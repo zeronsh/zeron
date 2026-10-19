@@ -15,6 +15,108 @@ pub struct MockHarness {
     pub script: Vec<AgentEvent>,
 }
 
+/// The subagent count a `/fanout [N]` prompt asks for (40 when bare).
+fn fanout_count(prompt: &str) -> Option<usize> {
+    let rest = prompt.trim().strip_prefix("/fanout")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let count = rest.trim().parse().unwrap_or(40);
+    Some(count.clamp(1, 200))
+}
+
+fn fanout_id(i: usize) -> String {
+    format!("mock-fanout-{i}")
+}
+
+fn fanout_tag(i: usize, event: AgentEvent) -> AgentEvent {
+    AgentEvent::Subagent {
+        parent_tool_use_id: fanout_id(i),
+        event: Box::new(event),
+    }
+}
+
+/// The `/fanout` opening: a line of text, then `count` spawn chips in the
+/// claude driver's shape, each seeded with its task like a Task prompt.
+fn fanout_spawns(count: usize) -> Vec<AgentEvent> {
+    const VERBS: [&str; 5] = ["Audit", "Map", "Profile", "Verify", "Trace"];
+    const AREAS: [&str; 8] = [
+        "the fold path",
+        "the commit cadence",
+        "the sync client",
+        "the registry doc",
+        "the composer dock",
+        "the sidebar sort",
+        "the diff reconciler",
+        "the relay transport",
+    ];
+    let mut events = vec![AgentEvent::TextDelta {
+        text: format!("\n### Fan-out\n\nSending {count} scouts across the workspace.\n\n"),
+    }];
+    for i in 0..count {
+        let description = format!(
+            "{} {}",
+            VERBS[i % VERBS.len()],
+            AREAS[(i / VERBS.len()) % AREAS.len()]
+        );
+        let prompt = format!("{description} and report anything that breaks its invariants.");
+        events.push(AgentEvent::ToolCall {
+            id: fanout_id(i),
+            call: zeron_proto::ToolCall::Unknown {
+                name: format!("Agent: {description}"),
+                input: Some(serde_json::json!({
+                    "description": description,
+                    "prompt": prompt,
+                })),
+            },
+        });
+        events.push(fanout_tag(i, AgentEvent::UserMessage { text: prompt }));
+        events.push(fanout_tag(
+            i,
+            AgentEvent::TextDelta {
+                text: "Reading the code paths involved.\n\n".into(),
+            },
+        ));
+    }
+    events
+}
+
+/// The `i`th scout's report and settle; every seventh fails.
+fn fanout_settle(i: usize) -> Vec<AgentEvent> {
+    let failed = i % 7 == 6;
+    vec![
+        fanout_tag(
+            i,
+            AgentEvent::TextDelta {
+                text: if failed {
+                    "Could not reproduce the setup; giving up.".into()
+                } else {
+                    "Invariants hold; nothing to report.".into()
+                },
+            },
+        ),
+        AgentEvent::ToolResult {
+            id: fanout_id(i),
+            is_error: failed,
+            output: None,
+            diff: None,
+        },
+        fanout_tag(
+            i,
+            AgentEvent::Done {
+                status: if failed {
+                    DoneStatus::Errored
+                } else {
+                    DoneStatus::Completed
+                },
+                result: None,
+                error: None,
+                session_id: None,
+            },
+        ),
+    ]
+}
+
 /// The scripted question set for the `ZERON_MOCK_QUESTION` variant (exercises
 /// the QuestionPanel end-to-end: single-select page, multi-select page).
 fn question_script() -> Vec<UserInputQuestion> {
@@ -100,7 +202,7 @@ impl Harness for MockHarness {
 
     async fn run(
         &self,
-        _request: RunRequest,
+        request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         // Optional pacing knob for demos/manual testing: `ZERON_MOCK_DELAY_MS`
@@ -152,6 +254,49 @@ impl Harness for MockHarness {
                             picked.join("**, **")
                         }
                     ),
+                });
+                let _ = tx.send(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                });
+            });
+            let stream = futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (Ok(event), rx))
+            });
+            return Ok(stream.boxed());
+        }
+
+        // Dev/testing knob: a `/fanout N` prompt spawns N subagents at once,
+        // then settles them one by one, oldest first (every seventh fails) —
+        // the only data-side way to fill the session card's subagent lane,
+        // scroll it, and watch it drain into its finished fold. They settle
+        // `ZERON_MOCK_DELAY_MS` apart, 2.5s by default.
+        if let Some(count) = fanout_count(&request.prompt) {
+            let settle = if delay_ms == 0 {
+                std::time::Duration::from_millis(2500)
+            } else {
+                delay
+            };
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            tokio::spawn(async move {
+                for event in fanout_spawns(count) {
+                    if tx.send(event).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                }
+                for i in 0..count {
+                    tokio::time::sleep(settle).await;
+                    for event in fanout_settle(i) {
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+                let _ = tx.send(AgentEvent::TextDelta {
+                    text: format!("All {count} scouts reported back."),
                 });
                 let _ = tx.send(AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -648,5 +793,36 @@ impl Harness for MockHarness {
                 event
             })
             .boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fanout_reads_its_count_from_the_prompt() {
+        assert_eq!(fanout_count("/fanout"), Some(40));
+        assert_eq!(fanout_count("  /fanout 12 "), Some(12));
+        assert_eq!(fanout_count("/fanout 9000"), Some(200));
+        assert_eq!(fanout_count("/fanouts"), None);
+        assert_eq!(fanout_count("Walk me through the pipeline"), None);
+    }
+
+    #[test]
+    fn fanout_spawns_every_scout_and_every_seventh_fails() {
+        let spawns = fanout_spawns(40)
+            .into_iter()
+            .filter(|event| matches!(event, AgentEvent::ToolCall { .. }))
+            .count();
+        assert_eq!(spawns, 40);
+        let failed = (0..40)
+            .filter(|&i| {
+                fanout_settle(i)
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolResult { is_error: true, .. }))
+            })
+            .count();
+        assert_eq!(failed, 5);
     }
 }

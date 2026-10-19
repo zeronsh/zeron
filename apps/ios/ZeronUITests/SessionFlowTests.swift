@@ -242,6 +242,48 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
     }
 
+    /// Render Math toggles the Math Font row; the font picks from a sheet of
+    /// every face.
+    func testMathSettings() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        let toggle = app.switches["toggle-math:render"]
+        for _ in 0..<6 where !toggle.exists || !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if (toggle.value as? String) != "1" { toggle.tap() }
+        let font = app.cells["settings-math:font"]
+        XCTAssertTrue(font.waitForExistence(timeout: 5), "font row shown while rendering")
+        font.tap()
+        for label in ["Fira Math", "STIX Two", "Computer Modern", "Libertinus", "Palatino", "Euler"] {
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 5), label)
+        }
+        app.buttons["Computer Modern"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'The classic LaTeX look.'")).firstMatch.waitForExistence(timeout: 5))
+        font.tap()
+        XCTAssertTrue(app.buttons["Fira Math"].waitForExistence(timeout: 5))
+        app.buttons["Fira Math"].tap()
+        let size = app.cells["settings-math:size"]
+        XCTAssertTrue(size.waitForExistence(timeout: 5), "size row shown while rendering")
+        for _ in 0..<3 where !size.isHittable { app.swipeUp() }
+        size.tap()
+        XCTAssertTrue(app.buttons["150%"].waitForExistence(timeout: 5))
+        app.buttons["135%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '135% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        size.tap()
+        XCTAssertTrue(app.buttons["100%"].waitForExistence(timeout: 5))
+        app.buttons["100%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '100% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertFalse(font.waitForExistence(timeout: 1), "font row hidden while off")
+        XCTAssertFalse(size.exists, "size row hidden while off")
+        snapshot(app, "math-settings-off")
+        toggle.tap()
+        XCTAssertTrue(font.waitForExistence(timeout: 5))
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
+    }
+
     func testNewSessionFromAccessory() {
         let app = launch()
         let accessory = app.buttons["new-session"]

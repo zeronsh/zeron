@@ -33,6 +33,9 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
     /// Headers are disclosure rows that fold their section (front page).
     var collapsible = false
+    /// Long-press drags a session between the list's sections (front page);
+    /// `dropTarget` names what each section means as a destination.
+    var movesAcrossSections = false
     private(set) var collapsed = Set(UserDefaults.standard.stringArray(forKey: "collapsedSections") ?? [])
     private var headerStates: [String: SectionHeaderCell.State] = [:]
 
@@ -56,6 +59,12 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.delegate = self
+        if movesAcrossSections {
+            collectionView.dragDelegate = self
+            collectionView.dropDelegate = self
+            // Off by default on iPhone.
+            collectionView.dragInteractionEnabled = true
+        }
         view.addSubview(collectionView)
 
         let sessionReg = UICollectionView.CellRegistration<SessionCell, String> { [weak self] cell, path, id in
@@ -200,6 +209,10 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     /// Long-press actions for a collapsible section header.
     func headerMenu(_ id: String) -> UIMenu? { nil }
 
+    /// What dropping a dragged session into list section `id` means; nil
+    /// where sessions can't be dropped.
+    func dropTarget(_ id: String) -> SessionDropTarget? { nil }
+
     func openSession(_ id: String) {
         // iPad: sessions open beside the sidebar.
         if let split = splitViewController as? SplitRootController, !split.isCollapsed {
@@ -329,6 +342,117 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 }
 
+/// Where a dragged session lands. Pinned and the user's sections keep a placed
+/// order (shared with desktop); Recent is by activity, so only membership moves.
+enum SessionDropTarget: Equatable {
+    case pinned
+    case section(String)
+    case recent
+}
+
+// MARK: Drag between sections
+
+extension SessionListController: UICollectionViewDragDelegate, UICollectionViewDropDelegate {
+    func collectionView(_ collectionView: UICollectionView, itemsForBeginning session: UIDragSession, at indexPath: IndexPath) -> [UIDragItem] {
+        guard let id = sessionId(indexPath), dropTarget(listSection(of: indexPath)) != nil else { return [] }
+        let item = UIDragItem(itemProvider: NSItemProvider())
+        item.localObject = id
+        return [item]
+    }
+
+    func collectionView(_ collectionView: UICollectionView, canHandle session: UIDropSession) -> Bool {
+        session.localDragSession?.items.first?.localObject is String
+    }
+
+    func collectionView(_ collectionView: UICollectionView, dropSessionDidUpdate session: UIDropSession, withDestinationIndexPath destinationIndexPath: IndexPath?) -> UICollectionViewDropProposal {
+        guard let id = session.localDragSession?.items.first?.localObject as? String,
+              let path = destinationIndexPath,
+              let slot = dropSlot(for: id, at: path)
+        else { return UICollectionViewDropProposal(operation: .cancel) }
+        // Recent sorts by activity: a drag within it has nothing to place.
+        if slot.target == .recent, currentTarget(of: id) == .recent {
+            return UICollectionViewDropProposal(operation: .cancel)
+        }
+        return UICollectionViewDropProposal(operation: .move, intent: .insertAtDestinationIndexPath)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, performDropWith coordinator: UICollectionViewDropCoordinator) {
+        guard let item = coordinator.items.first,
+              let id = item.dragItem.localObject as? String,
+              let path = coordinator.destinationIndexPath,
+              let slot = dropSlot(for: id, at: path)
+        else { return }
+        let source = currentTarget(of: id)
+        if slot.target == .recent, source == .recent { return }
+        // Show the row in its slot at once; the synced state follows. A
+        // folded destination opens, as desktop's does, to show where it went.
+        var snapshot = dataSource.snapshot()
+        let section = snapshot.sectionIdentifiers[path.section]
+        if collapsed.remove(section) != nil {
+            UserDefaults.standard.set(Array(collapsed), forKey: "collapsedSections")
+        }
+        snapshot.deleteItems([.session(id)])
+        if slot.index > 0 {
+            snapshot.insertItems([.session(id)], afterItem: slot.items[slot.index - 1])
+        } else if let first = slot.items.first {
+            snapshot.insertItems([.session(id)], beforeItem: first)
+        } else {
+            snapshot.appendItems([.session(id)], toSection: section)
+        }
+        dataSource.apply(snapshot, animatingDifferences: false)
+        coordinator.drop(item.dragItem, toItemAt: IndexPath(item: slot.index, section: path.section))
+        UISelectionFeedbackGenerator().selectionChanged()
+
+        switch slot.target {
+        case .pinned:
+            if source == .pinned {
+                app.movePin(id, after: slot.after, before: slot.before)
+            } else {
+                app.pin(id, after: slot.after, before: slot.before)
+            }
+        case let .section(sectionId):
+            app.place(id, inSection: sectionId, after: slot.after, before: slot.before)
+        case .recent:
+            if source == .pinned {
+                app.setPinned(id, false)
+            } else {
+                app.move(id, toSection: nil)
+            }
+        }
+    }
+
+    private func listSection(of path: IndexPath) -> String {
+        dataSource.snapshot().sectionIdentifiers[path.section]
+    }
+
+    /// The destination the session sits in now.
+    private func currentTarget(of id: String) -> SessionDropTarget? {
+        dataSource.snapshot().sectionIdentifier(containingItem: .session(id)).flatMap(dropTarget)
+    }
+
+    /// Where a drop at `path` places `id`: the destination, the section's items
+    /// without the dragged row, the row's index among them, and its session
+    /// neighbours. A drop above a section's header has no slot.
+    private func dropSlot(for id: String, at path: IndexPath) -> (target: SessionDropTarget, items: [Item], index: Int, after: String?, before: String?)? {
+        let snapshot = dataSource.snapshot()
+        guard path.section < snapshot.numberOfSections else { return nil }
+        let section = snapshot.sectionIdentifiers[path.section]
+        guard let target = dropTarget(section) else { return nil }
+        let items = snapshot.itemIdentifiers(inSection: section).filter { $0 != .session(id) }
+        let headed: Int
+        if case .header = items.first { headed = 1 } else { headed = 0 }
+        if path.item < headed { return nil }
+        let index = min(path.item, items.count)
+        func session(_ item: Item?) -> String? {
+            if case let .session(id) = item { return id }
+            return nil
+        }
+        let after = index > 0 ? session(items[index - 1]) : nil
+        let before = index < items.count ? session(items[index]) : nil
+        return (target, items, index, after, before)
+    }
+}
+
 /// Front page, laid out like the desktop sidebar: Pinned and the user's
 /// sections inline as foldable groups, then everything else under Recent.
 /// Fold state persists; long-press a header for its actions.
@@ -342,6 +466,7 @@ class SessionsViewController: SessionListController {
 
     override func viewDidLoad() {
         collapsible = true
+        movesAcrossSections = true
         super.viewDidLoad()
         let backdrop = UIView()
         backdrop.addSubview(wallpaper)
@@ -378,6 +503,16 @@ class SessionsViewController: SessionListController {
     override func listDidScroll(_ scrollView: UIScrollView) {
         let travel = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
         wallpaper.scrollFade = 1 - max(0, travel) / max(1, wallpaper.bounds.height * 0.6)
+    }
+
+    override func dropTarget(_ id: String) -> SessionDropTarget? {
+        // Search results and project groups aren't places a session is put.
+        guard query.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        switch id {
+        case "pinned": return .pinned
+        case "recent": return .recent
+        default: return app.frontPage.folders.contains { $0.id == id } ? .section(id) : nil
+        }
     }
 
     override func headerMenu(_ id: String) -> UIMenu? {

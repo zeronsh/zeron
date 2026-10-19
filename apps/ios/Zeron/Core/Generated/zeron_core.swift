@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -1141,6 +1157,17 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func pinSession(chatId: String) throws 
     
     /**
+     * Pin between neighbours (`None` at either end).
+     */
+    func pinSessionAt(chatId: String, after: String?, before: String?) throws 
+    
+    /**
+     * Move a session into a section between its members (`None` at either
+     * end), as a drop into the section does.
+     */
+    func placeSession(chatId: String, sectionId: String?, after: String?, before: String?) throws 
+    
+    /**
      * Warm the most relevant sessions (capped).
      */
     func preloadSessions() 
@@ -1723,6 +1750,36 @@ open func pinSession(chatId: String)throws   {try rustCallWithError(FfiConverter
     uniffi_zeron_mobile_fn_method_coreclient_pin_session(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Pin between neighbours (`None` at either end).
+     */
+open func pinSessionAt(chatId: String, after: String?, before: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_pin_session_at(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterOptionString.lower(after),
+        FfiConverterOptionString.lower(before),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Move a session into a section between its members (`None` at either
+     * end), as a drop into the section does.
+     */
+open func placeSession(chatId: String, sectionId: String?, after: String?, before: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_place_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),
+        FfiConverterOptionString.lower(sectionId),
+        FfiConverterOptionString.lower(after),
+        FfiConverterOptionString.lower(before),uniffiCallStatus
     )
 }
 }
@@ -3748,6 +3805,12 @@ public protocol TranscriptViewProtocol: AnyObject, Sendable {
      */
     func setDebugEntries(entries: [DebugEntry], working: Bool) 
     
+    /**
+     * Render formulas (in `face`, at `size_percent` of the text around
+     * them, clamped to 75–200), or show them as their TeX source.
+     */
+    func setMath(enabled: Bool, face: MathFace, sizePercent: UInt16) 
+    
     func setViewport(width: Float, textScale: Float) 
     
     /**
@@ -3882,6 +3945,21 @@ open func setDebugEntries(entries: [DebugEntry], working: Bool)  {try! rustCall(
             self.uniffiCloneHandle(),
         FfiConverterSequenceTypeDebugEntry.lower(entries),
         FfiConverterBool.lower(working),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Render formulas (in `face`, at `size_percent` of the text around
+     * them, clamped to 75–200), or show them as their TeX source.
+     */
+open func setMath(enabled: Bool, face: MathFace, sizePercent: UInt16)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_transcriptview_set_math(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),
+        FfiConverterTypeMathFace_lower(face),
+        FfiConverterUInt16.lower(sizePercent),uniffiCallStatus
     )
 }
 }
@@ -5547,10 +5625,21 @@ public struct BoxPrim: Equatable, Hashable {
     public var style: BoxStyle
     public var color: ColorRole
     public var scroller: UInt32?
+    /**
+     * For a formula's fills (rules, decoration lines): the UTF-16 offset of
+     * its placeholder, so the streaming veil fades them with the formula's
+     * glyphs. `None`: painted with the row's settled boxes.
+     */
+    public var start: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(x: Float, y: Float, w: Float, h: Float, radius: Float, style: BoxStyle, color: ColorRole, scroller: UInt32?) {
+    public init(x: Float, y: Float, w: Float, h: Float, radius: Float, style: BoxStyle, color: ColorRole, scroller: UInt32?, 
+        /**
+         * For a formula's fills (rules, decoration lines): the UTF-16 offset of
+         * its placeholder, so the streaming veil fades them with the formula's
+         * glyphs. `None`: painted with the row's settled boxes.
+         */start: UInt32?) {
         self.x = x
         self.y = y
         self.w = w
@@ -5559,6 +5648,7 @@ public struct BoxPrim: Equatable, Hashable {
         self.style = style
         self.color = color
         self.scroller = scroller
+        self.start = start
     }
 
     
@@ -5584,7 +5674,8 @@ public struct FfiConverterTypeBoxPrim: FfiConverterRustBuffer {
                 radius: FfiConverterFloat.read(from: &buf), 
                 style: FfiConverterTypeBoxStyle.read(from: &buf), 
                 color: FfiConverterTypeColorRole.read(from: &buf), 
-                scroller: FfiConverterOptionUInt32.read(from: &buf)
+                scroller: FfiConverterOptionUInt32.read(from: &buf), 
+                start: FfiConverterOptionUInt32.read(from: &buf)
         )
     }
 
@@ -5597,6 +5688,7 @@ public struct FfiConverterTypeBoxPrim: FfiConverterRustBuffer {
         FfiConverterTypeBoxStyle.write(value.style, into: &buf)
         FfiConverterTypeColorRole.write(value.color, into: &buf)
         FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+        FfiConverterOptionUInt32.write(value.start, into: &buf)
     }
 }
 
@@ -6915,6 +7007,103 @@ public func FfiConverterTypeFrontPage_lift(_ buf: RustBuffer) throws -> FrontPag
 #endif
 public func FfiConverterTypeFrontPage_lower(_ value: FrontPage) -> RustBuffer {
     return FfiConverterTypeFrontPage.lower(value)
+}
+
+
+/**
+ * One glyph of a math formula: glyph id `glyph` of math font `font` (an
+ * index for [`math_font_data`]) drawn at `size` with its origin at
+ * (`x`, `y`). Rules (fraction bars, radicals) are plain [`BoxPrim`] fills.
+ */
+public struct GlyphPrim: Equatable, Hashable {
+    public var font: UInt8
+    public var glyph: UInt16
+    public var x: Float
+    /**
+     * Baseline.
+     */
+    public var y: Float
+    public var size: Float
+    public var color: ColorRole
+    public var scroller: UInt32?
+    /**
+     * UTF-16 offset in the row text of the formula's placeholder (U+FFFC),
+     * so the streaming veil splits glyphs where it splits runs.
+     */
+    public var start: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(font: UInt8, glyph: UInt16, x: Float, 
+        /**
+         * Baseline.
+         */y: Float, size: Float, color: ColorRole, scroller: UInt32?, 
+        /**
+         * UTF-16 offset in the row text of the formula's placeholder (U+FFFC),
+         * so the streaming veil splits glyphs where it splits runs.
+         */start: UInt32) {
+        self.font = font
+        self.glyph = glyph
+        self.x = x
+        self.y = y
+        self.size = size
+        self.color = color
+        self.scroller = scroller
+        self.start = start
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GlyphPrim: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGlyphPrim: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GlyphPrim {
+        return
+            try GlyphPrim(
+                font: FfiConverterUInt8.read(from: &buf), 
+                glyph: FfiConverterUInt16.read(from: &buf), 
+                x: FfiConverterFloat.read(from: &buf), 
+                y: FfiConverterFloat.read(from: &buf), 
+                size: FfiConverterFloat.read(from: &buf), 
+                color: FfiConverterTypeColorRole.read(from: &buf), 
+                scroller: FfiConverterOptionUInt32.read(from: &buf), 
+                start: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GlyphPrim, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.font, into: &buf)
+        FfiConverterUInt16.write(value.glyph, into: &buf)
+        FfiConverterFloat.write(value.x, into: &buf)
+        FfiConverterFloat.write(value.y, into: &buf)
+        FfiConverterFloat.write(value.size, into: &buf)
+        FfiConverterTypeColorRole.write(value.color, into: &buf)
+        FfiConverterOptionUInt32.write(value.scroller, into: &buf)
+        FfiConverterUInt32.write(value.start, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphPrim_lift(_ buf: RustBuffer) throws -> GlyphPrim {
+    return try FfiConverterTypeGlyphPrim.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGlyphPrim_lower(_ value: GlyphPrim) -> RustBuffer {
+    return FfiConverterTypeGlyphPrim.lower(value)
 }
 
 
@@ -8715,6 +8904,7 @@ public struct RowDisplay: Equatable, Hashable {
     public var height: Float
     public var text: String
     public var runs: [TextRun]
+    public var glyphs: [GlyphPrim]
     public var boxes: [BoxPrim]
     public var links: [LinkHit]
     public var scrollers: [Scroller]
@@ -8727,7 +8917,7 @@ public struct RowDisplay: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(key: UInt64, version: UInt64, width: Float, height: Float, text: String, runs: [TextRun], boxes: [BoxPrim], links: [LinkHit], scrollers: [Scroller], widgets: [Widget], fades: [Fade], 
+    public init(key: UInt64, version: UInt64, width: Float, height: Float, text: String, runs: [TextRun], glyphs: [GlyphPrim], boxes: [BoxPrim], links: [LinkHit], scrollers: [Scroller], widgets: [Widget], fades: [Fade], 
         /**
          * Plain text for copy / accessibility.
          */copyText: String) {
@@ -8737,6 +8927,7 @@ public struct RowDisplay: Equatable, Hashable {
         self.height = height
         self.text = text
         self.runs = runs
+        self.glyphs = glyphs
         self.boxes = boxes
         self.links = links
         self.scrollers = scrollers
@@ -8767,6 +8958,7 @@ public struct FfiConverterTypeRowDisplay: FfiConverterRustBuffer {
                 height: FfiConverterFloat.read(from: &buf), 
                 text: FfiConverterString.read(from: &buf), 
                 runs: FfiConverterSequenceTypeTextRun.read(from: &buf), 
+                glyphs: FfiConverterSequenceTypeGlyphPrim.read(from: &buf), 
                 boxes: FfiConverterSequenceTypeBoxPrim.read(from: &buf), 
                 links: FfiConverterSequenceTypeLinkHit.read(from: &buf), 
                 scrollers: FfiConverterSequenceTypeScroller.read(from: &buf), 
@@ -8783,6 +8975,7 @@ public struct FfiConverterTypeRowDisplay: FfiConverterRustBuffer {
         FfiConverterFloat.write(value.height, into: &buf)
         FfiConverterString.write(value.text, into: &buf)
         FfiConverterSequenceTypeTextRun.write(value.runs, into: &buf)
+        FfiConverterSequenceTypeGlyphPrim.write(value.glyphs, into: &buf)
         FfiConverterSequenceTypeBoxPrim.write(value.boxes, into: &buf)
         FfiConverterSequenceTypeLinkHit.write(value.links, into: &buf)
         FfiConverterSequenceTypeScroller.write(value.scrollers, into: &buf)
@@ -12597,6 +12790,123 @@ public func FfiConverterTypeFadeEdge_lower(_ value: FadeEdge) -> RustBuffer {
 
 
 /**
+ * The face formulas are laid out in (STIX Two for what it lacks). Every
+ * face paints from the [`math_font_data`] table, so switching never
+ * re-registers fonts.
+ */
+
+public enum MathFace: Equatable, Hashable {
+    
+    /**
+     * Fira Math: a sans that sits beside Geist.
+     */
+    case fira
+    /**
+     * STIX Two Math: the Times-like TeX look.
+     */
+    case stixTwo
+    /**
+     * New Computer Modern Math (Book): the classic LaTeX look.
+     */
+    case computerModern
+    /**
+     * Libertinus Math: a warm book serif.
+     */
+    case libertinus
+    /**
+     * TeX Gyre Pagella Math: Palatino.
+     */
+    case pagella
+    /**
+     * Euler Math: Zapf's upright, hand-drawn math.
+     */
+    case euler
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MathFace: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMathFace: FfiConverterRustBuffer {
+    typealias SwiftType = MathFace
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MathFace {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .fira
+        
+        case 2: return .stixTwo
+        
+        case 3: return .computerModern
+        
+        case 4: return .libertinus
+        
+        case 5: return .pagella
+        
+        case 6: return .euler
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MathFace, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .fira:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stixTwo:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .computerModern:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .libertinus:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .pagella:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .euler:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMathFace_lift(_ buf: RustBuffer) throws -> MathFace {
+    return try FfiConverterTypeMathFace.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMathFace_lower(_ value: MathFace) -> RustBuffer {
+    return FfiConverterTypeMathFace.lower(value)
+}
+
+
+
+/**
  * The four tuned size presets (inline 20, avatar 64, large 96, hero 128).
  */
 
@@ -16148,6 +16458,31 @@ fileprivate struct FfiConverterSequenceTypeFolderEntry: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeGlyphPrim: FfiConverterRustBuffer {
+    typealias SwiftType = [GlyphPrim]
+
+    public static func write(_ value: [GlyphPrim], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGlyphPrim.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GlyphPrim] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GlyphPrim]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGlyphPrim.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeHarnessInfo: FfiConverterRustBuffer {
     typealias SwiftType = [HarnessInfo]
 
@@ -17142,6 +17477,20 @@ public func layoutFixtureMarkdown() -> String  {
 })
 }
 /**
+ * The bytes of math font `index` — one per [`MathFace`], in its declaration
+ * order (0 = Fira Math, 1 = STIX Two Math, …), the same table whichever face
+ * lays formulas out; empty past the end. Glyph ids in [`GlyphPrim`] index
+ * these exact files. Hosts load an index when a glyph first names it.
+ */
+public func mathFontData(index: UInt8) -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_math_font_data(
+        FfiConverterUInt8.lower(index),uniffiCallStatus
+    )
+})
+}
+/**
  * Apply `effect` to an RGBA image; `light` is the appearance it's drawn in
  * (effects print on white paper in light mode, black in dark).
  */
@@ -17267,6 +17616,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_func_layout_fixture_markdown() != 37734) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_func_math_font_data() != 16862) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_func_wallpaper_render() != 28318) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17370,6 +17722,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_pin_session() != 14361) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_pin_session_at() != 16727) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_place_session() != 55306) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_preload_sessions() != 4026) {
@@ -17610,6 +17968,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_debug_entries() != 54762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_transcriptview_set_math() != 28799) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_transcriptview_set_viewport() != 43528) {

@@ -26,7 +26,8 @@
 //!    - text it doesn't cover goes to the host's [`FallbackMeasurer`] (the platform engine with
 //!      its font cascade). With [`FallbackMeasurer::measure_run`], whole uncovered runs are
 //!      measured once in context — CoreText picks fallback fonts and kerns per run — and each
-//!      piece takes its share; otherwise each piece is measured on its own.
+//!      piece takes its share; otherwise each piece is measured on its own;
+//!    - an inline box advances by its own width (see *inline boxes*), bypassing the cache.
 //! 5. **Seams**: a paragraph is shaped as a whole by the platform, so segments measured apart
 //!    get the difference back at each boundary: the pair context of the two graphemes around it
 //!    (kerning lands on the left glyph; a ligature or contextual form spanning it, like Geist's
@@ -59,6 +60,18 @@
 //!
 //! Re-layout at a new width never re-measures.
 //!
+//! # inline boxes
+//!
+//! A span with an [`InlineBox`] ([`Span::with_inline_box`]: an inline formula, an image) is an
+//! atomic span whose placeholder text (conventionally one U+FFFC) is never shaped: its advance is
+//! the box's `width` plus the span's padding, and it breaks as one unit — never split, moved to
+//! the next line whole when it doesn't fit, one unit under `overflow-wrap: anywhere`. Line
+//! breaking stays width-only; the box's `ascent`/`descent` only make its line taller. Consumers
+//! lay lines out `lh` tall with the baseline `base` below the line top and grow a line by
+//! [`line_growth`] of its [`Prepared::line_box_extents`] (above the baseline, below it);
+//! [`Prepared::height`] sums exactly that, and is `line_count × lh` — the allocation-free walk —
+//! when [`Prepared::has_inline_boxes`] is false.
+//!
 //! Conventions: an empty paragraph (or one that normalizes to nothing) has zero lines; a
 //! trailing forced break does not start an extra empty line; widths are points; byte ranges
 //! index [`Prepared::text`] (the normalized text), fragments also carry UTF-16 ranges for
@@ -78,7 +91,8 @@ pub use font::{
 };
 pub use layout::{Cursor, Fragment, LINE_FIT_EPSILON, Line, LineRange, LineStats};
 pub use prepare::{
-    OverflowWrap, PrepareOptions, Prepared, SegmentBreak, Span, WhiteSpace, prepare,
+    InlineBox, OverflowWrap, PrepareOptions, Prepared, SegmentBreak, Span, WhiteSpace, line_growth,
+    prepare,
 };
 
 #[cfg(test)]

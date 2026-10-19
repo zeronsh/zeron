@@ -9,11 +9,12 @@ protocol AppRouter: AnyObject {
     func showSearch()
 }
 
-/// iPad shell: Zeron mobile with a sidebar. The sidebar is the phone's
+/// The app's shell: Zeron mobile with a sidebar. The sidebar is the phone's
 /// Sessions page (same rows, sections, wallpaper) over a bottom toolbar;
 /// the main column shows the open session or the phone's new-session page.
-/// Compact widths (Slide Over, narrow Split View) collapse to the iPhone tab
-/// shell.
+/// It shows when the window is regular in both directions (iPad, an unfolded
+/// iPhone Duo); anything else (iPhone, the Duo folded, Slide Over, narrow
+/// Split View) collapses to the iPhone tab shell.
 final class SplitRootController: UISplitViewController, UISplitViewControllerDelegate, AppRouter {
     private let app: AppModel
     private let sidebar: SidebarViewController
@@ -47,7 +48,38 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         detail.navigationBar.tintColor = Palette.text
         setViewController(detail, for: .secondary)
         setViewController(tabs, for: .compact)
-        showDraft(prompt: nil, focus: false)
+        // A phone in landscape is compact in height but can be regular in
+        // width (the larger models); it keeps the tab shell. The split
+        // collapses on its own horizontal class, so pin that to compact.
+        registerForTraitChanges([UITraitVerticalSizeClass.self]) { (self: SplitRootController, _) in
+            self.syncCollapse()
+        }
+        syncCollapse()
+    }
+
+    private func syncCollapse() {
+        if traitCollection.verticalSizeClass == .compact {
+            traitOverrides.horizontalSizeClass = .compact
+        } else if traitOverrides.contains(UITraitHorizontalSizeClass.self) {
+            traitOverrides.remove(UITraitHorizontalSizeClass.self)
+        }
+    }
+
+    /// The main column starts on the new-session page, built only once the
+    /// sidebar is actually on screen (an iPhone may never expand).
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        if !isCollapsed, detail.viewControllers.isEmpty { showDraft(prompt: nil, focus: false) }
+    }
+
+    /// Narrow windows hold the sidebar at its minimum (an iPad mini in
+    /// portrait gets 320). The unfolded iPhone Duo is narrower still (669pt
+    /// in portrait): it goes lower so the session column keeps a phone's
+    /// width for the transcript and composer.
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let minimum: CGFloat = view.bounds.width < 700 ? 280 : 320
+        if minimumPrimaryColumnWidth != minimum { minimumPrimaryColumnWidth = minimum }
     }
 
     override var keyCommands: [UIKeyCommand]? {

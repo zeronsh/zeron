@@ -3,6 +3,27 @@ use super::*;
 use crate::settings::SidebarSection;
 use zeron_proto::{SidebarPinChange, SidebarSectionChange};
 
+/// The air above each custom section's header.
+const SIDEBAR_SECTION_TOP_PAD: f32 = 12.0;
+
+/// Where a lifted section lands among its siblings: past each one whose middle
+/// its leading edge has crossed. `top` is the lifted section's top measured
+/// from the first slot; natural slots keep the thresholds still while the
+/// siblings slide.
+fn section_drop_index(top: f32, heights: &[f32], from: usize) -> usize {
+    let bottom = top + heights[from];
+    let mut slot_top = 0.0;
+    let mut over = 0;
+    for (ix, height) in heights.iter().enumerate() {
+        let middle = slot_top + height / 2.0;
+        if (ix < from && top > middle) || (ix > from && bottom > middle) {
+            over += 1;
+        }
+        slot_top += height + SIDEBAR_LIST_GAP;
+    }
+    over
+}
+
 pub(super) struct SectionDialog {
     profile: String,
     id: Option<String>,
@@ -252,6 +273,7 @@ impl Shell {
         section: SidebarSection,
         rows: Vec<SidebarKeyedRow>,
         drag_group: String,
+        drag: Option<SidebarSectionDrag>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarKeyedRow {
@@ -312,6 +334,10 @@ impl Shell {
             chevron,
         )
         .id(SharedString::from(format!("section-header-{id}")))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("section-header-{id}")
+        })
         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             this.section_header_hover = hovered.then(|| hover_id.clone());
             cx.notify();
@@ -330,7 +356,18 @@ impl Shell {
                 cx,
             );
             cx.notify();
-        }));
+        }))
+        // The header lifts the whole section to reorder it among the others.
+        .when_some(drag, |el, payload| {
+            let shell = cx.entity();
+            el.on_drag(payload, move |payload, grab, window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.begin_sidebar_section_drag(payload, grab, window, cx);
+                });
+                cx.stop_propagation();
+                cx.new(|_| DragGhost)
+            })
+        });
         let content = div()
             .w_full()
             .flex()
@@ -363,7 +400,7 @@ impl Shell {
             .w_full()
             .flex()
             .flex_col()
-            .pt(px(12.0))
+            .pt(px(SIDEBAR_SECTION_TOP_PAD))
             .on_drag_move::<SidebarSessionDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                     if (empty || !open) && event.bounds.contains(&event.event.position) {
@@ -371,7 +408,7 @@ impl Shell {
                             event.bounds.top()
                                 - this.sidebar_scroll.bounds().top()
                                 - this.sidebar_scroll.offset().y,
-                        ) + 12.0
+                        ) + SIDEBAR_SECTION_TOP_PAD
                             + spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
                         if let Some(drag) = this.sidebar_session_transfer.as_mut() {
                             drag.preview = Some(SidebarSessionGap {
@@ -398,8 +435,315 @@ impl Shell {
             .into_any_element();
         (
             format!("custom:{id}"),
-            12.0 + spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT + if open { height } else { 0.0 },
+            SIDEBAR_SECTION_TOP_PAD
+                + spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                + if open { height } else { 0.0 },
             element,
+        )
+    }
+
+    /// Sections reorder in this device's settings, or through an engine that
+    /// orders them: an older engine rejects the move outright.
+    pub(super) fn sidebar_sections_reorderable(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state.workspace_scope == Some(WorkspaceScope::Local)
+            || (state.sidebar_preferences.can_edit()
+                && state.engine().is_some_and(|engine| {
+                    engine
+                        .engine_info()
+                        .supports(zeron_proto::capabilities::SIDEBAR_SECTION_ORDER_V1)
+                }))
+    }
+
+    /// `grab` is where the header was pressed, from its origin: the drag only
+    /// starts once the pointer has already moved on.
+    pub(super) fn begin_sidebar_section_drag(
+        &mut self,
+        payload: &SidebarSectionDrag,
+        grab: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let bounds = self.sidebar_section_bounds.borrow().clone();
+        let Some(from) = payload.ids.iter().position(|id| id == &payload.section_id) else {
+            return;
+        };
+        if bounds.len() != payload.ids.len() {
+            return;
+        }
+        self.cancel_sidebar_session_transfer(cx);
+        self.section_menu = None;
+        let viewport = self.sidebar_scroll.bounds();
+        let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
+        let pointer = window.mouse_position();
+        self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
+        let generation = self.pinned_session_drag_generation;
+        self.sidebar_section_drag = Some(SidebarSectionDragState {
+            payload: payload.clone(),
+            from,
+            over: from,
+            heights: bounds.iter().map(|b| f32::from(b.size.height)).collect(),
+            top: f32::from(bounds[0].top() - viewport.top()) + scroll_top,
+            left: f32::from(bounds[0].left() - viewport.left()),
+            width: f32::from(bounds[0].size.width),
+            grab_y: f32::from(grab.y) + SIDEBAR_SECTION_TOP_PAD,
+            pointer,
+            siblings: Default::default(),
+            generation,
+        });
+        // Siblings ease and the list edge-scrolls while the pointer rests.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(
+                        SIDEBAR_DRAG_SCROLL_FRAME_MS,
+                    ))
+                    .await;
+                let keep_running = this
+                    .update(cx, |shell, cx| {
+                        shell.sidebar_section_drag_tick(generation, cx)
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sidebar_section_drag_tick(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.sidebar_section_drag.as_ref() else {
+            return false;
+        };
+        if drag.generation != generation {
+            return false;
+        }
+        cx.notify();
+        if !cx.has_active_drag() {
+            // A release outside the sidebar: render settles it home.
+            return false;
+        }
+        let viewport = self.sidebar_scroll.bounds();
+        let pointer = drag.pointer;
+        if pointer.x >= viewport.left() && pointer.x <= viewport.right() {
+            let delta = spaces::pinned_drag_scroll_delta(
+                f32::from(pointer.y),
+                f32::from(viewport.top()),
+                f32::from(viewport.bottom()),
+            );
+            let offset = self.sidebar_scroll.offset();
+            let scroll_top = -f32::from(offset.y);
+            let max_scroll = f32::from(self.sidebar_scroll.max_offset().y);
+            let next = (scroll_top + delta).clamp(0.0, max_scroll);
+            if next != scroll_top {
+                self.sidebar_scroll
+                    .set_offset(gpui::point(offset.x, px(-next)));
+                self.update_sidebar_section_drop();
+            }
+        }
+        true
+    }
+
+    pub(super) fn track_sidebar_section_drag(
+        &mut self,
+        pointer: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(drag) = self.sidebar_section_drag.as_mut() {
+            drag.pointer = pointer;
+            self.update_sidebar_section_drop();
+            cx.notify();
+        }
+    }
+
+    /// The lifted section's top in the list's content coordinates, unclamped.
+    fn lifted_sidebar_section_y(&self, drag: &SidebarSectionDragState) -> f32 {
+        let viewport_top = f32::from(self.sidebar_scroll.bounds().top());
+        let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
+        f32::from(drag.pointer.y) - viewport_top + scroll_top - drag.grab_y
+    }
+
+    /// Where the lifted section paints: under the pointer, held within the
+    /// span of the sections it reorders among.
+    fn lifted_sidebar_section_top(&self, drag: &SidebarSectionDragState) -> f32 {
+        let total = drag.heights.iter().sum::<f32>()
+            + SIDEBAR_LIST_GAP * drag.heights.len().saturating_sub(1) as f32;
+        self.lifted_sidebar_section_y(drag).clamp(
+            drag.top,
+            drag.top + (total - drag.heights[drag.from]).max(0.0),
+        )
+    }
+
+    fn update_sidebar_section_drop(&mut self) {
+        let Some(drag) = self.sidebar_section_drag.as_ref() else {
+            return;
+        };
+        let top = self.lifted_sidebar_section_y(drag) - drag.top;
+        let over = section_drop_index(top, &drag.heights, drag.from);
+        if let Some(drag) = self.sidebar_section_drag.as_mut() {
+            drag.over = over;
+        }
+    }
+
+    pub(super) fn sidebar_section_drag_is_valid(&self, cx: &App) -> bool {
+        let Some(drag) = self.sidebar_section_drag.as_ref() else {
+            return true;
+        };
+        self.active_sidebar_pin_profile_key(cx).as_deref() == Some(&drag.payload.profile_key)
+            && self
+                .active_sidebar_sections(cx)
+                .iter()
+                .map(|section| &section.id)
+                .eq(drag.payload.ids.iter())
+    }
+
+    pub(super) fn finish_sidebar_section_drag(
+        &mut self,
+        payload: &SidebarSectionDrag,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.sidebar_section_drag.as_ref() else {
+            return;
+        };
+        if drag.payload.section_id != payload.section_id
+            || drag.payload.ids != payload.ids
+            || !self.sidebar_section_drag_is_valid(cx)
+        {
+            self.end_sidebar_section_drag(false, cx);
+            return;
+        }
+        let (from, over) = (drag.from, drag.over);
+        if from == over {
+            self.end_sidebar_section_drag(false, cx);
+            return;
+        }
+        let mut ids = (*drag.payload.ids).clone();
+        let id = ids.remove(from);
+        let change = SidebarSectionChange::Move {
+            id,
+            after: over.checked_sub(1).and_then(|i| ids.get(i)).cloned(),
+            before: ids.get(over).cloned(),
+        };
+        let placed = self.change_sidebar_section(change, cx);
+        self.end_sidebar_section_drag(placed, cx);
+    }
+
+    pub(super) fn cancel_sidebar_section_drag(&mut self, cx: &mut Context<Self>) {
+        self.end_sidebar_section_drag(false, cx);
+    }
+
+    /// Land the lifted section in its new slot, or home when `placed` is
+    /// false, gliding every section from where it last painted.
+    fn end_sidebar_section_drag(&mut self, placed: bool, cx: &mut Context<Self>) {
+        let Some(drag) = self.sidebar_section_drag.as_ref() else {
+            return;
+        };
+        let mut settle = std::collections::HashMap::new();
+        if !self.reduced_motion {
+            let over = if placed { drag.over } else { drag.from };
+            let landed = drag.top
+                + (0..drag.heights.len())
+                    .filter(|ix| *ix != drag.from)
+                    .take(over)
+                    .map(|ix| drag.heights[ix] + SIDEBAR_LIST_GAP)
+                    .sum::<f32>();
+            settle.insert(
+                format!("custom:{}", drag.payload.section_id),
+                self.lifted_sidebar_section_top(drag) - landed,
+            );
+            let step = drag.heights[drag.from] + SIDEBAR_LIST_GAP;
+            for (ix, id) in drag.payload.ids.iter().enumerate() {
+                let current = drag.siblings.get(id).map_or(0.0, |slide| slide.current());
+                let target = crate::terminal::panel::slide_offset(ix, drag.from, over) * step;
+                if ix != drag.from && (current - target).abs() > 0.5 {
+                    settle.insert(format!("custom:{id}"), current - target);
+                }
+            }
+        }
+        self.sidebar_section_drag = None;
+        // The settle glide rides the resort animation; a fresh baseline keeps
+        // the reorder itself from replaying as a second glide.
+        self.sidebar_prev_order.clear();
+        self.sidebar_new_keys.clear();
+        self.sidebar_resort = settle;
+        self.resort_epoch += 1;
+        cx.notify();
+    }
+
+    /// Each custom section's displacement this frame while one is lifted.
+    pub(super) fn sidebar_section_drag_offsets(&mut self) -> Option<(usize, Vec<f32>)> {
+        let reduced_motion = self.reduced_motion;
+        let drag = self.sidebar_section_drag.as_mut()?;
+        let (from, over) = (drag.from, drag.over);
+        let step = drag.heights[from] + SIDEBAR_LIST_GAP;
+        let offsets = drag
+            .payload
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(ix, id)| {
+                if ix == from {
+                    return 0.0;
+                }
+                let slide =
+                    drag.siblings
+                        .entry(id.clone())
+                        .or_insert_with(|| SidebarSessionSlide {
+                            from: 0.0,
+                            to: 0.0,
+                            epoch: 0,
+                            started: std::time::Instant::now(),
+                        });
+                slide.retarget(crate::terminal::panel::slide_offset(ix, from, over) * step);
+                if reduced_motion {
+                    slide.to
+                } else {
+                    slide.current()
+                }
+            })
+            .collect();
+        Some((from, offsets))
+    }
+
+    /// The lifted section, frosted a level above the list as a lifted session
+    /// is. Its slot's top padding stays outside the card, which frames the
+    /// header.
+    pub(super) fn render_lifted_sidebar_section(
+        &self,
+        section: AnyElement,
+        theme: &Theme,
+    ) -> Option<AnyElement> {
+        const LIFT_PAD: f32 = 4.0;
+        let drag = self.sidebar_section_drag.as_ref()?;
+        let trim = (SIDEBAR_SECTION_TOP_PAD - LIFT_PAD).max(0.0);
+        let height = drag.heights[drag.from];
+        let card = div()
+            .size_full()
+            .rounded(px(8.0))
+            .bg(crate::popover::surface_bg(theme))
+            .shadow_md()
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(8.0))
+                    .bg(crate::theme::wash(0.06))
+                    .child(div().relative().top(px(-trim)).w_full().child(section)),
+            );
+        Some(
+            gpui::deferred(
+                div()
+                    .debug_selector(|| "sidebar-lifted-section".into())
+                    .absolute()
+                    .left(px(drag.left))
+                    .top(px(self.lifted_sidebar_section_top(drag) + trim))
+                    .w(px(drag.width))
+                    .h(px(height - trim + LIFT_PAD))
+                    .child(crate::frost::frosted(8.0, crate::frost::MENU_BLUR, card)),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
@@ -860,6 +1204,98 @@ mod tests {
                 assert_eq!(shell.sidebar_visible_order(cx), ["pin", "other", "regular"]);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn sections_reorder_by_dragging_their_header(cx: &mut gpui::TestAppContext) {
+        use gpui::MouseButton;
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell
+                    .settings
+                    .sidebar_sections_by_profile
+                    .get_mut("local")
+                    .unwrap()
+                    .push(SidebarSection {
+                        id: "c".into(),
+                        name: "Someday".into(),
+                        session_ids: vec![],
+                        collapsed: false,
+                    });
+                shell.debug_gate = Some(super::GatePhase::Ready);
+                crate::motion::set_reduced_motion(cx, true);
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+        cx.run_until_parked();
+        let order = |cx: &mut gpui::VisualTestContext| {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell
+                        .active_sidebar_sections(cx)
+                        .into_iter()
+                        .map(|s| s.id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+        let none = gpui::Modifiers::default();
+        let from = cx.debug_bounds("section-header-a").unwrap().center();
+        let last = cx.debug_bounds("section-header-c").unwrap();
+        let to = gpui::point(from.x, last.bottom() + px(30.0));
+        let nudge = gpui::point(px(0.0), px(6.0));
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        // The first move lifts the section where it sits; it then follows.
+        cx.simulate_mouse_move(from + nudge, Some(MouseButton::Left), none);
+        cx.update(|_, cx| assert!(cx.has_active_drag(), "section drag never started"));
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), none);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-lifted-section").is_some(),
+            "the section lifts while it drags"
+        );
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        cx.run_until_parked();
+        assert_eq!(order(&mut cx), ["b", "c", "a"]);
+        assert!(cx.debug_bounds("sidebar-lifted-section").is_none());
+
+        // Released outside the sidebar, the section goes home.
+        let from = cx.debug_bounds("section-header-b").unwrap().center();
+        let outside = gpui::point(px(900.0), from.y + px(200.0));
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        cx.simulate_mouse_move(from + nudge, Some(MouseButton::Left), none);
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), none);
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        cx.run_until_parked();
+        assert_eq!(order(&mut cx), ["b", "c", "a"]);
+        window
+            .update(&mut cx, |shell, _, _| {
+                assert!(shell.sidebar_section_drag.is_none());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn section_drop_index_follows_the_leading_edge() {
+        let heights = [50.0, 300.0, 50.0];
+        let gap = SIDEBAR_LIST_GAP;
+        // At rest every section keeps its slot.
+        assert_eq!(section_drop_index(0.0, &heights, 0), 0);
+        assert_eq!(section_drop_index(50.0 + gap, &heights, 1), 1);
+        // Dragged down, the bottom edge must pass the next middle.
+        assert_eq!(section_drop_index(99.0, &heights, 0), 0);
+        assert_eq!(section_drop_index(140.0 + gap, &heights, 0), 0);
+        assert_eq!(section_drop_index(160.0 + gap, &heights, 0), 1);
+        assert_eq!(section_drop_index(400.0, &heights, 0), 2);
+        // Dragged up, the top edge must pass the previous middle.
+        let last = 350.0 + 2.0 * gap;
+        assert_eq!(section_drop_index(last - 100.0, &heights, 2), 2);
+        assert_eq!(section_drop_index(150.0, &heights, 2), 1);
+        assert_eq!(section_drop_index(-10.0, &heights, 2), 0);
     }
 
     #[gpui::test]

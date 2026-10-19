@@ -1302,13 +1302,91 @@ fn questions_map_to_input_panel_shape() {
             "multiple": true,
         }],
     });
-    let questions = map_questions(&props);
-    assert_eq!(questions.len(), 1);
-    assert_eq!(questions[0].id, "q0");
-    assert_eq!(questions[0].header, "Color");
-    assert_eq!(questions[0].question, "Which color?");
-    assert_eq!(questions[0].options, vec!["Red", "Blue"]);
-    assert!(questions[0].multi_select);
+    let pairs = map_questions(&props);
+    assert_eq!(pairs.len(), 1);
+    let (key, question) = &pairs[0];
+    // A key-less 1.x question falls back to the positional form key.
+    assert_eq!(key, "q0");
+    // Panel ids are minted per question, never taken from the wire.
+    assert_ne!(question.id, "q0");
+    assert_ne!(question.id, map_questions(&props)[0].1.id);
+    assert_eq!(question.header, "Color");
+    assert_eq!(question.question, "Which color?");
+    assert_eq!(question.options, vec!["Red", "Blue"]);
+    assert!(question.multi_select);
+}
+
+/// A live 2.0.24 `form.created` frame (the `question` tool's transport)
+/// folds into the same bus payload the 1.x question path consumes.
+#[test]
+fn v2_question_forms_fold_into_the_input_panel_shape() {
+    let mut tools = HashMap::new();
+    let out = normalize_v2_frame(
+        json!({"id":"evt_form","type":"form.created","data":{"form":{
+        "id":"frm_116e46801001",
+        "sessionID":"ses_1",
+        "title":"Questions",
+        "metadata":{"kind":"question","tool":{"messageID":"msg_1","id":"call_1"}},
+        "fields":[
+            {"key":"q0","title":"Color","description":"Which color?","type":"string",
+             "options":[{"value":"Red","label":"Red","description":"warm"},
+                        {"value":"Blue","label":"Blue","description":"cool"}],
+             "custom":true},
+            {"key":"q1","title":"Toppings","description":"Pick some","type":"multiselect",
+             "options":[{"value":"A","label":"A"},{"value":"B","label":"B"}],"custom":true}
+        ]}}}),
+        &mut tools,
+    );
+    assert_eq!(
+        out,
+        vec![json!({"type":"question.asked","properties":{
+        "id":"frm_116e46801001","sessionID":"ses_1","form":true,
+        "questions":[
+            {"key":"q0","header":"Color","question":"Which color?","multiple":false,
+             "options":[{"label":"Red"},{"label":"Blue"}]},
+            {"key":"q1","header":"Toppings","question":"Pick some","multiple":true,
+             "options":[{"label":"A"},{"label":"B"}]}
+        ]}})]
+    );
+    // Forms from other features (no question metadata) never reach the panel.
+    assert!(
+        normalize_v2_frame(
+            json!({"id":"evt_other","type":"form.created","data":{"form":{
+                "id":"frm_2","sessionID":"ses_1","title":"MCP",
+                "fields":[{"key":"url","title":"URL","type":"string"}]}}}),
+            &mut tools,
+        )
+        .is_empty()
+    );
+}
+
+/// Form answers key by field: one label for a single-select field, the label
+/// array for a multiselect.
+#[test]
+fn form_answers_key_by_field_with_multiselect_arrays() {
+    let pairs = map_questions(&json!({"questions":[
+        {"key":"q0","question":"Which color?","header":"Color","options":[],"multiple":false},
+        {"key":"q1","question":"Pick some","header":"Toppings","options":[],"multiple":true}
+    ]}));
+    let answers = vec![
+        UserInputAnswer {
+            question_id: pairs[0].1.id.clone(),
+            labels: vec!["Red".into()],
+        },
+        UserInputAnswer {
+            question_id: pairs[1].1.id.clone(),
+            labels: vec!["A".into(), "B".into()],
+        },
+    ];
+    assert_eq!(
+        form_answer_body(&pairs, &answers),
+        json!({"answer":{"q0":"Red","q1":["A","B"]}})
+    );
+    // An unanswered single-select degrades to an empty string, never an array.
+    assert_eq!(
+        form_answer_body(&pairs, &[]),
+        json!({"answer":{"q0":"","q1":[]}})
+    );
 }
 
 #[test]
@@ -1763,6 +1841,47 @@ async fn permissions_do_not_auto_answer_agent_questions() {
     }})).unwrap();
     let body = wire.posted("/question/question/reply").await;
     assert_eq!(body, json!({"answers": [["No"]]}));
+}
+
+/// 2.x (2.0.24+) answers question forms, keyed by field, on the session's
+/// form route — and the harness emits NO `InputRequested`/`InputResolved` of
+/// its own (the engine's input bridge owns that lifecycle; a twin under
+/// opencode's id folded an unanswerable duplicate chip into the doc).
+#[tokio::test]
+async fn v2_question_forms_answer_through_the_form_route() {
+    let mut wire = TurnWire::start_policy(false, true, false, Some(true)).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2(
+        "form.created",
+        json!({"form":{
+        "id":"frm_1","sessionID":"fixture","title":"Questions",
+        "metadata":{"kind":"question","tool":{"messageID":"msg_1","id":"call_1"}},
+        "fields":[
+            {"key":"q0","title":"Color","description":"Which color?","type":"string",
+             "options":[{"value":"Red","label":"Red","description":"warm"}],"custom":true},
+            {"key":"q1","title":"Toppings","description":"Pick some","type":"multiselect",
+             "options":[{"value":"A","label":"A"}],"custom":true}
+        ]}}),
+    );
+    let body = wire.posted("/api/session/fixture/form/frm_1/reply").await;
+    assert_eq!(body, json!({"answer":{"q0":"Yes","q1":["Yes"]}}));
+    // Let the pre-fix twin (if any) land, then prove the stream carries none.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut twins = Vec::new();
+    while let Ok(event) = wire.events.try_recv() {
+        let event = event.unwrap();
+        if matches!(
+            event,
+            AgentEvent::InputRequested { .. } | AgentEvent::InputResolved { .. }
+        ) {
+            twins.push(event);
+        }
+    }
+    assert!(
+        twins.is_empty(),
+        "harness must not emit input lifecycle events itself: {twins:?}"
+    );
 }
 
 #[test]

@@ -1001,6 +1001,20 @@ impl Client {
         })
     }
 
+    /// Pin between neighbours (either may be `None` at the ends).
+    pub fn pin_session_at(
+        &self,
+        chat_id: &str,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> Result<()> {
+        self.pin_change(SidebarPinChange::Pin {
+            session_id: chat_id.to_owned(),
+            after,
+            before,
+        })
+    }
+
     pub fn unpin_session(&self, chat_id: &str) -> Result<()> {
         self.pin_change(SidebarPinChange::Unpin {
             session_id: chat_id.to_owned(),
@@ -1057,11 +1071,23 @@ impl Client {
 
     /// Move a session into a section (`None` = back to the recent list).
     pub fn assign_section(&self, chat_id: &str, section_id: Option<String>) -> Result<()> {
+        self.place_session(chat_id, section_id, None, None)
+    }
+
+    /// Move a session into a section between its members (either neighbour
+    /// may be `None` at the ends; both `None` appends).
+    pub fn place_session(
+        &self,
+        chat_id: &str,
+        section_id: Option<String>,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> Result<()> {
         self.section_change(SidebarSectionChange::Assign {
             session_id: chat_id.to_owned(),
             section_id,
-            after: None,
-            before: None,
+            after,
+            before,
         })
     }
 

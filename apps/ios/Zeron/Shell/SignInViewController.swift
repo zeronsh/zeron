@@ -80,7 +80,7 @@ final class SignInViewController: UIViewController, ASWebAuthenticationPresentat
             view.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            top.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            top.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
             top.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -80),
             buttons.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
             buttons.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),

@@ -4,7 +4,7 @@
 //!
 //! Ordering mirrors the desktop sidebar (`Shell::sidebar_visible_order`,
 //! "In one list" + "Last updated"): pinned sessions in their shared manual
-//! order, then the user's sections (each in recency order), then everything
+//! order, then the user's sections (each in its placed order), then everything
 //! else by recency ([`zeron_proto::view::sort_active`] keys). Archived and
 //! child (side/subagent) chats never appear in the active lists, and a chat
 //! pointing at a deleted project is hidden (projectless chats are first-class).
@@ -612,11 +612,14 @@ pub(crate) fn derive(
             id: section.id.clone(),
             name: section.name.clone(),
             collapsed: section.collapsed,
-            sessions: active
+            // Members keep their placed order, as on desktop.
+            sessions: section
+                .session_ids
                 .iter()
-                .filter(|c| !rc.pinned.contains(c.id.as_str()))
-                .filter(|c| rc.section_of.get(c.id.as_str()) == Some(&section.id.as_str()))
-                .map(|c| row(c))
+                .filter(|id| active_ids.contains(id.as_str()) && !rc.pinned.contains(id.as_str()))
+                .filter(|id| rc.section_of.get(id.as_str()) == Some(&section.id.as_str()))
+                .filter(|id| seen.insert(id.as_str()))
+                .map(|id| rows[id].clone())
                 .collect(),
         })
         .collect();

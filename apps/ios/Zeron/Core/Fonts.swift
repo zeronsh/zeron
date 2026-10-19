@@ -64,6 +64,38 @@ enum Fonts {
     static func ui(_ face: FaceRole, _ size: CGFloat) -> UIFont {
         ctFont(face, size: Float(size)) as UIFont
     }
+
+    /// The core's math faces, by table index (0 Fira Math, 1 STIX Two Math,
+    /// …, whichever face the setting picks; glyph ids index these exact
+    /// bytes), each at `mathReferenceSize`. Loaded when a row model first
+    /// names its index (models build on the prefetch queue, so drawing never
+    /// pays the copy) — a face nobody picks is never copied out of the core — and
+    /// kept; a failed load is remembered as nil so it's never retried. Never
+    /// registered: they're drawn by glyph id, not by name. Glyphs draw at any
+    /// size by scaling the context — no per-size fonts, since shrunk formulas
+    /// make sizes continuous (and iOS doesn't hint, so a scaled glyph paints
+    /// the same as a sized one).
+    private static let mathLock = NSLock()
+    nonisolated(unsafe) private static var mathFonts: [UInt8: CTFont?] = [:]
+
+    /// The size `mathFont` fonts are made at; scale by `size / this` to draw.
+    static let mathReferenceSize: CGFloat = 16
+
+    /// Math font `index` at `mathReferenceSize` (nil: unknown face).
+    /// Thread-safe: row models resolve glyph fonts on the prefetch queue (and
+    /// on main for a row needed before its prefetch lands).
+    static func mathFont(_ index: UInt8) -> CTFont? {
+        mathLock.lock()
+        defer { mathLock.unlock() }
+        if let font = mathFonts[index] { return font }
+        let data = mathFontData(index: index)
+        var font: CTFont?
+        if !data.isEmpty, let provider = CGDataProvider(data: data as CFData), let graphic = CGFont(provider) {
+            font = CTFontCreateWithGraphicsFont(graphic, mathReferenceSize, nil, nil)
+        }
+        mathFonts[index] = .some(font)
+        return font
+    }
 }
 
 /// CoreText as ground truth for glyphs the bundled faces don't cover.

@@ -89,6 +89,7 @@ serde.workspace = true
 serde_json.workspace = true
 pulldown-cmark.workspace = true
 zeron-markdown.workspace = true
+zatex = { workspace = true, features = ["bundled"] }
 html5ever = "0.39"
 alacritty_terminal.workspace = true
 base64 = "0.22"

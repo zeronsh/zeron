@@ -353,6 +353,49 @@ fn sidebar_writes_reorder_the_front_page() {
     let later = ws.front.sections.iter().find(|s| s.id == section).unwrap();
     assert_eq!(ids(&later.sessions), ["chat-deploy"]);
     assert!(!ids(&ws.front.recent).contains(&"chat-deploy"));
+    // A section lists its members in their placed order, as desktop does,
+    // and a placement out of Pinned unpins.
+    let members = |client: &Client| {
+        let ws = client.workspace();
+        ids(&ws
+            .front
+            .sections
+            .iter()
+            .find(|s| s.id == section)
+            .unwrap()
+            .sessions)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            None,
+            Some("chat-deploy".into()),
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-home", "chat-deploy"]);
+    assert!(!ids(&client.workspace().front.pinned).contains(&"chat-home"));
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            Some("chat-deploy".into()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-deploy", "chat-home"]);
+    // A drop into Pinned lands between its neighbours.
+    client
+        .pin_session_at("chat-home", None, Some("chat-picker".into()))
+        .unwrap();
+    assert_eq!(
+        ids(&client.workspace().front.pinned),
+        ["chat-home", "chat-picker"]
+    );
+    assert_eq!(members(&client), ["chat-deploy"]);
     client.set_section_collapsed(&section, true).unwrap();
     client.rename_section(&section, "Someday").unwrap();
     let ws = client.workspace();

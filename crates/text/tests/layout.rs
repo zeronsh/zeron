@@ -664,3 +664,255 @@ fn hostile_widths_are_handled() {
     assert_eq!(p.line_count(-5.0), p.line_count(0.0));
     assert_eq!(p.line_count(0.0), "helloworld".len());
 }
+
+// ---------------------------------------------------------------- inline boxes
+
+const OBJ: &str = "\u{FFFC}";
+
+/// `parts` joined, each `(text, Some(box))` an inline-box span, others plain `fx.sans` spans.
+fn boxed(fx: &Fixture, parts: &[(&str, Option<InlineBox>)]) -> (String, Vec<Span>) {
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    for &(t, b) in parts {
+        let a = text.len();
+        text.push_str(t);
+        let s = Span::new(a..text.len(), fx.sans);
+        spans.push(match b {
+            Some(b) => s.with_inline_box(b),
+            None => s,
+        });
+    }
+    (text, spans)
+}
+
+fn bx(width: f32, ascent: f32, descent: f32) -> InlineBox {
+    InlineBox {
+        width,
+        ascent,
+        descent,
+    }
+}
+
+#[test]
+fn inline_box_advances_by_its_width_without_shaping() {
+    let mut fx = Fixture::new();
+    let b = bx(37.5, 20.0, 8.0);
+    let (text, mut spans) = boxed(&fx, &[("sum ", None), (OBJ, Some(b)), (" done", None)]);
+    spans[1] = spans[1].clone().with_padding(2.0, 3.0);
+    let calls = fx.fallback_calls();
+    let p = fx.prep_spans(&text, &spans, PrepareOptions::default());
+    // U+FFFC isn't in Geist: had it been measured, the fallback would have seen it.
+    assert_eq!(fx.fallback_calls(), calls, "the placeholder was measured");
+    assert!(p.has_inline_boxes());
+    assert_eq!(
+        p.spans()[1].inline_box,
+        Some(b),
+        "normalized spans keep the box"
+    );
+    assert!(p.spans()[1].atomic, "a box is atomic");
+    let line = &p.lines(1000.0)[0];
+    let f = line.fragments.iter().find(|f| f.span == 1).unwrap();
+    assert_eq!(&p.text()[f.range.clone()], OBJ);
+    assert_close(f.width, 37.5 + 5.0, "box advance");
+    assert_close(
+        line.width,
+        fx.width("sum ", fx.sans) + 42.5 + fx.width(" done", fx.sans),
+        "line width",
+    );
+    // the placeholder text never matters
+    let mut other = spans.clone();
+    let text2 = text.replacen(OBJ, "WWW", 1);
+    other[1].range = 4..7;
+    other[2].range = 7..text2.len();
+    let q = fx.prep_spans(&text2, &other, PrepareOptions::default());
+    assert_close(
+        q.max_content_width(),
+        p.max_content_width(),
+        "placeholder-free",
+    );
+}
+
+#[test]
+fn inline_box_breaks_as_one_unit() {
+    let mut fx = Fixture::new();
+    let b = bx(50.0, 10.0, 4.0);
+    let (text, spans) = boxed(
+        &fx,
+        &[
+            ("alpha beta ", None),
+            (OBJ, Some(b)),
+            (" gamma x", None),
+            (OBJ, Some(b)),
+            ("y", None),
+        ],
+    );
+    for wrap in [OverflowWrap::Anywhere, OverflowWrap::Normal] {
+        let o = PrepareOptions {
+            overflow_wrap: wrap,
+            ..Default::default()
+        };
+        let p = fx.prep_spans(&text, &spans, o);
+        for w in [0.0, 5.0, 30.0, 49.0, 50.0, 51.0, 80.0, 120.0, 200.0, 1000.0] {
+            let lines = p.lines(w);
+            for k in [1, 3] {
+                let frags: Vec<&Fragment> = lines
+                    .iter()
+                    .flat_map(|l| &l.fragments)
+                    .filter(|f| f.span == k)
+                    .collect();
+                assert_eq!(frags.len(), 1, "box {k} split at w={w} ({wrap:?})");
+                assert_close(frags[0].width, 50.0, "box width");
+            }
+            // once the box fits on a line by itself, nothing overflows under `anywhere`
+            if wrap == OverflowWrap::Anywhere && w >= 50.0 {
+                for l in &lines {
+                    assert!(
+                        l.width <= w + LINE_FIT_EPSILON,
+                        "w={w}: {:?} overflows",
+                        &p.text()[l.range.clone()]
+                    );
+                }
+            }
+            // narrower, the box overflows on a line of its own
+            if w < 50.0 {
+                let l = lines
+                    .iter()
+                    .find(|l| l.fragments.iter().any(|f| f.span == 1));
+                assert_eq!(&p.text()[l.unwrap().range.clone()], OBJ, "w={w}");
+            }
+        }
+        // "alpha beta" fits but the box doesn't: the box moves to the next line whole
+        let ab = fx.width("alpha beta", fx.sans);
+        let lines = p.lines(ab + 20.0);
+        assert_eq!(&p.text()[lines[0].range.clone()], "alpha beta");
+        assert!(p.text()[lines[1].range.clone()].starts_with(OBJ));
+    }
+}
+
+#[test]
+fn inline_box_literal_is_atomic_even_without_the_flag() {
+    let mut fx = Fixture::new();
+    let text = "go ab-cd-ef now";
+    let spans = [
+        Span::new(0..3, fx.sans),
+        Span {
+            range: 3..11,
+            style: fx.sans,
+            pad_start: 0.0,
+            pad_end: 0.0,
+            atomic: false,
+            inline_box: Some(bx(30.0, 9.0, 3.0)),
+        },
+        Span::new(11..text.len(), fx.sans),
+    ];
+    let p = fx.prep_spans(text, &spans, PrepareOptions::default());
+    for w in [1.0, 10.0, 31.0, 1000.0] {
+        let frags: Vec<Fragment> = p
+            .lines(w)
+            .into_iter()
+            .flat_map(|l| l.fragments)
+            .filter(|f| f.span == 1)
+            .collect();
+        assert_eq!(frags.len(), 1, "w={w}");
+        assert_eq!(frags[0].range, 3..11);
+        assert_close(frags[0].width, 30.0, "box width");
+    }
+}
+
+#[test]
+fn line_growth_fits_box_extents() {
+    assert_eq!(line_growth(None, 20.0, 15.0), (0.0, 0.0));
+    assert_eq!(line_growth(Some((5.0, 2.0)), 20.0, 15.0), (0.0, 0.0));
+    assert_eq!(line_growth(Some((15.0, 5.0)), 20.0, 15.0), (0.0, 0.0));
+    assert_eq!(line_growth(Some((30.0, 12.0)), 20.0, 15.0), (15.0, 7.0));
+    assert_eq!(line_growth(Some((10.0, 9.0)), 20.0, 15.0), (0.0, 4.0));
+}
+
+#[test]
+fn height_grows_lines_holding_tall_boxes() {
+    let mut fx = Fixture::new();
+    let (lh, base) = (20.0, 15.0);
+    let tall = bx(40.0, 30.0, 12.0);
+    let short = bx(12.0, 5.0, 2.0);
+    let deep = bx(20.0, 6.0, 11.0);
+    let (text, spans) = boxed(
+        &fx,
+        &[
+            ("Let ", None),
+            (OBJ, Some(short)),
+            (" be the integral ", None),
+            (OBJ, Some(tall)),
+            (" over the region, and note that ", None),
+            (OBJ, Some(deep)),
+            (" holds for every point of the closed interval.", None),
+        ],
+    );
+    let p = fx.prep_spans(&text, &spans, PrepareOptions::default());
+    assert!(p.has_inline_boxes());
+    for w in [30.0, 60.0, 100.0, 150.0, 220.0, 320.0, 1000.0] {
+        let lines = p.lines(w);
+        let mut expected = 0.0;
+        let mut ranges = Vec::new();
+        p.walk_lines(w, |l| ranges.push(p.line_range_box_extents(l)));
+        assert_eq!(ranges.len(), lines.len());
+        for (l, from_range) in lines.iter().zip(ranges) {
+            let ext = p.line_box_extents(l);
+            assert_eq!(ext, from_range, "w={w}: fragments vs ranges");
+            // independently: max over the boxes this line's fragments hold
+            let has = |k: usize| l.fragments.iter().any(|f| f.span == k);
+            let held: Vec<InlineBox> = [(1, short), (3, tall), (5, deep)]
+                .into_iter()
+                .filter(|&(k, _)| has(k))
+                .map(|(_, b)| b)
+                .collect();
+            let want = (!held.is_empty()).then(|| {
+                (
+                    held.iter().map(|b| b.ascent).fold(f32::MIN, f32::max),
+                    held.iter().map(|b| b.descent).fold(f32::MIN, f32::max),
+                )
+            });
+            assert_eq!(ext, want, "w={w}: extents");
+            let (above, below) = line_growth(ext, lh, base);
+            if has(3) {
+                assert_eq!((above, below), (15.0, 7.0), "w={w}: tall line");
+            }
+            expected += lh + above + below;
+        }
+        assert_close(p.height(w, lh, base), expected, &format!("height w={w}"));
+        assert!(p.height(w, lh, base) > p.line_count(w) as f32 * lh);
+    }
+    // all on one line: grows once, by the tallest ascent and deepest descent
+    assert_close(p.height(1e6, lh, base), lh + 15.0 + 7.0, "one line");
+}
+
+#[test]
+fn height_without_boxes_is_line_count_times_lh() {
+    let mut fx = Fixture::new();
+    let p = fx.prep("The quick brown fox jumps over the lazy dog, again and again and again.");
+    assert!(!p.has_inline_boxes());
+    for w in [0.0, 20.0, 50.0, 90.0, 140.0, 400.0, f32::INFINITY] {
+        assert_eq!(p.height(w, 18.0, 13.0), p.line_count(w) as f32 * 18.0);
+        assert!(p.lines(w).iter().all(|l| p.line_box_extents(l).is_none()));
+    }
+    // a box whose span is empty (normalized away) doesn't count
+    let text = "a b";
+    let spans = [
+        Span::new(0..1, fx.sans),
+        Span::new(1..2, fx.sans).with_inline_box(bx(10.0, 50.0, 50.0)),
+        Span::new(2..3, fx.sans),
+    ];
+    let spans = [
+        spans[0].clone(),
+        Span {
+            range: 1..1,
+            ..spans[1].clone()
+        },
+        Span {
+            range: 1..3,
+            ..spans[2].clone()
+        },
+    ];
+    let p = fx.prep_spans(text, &spans, PrepareOptions::default());
+    assert!(!p.has_inline_boxes());
+    assert_eq!(p.height(1000.0, 18.0, 13.0), 18.0);
+}
