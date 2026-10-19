@@ -41,6 +41,9 @@ final class AppModel {
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
+    /// Prompt drafts (unsent new-session pages), in their shared order.
+    private(set) var drafts: [DraftRowVM] = []
+    private var draftRows: [String: DraftRow] = [:]
     private(set) var connectivity: Connectivity?
     /// Front-page sessions that are working / waiting on the user.
     private(set) var live = LiveCounts()
@@ -75,20 +78,23 @@ final class AppModel {
     /// The demo (and the UI tests on it) keep the new-session page in memory
     /// only: one run's leftovers must not seed the next.
     private static let persistsNewSession = !ProcessInfo.processInfo.arguments.contains("-demo")
-    private var volatileNewSessionText = ""
 
-    /// What was typed on the new-session page when it was closed unsent.
-    var newSessionText: String {
-        get { Self.persistsNewSession ? Drafts.load(Self.newSessionDraftKey) : volatileNewSessionText }
+    /// The new-session page open right now, saved but not yet listed: if the
+    /// app dies with it open, the next launch lists it under Drafts.
+    var openCanvas: OpenCanvas? {
+        get { Self.persistsNewSession ? UserDefaults.standard.data(forKey: "openCanvas").flatMap { try? JSONDecoder().decode(OpenCanvas.self, from: $0) } : nil }
         set {
-            if Self.persistsNewSession { Drafts.save(Self.newSessionDraftKey, newValue) } else { volatileNewSessionText = newValue }
+            guard Self.persistsNewSession else { return }
+            UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: "openCanvas")
         }
     }
 
-    /// Images staged there (this launch only).
-    var newSessionImages: [StagedImage] = []
-
-    private static let newSessionDraftKey = "new-session"
+    struct OpenCanvas: Codable, Equatable {
+        let id: String
+        let revision: String
+        let baseRevision: String?
+        let createdAt: Int64
+    }
 
     var isSignedIn: Bool { client != nil }
     var isDemo: Bool { client?.isDemo() ?? false }
@@ -173,6 +179,7 @@ final class AppModel {
             refreshWorkspace()
             client?.preloadSessions()
             backfillProfile()
+            recoverOpenCanvas()
             clock?.invalidate()
             // Relative times ("4m") and 45s staleness age without events.
             clock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refreshWorkspace() }
@@ -249,8 +256,9 @@ final class AppModel {
         live = LiveCounts()
         workspaceRevision = 0
         lastDraft = NewSessionDraft()
-        newSessionText = ""
-        newSessionImages = []
+        openCanvas = nil
+        drafts = []
+        draftRows = [:]
     }
 
     private var lastDeliveryActivity = Date.distantPast
@@ -392,6 +400,8 @@ final class AppModel {
             for r in p.sessions where all[r.id] == nil { all[r.id] = r }
         }
         let archivedVMs = ws.archived.map(vm)
+        let draftVMs = ws.drafts.map(Self.vm)
+        draftRows = Dictionary(ws.drafts.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var counts = LiveCounts()
         var seen = Set<String>()
         for row in page.sessions + page.sectionSessions.values.flatMap({ $0 }) where seen.insert(row.id).inserted {
@@ -401,11 +411,12 @@ final class AppModel {
         rows = all
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
-        let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
+        let changed = page != frontPage || archivedVMs != archived || draftVMs != drafts || counts != live || hosts != lastHosts
         lastHosts = hosts
         live = counts
         frontPage = page
         archived = archivedVMs
+        drafts = draftVMs
         if changed { observers.values.forEach { $0() } }
     }
 
@@ -473,6 +484,27 @@ final class AppModel {
         )
     }
 
+    static func vm(_ d: DraftRow) -> DraftRowVM {
+        let branch = d.newWorktree ? "New worktree" : d.branch
+        return DraftRowVM(
+            id: d.id,
+            revision: d.revision,
+            preview: d.conflict ? "Recovered edit · \(d.preview)" : d.preview,
+            projectName: d.projectName ?? "No project",
+            hasProject: d.spaceId != nil,
+            colorIndex: Int(d.project?.colorIndex ?? projectColorIndex(spacePath: "home")),
+            hostName: d.deviceName,
+            harness: d.harness,
+            branch: branch,
+            timeLabel: d.timeLabel,
+            pending: d.pending
+        )
+    }
+
+    func draftRow(_ id: String) -> DraftRow? {
+        draftRows[id] ?? client?.drafts().first { $0.id == id }
+    }
+
     func session(_ id: String) -> SessionRowVM? {
         rows[id].map(Self.vm) ?? client?.sessionRow(chatId: id).map(Self.vm)
     }
@@ -525,6 +557,46 @@ final class AppModel {
     func createSection(_ name: String) { attempt("section") { _ = try client?.createSection(name: name) } }
     func rename(_ id: String, _ title: String) { attempt("rename") { try client?.renameSession(chatId: id, title: title) } }
     func markSeen(_ id: String) { attempt("seen") { try client?.markSeen(chatId: id) } }
+
+    // MARK: Prompt drafts
+
+    func discardDraft(_ id: String) {
+        attempt("discard draft") { try client?.discardDraft(id: id) }
+        if openCanvas?.id == id { openCanvas = nil }
+    }
+
+    func moveDraft(_ id: String, after: String?, before: String?) {
+        attempt("move draft") { try client?.moveDraft(id: id, after: after, before: before) }
+    }
+
+    func saveDraft(_ edit: DraftEdit) throws {
+        guard let client else { throw CoreError.Closed }
+        try client.saveDraft(edit: edit)
+    }
+
+    func loadDraft(revision: String) async throws -> LoadedDraft {
+        guard let client else { throw CoreError.Closed }
+        return try await client.loadDraft(revision: revision)
+    }
+
+    /// Reserve a listed draft's revision before sending it (another device
+    /// may be sending the same draft).
+    func claimDraft(_ id: String, revision: String) async throws {
+        guard let client else { throw CoreError.Closed }
+        try await client.claimDraft(id: id, revision: revision)
+    }
+
+    /// The page the app died on (saved, never listed) joins the Drafts.
+    private func recoverOpenCanvas() {
+        guard let canvas = openCanvas, let client else { return }
+        Task { @MainActor [weak self] in
+            // A page opened meanwhile keeps its own record.
+            defer { if self?.openCanvas?.id == canvas.id { self?.openCanvas = nil } }
+            guard let loaded = try? await client.loadDraft(revision: canvas.revision) else { return }
+            let edit = DraftEdit(id: canvas.id, revision: canvas.revision, baseRevision: canvas.baseRevision, createdAtMs: canvas.createdAt, deferred: false, prompt: loaded.prompt, target: loaded.target, files: loaded.files)
+            self?.attempt("recover draft") { try client.saveDraft(edit: edit) }
+        }
+    }
 
     // MARK: Sessions
 
@@ -623,8 +695,10 @@ final class AppModel {
         return refs.sorted { $0.current && !$1.current }.map(\.name)
     }
 
-    /// Create the chat, open it, and send the first message.
-    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage]) -> String? {
+    /// Create the chat, open it, and send the first message. From a prompt
+    /// draft (`fromDraft`), the chat id derives from the draft and the draft
+    /// leaves the list once the message is queued.
+    func createSession(draft: NewSessionDraft, text: String, images: [StagedImage], files: [DraftFile] = [], fromDraft: (id: String, revision: String)? = nil) -> String? {
         guard let client else { return nil }
         let target: SessionTarget
         if let p = draft.projectId {
@@ -636,11 +710,24 @@ final class AppModel {
         }
         let config = ChatConfig(harness: draft.harness, model: draft.model, reasoning: draft.effort, modelOptions: [:], sandbox: .workspaceWrite)
         do {
-            let chatId = try client.createSession(newSession: NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil))
+            let newSession = NewSession(target: target, config: config, branch: draft.worktree ? nil : draft.branch, cwd: nil, title: nil)
+            let chatId: String
+            if let fromDraft {
+                chatId = try client.createDraftSession(draftId: fromDraft.id, newSession: newSession)
+            } else {
+                chatId = try client.createSession(newSession: newSession)
+            }
             let handle = try client.openSession(chatId: chatId)
             let project = rawProjects.first { $0.id == draft.projectId }
             let worktree = draft.worktree ? project.map { WorktreeSpec(repoPath: $0.path, base: draft.branch ?? "HEAD", spaceId: $0.id) } : nil
-            _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: worktree, busy: .queue))
+            let attachments = images.map(\.outgoing) + files.map(\.outgoing)
+            _ = try handle.send(request: SendRequest(text: text, attachments: attachments, worktree: worktree, busy: .queue))
+            if let fromDraft {
+                // The message is queued either way: a failed unlist only
+                // leaves the draft listed.
+                attempt("consume draft") { try client.consumeDraft(id: fromDraft.id, revision: fromDraft.revision) }
+                if openCanvas?.id == fromDraft.id { openCanvas = nil }
+            }
             noteDeliveryActivity()
             refreshWorkspace()
             return chatId
@@ -652,7 +739,24 @@ final class AppModel {
 }
 
 extension StagedImage {
-    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: "image/jpeg", data: data) }
+    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: DraftFile.mimeType(name, fallback: "image/jpeg"), data: data) }
+}
+
+extension DraftFile {
+    /// A file the phone can't stage (a desktop draft's non-image file) still
+    /// goes out with its draft.
+    var outgoing: OutgoingAttachment { OutgoingAttachment(name: name, mimeType: Self.mimeType(name, fallback: "application/octet-stream"), data: data) }
+
+    static func mimeType(_ name: String, fallback: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "png": "image/png"
+        case "jpg", "jpeg": "image/jpeg"
+        case "gif": "image/gif"
+        case "webp": "image/webp"
+        case "heic": "image/heic"
+        default: fallback
+        }
+    }
 }
 
 /// Core events arrive on Rust runtime threads; hop to main.

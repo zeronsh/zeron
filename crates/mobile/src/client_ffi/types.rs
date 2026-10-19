@@ -702,6 +702,8 @@ pub struct WorkspaceSnapshot {
     pub pull_requests: PullRequestGroups,
     pub archived: Vec<SessionRow>,
     pub devices: Vec<DeviceView>,
+    /// Prompt drafts, in their shared manual order (above Pinned).
+    pub drafts: Vec<DraftRow>,
 }
 
 impl From<&zc::WorkspaceSnapshot> for WorkspaceSnapshot {
@@ -717,6 +719,7 @@ impl From<&zc::WorkspaceSnapshot> for WorkspaceSnapshot {
             pull_requests: (&w.pull_requests).into(),
             archived: rows(&w.archived),
             devices: w.devices.iter().map(Into::into).collect(),
+            drafts: w.drafts.iter().map(Into::into).collect(),
         }
     }
 }
@@ -1089,4 +1092,206 @@ pub struct PushPrefs {
     pub done: bool,
     pub input: bool,
     pub failed: bool,
+}
+
+// ── prompt drafts ─────────────────────────────────────────────────────────
+
+/// An unsent new-session canvas (docs/prompt-drafts.md), as the Drafts
+/// section lists it. Open it with `load_draft(revision)`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DraftRow {
+    pub id: String,
+    pub revision: String,
+    pub base_revision: Option<String>,
+    pub created_at_ms: i64,
+    /// First non-blank prompt line (or "N attachments").
+    pub preview: String,
+    /// The target project while it exists.
+    pub project: Option<ProjectRef>,
+    /// Its name even after the project was removed.
+    pub project_name: Option<String>,
+    pub space_id: Option<String>,
+    pub device_id: String,
+    pub device_name: Option<String>,
+    /// Wire harness id (`claude-code`).
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub model_label: Option<String>,
+    /// Wire effort (`xhigh`).
+    pub reasoning: Option<String>,
+    pub branch: Option<String>,
+    pub new_worktree: bool,
+    /// A concurrent edit from another device, listed beside its sibling.
+    pub conflict: bool,
+    /// Saved here, not yet on other devices.
+    pub pending: bool,
+    /// `now` / `34m` / `4h` / `2d` of `created_at_ms`.
+    pub time_label: String,
+}
+
+impl From<&zc::DraftRow> for DraftRow {
+    fn from(d: &zc::DraftRow) -> Self {
+        Self {
+            id: d.id.clone(),
+            revision: d.revision.clone(),
+            base_revision: d.base_revision.clone(),
+            created_at_ms: d.created_at_ms,
+            preview: d.preview.clone(),
+            project: d.project.as_ref().map(|p| ProjectRef {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                color_index: p.color_index,
+            }),
+            project_name: d.project_name.clone(),
+            space_id: d.space_id.clone(),
+            device_id: d.device_id.clone(),
+            device_name: d.device_name.clone(),
+            harness: d.harness.clone(),
+            model: d.model.clone(),
+            model_label: d.model_label.clone(),
+            reasoning: d.reasoning.clone(),
+            branch: d.branch.clone(),
+            new_worktree: d.new_worktree,
+            conflict: d.conflict,
+            pending: d.pending,
+            time_label: d.time_label.clone(),
+        }
+    }
+}
+
+/// Where a draft will run, and how.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DraftTarget {
+    /// The host (a project's device, or a projectless session's).
+    pub device_id: String,
+    pub space_id: Option<String>,
+    /// The project's name when saved (survives its removal).
+    pub project_name: Option<String>,
+    pub config: Option<ChatConfig>,
+    /// Picked ref (the worktree's base with `new_worktree`).
+    pub branch: Option<String>,
+    pub new_worktree: bool,
+}
+
+impl From<&zc::DraftTarget> for DraftTarget {
+    fn from(t: &zc::DraftTarget) -> Self {
+        Self {
+            device_id: t.device_id.clone(),
+            space_id: t.space_id.clone(),
+            project_name: t.project_name.clone(),
+            config: t.config.as_ref().map(Into::into),
+            branch: t.branch.clone(),
+            new_worktree: t.new_worktree,
+        }
+    }
+}
+
+impl TryFrom<DraftTarget> for zc::DraftTarget {
+    type Error = CoreError;
+
+    fn try_from(t: DraftTarget) -> CoreResult<Self> {
+        Ok(zc::DraftTarget {
+            device_id: t.device_id,
+            space_id: t.space_id,
+            project_name: t.project_name,
+            config: t.config.map(TryInto::try_into).transpose()?,
+            branch: t.branch,
+            new_worktree: t.new_worktree,
+        })
+    }
+}
+
+/// One attached file.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DraftFile {
+    /// Stable across saves (the composer's attachment id).
+    pub id: String,
+    pub name: String,
+    pub data: Vec<u8>,
+    /// Desktop Appshot context (JSON), kept as-is across saves.
+    pub appshot_json: Option<String>,
+}
+
+impl From<zc::DraftFile> for DraftFile {
+    fn from(f: zc::DraftFile) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            data: f.data,
+            appshot_json: f.appshot.map(|v| v.to_string()),
+        }
+    }
+}
+
+impl TryFrom<DraftFile> for zc::DraftFile {
+    type Error = CoreError;
+
+    fn try_from(f: DraftFile) -> CoreResult<Self> {
+        Ok(zc::DraftFile {
+            id: f.id,
+            name: f.name,
+            data: f.data,
+            appshot: f
+                .appshot_json
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .map_err(|_| CoreError::InvalidArgument {
+                    message: "invalid Appshot context".into(),
+                })?,
+        })
+    }
+}
+
+/// One save of a canvas: a new `revision` whenever its content changed.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DraftEdit {
+    pub id: String,
+    pub revision: String,
+    /// The revision this one was edited from.
+    pub base_revision: Option<String>,
+    pub created_at_ms: i64,
+    /// Still the open canvas: saved, listed only once left.
+    pub deferred: bool,
+    pub prompt: String,
+    pub target: DraftTarget,
+    pub files: Vec<DraftFile>,
+}
+
+impl TryFrom<DraftEdit> for zc::DraftEdit {
+    type Error = CoreError;
+
+    fn try_from(e: DraftEdit) -> CoreResult<Self> {
+        Ok(zc::DraftEdit {
+            id: e.id,
+            revision: e.revision,
+            base_revision: e.base_revision,
+            created_at_ms: e.created_at_ms,
+            deferred: e.deferred,
+            prompt: e.prompt,
+            target: e.target.try_into()?,
+            files: e
+                .files
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<CoreResult<_>>()?,
+        })
+    }
+}
+
+/// A draft's full content.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct LoadedDraft {
+    pub prompt: String,
+    pub target: DraftTarget,
+    pub files: Vec<DraftFile>,
+}
+
+impl From<zc::LoadedDraft> for LoadedDraft {
+    fn from(d: zc::LoadedDraft) -> Self {
+        Self {
+            prompt: d.prompt,
+            target: (&d.target).into(),
+            files: d.files.into_iter().map(Into::into).collect(),
+        }
+    }
 }

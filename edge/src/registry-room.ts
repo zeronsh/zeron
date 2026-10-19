@@ -99,6 +99,7 @@ export class RegistryRoom implements DurableObject {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS draft_claims (id TEXT PRIMARY KEY, revision TEXT NOT NULL)");
     // Push targets are private to this room: never rows (those broadcast to
     // every socket, sync to every device and back up to R2).
     ctx.storage.sql.exec(
@@ -195,6 +196,18 @@ export class RegistryRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+
+    if (url.pathname === "/draft-claim" && request.method === "POST") {
+      const body = await request.json() as { id?: string; revision?: string };
+      const valid = (v: unknown): v is string => typeof v === "string" && /^[a-zA-Z0-9-]{1,128}$/.test(v);
+      if (!valid(body.id) || !valid(body.revision)) return json({ error: "bad_draft" }, 400);
+      // No await between read and write: the DO serializes concurrent claims.
+      const old = [...this.ctx.storage.sql.exec("SELECT revision FROM draft_claims WHERE id = ?", body.id)][0];
+      if (old) return old.revision === body.revision ? json({ ok: true }) : json({ error: "draft_already_claimed" }, 409);
+      if (this.loadRow("promptDrafts", body.id)?.fields.closed === true) return json({ error: "draft_closed" }, 409);
+      this.ctx.storage.sql.exec("INSERT INTO draft_claims(id,revision) VALUES (?,?)", body.id, body.revision);
+      return json({ ok: true });
+    }
 
     if (url.pathname === "/ws") {
       const device = url.searchParams.get("device") ?? "";

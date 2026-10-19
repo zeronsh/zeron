@@ -11,6 +11,7 @@ use zeron_proto::{
 
 use crate::client::ms;
 use crate::config::DemoFixture;
+use crate::drafts::{DraftEdit, DraftFile};
 use crate::rpc::capability;
 
 pub(crate) const MAC: &str = "dev-mac";
@@ -352,6 +353,128 @@ pub(crate) fn devices(self_id: &str, self_name: &str, now: i64) -> Vec<Device> {
             env!("CARGO_PKG_VERSION"),
             false,
             now,
+        ),
+    ]
+}
+
+/// Prompt drafts (unsent new-session canvases) as the Drafts section shows
+/// them: in a project with an image, projectless, in a new worktree on
+/// another host, and a draft edited on two devices at once (two heads).
+pub(crate) fn drafts(now: i64) -> Vec<DraftEdit> {
+    use zeron_proto::{DraftTarget, HarnessId::*, ReasoningLevel::*};
+    let config = |harness, model: &str, reasoning| ChatConfig {
+        harness,
+        model: Some(model.into()),
+        reasoning: Some(reasoning),
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+    };
+    let target = |device: &str, space: Option<&str>, name: Option<&str>, config| DraftTarget {
+        device_id: device.into(),
+        space_id: space.map(str::to_owned),
+        project_name: name.map(str::to_owned),
+        config: Some(config),
+        branch: None,
+        new_worktree: false,
+    };
+    let edit =
+        |id: &str, revision: &str, base: Option<&str>, ago: i64, prompt: &str, target| DraftEdit {
+            id: id.into(),
+            revision: revision.into(),
+            base_revision: base.map(str::to_owned),
+            created_at_ms: now - ago,
+            deferred: false,
+            prompt: prompt.into(),
+            target,
+            files: Vec::new(),
+        };
+    let mobile = || {
+        target(
+            MAC,
+            Some("space-mobile"),
+            Some("Zeron iOS"),
+            config(ClaudeCode, "claude-opus-5", XHigh),
+        )
+    };
+    vec![
+        DraftEdit {
+            files: vec![DraftFile {
+                id: "draft-shot".into(),
+                name: "sessions-list.png".into(),
+                data: super::png::gradient(390, 844, 0),
+                appshot: None,
+            }],
+            ..edit(
+                "demo-draft-sidebar",
+                "demo-draft-sidebar-1",
+                None,
+                12 * MIN,
+                "Match the desktop Drafts section on the Sessions page: accent rows above Pinned, swipe to discard, drag to reorder.\n\nThe screenshot shows where it goes.",
+                target(
+                    MAC,
+                    Some("space-zeron"),
+                    Some("zeron"),
+                    config(ClaudeCode, "claude-opus-5", XHigh),
+                ),
+            )
+        },
+        edit(
+            "demo-draft-notes",
+            "demo-draft-notes-1",
+            None,
+            3 * HOUR,
+            "Summarize this week's merged pull requests into release notes, grouped by app.",
+            target(MAC, None, None, config(Codex, "gpt-5.6-terra", High)),
+        ),
+        DraftEdit {
+            target: DraftTarget {
+                branch: Some("main".into()),
+                new_worktree: true,
+                ..target(
+                    VPS,
+                    Some("space-edge"),
+                    Some("edge"),
+                    config(Codex, "gpt-6-astra", High),
+                )
+            },
+            ..edit(
+                "demo-draft-limits",
+                "demo-draft-limits-1",
+                None,
+                DAY,
+                "Rate-limit draft-content uploads per user and return 429 with Retry-After.",
+                target(
+                    VPS,
+                    Some("space-edge"),
+                    Some("edge"),
+                    config(Codex, "gpt-6-astra", High),
+                ),
+            )
+        },
+        edit(
+            "demo-draft-haptics",
+            "demo-draft-haptics-1",
+            None,
+            2 * DAY,
+            "Add haptics to the composer.",
+            mobile(),
+        ),
+        // Edited on the phone and on the Mac before either synced.
+        edit(
+            "demo-draft-haptics",
+            "demo-draft-haptics-2",
+            Some("demo-draft-haptics-1"),
+            2 * DAY - HOUR,
+            "Add haptics to the composer send button and to pull to refresh.",
+            mobile(),
+        ),
+        edit(
+            "demo-draft-haptics",
+            "demo-draft-haptics-3",
+            Some("demo-draft-haptics-1"),
+            2 * DAY - 2 * HOUR,
+            "Add haptics to the composer, but only on devices with Taptic Engine.",
+            mobile(),
         ),
     ]
 }

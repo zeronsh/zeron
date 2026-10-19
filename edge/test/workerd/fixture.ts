@@ -1,4 +1,5 @@
 import { chatRoute } from "../../src/chat-route";
+import { draftContentRoute } from "../../src/draft-content";
 import { previewRoute } from "../../src/preview-route";
 export { DeviceRoom } from "../../src/device-room";
 export { ChatRoom } from "../../src/chat-room";
@@ -11,12 +12,20 @@ import { DurableObject } from "cloudflare:workers";
 export class TestLogRoom extends DurableObject {}
 
 export default {
-  fetch(request: Request, env: { PREVIEW_ROOMS: DurableObjectNamespace; CHAT_ROOMS: DurableObjectNamespace }): Response | Promise<Response> {
+  fetch(
+    request: Request,
+    env: { PREVIEW_ROOMS: DurableObjectNamespace; CHAT_ROOMS: DurableObjectNamespace; BLOBS: R2Bucket }
+  ): Response | Promise<Response> {
     // Test credentials exercise the production routing seam without loading
     // the unrelated session-room WASM inside the Workers test runner.
     const bearer = request.headers.get("authorization");
     if (!bearer?.startsWith("Bearer ")) return new Response("Unauthorized", { status: 401 });
     const [userId, orgId] = bearer.slice(7).split("@");
-    return chatRoute(request, env, userId) ?? previewRoute(request, env, { userId, orgId }) ?? new Response("test fixture", { status: 404 });
+    return (
+      draftContentRoute(request, env, { userId, orgId }) ??
+      chatRoute(request, env, userId) ??
+      previewRoute(request, env, { userId, orgId }) ??
+      new Response("test fixture", { status: 404 })
+    );
   }
 };

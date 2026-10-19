@@ -194,6 +194,120 @@ final class SessionCell: UICollectionViewListCell {
     static let markSide: CGFloat = 20
 }
 
+/// What a prompt-draft row shows (an unsent new-session page).
+struct DraftRowVM: Hashable {
+    let id: String
+    var revision: String
+    /// First prompt line; a concurrent edit reads "Recovered edit · …".
+    var preview: String
+    var projectName: String
+    var hasProject: Bool
+    var colorIndex: Int
+    var hostName: String?
+    var harness: String?
+    /// The picked branch, or "New worktree".
+    var branch: String?
+    var timeLabel: String
+    /// Saved on this phone, not yet on other devices.
+    var pending: Bool
+}
+
+/// Draft row, the session row's twin in the desktop's Drafts accent:
+///
+///   [mark]  First line of the prompt ············ 12m
+///           [P] project · host  branch
+final class DraftCell: UICollectionViewListCell {
+    static var height: CGFloat { SessionCell.height }
+
+    private let harness = UIImageView()
+    private let title = FadingLabel()
+    private let meta = FadingLabel()
+    private let time = UILabel()
+    private var vm: DraftRowVM?
+    /// The draft open beside the sidebar (iPad).
+    var isCurrent = false { didSet { if isCurrent != oldValue { setNeedsUpdateConfiguration() } } }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        time.textAlignment = .right
+        harness.contentMode = .scaleAspectFit
+        harness.tintColor = Palette.text
+        for v in [harness, title, meta, time] as [UIView] { contentView.addSubview(v) }
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: DraftCell, _) in
+            if let vm = cell.vm { cell.configure(vm) }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateConfiguration(using state: UICellConfigurationState) {
+        var bg = UIBackgroundConfiguration.listCell().updated(for: state)
+        bg.backgroundColor = state.isHighlighted || state.isSelected ? Palette.controlFill : isCurrent ? Palette.rowActive : .clear
+        bg.cornerRadius = 16
+        bg.backgroundInsets = NSDirectionalEdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
+        backgroundConfiguration = bg
+    }
+
+    override func preferredLayoutAttributesFitting(_ attrs: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+        attrs.size.height = Self.height
+        return attrs
+    }
+
+    func configure(_ vm: DraftRowVM) {
+        self.vm = vm
+        harness.image = BrandMarks.image(for: vm.harness ?? "claude-code", side: SessionCell.markSide)
+        // Desktop: accent text, no highlighted background.
+        title.text = vm.preview
+        title.font = Fonts.ui(.sansMedium, TypeScale.size(16.5))
+        title.textColor = Palette.accent
+        let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
+        let tileSide = (14 * TypeScale.factor).rounded()
+        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+        tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
+        let metaText = NSMutableAttributedString(attachment: tile)
+        let place = [vm.projectName, vm.hostName].compactMap { $0 }.joined(separator: " · ")
+        metaText.append(NSAttributedString(string: "  " + place, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))
+        if let b = vm.branch, !b.isEmpty, let icon = BranchIcon.image?.withTintColor(Palette.subline, renderingMode: .alwaysOriginal) {
+            let font = Fonts.ui(.sans, TypeScale.size(12.5))
+            let side = (12 * TypeScale.factor).rounded()
+            let attach = NSTextAttachment(image: icon)
+            attach.bounds = CGRect(x: 0, y: (font.capHeight - side) / 2, width: side, height: side)
+            metaText.append(NSAttributedString(string: "   "))
+            metaText.append(NSAttributedString(attachment: attach))
+            metaText.append(NSAttributedString(string: " " + b, attributes: [.font: font, .foregroundColor: Palette.subline]))
+        }
+        meta.attributedText = metaText
+        // Offline saves say so until they reach the other devices.
+        time.text = vm.pending ? "Not synced" : vm.timeLabel
+        time.textColor = vm.pending ? Palette.tertiary : StatusTone.time
+        time.font = Fonts.ui(.sansMedium, TypeScale.size(13))
+        accessibilityLabel = ["Draft", vm.preview, place, vm.pending ? "Not synced" : nil].compactMap { $0 }.joined(separator: ", ")
+        accessibilityIdentifier = "draft-\(vm.id)"
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let b = contentView.bounds
+        let left: CGFloat = 20
+        let right: CGFloat = 20
+        let k = TypeScale.factor
+        let titleY = (10 * k).rounded()
+        let titleH = (22 * k).rounded()
+        let metaY = (35 * k).rounded()
+        let metaH = (18 * k).rounded()
+        let mark = SessionCell.markSide
+        let titleFont = title.font ?? Fonts.ui(.sansMedium, TypeScale.size(16.5))
+        let baseline = titleY + (titleH - titleFont.lineHeight) / 2 + titleFont.ascender
+        harness.frame = CGRect(x: left, y: (baseline - titleFont.xHeight / 2 - mark / 2).rounded(), width: mark, height: mark)
+        let textX = left + mark + 14
+        let tw = ceil(time.sizeThatFits(CGSize(width: 140, height: 40)).width)
+        time.frame = CGRect(x: b.width - right - tw, y: titleY, width: tw, height: titleH)
+        title.frame = CGRect(x: textX, y: titleY, width: max(0, time.frame.minX - 10 - textX), height: titleH)
+        meta.frame = CGRect(x: textX, y: metaY, width: max(0, b.width - right - textX), height: metaH)
+    }
+}
+
 /// Folder row: icon, name, count, chevron.
 final class FolderCell: UICollectionViewListCell {
     static var height: CGFloat { (46 * TypeScale.factor).rounded() }

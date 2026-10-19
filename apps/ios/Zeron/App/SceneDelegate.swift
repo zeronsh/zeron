@@ -66,6 +66,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             DispatchQueue.main.async {
                 if route.hasPrefix("chat:") { router.openSession(String(route.dropFirst(5))) }
                 if route == "new" { router.presentNewSession(prompt: nil) }
+                if route.hasPrefix("draft:") { router.openDraft(String(route.dropFirst(6))) }
                 if route == "more" { router.showSettings() }
                 if route == "search" { router.showSearch() }
             }

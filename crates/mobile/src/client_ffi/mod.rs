@@ -219,6 +219,69 @@ impl CoreClient {
         Ok(self.client.create_session(new_session.try_into()?)?)
     }
 
+    /// A prompt draft's session: the chat id derives from the draft, so a
+    /// retried send reuses it.
+    pub fn create_draft_session(
+        &self,
+        draft_id: String,
+        new_session: NewSession,
+    ) -> CoreResult<String> {
+        Ok(self
+            .client
+            .create_draft_session(&draft_id, new_session.try_into()?)?)
+    }
+
+    // ── prompt drafts ──────────────────────────────────────────────────────
+
+    /// Listed drafts (also in `workspace().drafts`).
+    pub fn drafts(&self) -> Vec<DraftRow> {
+        self.client
+            .workspace()
+            .drafts
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Save a canvas locally; it publishes to other devices in the background.
+    pub fn save_draft(&self, edit: DraftEdit) -> CoreResult<()> {
+        Ok(self.client.save_draft(edit.try_into()?)?)
+    }
+
+    /// A draft's full content (cached objects first, else the edge).
+    pub async fn load_draft(&self, revision: String) -> CoreResult<LoadedDraft> {
+        let client = self.client.clone();
+        on_runtime(async move { client.load_draft(&revision).await })
+            .await
+            .map(Into::into)
+    }
+
+    pub fn discard_draft(&self, id: String) -> CoreResult<()> {
+        Ok(self.client.discard_draft(&id)?)
+    }
+
+    /// Reorder between neighbours (either may be `None` at the ends).
+    pub fn move_draft(
+        &self,
+        id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.move_draft(&id, after, before)?)
+    }
+
+    /// Reserve this exact revision for sending (fails when another device
+    /// already sent the draft).
+    pub async fn claim_draft(&self, id: String, revision: String) -> CoreResult<()> {
+        let client = self.client.clone();
+        on_runtime(async move { client.claim_draft(&id, &revision).await }).await
+    }
+
+    /// The draft became a session: unlist it everywhere.
+    pub fn consume_draft(&self, id: String, revision: String) -> CoreResult<()> {
+        Ok(self.client.consume_draft(&id, &revision)?)
+    }
+
     pub fn archive_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.archive_session(&chat_id)?)
     }

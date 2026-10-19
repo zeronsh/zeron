@@ -133,8 +133,19 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
         return nav
     }
 
+    func openDraft(_ draftId: String) {
+        guard let row = app.draftRow(draftId) else { return }
+        guard presentedViewController != nil else { return presentNewSession(restoring: row) }
+        dismiss(animated: true) { [weak self] in self?.presentNewSession(restoring: row) }
+    }
+
     func presentNewSession(prompt: String? = nil) {
-        let vc = NewSessionViewController(app: app, prompt: prompt) { [weak self] chatId, handoff in
+        presentNewSession(prompt: prompt, restoring: nil)
+    }
+
+    /// The new-session sheet; `restoring` reopens a prompt draft in it.
+    private func presentNewSession(prompt: String? = nil, restoring row: DraftRow?) {
+        let vc = NewSessionViewController(app: app, prompt: prompt, restoring: row) { [weak self] chatId, handoff in
             guard let self else { return }
             self.openSession(chatId, handoff: handoff)
         }
