@@ -50,6 +50,7 @@ final class AppModel {
     private var workspaceRevision: UInt64 = 0
     private var observers: [UUID: () -> Void] = [:]
     private var sessionObservers: [String: [UUID: () -> Void]] = [:]
+    private var observedSessionRows: [String: SessionRow] = [:]
     private lazy var bridge = ListenerBridge(app: self)
     private var refreshScheduled = false
     private var clock: Timer?
@@ -243,6 +244,7 @@ final class AppModel {
         frontPage = FrontPage()
         archived = []
         rows = [:]
+        observedSessionRows = [:]
         rawProjects = []
         lastHosts = []
         connectivity = nil
@@ -327,9 +329,19 @@ final class AppModel {
     }
 
     func observeSession(_ chatId: String, _ handler: @escaping () -> Void) -> AnyObject {
+        if sessionObservers[chatId] == nil {
+            observedSessionRows[chatId] = client?.sessionRow(chatId: chatId)
+        }
         let id = UUID()
         sessionObservers[chatId, default: [:]][id] = handler
-        return Token { [weak self] in self?.sessionObservers[chatId]?[id] = nil }
+        return Token { [weak self] in
+            guard let self else { return }
+            self.sessionObservers[chatId]?[id] = nil
+            if self.sessionObservers[chatId]?.isEmpty == true {
+                self.sessionObservers[chatId] = nil
+                self.observedSessionRows[chatId] = nil
+            }
+        }
     }
 
     fileprivate final class Token {
@@ -399,6 +411,15 @@ final class AppModel {
             if row.status == .awaiting { counts.awaiting += 1 }
         }
         rows = all
+        // Session chrome uses row fields omitted from the list view model.
+        var changedSessionHandlers: [() -> Void] = []
+        for (chatId, handlers) in sessionObservers {
+            let latest = all[chatId] ?? client.sessionRow(chatId: chatId)
+            if observedSessionRows[chatId] != latest {
+                observedSessionRows[chatId] = latest
+                changedSessionHandlers.append(contentsOf: handlers.values)
+            }
+        }
         // Devices coming and going (Settings, host pickers) count as changes.
         let hosts = hostOptions
         let changed = page != frontPage || archivedVMs != archived || counts != live || hosts != lastHosts
@@ -407,6 +428,7 @@ final class AppModel {
         frontPage = page
         archived = archivedVMs
         if changed { observers.values.forEach { $0() } }
+        changedSessionHandlers.forEach { $0() }
     }
 
     /// Like the desktop's project grouping: checkouts of one repository
