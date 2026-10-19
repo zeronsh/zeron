@@ -82,6 +82,17 @@ pub(crate) struct SystemFrame {
     /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
     pub tasks: Option<Vec<Value>>,
+    /// `task_started`: `local_workflow` for a Workflow tool run.
+    #[serde(default)]
+    pub task_type: Option<String>,
+    /// `task_progress` of a workflow: every agent's latest state
+    /// (`label`, `model`, `state`, `resultPreview`, …), keyed by `index`.
+    #[serde(default)]
+    pub workflow_progress: Vec<Value>,
+    /// `task_progress` / `task_notification`: the task's running totals
+    /// (`total_tokens`, `tool_uses`, `duration_ms`).
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
