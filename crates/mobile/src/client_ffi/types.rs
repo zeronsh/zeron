@@ -1027,6 +1027,62 @@ impl From<zc::rpc::FolderListing> for FolderListing {
     }
 }
 
+// ── agent accounts ────────────────────────────────────────────────────────
+
+/// a plan rate-limit window ("Session", "Week"), not app token accounting.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AgentUsageWindow {
+    pub label: String,
+    /// 0.0..=1.0
+    pub used_fraction: f32,
+    pub resets_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AgentAccount {
+    pub id: String,
+    /// wire id (`claude-code`, `codex`, …).
+    pub harness: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub plan_label: Option<String>,
+    pub active: bool,
+    pub usage_windows: Vec<AgentUsageWindow>,
+    pub usage_fetched_at_ms: Option<i64>,
+    pub usage_error: Option<String>,
+    /// the store key of a per-provider login (OpenCode's `openai`,
+    /// `opencode-go`, Pi's `anthropic`, …); `None` for one-login agents.
+    pub provider: Option<String>,
+}
+
+impl From<zeron_proto::AgentAccount> for AgentAccount {
+    fn from(a: zeron_proto::AgentAccount) -> Self {
+        Self {
+            id: a.id,
+            harness: serde_json::to_value(a.harness)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            email: a.email,
+            display_name: a.display_name,
+            plan_label: a.plan_label,
+            active: a.active,
+            usage_windows: a
+                .usage_windows
+                .into_iter()
+                .map(|w| AgentUsageWindow {
+                    label: w.label,
+                    used_fraction: w.used_fraction,
+                    resets_at_ms: w.resets_at.map(|t| t.timestamp_millis()),
+                })
+                .collect(),
+            usage_fetched_at_ms: a.usage_fetched_at,
+            usage_error: a.usage_error,
+            provider: a.provider,
+        }
+    }
+}
+
 // ── attachments ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1089,4 +1145,37 @@ pub struct PushPrefs {
     pub done: bool,
     pub input: bool,
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_account_keeps_wire_harness_id_and_reset_millis() {
+        let account: zeron_proto::AgentAccount = serde_json::from_value(serde_json::json!({
+            "id": "slot-1",
+            "harness": "claude-code",
+            "email": "you@example.com",
+            "planLabel": "Max 20×",
+            "active": true,
+            "usageWindows": [
+                { "label": "Session", "usedFraction": 0.42, "resetsAt": "2026-04-08T18:59:59Z" },
+                { "label": "Week", "usedFraction": 0.8, "resetsAt": null },
+            ],
+            "usageFetchedAt": 1_775_000_000_000_i64,
+            "provider": "opencode-go",
+        }))
+        .unwrap();
+
+        let ffi = AgentAccount::from(account);
+
+        assert_eq!(ffi.harness, "claude-code");
+        assert_eq!(ffi.plan_label.as_deref(), Some("Max 20×"));
+        assert_eq!(ffi.usage_windows.len(), 2);
+        assert_eq!(ffi.usage_windows[0].resets_at_ms, Some(1_775_674_799_000));
+        assert_eq!(ffi.usage_windows[1].resets_at_ms, None);
+        assert_eq!(ffi.usage_fetched_at_ms, Some(1_775_000_000_000));
+        assert_eq!(ffi.provider.as_deref(), Some("opencode-go"));
+    }
 }

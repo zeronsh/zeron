@@ -134,6 +134,8 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
     }
 
     func presentNewSession(prompt: String? = nil) {
+        let presented = presentedViewController
+        if (presented as? UINavigationController)?.viewControllers.first is NewSessionViewController { return }
         let vc = NewSessionViewController(app: app, prompt: prompt) { [weak self] chatId, handoff in
             guard let self else { return }
             self.openSession(chatId, handoff: handoff)
@@ -144,7 +146,10 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
             sheet.detents = [.large()]
             sheet.prefersGrabberVisible = true
         }
-        present(nav, animated: true)
+        guard presented != nil else { return present(nav, animated: true) }
+        // a widget or control can ask while another sheet (settings, the call
+        // stage) is up, and only one presents at a time.
+        dismiss(animated: true) { [weak self] in self?.present(nav, animated: true) }
     }
 
     func showSettings() {
@@ -153,6 +158,13 @@ final class MainTabController: UITabBarController, UITabBarControllerDelegate, A
 
     func showSearch() {
         selectedTab = tabs.first { $0 is UISearchTab }
+    }
+
+    func showSessions() {
+        if presentedViewController != nil { dismiss(animated: true) }
+        selectedTab = tabs.first { $0.identifier == "sessions" }
+        popToFrontPage()
+        syncAccessory()
     }
 
     /// From the new-session sheet: the chat goes in under the sheet at once,

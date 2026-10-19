@@ -1100,6 +1100,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func isDemo()  -> Bool
     
     /**
+     * the logins of every agent CLI on `device_id` with their usage windows.
+     */
+    func listAgentAccounts(deviceId: String, forceUsage: Bool) async throws  -> [AgentAccount]
+    
+    /**
      * Browse folders on a device (`None` = its home folder).
      */
     func listFolders(deviceId: String, path: String?) async throws  -> FolderListing
@@ -1546,6 +1551,25 @@ open func isDemo() -> Bool  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * the logins of every agent CLI on `device_id` with their usage windows.
+     */
+open func listAgentAccounts(deviceId: String, forceUsage: Bool)async throws  -> [AgentAccount]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_list_agent_accounts(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterBool.lower(forceUsage)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeAgentAccount.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -5253,6 +5277,173 @@ public func FfiConverterTypeVoiceSessionListener_lower(_ value: VoiceSessionList
 }
 
 
+
+
+public struct AgentAccount: Equatable, Hashable {
+    public var id: String
+    /**
+     * wire id (`claude-code`, `codex`, …).
+     */
+    public var harness: String
+    public var email: String?
+    public var displayName: String?
+    public var planLabel: String?
+    public var active: Bool
+    public var usageWindows: [AgentUsageWindow]
+    public var usageFetchedAtMs: Int64?
+    public var usageError: String?
+    /**
+     * the store key of a per-provider login (OpenCode's `openai`,
+     * `opencode-go`, Pi's `anthropic`, …); `None` for one-login agents.
+     */
+    public var provider: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, 
+        /**
+         * wire id (`claude-code`, `codex`, …).
+         */harness: String, email: String?, displayName: String?, planLabel: String?, active: Bool, usageWindows: [AgentUsageWindow], usageFetchedAtMs: Int64?, usageError: String?, 
+        /**
+         * the store key of a per-provider login (OpenCode's `openai`,
+         * `opencode-go`, Pi's `anthropic`, …); `None` for one-login agents.
+         */provider: String?) {
+        self.id = id
+        self.harness = harness
+        self.email = email
+        self.displayName = displayName
+        self.planLabel = planLabel
+        self.active = active
+        self.usageWindows = usageWindows
+        self.usageFetchedAtMs = usageFetchedAtMs
+        self.usageError = usageError
+        self.provider = provider
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AgentAccount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentAccount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentAccount {
+        return
+            try AgentAccount(
+                id: FfiConverterString.read(from: &buf), 
+                harness: FfiConverterString.read(from: &buf), 
+                email: FfiConverterOptionString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf), 
+                planLabel: FfiConverterOptionString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf), 
+                usageWindows: FfiConverterSequenceTypeAgentUsageWindow.read(from: &buf), 
+                usageFetchedAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                usageError: FfiConverterOptionString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AgentAccount, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterOptionString.write(value.email, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+        FfiConverterOptionString.write(value.planLabel, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+        FfiConverterSequenceTypeAgentUsageWindow.write(value.usageWindows, into: &buf)
+        FfiConverterOptionInt64.write(value.usageFetchedAtMs, into: &buf)
+        FfiConverterOptionString.write(value.usageError, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentAccount_lift(_ buf: RustBuffer) throws -> AgentAccount {
+    return try FfiConverterTypeAgentAccount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentAccount_lower(_ value: AgentAccount) -> RustBuffer {
+    return FfiConverterTypeAgentAccount.lower(value)
+}
+
+
+/**
+ * a plan rate-limit window ("Session", "Week"), not app token accounting.
+ */
+public struct AgentUsageWindow: Equatable, Hashable {
+    public var label: String
+    /**
+     * 0.0..=1.0
+     */
+    public var usedFraction: Float
+    public var resetsAtMs: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, 
+        /**
+         * 0.0..=1.0
+         */usedFraction: Float, resetsAtMs: Int64?) {
+        self.label = label
+        self.usedFraction = usedFraction
+        self.resetsAtMs = resetsAtMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AgentUsageWindow: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentUsageWindow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentUsageWindow {
+        return
+            try AgentUsageWindow(
+                label: FfiConverterString.read(from: &buf), 
+                usedFraction: FfiConverterFloat.read(from: &buf), 
+                resetsAtMs: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AgentUsageWindow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterFloat.write(value.usedFraction, into: &buf)
+        FfiConverterOptionInt64.write(value.resetsAtMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentUsageWindow_lift(_ buf: RustBuffer) throws -> AgentUsageWindow {
+    return try FfiConverterTypeAgentUsageWindow.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentUsageWindow_lower(_ value: AgentUsageWindow) -> RustBuffer {
+    return FfiConverterTypeAgentUsageWindow.lower(value)
+}
 
 
 public struct AppshotLabel: Equatable, Hashable {
@@ -15946,6 +16137,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAgentAccount: FfiConverterRustBuffer {
+    typealias SwiftType = [AgentAccount]
+
+    public static func write(_ value: [AgentAccount], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAgentAccount.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AgentAccount] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AgentAccount]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAgentAccount.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAgentUsageWindow: FfiConverterRustBuffer {
+    typealias SwiftType = [AgentUsageWindow]
+
+    public static func write(_ value: [AgentUsageWindow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAgentUsageWindow.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AgentUsageWindow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AgentUsageWindow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAgentUsageWindow.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeAuthOrg: FfiConverterRustBuffer {
     typealias SwiftType = [AuthOrg]
 
@@ -17371,6 +17612,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_is_demo() != 28119) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_list_agent_accounts() != 35429) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_list_folders() != 2324) {

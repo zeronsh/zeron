@@ -8,7 +8,9 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::{
+    AgentAccountsSnapshot, Chat, ChatConfig, SidebarPinChange, SidebarSectionChange,
+};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -1340,6 +1342,29 @@ impl Client {
                         device_id,
                         zeron_rpc::methods::SEARCH_FILES,
                         serde_json::json!({ "query": query, "chatId": chat_id, "spaceId": space_id }),
+                    )
+                    .await?;
+                serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// without `force_usage` the engine serves its last good probe; with it,
+    /// it probes the providers (at most every 30s per account).
+    pub async fn list_agent_accounts(
+        &self,
+        device_id: &str,
+        force_usage: bool,
+    ) -> Result<AgentAccountsSnapshot> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(AgentAccountsSnapshot::default()),
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                        serde_json::json!({ "forceUsage": force_usage }),
                     )
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))

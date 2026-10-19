@@ -3,6 +3,9 @@ import UIKit
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private let app = AppModel()
+    /// a widget or control route that arrived before the signed-in shell
+    /// could take it (signed out, or still launching).
+    private var pendingRoute: URL?
 
     func scene(
         _ scene: UIScene,
@@ -27,6 +30,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         app.onSignOut = { [weak self] in
             guard let self else { return }
+            self.pendingRoute = nil
             push.signingOut(client: self.app.client)
             self.app.signOutLocally()
             self.showRoot(animated: true)
@@ -52,6 +56,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         window.makeKeyAndVisible()
         if !args.contains("-lab") { shellShown() }
+        if let url = connectionOptions.urlContexts.first?.url {
+            DispatchQueue.main.async { self.open(url) }
+        }
+        DispatchQueue.main.async { [weak self] in
+            LinkRouter.handler = { url in self?.open(url) }
+        }
 
         #if DEBUG
         if args.contains("-voice-preview") {
@@ -73,11 +83,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     /// The signed-in shell is up: refresh this phone's notification
-    /// registration and open a session a notification was tapped for.
+    /// registration and open a session a notification (or widget) was
+    /// tapped for.
     private func shellShown() {
         guard app.isSignedIn else { return }
         if !app.isDemo { PushNotifications.shared.signedIn() }
         PushNotifications.shared.shellReady()
+        if let url = pendingRoute {
+            pendingRoute = nil
+            DispatchQueue.main.async { self.open(url) }
+        }
     }
 
     private func showRoot(animated: Bool) {
@@ -101,12 +116,51 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
-    /// `zeron://voice` (the call's Live Activity) returns to the stage.
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
-        guard URLContexts.contains(where: { $0.url.scheme == "zeron" && $0.url.host == "voice" }),
-              app.voice.live, let root = window?.rootViewController
-        else { return }
-        root.presentVoiceStage(app: app, source: nil)
+        URLContexts.forEach { open($0.url) }
+    }
+
+    /// `zeron://voice` (the call's Live Activity) returns to the stage;
+    /// `zeron://chat/<id>`, `zeron://new`, `zeron://call` and
+    /// `zeron://sessions` come from the widgets and controls.
+    private func open(_ url: URL) {
+        guard url.scheme == "zeron", let root = window?.rootViewController else { return }
+        if url.host == "voice" {
+            guard app.voice.live else { return }
+            return root.presentVoiceStage(app: app, source: nil)
+        }
+        guard app.isSignedIn, let router = root as? AppRouter else {
+            pendingRoute = url
+            return
+        }
+        switch url.host {
+        case "call":
+            openVoiceOnceHostsKnown(deadline: Date().addingTimeInterval(5))
+        case "chat":
+            guard let chatId = url.pathComponents.dropFirst().first else { return }
+            router.openSession(chatId)
+        case "new":
+            router.presentNewSession(prompt: nil)
+        case "sessions":
+            router.showSessions()
+        default:
+            break
+        }
+    }
+
+    /// a cold launch from the call control lands before the registry: until
+    /// it syncs (or a host shows up), the host picker would claim there's no
+    /// online device.
+    private func openVoiceOnceHostsKnown(deadline: Date) {
+        guard app.isSignedIn, let root = window?.rootViewController as? UIViewController & AppRouter else { return }
+        let voice = app.voice
+        guard voice.live || !voice.hosts.isEmpty || app.synced || Date() >= deadline else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.openVoiceOnceHostsKnown(deadline: deadline)
+            }
+            return
+        }
+        root.openVoice(app: app, source: nil)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
