@@ -203,6 +203,12 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Spawn tool id → the prompt already seeded as its opening user message,
+    /// until the child's first tagged frame. A foreground child echoes that
+    /// prompt as its first tagged user frame (live-verified 2.1.296); the
+    /// seed must not double it. A background child never echoes, so the
+    /// entry just clears on its first frame.
+    unechoed_openings: std::collections::HashMap<String, String>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -218,6 +224,7 @@ impl Normalizer {
             agent_tasks: std::collections::HashMap::new(),
             agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            unechoed_openings: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
         }
@@ -431,6 +438,7 @@ impl Normalizer {
                 }
                 if let Some(parent) = &f.parent_tool_use_id {
                     let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
+                    self.unechoed_openings.remove(parent);
                     return match f.event.delta.kind.as_str() {
                         "text_delta" => vec![tag(
                             parent,
@@ -471,6 +479,7 @@ impl Normalizer {
             Frame::Assistant(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
                     let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
+                    self.unechoed_openings.remove(parent);
                     // Subagent content, attributed. The 2.1.x wire streams NO
                     // tagged partial deltas (live-verified): a subagent's text
                     // arrives only as full text blocks on its tagged
@@ -511,6 +520,16 @@ impl Normalizer {
                 for b in f.message.blocks() {
                     if b.kind == "tool_use" && matches!(b.name.as_str(), "Agent" | "Task") {
                         self.agent_spawn_tools.insert(b.id.clone());
+                        // The opening prompt seeded below; see `unechoed_openings`.
+                        if let Some(prompt) = b
+                            .input
+                            .get("prompt")
+                            .and_then(Value::as_str)
+                            .filter(|p| !p.trim().is_empty())
+                        {
+                            self.unechoed_openings
+                                .insert(b.id.clone(), prompt.trim().to_owned());
+                        }
                     }
                 }
                 let mut out: Vec<AgentEvent> = f
@@ -523,10 +542,10 @@ impl Normalizer {
                             call: decode_tool_use(&b.name, &b.input),
                         };
                         // A spawn's `prompt` is the subagent's opening user
-                        // message — the wire never echoes it on the child
-                        // feed (child user frames carry tool results and
-                        // steers only), so seed it here and the subagent
-                        // transcript starts the way every chat does.
+                        // message. A background child never echoes it on its
+                        // feed, so seed it here and the subagent transcript
+                        // starts the way every chat does; a foreground child
+                        // echoes it once, which the tagged user arm drops.
                         let opening = matches!(b.name.as_str(), "Agent" | "Task")
                             .then(|| b.input.get("prompt"))
                             .flatten()
@@ -607,6 +626,7 @@ impl Normalizer {
             Frame::User(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
                     let parent = self.agent_tool_spawns.get(parent).unwrap_or(parent);
+                    let seeded = self.unechoed_openings.remove(parent);
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
                     let mut out: Vec<AgentEvent> = f
@@ -630,6 +650,8 @@ impl Normalizer {
                     // tool results ride their own blocks, filtered above).
                     // Synthetic harness injections are not conversation, and
                     // must not read as a steer — see [`is_synthetic_user_text`].
+                    // The spawn's seeded opening is not a steer either: a
+                    // foreground child echoes it here as its first frame.
                     out.extend(
                         f.message
                             .blocks()
@@ -637,6 +659,7 @@ impl Normalizer {
                                 b.kind == "text"
                                     && !b.text.trim().is_empty()
                                     && !is_synthetic_user_text(&b.text)
+                                    && seeded.as_deref() != Some(b.text.trim())
                             })
                             .map(|b| tag(parent, AgentEvent::UserMessage { text: b.text })),
                     );
@@ -1086,6 +1109,37 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Subagent { .. }))
         );
+    }
+
+    #[test]
+    fn foreground_prompt_echo_is_not_a_second_opening() {
+        // A foreground spawn's child echoes its prompt as its first tagged
+        // user frame (live-verified 2.1.296), on top of the seeded opening.
+        // The subagent transcript must open with the prompt exactly once.
+        let mut norm = Normalizer::new();
+        let spawn = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_fg","name":"Agent","input":{"description":"ping","prompt":"reply with only the word pong"}}]}}"#,
+            )
+            .expect("frame parses"),
+            false,
+        );
+        let echo = norm.normalize(
+            crate::claude::wire::parse_frame(
+                r#"{"type":"user","parent_tool_use_id":"toolu_fg","message":{"role":"user","content":[{"type":"text","text":"reply with only the word pong"}]}}"#,
+            )
+            .expect("frame parses"),
+            false,
+        );
+        let openings = spawn
+            .iter()
+            .chain(&echo)
+            .filter(|ev| {
+                matches!(ev, AgentEvent::Subagent { event, .. }
+                    if matches!(event.as_ref(), AgentEvent::UserMessage { .. }))
+            })
+            .count();
+        assert_eq!(openings, 1, "spawn {spawn:?} echo {echo:?}");
     }
 
     #[test]
