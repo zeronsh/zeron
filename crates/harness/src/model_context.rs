@@ -78,10 +78,11 @@ pub(crate) fn context(
         }
         _ => vec![],
     };
+    // Probe the path as run: a dispatcher (mise shim) answers for the tool it is named after.
+    let version = crate::executable::binary_version(binary).map(|v| v.to_string());
     let binary = binary
         .canonicalize()
         .unwrap_or_else(|_| binary.to_path_buf());
-    let version = crate::executable::binary_version(&binary).map(|v| v.to_string());
     let mut hash = Sha256::new();
     field(&mut hash, binary.as_os_str().as_encoded_bytes());
     field(
