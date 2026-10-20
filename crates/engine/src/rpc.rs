@@ -2161,6 +2161,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
+            | methods::GET_SESSION_SETTINGS
+            | methods::SET_SESSION_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2688,6 +2690,14 @@ impl RpcService for EngineRpc {
                     .set_native_subagents(p.harness, p.enabled)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.native_subagent_settings())
+            }
+            methods::GET_SESSION_SETTINGS => RpcReply::value(&self.registry.session_settings()),
+            methods::SET_SESSION_SETTINGS => {
+                let p: crate::registry::SessionSettings = parse_params(params)?;
+                self.registry
+                    .set_session_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.session_settings())
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

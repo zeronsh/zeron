@@ -59,6 +59,9 @@ pub mod methods {
     /// (`{switchable, off}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
+    /// The device's persistent session preferences (Settings → General).
+    pub const GET_SESSION_SETTINGS: &str = "GetSessionSettings";
+    pub const SET_SESSION_SETTINGS: &str = "SetSessionSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
