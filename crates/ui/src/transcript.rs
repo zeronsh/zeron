@@ -10524,6 +10524,103 @@ mod tests {
         });
     }
 
+    /// A window's view (#414 multi-window) gets its transcript from the shared
+    /// conversation source, not from its own watch. Revisiting a chat must
+    /// treat that source's replay as history, as the single-state path does.
+    #[gpui::test]
+    fn tool_groups_stay_closed_when_a_window_revisits_a_shared_conversation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let history = vec![assistant(
+            "tools",
+            MessageStatus::Complete,
+            vec![tool_part("call", "pwd")],
+        )];
+        let (view, transcript) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let owner = cx.new(|_| AppState::new());
+            let view = cx.new(|cx| AppState::for_window(owner, cx));
+            let transcript = cx.new(|cx| Transcript::new(view.clone(), cx));
+            transcript.update(cx, |this, _| this.retain_for_route_exit());
+            (view, transcript)
+        });
+        // The engine watch feeds the shared source; the view gets its frames.
+        let replay = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let source = crate::chat_store::acquire("chat-a".into(), None, cx);
+                source.update(cx, |source, cx| {
+                    source
+                        .receive_transcript_update(
+                            zeron_doc::TranscriptUpdate {
+                                frame: zeron_doc::TranscriptFrame::reset(&history),
+                                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                    &history,
+                                )),
+                                context_usage: None,
+                            },
+                            cx,
+                        )
+                        .unwrap();
+                });
+            });
+            cx.update(|cx| transcript.update(cx, |this, cx| this.sync(cx)));
+        };
+        let select = |chat: &str, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                view.update(cx, |view, cx| view.select_chat(Some(chat.into()), cx));
+            });
+            cx.update(|cx| transcript.update(cx, |this, cx| this.sync(cx)));
+        };
+        select("chat-a", cx);
+        replay(cx);
+        cx.update(|cx| assert_replayed_group_is_closed(&transcript, cx));
+        for held in [false, true, false] {
+            // Another window may keep the source (and its replay) alive.
+            let hold =
+                held.then(|| cx.update(|cx| crate::chat_store::acquire("chat-a".into(), None, cx)));
+            select("chat-b", cx);
+            select("chat-a", cx);
+            if hold.is_some() {
+                cx.update(|cx| assert_replayed_group_is_closed(&transcript, cx));
+            }
+            // A released source replays again: that is history too.
+            replay(cx);
+            cx.update(|cx| assert_replayed_group_is_closed(&transcript, cx));
+            drop(hold);
+        }
+        // A tool that arrives live after the revisit still animates.
+        let mut live = history.clone();
+        live[0].parts.push(tool_part("live-call", "git status"));
+        cx.update(|cx| {
+            let source = crate::chat_store::acquire("chat-a".into(), None, cx);
+            source.update(cx, |source, cx| {
+                source
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::diff_transcript(&history, &live),
+                            replay_baseline: None,
+                            context_usage: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+        });
+        cx.update(|cx| transcript.update(cx, |this, cx| this.sync(cx)));
+        cx.update(|cx| {
+            let this = transcript.read(cx);
+            let reveal = &this.tool_group_reveals[&SharedString::from("tools#g0")];
+            assert!(
+                reveal.starts[0].is_none(),
+                "the replayed tool stays settled"
+            );
+            assert!(reveal.starts[1].is_some(), "the live tool still animates");
+        });
+    }
+
     #[gpui::test]
     fn tool_groups_stay_closed_on_populated_chat_attach(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {

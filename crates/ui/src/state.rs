@@ -1185,13 +1185,43 @@ impl AppState {
             self.echoes = data.echoes.clone();
             self.pending_sends = data.pending_sends.clone();
             self.optimistic_revision = data.optimistic_revision.clone();
+            // The view mirrors the source: its baseline and prepared rows
+            // describe the entries just copied, never the cached projection
+            // they replaced. A cached baseline left over an empty transcript
+            // made the view take the source's later replay for live arrivals,
+            // so finished tool groups opened and closed on every revisit.
+            match data.transcript_baselines.get(&chat_id) {
+                Some(baseline) => {
+                    self.transcript_baselines
+                        .insert(chat_id.clone(), baseline.clone());
+                }
+                None => {
+                    self.transcript_baselines.remove(&chat_id);
+                }
+            }
+            match data.prepared_transcripts.get(&chat_id) {
+                Some(prepared) => {
+                    self.prepared_transcripts
+                        .insert(chat_id.clone(), prepared.clone());
+                }
+                None => {
+                    self.prepared_transcripts.remove(&chat_id);
+                }
+            }
         }
         let frames = cx.subscribe(
             &source,
             |this, _, event: &crate::chat_store::ConversationFrame, cx| {
                 // This subscription is dropped on navigation, before attaching the
                 // replacement feed. A reset repairs both source and projections.
-                if let Err(error) = this.receive_transcript_frame(event.frame.clone(), cx) {
+                let received = this.receive_transcript_frame(event.frame.clone(), cx);
+                if received.is_ok()
+                    && let (Some(chat_id), Some(baseline)) =
+                        (this.selected_chat.clone(), event.replay_baseline.clone())
+                {
+                    this.transcript_baselines.insert(chat_id, baseline);
+                }
+                if let Err(error) = received {
                     tracing::warn!(%error, "conversation projection desynchronized");
                     if let Some(binding) = &this.conversation {
                         let source = binding.source.clone();
@@ -1809,6 +1839,17 @@ impl AppState {
         frame: TranscriptFrame,
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
+        self.receive_transcript_frame_with(frame, None, cx)
+    }
+
+    /// [`Self::receive_transcript_frame`], forwarding `replay_baseline` with
+    /// the frame when this state is a shared conversation source.
+    fn receive_transcript_frame_with(
+        &mut self,
+        frame: TranscriptFrame,
+        replay_baseline: Option<Arc<zeron_doc::TranscriptBaseline>>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
         let text_doc = self
             .selected_chat
             .as_ref()
@@ -1823,7 +1864,10 @@ impl AppState {
         if result.is_ok()
             && let Some(frame) = shared_frame
         {
-            cx.emit(crate::chat_store::ConversationFrame { frame });
+            cx.emit(crate::chat_store::ConversationFrame {
+                frame,
+                replay_baseline,
+            });
         }
         if let Some(doc_id) = text_doc.filter(|_| result.is_ok()) {
             cx.emit(TranscriptTextChanged { doc_id });
@@ -1845,10 +1889,10 @@ impl AppState {
         update: zeron_doc::TranscriptUpdate,
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
-        self.receive_transcript_frame(update.frame, cx)?;
-        if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, update.replay_baseline) {
-            self.transcript_baselines
-                .insert(doc_id.clone(), Arc::new(baseline));
+        let baseline = update.replay_baseline.map(Arc::new);
+        self.receive_transcript_frame_with(update.frame, baseline.clone(), cx)?;
+        if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, baseline) {
+            self.transcript_baselines.insert(doc_id.clone(), baseline);
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;

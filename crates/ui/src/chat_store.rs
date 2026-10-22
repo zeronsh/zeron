@@ -22,6 +22,9 @@ pub(crate) struct ConversationBinding {
 
 pub(crate) struct ConversationFrame {
     pub frame: zeron_doc::TranscriptFrame,
+    /// The replay baseline that came with `frame`: views need it to tell an
+    /// opening snapshot (history) from live arrivals.
+    pub replay_baseline: Option<std::sync::Arc<zeron_doc::TranscriptBaseline>>,
 }
 
 impl gpui::EventEmitter<ConversationFrame> for AppState {}
