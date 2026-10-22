@@ -96,6 +96,52 @@ pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
     newest_candidate(candidates)
 }
 
+/// Multicall launchers that pick the tool to run from the name they were
+/// invoked under. A `codex` symlink that resolves to one of these belongs to a
+/// version manager (mise/rtx wrappers and shims, Omarchy's default install;
+/// Volta; aqua; proto; busybox) and is not the release itself: launching its
+/// target would run `mise app-server` instead of `codex app-server`.
+const DISPATCHERS: &[&str] = &[
+    "mise",
+    "rtx",
+    "volta-shim",
+    "aqua-proxy",
+    "proto-shim",
+    "busybox",
+];
+
+/// Whether `path` reaches a [`DISPATCHERS`] binary under another name. mise also
+/// recognizes itself under versioned names (`mise-2026.10.10`), which a dotted
+/// `file_stem` would cut short, so names are compared whole, minus `.exe`.
+fn is_dispatcher_link(path: &Path, canonical: &Path) -> bool {
+    let name = |p: &Path| {
+        let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
+        Some(name.strip_suffix(".exe").map(str::to_owned).unwrap_or(name))
+    };
+    match (name(path), name(canonical)) {
+        (Some(link), Some(target)) => {
+            link != target
+                && (DISPATCHERS.contains(&target.as_str())
+                    || target.starts_with("mise-")
+                    || target.starts_with("rtx-"))
+        }
+        _ => false,
+    }
+}
+
+/// The path that identifies the release `path` runs, for pinning a launch or
+/// keying a cache: its canonical target, except behind a dispatcher link. There
+/// the target is the dispatcher and only the link names the tool, so the link
+/// is kept and the dispatcher resolves the release at exec time.
+pub(crate) fn pinned_executable(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = path.canonicalize()?;
+    Ok(if is_dispatcher_link(path, &canonical) {
+        path.to_path_buf()
+    } else {
+        canonical
+    })
+}
+
 pub(crate) fn binary_hint(path: &Path) -> String {
     format!(
         "{} (version {})",
@@ -123,7 +169,7 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     let candidates: Vec<_> = candidates
         .into_iter()
-        .filter(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())))
+        .filter(|p| seen.insert(pinned_executable(p).unwrap_or_else(|_| p.clone())))
         .collect();
     let mut best = candidates.first()?.clone();
     if candidates.len() > 1 {
@@ -144,7 +190,16 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 }
 
 type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
-type VersionEntry = (Option<semver::Version>, std::collections::HashSet<String>);
+/// Version, aliases, and when a dispatcher entry goes stale.
+type VersionEntry = (
+    Option<semver::Version>,
+    std::collections::HashSet<String>,
+    Option<std::time::Instant>,
+);
+
+/// A dispatcher's own metadata never changes when the tool behind it upgrades
+/// (`mise up codex`), so its versions are re-probed after this long.
+const DISPATCHER_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 static VERSION_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<VersionKey, VersionEntry>>,
 > = std::sync::OnceLock::new();
@@ -156,17 +211,28 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
         cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, aliases)| !names.iter().any(|name| aliases.contains(*name)));
+            .retain(|_, (_, aliases, _)| !names.iter().any(|name| aliases.contains(*name)));
     }
 }
 
 /// Probe once per executable identity. Failures are cached too, including timeout.
 /// Keep the lock during the short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
+    binary_version_at(path, std::time::Instant::now())
+}
+
+fn binary_version_at(path: &Path, now: std::time::Instant) -> Option<semver::Version> {
     use std::time::Duration;
     let canonical = path.canonicalize().ok()?;
     let metadata = canonical.metadata().ok()?;
-    let key = (canonical, metadata.modified().ok(), metadata.len());
+    // Every tool behind one dispatcher shares its metadata: key on the link.
+    let dispatcher = is_dispatcher_link(path, &canonical);
+    let identity = if dispatcher {
+        path.to_path_buf()
+    } else {
+        canonical
+    };
+    let key = (identity, metadata.modified().ok(), metadata.len());
     let mut cache = VERSION_CACHE
         .get_or_init(Default::default)
         .lock()
@@ -176,7 +242,9 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some((version, aliases)) = cache.get_mut(&key) {
+    if let Some((version, aliases, stale_at)) = cache.get_mut(&key)
+        && stale_at.is_none_or(|at| now < at)
+    {
         aliases.insert(alias);
         return version.clone();
     }
@@ -272,7 +340,11 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
     };
     let version = probe();
     cache.retain(|(p, _, _), _| p != &key.0);
-    cache.insert(key, (version.clone(), [alias].into_iter().collect()));
+    let stale_at = dispatcher.then(|| now + DISPATCHER_VERSION_TTL);
+    cache.insert(
+        key,
+        (version.clone(), [alias].into_iter().collect(), stale_at),
+    );
     version
 }
 
@@ -581,6 +653,108 @@ mod tests {
         assert_eq!(binary_version(&cli).unwrap().to_string(), "1.0.0");
         invalidate_versions(&["install-cache-test"]);
         assert_eq!(binary_version(&cli).unwrap().to_string(), "2.0.0");
+    }
+
+    /// A mise-style multicall binary: answers `--version` for the tool named by
+    /// argv[0] (from a per-tool version file) and fails under its own name.
+    #[cfg(unix)]
+    fn dispatcher(dir: &Path, tools: &[&str]) -> Vec<PathBuf> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let mise = dir.join("bin/mise");
+        std::fs::create_dir_all(mise.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mise,
+            format!(
+                "#!/bin/sh\ncase \"${{0##*/}}\" in\n  mise) echo 'mise ERROR' >&2; exit 1 ;;\n  *) /bin/cat '{}/'\"${{0##*/}}\".version ;;\nesac\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mise, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.join("wrappers")).unwrap();
+        tools
+            .iter()
+            .map(|tool| {
+                let link = dir.join("wrappers").join(tool);
+                symlink(&mise, &link).unwrap();
+                link
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatcher_links_are_kept_and_release_links_still_pin() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let links = dispatcher(&root, &["codex"]);
+        assert_eq!(pinned_executable(&links[0]).unwrap(), links[0]);
+        // mise under a versioned file name is still mise.
+        let versioned = root.join("bin/mise-2026.10.10");
+        std::fs::copy(root.join("bin/mise"), &versioned).unwrap();
+        symlink(&versioned, root.join("wrappers/grok")).unwrap();
+        assert_eq!(
+            pinned_executable(&root.join("wrappers/grok")).unwrap(),
+            root.join("wrappers/grok")
+        );
+        // Invoked under its own name, the dispatcher is just a binary.
+        assert_eq!(
+            pinned_executable(&root.join("bin/mise")).unwrap(),
+            root.join("bin/mise")
+        );
+        // The standalone installer's `current` link and npm's `.bin` link
+        // keep resolving to the release they point at.
+        let release = root.join("releases/1/bin/codex");
+        std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+        std::fs::write(&release, "#!/bin/sh\n").unwrap();
+        symlink(root.join("releases/1"), root.join("current")).unwrap();
+        assert_eq!(
+            pinned_executable(&root.join("current/bin/codex")).unwrap(),
+            release
+        );
+        let entry = root.join("lib/cli.js");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "#!/usr/bin/env node\n").unwrap();
+        symlink(&entry, root.join("claude")).unwrap();
+        assert_eq!(pinned_executable(&root.join("claude")).unwrap(), entry);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_behind_one_dispatcher_keep_their_own_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let links = dispatcher(&root, &["codex", "claude"]);
+        std::fs::write(root.join("codex.version"), "codex-cli 0.163.0").unwrap();
+        std::fs::write(root.join("claude.version"), "2.1.301 (Claude Code)").unwrap();
+        assert_eq!(binary_version(&links[0]).unwrap().to_string(), "0.163.0");
+        assert_eq!(binary_version(&links[1]).unwrap().to_string(), "2.1.301");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatcher_versions_are_reprobed_after_the_tool_upgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let codex = dispatcher(&root, &["codex"]).remove(0);
+        let now = std::time::Instant::now();
+        std::fs::write(root.join("codex.version"), "codex-cli 0.162.1").unwrap();
+        assert_eq!(
+            binary_version_at(&codex, now).unwrap().to_string(),
+            "0.162.1"
+        );
+        // `mise up codex` changes nothing about the dispatcher itself.
+        std::fs::write(root.join("codex.version"), "codex-cli 0.163.0").unwrap();
+        assert_eq!(
+            binary_version_at(&codex, now).unwrap().to_string(),
+            "0.162.1"
+        );
+        let later = now + DISPATCHER_VERSION_TTL + std::time::Duration::from_secs(1);
+        assert_eq!(
+            binary_version_at(&codex, later).unwrap().to_string(),
+            "0.163.0"
+        );
     }
 
     #[cfg(unix)]

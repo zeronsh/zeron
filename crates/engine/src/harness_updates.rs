@@ -1980,6 +1980,11 @@ fn homebrew_package(path: &Path) -> Option<HomebrewPackage> {
         return None;
     }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // A mise shim reaching Homebrew's mise (`Cellar/mise/<v>/bin/mise`) runs a
+    // tool mise installed; `brew upgrade mise` would not update it.
+    if is_mise_link(path, &canonical) {
+        return None;
+    }
     let components: Vec<_> = canonical.components().collect();
     let (index, cask) =
         components
@@ -2094,11 +2099,19 @@ fn claude_package_manager_command(path: &Path) -> Option<String> {
         return Some(package.upgrade_command());
     }
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    claude_package_manager_hint(path, &canonical)
+}
+
+fn claude_package_manager_hint(path: &Path, canonical: &Path) -> Option<String> {
     let text = format!("{}\n{}", path.display(), canonical.display())
         .replace('\\', "/")
         .to_ascii_lowercase();
     if text.contains("/winget/") || text.contains("/microsoft/winget/") {
         Some("winget upgrade Anthropic.ClaudeCode".into())
+    } else if is_mise_link(path, canonical) {
+        // mise's wrappers and shims link to the mise binary (often
+        // /usr/bin/mise); mise owns the install, not the system package manager.
+        Some("mise upgrade claude".into())
     } else if canonical.starts_with("/usr/bin")
         || canonical.starts_with("/nix/store")
         || canonical.starts_with("/snap")
@@ -2107,6 +2120,23 @@ fn claude_package_manager_command(path: &Path) -> Option<String> {
     } else {
         None
     }
+}
+
+/// A mise (formerly rtx) wrapper or shim: a link, under the tool's own name, to
+/// the mise binary that dispatches on that name (also under a versioned name
+/// such as `mise-2026.10.10`, which mise recognizes as itself).
+fn is_mise_link(path: &Path, canonical: &Path) -> bool {
+    let name = |p: &Path| {
+        let name = p.file_name()?.to_str()?.to_ascii_lowercase();
+        Some(name.strip_suffix(".exe").map(str::to_owned).unwrap_or(name))
+    };
+    let (Some(link), Some(target)) = (name(path), name(canonical)) else {
+        return false;
+    };
+    link != target
+        && (matches!(target.as_str(), "mise" | "rtx")
+            || target.starts_with("mise-")
+            || target.starts_with("rtx-"))
 }
 
 /// Only actual cask paths establish Homebrew ownership. An npm install
@@ -3563,6 +3593,63 @@ esac
             HarnessId::Pi,
             std::path::Path::new("/usr/bin/pi")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_wrapped_claude_stays_manual_and_points_at_mise() {
+        let dir = tempfile::tempdir().unwrap();
+        let mise = dir.path().join("mise");
+        std::fs::write(&mise, "#!/bin/sh\n").unwrap();
+        let wrapper = dir.path().join("claude");
+        std::os::unix::fs::symlink(&mise, &wrapper).unwrap();
+        assert!(!super::can_apply_update(HarnessId::ClaudeCode, &wrapper));
+        assert_eq!(
+            super::claude_package_manager_command(&wrapper).as_deref(),
+            Some("mise upgrade claude")
+        );
+        // mise itself, invoked by name, is not a wrapper.
+        assert_eq!(super::claude_package_manager_command(&mise), None);
+
+        // Omarchy's wrapper resolves into /usr/bin: mise must win over the
+        // system-package-manager guess, including under a versioned name.
+        let omarchy = std::path::Path::new("/home/u/.local/share/mise/command-wrappers/bin/claude");
+        for target in ["/usr/bin/mise", "/usr/bin/mise-2026.10.10"] {
+            assert_eq!(
+                super::claude_package_manager_hint(omarchy, std::path::Path::new(target))
+                    .as_deref(),
+                Some("mise upgrade claude")
+            );
+        }
+        assert_eq!(
+            super::claude_package_manager_hint(
+                std::path::Path::new("/usr/bin/claude"),
+                std::path::Path::new("/usr/bin/claude")
+            )
+            .as_deref(),
+            Some("Update Claude Code with the system package manager that installed it")
+        );
+
+        // A shim reaching Homebrew's mise is not the mise formula: no
+        // `brew upgrade mise` for Claude or Codex.
+        let brew_mise = dir.path().join("Cellar/mise/2026.10.10/bin/mise");
+        std::fs::create_dir_all(brew_mise.parent().unwrap()).unwrap();
+        std::fs::write(&brew_mise, "#!/bin/sh\n").unwrap();
+        let shims = dir.path().join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        for tool in ["claude", "codex"] {
+            std::os::unix::fs::symlink(&brew_mise, shims.join(tool)).unwrap();
+            assert!(super::homebrew_package(&shims.join(tool)).is_none());
+        }
+        assert!(super::homebrew_package(&brew_mise).is_some());
+        assert!(!super::can_apply_update(
+            HarnessId::ClaudeCode,
+            &shims.join("claude")
+        ));
+        assert_eq!(
+            super::claude_package_manager_command(&shims.join("claude")).as_deref(),
+            Some("mise upgrade claude")
+        );
     }
 
     #[cfg(unix)]
