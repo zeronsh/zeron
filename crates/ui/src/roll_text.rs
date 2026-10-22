@@ -60,10 +60,18 @@ struct Roll {
 /// Bound on remembered labels (see [`rolling`]).
 const MAX_KEYS: usize = 256;
 
+/// Last label per key, plus the roll in flight (if any).
+type Rolls = HashMap<SharedString, (SharedString, Option<Roll>)>;
+
 thread_local! {
-    /// Last label per key, plus the roll in flight (if any).
-    static ROLLS: RefCell<HashMap<SharedString, (SharedString, Option<Roll>)>> =
-        RefCell::new(HashMap::new());
+    /// One map per native window (see `motion::enter_window`): two windows
+    /// showing different labels under one key must not roll each other's.
+    static ROLLS: RefCell<HashMap<Option<u64>, Rolls>> = RefCell::new(HashMap::new());
+}
+
+/// Drop a closed window's labels.
+pub(crate) fn forget_window(window: Option<u64>) {
+    ROLLS.with(|rolls| rolls.borrow_mut().remove(&window));
 }
 
 /// The whole roll in unscaled seconds: the stagger pushes the last glyph's
@@ -93,7 +101,8 @@ pub fn rolling(
     let key = key.into();
     let now = Instant::now();
     let roll = ROLLS.with(|rolls| {
-        let mut rolls = rolls.borrow_mut();
+        let mut windows = rolls.borrow_mut();
+        let rolls = windows.entry(crate::motion::current_window()).or_default();
         // Keys can be per-turn (the working trailer), so bound the map: past
         // the cap, forget settled labels — they show plain next time.
         if rolls.len() >= MAX_KEYS && !rolls.contains_key(&key) {

@@ -30,7 +30,7 @@
 //! transformations), so `menu-in`/`dialog-in` approximate their scale component
 //! with fade + translate; see the module report in ARCHITECTURE §4 follow-ups.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -721,6 +721,14 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
 // every signature. All access happens on the UI thread (element builders,
 // mouse listeners, the render tail).
 //
+// Windows: the store is scoped per native window. Several windows of one
+// app render on the same thread and reuse element keys (the same button, menu
+// row or chat row in each), so one shared map would light an element in every
+// window, and the once-per-window-frame tick would age entries N times per
+// frame. [`enter_window`] marks the window being built or receiving input;
+// its root renders and its root capture listeners ([`window_scope`]) set it
+// before any element reads or writes a key.
+//
 // Staleness: an element that unmounts mid-hover never gets its leave event, so
 // entries are stamped with a frame counter on every read and pruned by
 // [`hover_fades_active`] (the once-per-frame tick) when a full frame passes
@@ -918,21 +926,89 @@ impl HoverFades {
     }
 }
 
+/// A per-window store key: the native window's id, or `None` outside any
+/// window (tests, free-standing previews).
+type WindowKey = Option<u64>;
+
 thread_local! {
-    static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
+    static HOVER_FADES: RefCell<HashMap<WindowKey, HoverFades>> = RefCell::new(HashMap::new());
+    /// The window whose frame is being built or whose input is dispatching.
+    static CURRENT_WINDOW: Cell<WindowKey> = const { Cell::new(None) };
 }
 
-/// Hover progress (0..1) for `key` this frame.
+/// Scope the motion stores to `window` until another window takes over. Its
+/// root render calls this first; [`window_scope`] repeats it before input.
+pub fn enter_window(window: &Window) {
+    CURRENT_WINDOW.set(Some(window.window_handle().window_id().as_u64()));
+}
+
+/// The window the motion stores currently resolve to.
+pub(crate) fn current_window() -> WindowKey {
+    CURRENT_WINDOW.get()
+}
+
+/// Drop a closed window's motion state.
+pub fn forget_window(window: gpui::WindowId) {
+    let key = Some(window.as_u64());
+    HOVER_FADES.with(|fades| fades.borrow_mut().remove(&key));
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().remove(&key));
+    crate::roll_text::forget_window(key);
+    if CURRENT_WINDOW.get() == key {
+        CURRENT_WINDOW.set(None);
+    }
+}
+
+/// Root capture listeners that re-scope the motion stores to this window
+/// before any of its elements handles input: hover and press listeners write
+/// the window they belong to, even while another window drew last.
+pub fn window_scope() -> impl IntoElement {
+    fn scope(phase: gpui::DispatchPhase, window: &Window) {
+        if phase == gpui::DispatchPhase::Capture {
+            enter_window(window);
+        }
+    }
+    gpui::canvas(
+        |_, _, _| {},
+        |_, _, window, _| {
+            window
+                .on_mouse_event(|_: &gpui::MouseMoveEvent, phase, window, _| scope(phase, window));
+            window
+                .on_mouse_event(|_: &gpui::MouseDownEvent, phase, window, _| scope(phase, window));
+            window.on_mouse_event(|_: &gpui::MouseUpEvent, phase, window, _| scope(phase, window));
+            window.on_mouse_event(|_: &gpui::ScrollWheelEvent, phase, window, _| {
+                scope(phase, window)
+            });
+            window
+                .on_mouse_event(|_: &gpui::MouseExitEvent, phase, window, _| scope(phase, window));
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
+fn with_hover_fades<R>(window: WindowKey, f: impl FnOnce(&mut HoverFades) -> R) -> R {
+    HOVER_FADES.with(|fades| f(fades.borrow_mut().entry(window).or_default()))
+}
+
+/// Hover progress (0..1) for `key` this frame, in the current window.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, Instant::now()))
+    with_hover_fades(current_window(), |fades| {
+        fades.value_at(key, Instant::now())
+    })
 }
 
-/// Record a hover flip for `key` (reduced motion snaps).
+/// Record a hover flip for `key` in the current window (reduced motion snaps).
 pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
-    HOVER_FADES.with(|fades| {
-        fades
-            .borrow_mut()
-            .set_at(key, hovered, reduced, Instant::now())
+    with_hover_fades(current_window(), |fades| {
+        fades.set_at(key, hovered, reduced, Instant::now())
+    });
+}
+
+/// [`set_hover`] in `window` explicitly.
+pub fn set_hover_in(window: &Window, key: &str, hovered: bool, reduced: bool) {
+    let window = Some(window.window_handle().window_id().as_u64());
+    with_hover_fades(window, |fades| {
+        fades.set_at(key, hovered, reduced, Instant::now())
     });
 }
 
@@ -943,7 +1019,7 @@ pub fn hover_listener(
 ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
     let key = key.into();
     move |hovered, window, cx| {
-        set_hover(&key, *hovered, reduced_motion(cx));
+        set_hover_in(window, &key, *hovered, reduced_motion(cx));
         // Event-dispatch context: `request_animation_frame` is draw-phase-only
         // (it resolves the current view) — `refresh` marks the whole window
         // dirty, the root render re-evaluates the blend and keeps frames
@@ -953,9 +1029,10 @@ pub fn hover_listener(
 }
 
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
-/// while any hover fade is mid-flight and frames must keep coming.
+/// while a hover fade of the current window is mid-flight and its frames must
+/// keep coming. Only that window's store ages.
 pub fn hover_fades_active() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(Instant::now()))
+    with_hover_fades(current_window(), |fades| fades.tick_at(Instant::now()))
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1093,21 +1170,22 @@ impl StateMorphs {
 }
 
 thread_local! {
-    static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
+    static STATE_MORPHS: RefCell<HashMap<WindowKey, StateMorphs>> = RefCell::new(HashMap::new());
 }
 
-/// Morph progress (0..1) of `key` toward `on` this frame.
+fn with_state_morphs<R>(f: impl FnOnce(&mut StateMorphs) -> R) -> R {
+    STATE_MORPHS.with(|morphs| f(morphs.borrow_mut().entry(current_window()).or_default()))
+}
+
+/// Morph progress (0..1) of `key` toward `on` this frame, in the current
+/// window: two windows may hold the same glyph in different states.
 pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool) -> f32 {
-    STATE_MORPHS.with(|morphs| {
-        morphs
-            .borrow_mut()
-            .value_at(key, on, spec, reduced, Instant::now())
-    })
+    with_state_morphs(|morphs| morphs.value_at(key, on, spec, reduced, Instant::now()))
 }
 
 /// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame.
 pub fn state_morphs_active() -> bool {
-    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(Instant::now()))
+    with_state_morphs(|morphs| morphs.tick_at(Instant::now()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1952,4 +2030,185 @@ pub fn fast_tier(
     element.with_animation(id, Animation::new(Duration::from_millis(700)), |el, t| {
         el.opacity(1.0 - 0.35 * (1.0 - t) * (std::f32::consts::PI * t).sin())
     })
+}
+
+#[cfg(test)]
+mod window_scope_tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext, WindowHandle, div, prelude::*};
+
+    const KEY: &str = "shared-element-hover";
+    const GLYPH: &str = "shared-glyph-morph";
+
+    /// One window's root: scopes motion to itself like the shell, reads the
+    /// shared keys, and hovers [`KEY`] from a plain mouse-move listener.
+    struct Probe {
+        glyph_on: bool,
+        /// Whether this window draws the element behind [`KEY`].
+        shows_key: bool,
+        hover: f32,
+        glyph: f32,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            enter_window(window);
+            if self.shows_key {
+                self.hover = hover_t(KEY);
+            }
+            self.glyph = state_t(GLYPH, self.glyph_on, FADE_QUICK, false);
+            hover_fades_active();
+            state_morphs_active();
+            div()
+                .size_full()
+                .on_mouse_move(cx.listener(|_, _: &gpui::MouseMoveEvent, _, _| {
+                    // No window argument: the root capture scope routes it.
+                    set_hover(KEY, true, true);
+                }))
+                .child(window_scope())
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, glyph_on: bool) -> WindowHandle<Probe> {
+        open_showing(cx, glyph_on, true)
+    }
+
+    fn open_showing(
+        cx: &mut TestAppContext,
+        glyph_on: bool,
+        shows_key: bool,
+    ) -> WindowHandle<Probe> {
+        cx.add_window(move |_, _| Probe {
+            glyph_on,
+            shows_key,
+            hover: 0.0,
+            glyph: 0.0,
+        })
+    }
+
+    fn draw(cx: &mut TestAppContext, window: WindowHandle<Probe>) -> (f32, f32) {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        })
+        .unwrap();
+        window
+            .read_with(cx, |probe, _| (probe.hover, probe.glyph))
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn hovering_one_window_does_not_light_another(cx: &mut TestAppContext) {
+        let a = open(cx, false);
+        let b = open(cx, false);
+        draw(cx, a);
+        draw(cx, b);
+        cx.update_window(a.into(), |_, window, _| {
+            set_hover_in(window, KEY, true, true)
+        })
+        .unwrap();
+        assert_eq!(draw(cx, a).0, 1.0);
+        assert_eq!(draw(cx, b).0, 0.0, "the other window's copy lit up");
+    }
+
+    #[gpui::test]
+    fn input_in_a_window_writes_that_windows_state(cx: &mut TestAppContext) {
+        let a = open(cx, false);
+        let b = open(cx, false);
+        draw(cx, a);
+        // B drew last: a listener in A must still write A's store.
+        draw(cx, b);
+        cx.update_window(a.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: gpui::point(gpui::px(10.0), gpui::px(10.0)),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(draw(cx, b).0, 0.0);
+        assert_eq!(draw(cx, a).0, 1.0, "A's hover landed in another window");
+    }
+
+    #[gpui::test]
+    fn one_glyph_in_two_states_settles_in_each_window(cx: &mut TestAppContext) {
+        let a = open(cx, true);
+        let b = open(cx, false);
+        for _ in 0..4 {
+            // A shared store flips the entry on every read and never settles.
+            assert_eq!(draw(cx, a).1, 1.0);
+            assert_eq!(draw(cx, b).1, 0.0);
+        }
+    }
+
+    #[gpui::test]
+    fn another_windows_frames_do_not_age_this_ones_hover(cx: &mut TestAppContext) {
+        let a = open(cx, false);
+        // B shows something else: it never reads A's key to keep it alive.
+        let b = open_showing(cx, false, false);
+        draw(cx, a);
+        cx.update_window(a.into(), |_, window, _| {
+            set_hover_in(window, KEY, true, true)
+        })
+        .unwrap();
+        assert_eq!(draw(cx, a).0, 1.0);
+        // Several frames of B tick only B's store.
+        for _ in 0..3 {
+            draw(cx, b);
+        }
+        assert_eq!(draw(cx, a).0, 1.0, "B's frames pruned A's live hover");
+    }
+
+    #[gpui::test]
+    fn a_closed_window_drops_its_motion_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::window_manager::init(cx);
+        });
+        let a = open(cx, false);
+        let b = open(cx, false);
+        draw(cx, b);
+        draw(cx, a);
+        cx.update_window(a.into(), |_, window, _| {
+            set_hover_in(window, KEY, true, true)
+        })
+        .unwrap();
+        assert!(crate::roll_text::rolling("label", "A".into(), false).is_none());
+        let id = a.window_id().as_u64();
+        assert!(HOVER_FADES.with(|fades| fades.borrow().contains_key(&Some(id))));
+        cx.update_window(a.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!HOVER_FADES.with(|fades| fades.borrow().contains_key(&Some(id))));
+        assert!(!STATE_MORPHS.with(|morphs| morphs.borrow().contains_key(&Some(id))));
+        assert!(
+            HOVER_FADES.with(|fades| fades.borrow().contains_key(&Some(b.window_id().as_u64())))
+        );
+        // Re-entering the old id starts fresh, including rolling labels.
+        CURRENT_WINDOW.set(Some(id));
+        assert!(crate::roll_text::rolling("label", "fresh".into(), false).is_none());
+        forget_window(a.window_id());
+    }
+
+    #[gpui::test]
+    fn rolling_labels_do_not_restart_other_windows(cx: &mut TestAppContext) {
+        let a = open(cx, false);
+        let b = open(cx, false);
+        let label = |window: WindowHandle<Probe>, text: &str, cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, _| {
+                enter_window(window);
+                crate::roll_text::rolling("shared-label", text.to_string().into(), false).is_some()
+            })
+            .unwrap()
+        };
+        assert!(!label(a, "Window A", cx));
+        assert!(!label(b, "Window B", cx));
+        assert!(!label(a, "Window A", cx));
+        assert!(label(a, "Changed A", cx));
+        assert!(!label(b, "Window B", cx));
+        assert!(label(a, "Changed A", cx));
+    }
 }

@@ -13486,6 +13486,9 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything reads hover fades or glyph morphs: they are scoped
+        // per window, and the views below render as part of this frame.
+        motion::enter_window(window);
         self.state
             .update(cx, |state, cx| state.refresh_application_heartbeats(cx));
         self.sync_application_progress(cx);
@@ -14378,11 +14381,14 @@ impl Render for Shell {
         };
         // Toasts float over every phase and route.
         let root = root.children(crate::toast::render_toaster(window, cx));
+        // Input in this window updates this window's motion state.
+        let root = root.child(motion::window_scope());
 
         // A manually-driven tween is mid-flight: keep frames coming (the same
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
-        // the window's root render — it runs exactly once per frame).
+        // the window's root render — it runs exactly once per frame) and ages
+        // only this window's entries.
         if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
             window.request_animation_frame();
         }
