@@ -572,6 +572,33 @@ impl TerminalPanel {
         self.close_tab(&chat, key, window, cx);
     }
 
+    /// Closing a window must release all its PTYs, including inactive chats.
+    pub(crate) fn close_all_sessions(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        let engine = self.engine(cx);
+        for tabs in self.chats.drain().map(|(_, tabs)| tabs) {
+            for mut tab in tabs.tabs {
+                if let (Some(engine), Some(id)) = (engine.clone(), tab.terminal_id.take()) {
+                    let target = tab.target_device_id;
+                    cx.spawn(async move |_, _| {
+                        let _ = engine
+                            .client()
+                            .call(
+                                methods::CLOSE_TERMINAL,
+                                with_target(serde_json::json!({ "terminalId": id }), &target),
+                            )
+                            .await;
+                    })
+                    .detach();
+                } else if let Some(run) = tab._run.take() {
+                    // Let an in-flight OpenTerminal finish: spawn_session sees
+                    // the removed tab and closes the late PTY itself.
+                    run.detach();
+                }
+            }
+        }
+    }
+
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
         let selected_key = self.selected_chat(cx);
         let prev = self.last_selected.clone();

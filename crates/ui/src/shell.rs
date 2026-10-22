@@ -2393,6 +2393,10 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        // Every window close path releases its shell. Close its PTYs as well:
+        // the engine intentionally keeps detached sessions running.
+        cx.on_release(|shell: &mut Shell, cx| shell.close_window_terminals(cx))
+            .detach();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
@@ -3346,6 +3350,12 @@ impl Shell {
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
         }
         cx.notify();
+    }
+
+    fn close_window_terminals(&mut self, cx: &mut App) {
+        for panel in self.terminal.iter().chain(self.right_terminal.iter()) {
+            panel.update(cx, |panel, cx| panel.close_all_sessions(cx));
+        }
     }
 
     fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {

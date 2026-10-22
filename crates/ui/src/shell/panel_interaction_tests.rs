@@ -78,6 +78,106 @@ fn change(
     });
 }
 
+#[gpui::test]
+fn closing_the_window_closes_its_drawer_and_right_pane_ptys(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let (_dir, shell, cx) = setup(cx);
+    let (out, mut requests) = tokio::sync::mpsc::channel(64);
+    let (replies, inbound) = tokio::sync::mpsc::channel(64);
+    let engine =
+        crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+    let panels = shell.update(cx, |shell, cx| {
+        shell
+            .state
+            .update(cx, |state, _| state.set_test_engine(engine));
+        [shell.terminal_panel(cx), shell.right_terminal_panel(cx)]
+    });
+    // Include inactive chats and a remote host: neither may be left running.
+    let sessions = [
+        (&panels[0], "a", "drawer-pty", None),
+        (
+            &panels[0],
+            "b",
+            "inactive-pty",
+            Some("remote-host".to_string()),
+        ),
+        (&panels[1], "a", "right-pty", None),
+    ];
+    for (panel, chat, id, target) in sessions {
+        panel.update(cx, |panel, cx| {
+            let key = panel.reserve_tab_for_chat(chat.into(), id, cx);
+            assert!(panel.attach_reserved_session(
+                chat,
+                key,
+                zeron_proto::TerminalSession {
+                    id: id.into(),
+                    cwd: "/project".into(),
+                    shell: "bash".into(),
+                },
+                target,
+                cx,
+            ));
+        });
+    }
+    // Also close while OpenTerminal is in flight; its late result must be freed.
+    panels[1].update(cx, |panel, cx| {
+        assert!(panel.open_tab_for_selected(cx).is_some());
+    });
+    let pump = |cx: &mut VisualTestContext| {
+        for _ in 0..4 {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+        }
+    };
+    pump(cx);
+    let mut opening = None;
+    while let Ok(frame) = requests.try_recv() {
+        let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+        if frame.method.as_deref() == Some(methods::OPEN_TERMINAL) {
+            opening = Some(frame.id);
+        }
+    }
+    let opening = opening.expect("the terminal open request must be in flight");
+    let weak = shell.downgrade();
+    drop(shell);
+    cx.update(|window, _| window.remove_window());
+    pump(cx);
+    assert!(
+        weak.upgrade().is_none(),
+        "a closed window retained its shell"
+    );
+    replies
+        .try_send(
+            serde_json::json!({
+                "id": opening,
+                "ok": { "id": "late-pty", "cwd": "/project", "shell": "bash" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    pump(cx);
+    let mut closed = Vec::new();
+    while let Ok(frame) = requests.try_recv() {
+        let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+        if frame.method.as_deref() == Some(methods::CLOSE_TERMINAL) {
+            let id = frame.params["terminalId"].as_str().unwrap().to_string();
+            if id == "inactive-pty" {
+                assert_eq!(frame.params["targetDeviceId"], "remote-host");
+            }
+            closed.push(id);
+        }
+    }
+    closed.sort();
+    assert_eq!(
+        closed,
+        ["drawer-pty", "inactive-pty", "late-pty", "right-pty"]
+    );
+}
+
 enum Panel {
     Sidebar,
     Files,
