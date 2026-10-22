@@ -1112,6 +1112,13 @@ impl AppState {
         self.echoes = source.echoes.clone();
         self.pending_sends = source.pending_sends.clone();
         self.optimistic_revision = source.optimistic_revision.clone();
+        // A runtime replacement restarts revisions. Otherwise preserve a newer
+        // mutation acknowledgement already applied by this window.
+        if replaced {
+            self.sidebar_preferences = source.sidebar_preferences.clone();
+        } else {
+            self.apply_sidebar_preferences(source.sidebar_preferences.clone());
+        }
         if self.observed_optimistic_revision != self.optimistic_revision.get() {
             self.observed_optimistic_revision = self.optimistic_revision.get();
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -3828,6 +3835,71 @@ mod tests {
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
     use zeron_proto::{SessionStatus, UserProfile};
+
+    #[gpui::test]
+    fn every_window_shows_the_owners_sidebar_sections_and_pins(cx: &mut gpui::TestAppContext) {
+        let prefs = |revision: u64, section: &str| SidebarPreferencesState {
+            revision,
+            synced: true,
+            initialized: true,
+            pinned_session_ids: vec!["a".into()],
+            sections: vec![zeron_proto::SidebarSection {
+                id: section.into(),
+                name: section.into(),
+                session_ids: vec!["b".into()],
+                collapsed: false,
+            }],
+        };
+        let (owner, a, b) = cx.update(|cx| {
+            let owner = cx.new(|_| AppState::new());
+            let a = cx.new(|cx| AppState::for_window(owner.clone(), cx));
+            let b = cx.new(|cx| AppState::for_window(owner.clone(), cx));
+            (owner, a, b)
+        });
+        cx.update(|cx| {
+            owner.update(cx, |owner, cx| {
+                assert!(owner.apply_sidebar_preferences(prefs(2, "work")));
+                cx.notify();
+            });
+        });
+        cx.update(|cx| {
+            for view in [&a, &b] {
+                // Without this, every window drew all sessions loose and
+                // treated the sidebar as still syncing.
+                assert_eq!(view.read(cx).sidebar_preferences, prefs(2, "work"));
+                assert!(view.read(cx).sidebar_preferences.can_edit());
+            }
+            // A mutation ack this window applied outranks the owner's older copy.
+            a.update(cx, |a, _| {
+                assert!(a.apply_sidebar_preferences(prefs(3, "renamed")))
+            });
+            owner.update(cx, |_, cx| cx.notify());
+        });
+        cx.update(|cx| {
+            assert_eq!(a.read(cx).sidebar_preferences, prefs(3, "renamed"));
+            // A replaced runtime restarts the count: windows follow the owner.
+            a.update(cx, |a, cx| a.prepare_runtime_replacement(cx));
+        });
+        cx.update(|cx| {
+            for view in [&a, &b] {
+                assert_eq!(
+                    view.read(cx).sidebar_preferences,
+                    owner.read(cx).sidebar_preferences
+                );
+                assert!(view.read(cx).sidebar_preferences.sections.is_empty());
+            }
+            owner.update(cx, |owner, cx| {
+                assert!(owner.apply_sidebar_preferences(prefs(1, "new-runtime")));
+                cx.notify();
+            });
+        });
+        cx.update(|cx| {
+            for view in [&a, &b] {
+                assert_eq!(view.read(cx).sidebar_preferences, prefs(1, "new-runtime"));
+                assert!(view.read(cx).sidebar_preferences.can_edit());
+            }
+        });
+    }
 
     #[gpui::test]
     fn pending_bootstrap_releases_its_application_state(cx: &mut gpui::TestAppContext) {
