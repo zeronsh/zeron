@@ -96,6 +96,8 @@ use side_chats::SideChatTab;
 mod tabs;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
+#[cfg(test)]
+mod window_selection_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 

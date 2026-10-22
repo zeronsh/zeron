@@ -1536,6 +1536,7 @@ pub(super) fn flat_text_presented_element(
             // mouse listeners.
             REGISTRY.with(|r| {
                 r.borrow_mut().push(RegEntry {
+                    window: window.window_handle().window_id(),
                     surface,
                     key: sel_key.clone(),
                     text: flat_text.clone(),
@@ -1686,6 +1687,7 @@ fn paint_text_selection_with_wash(
     }
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
+            window: window.window_handle().window_id(),
             surface,
             key: key.clone(),
             text: text.clone(),
@@ -1737,6 +1739,7 @@ fn code_line_selection_key(row_key: &str, code_ix: usize, line_ix: usize) -> std
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).
 struct RegEntry {
+    window: gpui::WindowId,
     /// Which painted transcript this element belongs to (see
     /// `selection_frame_reset_for`); 0 for surfaces that never share a frame.
     surface: u64,
@@ -1751,8 +1754,15 @@ thread_local! {
     /// The surface currently painting: set by its reset canvas, which paints
     /// before any of its text, and stamped onto each entry it registers.
     static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
-    /// Surfaces whose reset painted since the latest one's previous reset.
-    static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Each window ages only its own surfaces. A streaming peer must not
+    /// evict the text under another window's still-registered input listeners.
+    static PAINTED_SURFACES: RefCell<HashMap<gpui::WindowId, Vec<u64>>> = RefCell::new(HashMap::new());
+}
+
+/// Retire only the closed window's text geometry and frame cycle.
+pub(crate) fn forget_window(window: gpui::WindowId) {
+    REGISTRY.with(|registry| registry.borrow_mut().retain(|entry| entry.window != window));
+    PAINTED_SURFACES.with(|painted| painted.borrow_mut().remove(&window));
 }
 
 #[cfg(test)]
@@ -1818,16 +1828,19 @@ pub fn selection_frame_reset() -> impl IntoElement {
 pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |_, _, _, _| {
+        move |_, _, window, _| {
             PAINTING_SURFACE.with(|s| s.set(surface));
             PAINTED_SURFACES.with(|painted| {
-                let mut painted = painted.borrow_mut();
+                let window = window.window_handle().window_id();
+                let mut windows = painted.borrow_mut();
+                let painted = windows.entry(window).or_default();
                 // Seeing this surface again closes a cycle: `painted` now
-                // holds every surface still on screen.
+                // holds every surface still on screen in this window.
                 let cycle = painted.contains(&surface);
                 REGISTRY.with(|r| {
                     r.borrow_mut().retain(|e| {
-                        !selection_scope(&e.key).is_empty()
+                        e.window != window
+                            || !selection_scope(&e.key).is_empty()
                             || (e.surface != surface && (!cycle || painted.contains(&e.surface)))
                     })
                 });

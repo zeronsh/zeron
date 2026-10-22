@@ -29,6 +29,7 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_window_closed(|cx, id| {
         // Its hover fades, glyph morphs and rolling labels go with it.
         crate::motion::forget_window(id);
+        crate::markdown::render::forget_window(id);
         cx.global_mut::<Windows>()
             .recent
             .retain(|w| w.window_id() != id);
