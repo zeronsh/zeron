@@ -1002,6 +1002,7 @@ pub struct UiSettings {
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
+    pub github_activity: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -1253,6 +1254,7 @@ impl Default for UiSettings {
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            github_activity: true,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -1868,6 +1870,7 @@ impl UiSettings {
             skills_in_slash_menu,
             skill_completion_by_harness,
             compact_model_picker,
+            github_activity,
             sidebar_width,
             sidebar_collapsed,
             sidebar_grouped,
@@ -2993,6 +2996,7 @@ mod tests {
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            github_activity: false,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

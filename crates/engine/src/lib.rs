@@ -45,6 +45,7 @@ pub mod rpc;
 pub mod run_journal;
 pub mod runner;
 pub mod sessions;
+mod github_activity;
 pub mod source_control;
 pub mod spaces;
 pub mod terminals;

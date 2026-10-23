@@ -11,6 +11,7 @@ pub mod cloud;
 pub mod device_paths;
 pub mod entities;
 pub mod file_mentions;
+pub mod github_activity;
 pub mod invocation;
 pub mod motion;
 pub mod plan_usage;
@@ -30,6 +31,7 @@ pub use entities::*;
 pub use preview::*;
 pub use program_status::*;
 pub use sidebar_pins::*;
+pub use github_activity::*;
 pub use workspace::*;
 
 /// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)
