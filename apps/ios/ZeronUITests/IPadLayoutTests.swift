@@ -21,6 +21,38 @@ final class IPadLayoutTests: XCTestCase {
         add(shot)
     }
 
+    /// The sidebar must not gain a second navigation bar above its header.
+    func testSidebarHeaderStaysAtTop() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launch()
+        let sidebarBar = app.navigationBars["Sessions"]
+        let title = sidebarBar.staticTexts["Sessions"]
+        let search = app.descendants(matching: .any)["sidebar-search"].firstMatch
+        let detailBar = app.navigationBars["New Session"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        XCTAssertTrue(detailBar.waitForExistence(timeout: 5))
+
+        for (orientation, name) in [(UIDeviceOrientation.landscapeLeft, "landscape"), (.portrait, "portrait")] {
+            XCUIDevice.shared.orientation = orientation
+            let layout = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let window = app.windows.firstMatch.frame
+                let isLandscape = window.width > window.height
+                return isLandscape == (orientation == .landscapeLeft)
+                    && title.isHittable && search.isHittable
+                    && abs(sidebarBar.frame.minY - detailBar.frame.minY) <= 1
+                    && title.frame.minY >= sidebarBar.frame.minY
+                    && title.frame.maxY <= search.frame.minY
+                    && search.frame.maxY <= sidebarBar.frame.maxY + 1
+            }, object: nil)
+            let result = XCTWaiter.wait(for: [layout], timeout: 5)
+            snapshot(app, "ipad-header-\(name)")
+            XCTAssertEqual(result, XCTWaiter.Result.completed,
+                           "Sessions and search sit at the top beside the detail bar in \(name)")
+        }
+    }
+
     func testSidebarOpensSessionsBesideIt() {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = launch()
