@@ -10,7 +10,8 @@ Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi,
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
+- **macOS (Apple silicon)** — `zeron-<version>-macos-arm64.dmg`
+- **macOS (Intel)** — `zeron-<version>-macos-x86_64.dmg`
 - **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
 - **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
 
