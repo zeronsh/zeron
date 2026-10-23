@@ -11,6 +11,8 @@ on:
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
+      - '.github/actions/windows-ci-setup/**'
+      - '.github/actions/ort-bin-cache/**'
       - '.github/workflows/windows.yml'
   push:
     branches: [main]
@@ -23,6 +25,8 @@ on:
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
+      - '.github/actions/windows-ci-setup/**'
+      - '.github/actions/ort-bin-cache/**'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
     inputs:
@@ -163,6 +167,12 @@ jobs:
             target/release/examples/windows-render-fixture.exe
           if-no-files-found: error
           retention-days: 1
+      - name: Save ONNX Runtime binaries
+        # One job per cache key saves on main; pull requests only restore.
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/ort-bin-cache
+        with:
+          mode: save
 
   native-gui:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}

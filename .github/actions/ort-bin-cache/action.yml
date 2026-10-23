@@ -1,0 +1,45 @@
+name: ONNX Runtime binaries cache
+description: >-
+  Restore or save the prebuilt ONNX Runtime binaries that the ort-sys build
+  script downloads from the pyke CDN (used by parakeet-rs for voice). The
+  download is a few hundred megabytes and the CDN occasionally stalls for the
+  whole 30-minute global timeout in ort-sys, which fails jobs at random. The
+  extracted binaries are stable per target and Cargo.lock, so cache them the
+  way apt-install.sh caches .debs: main saves, pull requests only restore.
+  Restore mode also points ORT_CACHE_DIR at the cached directory.
+
+inputs:
+  mode:
+    description: "'restore' (start of the job) or 'save' (end of a job that runs on main)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: ONNX Runtime cache location
+      shell: pwsh
+      run: |
+        # pwsh resolves $HOME to a native, drive-qualified absolute path on
+        # every OS. Do not use the bash shell here: git-bash writes
+        # /c/Users/... on Windows, and the path is baked into the build by the
+        # ort-sys build script (DLLs next to the test executables), where a
+        # drive-relative path resolves against the workspace drive and the
+        # loader finds nothing at test startup.
+        $dir = Join-Path $HOME 'ort-cache'
+        "ORT_CACHE_DIR=$dir" >> $env:GITHUB_ENV
+        Write-Host "ort-sys binaries cache: $dir"
+    - name: Restore ONNX Runtime binaries
+      if: inputs.mode == 'restore'
+      id: ort-cache
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/ort-cache
+        key: ort-bin-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ort-bin-v1-${{ runner.os }}-${{ runner.arch }}-
+    - name: Save ONNX Runtime binaries
+      if: inputs.mode == 'save'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/ort-cache
+        key: ort-bin-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}

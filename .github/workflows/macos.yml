@@ -13,6 +13,7 @@ on:
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
+      - '.github/actions/ort-bin-cache/**'
       - '.github/workflows/macos.yml'
   push:
     branches: [main]
@@ -27,6 +28,7 @@ on:
       - 'scripts/ci/run-macos-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
+      - '.github/actions/ort-bin-cache/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
 
@@ -95,6 +97,16 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      # The ort-sys build script downloads prebuilt ONNX Runtime binaries from
+      # the pyke CDN (voice transcription via parakeet-rs). That download has a
+      # 30-minute global timeout and occasionally stalls past it on hosted
+      # runners, failing the job at random; the extracted binaries are cached so
+      # the download runs only when the set of binaries changes. This job saves
+      # the cache on main.
+      - name: Restore ONNX Runtime binaries
+        uses: ./.github/actions/ort-bin-cache
+        with:
+          mode: restore
       - name: Install cargo-nextest
         run: |
           # Pinned release, verified against a checksum.
@@ -162,6 +174,12 @@ jobs:
           name: preview-macos-captures
           path: ${{ runner.temp }}/preview-captures*
           if-no-files-found: ignore
+      - name: Save ONNX Runtime binaries
+        # One job per cache key saves on main; pull requests only restore.
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/ort-bin-cache
+        with:
+          mode: save
 
   # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
   macos-frame-source:
