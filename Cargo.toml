@@ -127,7 +127,7 @@ json5 = "0.4"
 # user's comments and unquoted keys have to survive our read of the same file.
 deser-hjson = "2.2"
 plist = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 # storage
 rusqlite = { version = "0.32", features = ["bundled"] }

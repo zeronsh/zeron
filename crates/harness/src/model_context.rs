@@ -106,6 +106,7 @@ pub(crate) fn context(
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],
+        HarnessId::Muse => &["MUSE_"],
         _ => &[],
     };
     let mut env: Vec<_> = std::env::vars_os()
