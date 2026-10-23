@@ -1618,6 +1618,112 @@ async fn diff_sync_publishes_without_rewriting_chat_branch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_status_stream_tracks_branch_switches_without_a_chat_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let worktree = tmp.path().join("worktree");
+    init_repo(&root).await;
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "worktree-start",
+            worktree.to_str().unwrap(),
+        ],
+    )
+    .await;
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space",
+            &core.device_id,
+            &root.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    for (chat, cwd, branch) in [
+        ("main-chat", &root, "main"),
+        ("worktree-chat", &worktree, "worktree-start"),
+    ] {
+        core.workspace
+            .create_chat(
+                chat,
+                Some("space"),
+                None,
+                None,
+                Some(cwd.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        core.workspace.set_chat_branch(chat, branch).unwrap();
+    }
+    core.diff_sync.reconcile_now().await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut main = client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"chatId": "main-chat"}),
+        )
+        .await
+        .unwrap();
+    let mut linked = client
+        .subscribe_checked(
+            methods::WATCH_WORKSPACE_GIT_STATUS,
+            serde_json::json!({"chatId": "worktree-chat"}),
+        )
+        .await
+        .unwrap();
+    async fn next(stream: &mut zeron_rpc::RpcSubscription) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let frame = stream.recv().await.expect("stream alive");
+                if !frame["status"].is_null() {
+                    assert_eq!(frame["status"]["complete"], true);
+                    assert!(frame["status"]["files"].as_array().unwrap().is_empty());
+                    assert!(frame["status"].get("patch").is_none());
+                    return frame["status"].clone();
+                }
+            }
+        })
+        .await
+        .expect("branch update arrives without dispatching a turn or a manual sync")
+    }
+    let initial_main = next(&mut main).await;
+    let initial_linked = next(&mut linked).await;
+    assert_eq!(initial_main["branch"], "main");
+    assert_eq!(initial_linked["branch"], "worktree-start");
+    assert_ne!(initial_main["checkoutId"], initial_linked["checkoutId"]);
+
+    // Switching between branches on the same commit leaves all file statuses
+    // unchanged, but must still publish the live branch to the composer.
+    for (cwd, stream, initial, branch) in [
+        (&root, &mut main, &initial_main, "feature/live-main"),
+        (
+            &worktree,
+            &mut linked,
+            &initial_linked,
+            "feature/live-worktree",
+        ),
+    ] {
+        git(cwd, &["switch", "-c", branch]).await;
+        let switched = next(stream).await;
+        assert_eq!(switched["branch"], branch);
+        assert_eq!(switched["checkoutId"], initial["checkoutId"]);
+        assert_ne!(switched["revision"], initial["revision"]);
+        git(cwd, &["switch", "--detach"]).await;
+        assert_eq!(next(stream).await["branch"], "HEAD");
+    }
+    for (chat, branch) in [("main-chat", "main"), ("worktree-chat", "worktree-start")] {
+        let row = core.workspace.chat(chat).unwrap().unwrap();
+        assert_eq!(row.branch.as_deref(), Some(branch));
+        assert_eq!(row.source_context, None);
+    }
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("repo");

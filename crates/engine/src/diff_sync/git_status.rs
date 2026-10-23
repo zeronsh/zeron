@@ -81,6 +81,7 @@ pub(super) fn parse(bytes: &[u8], truncated: bool) -> (Vec<GitFileStatus>, bool)
 pub(super) fn publish(
     inner: &DiffSyncInner,
     entry: &CheckoutEntry,
+    branch: Option<&str>,
     files: Vec<GitFileStatus>,
     complete: bool,
 ) {
@@ -91,11 +92,13 @@ pub(super) fn publish(
         return;
     }
     let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&branch).expect("Git branch serialization"));
     hasher.update(serde_json::to_vec(&files).expect("Git status serialization"));
     hasher.update([u8::from(complete)]);
     let next = CheckoutGitStatus {
         checkout_id: entry.identity.id.clone(),
         device_id: inner.device_id.clone(),
+        branch: branch.map(str::to_owned),
         revision: crate::repos::hex(&hasher.finalize()),
         complete,
         files,
