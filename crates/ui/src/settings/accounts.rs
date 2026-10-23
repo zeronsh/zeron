@@ -2490,6 +2490,7 @@ mod tests {
             }
         }
         assert!(!signs_in(HarnessId::Mock));
+        assert!(!signs_in(HarnessId::Omp));
         // Antigravity has no quota to show and keeps a single login.
         assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
         assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));

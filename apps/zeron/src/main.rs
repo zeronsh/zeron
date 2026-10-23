@@ -219,6 +219,7 @@ fn attach_parent_console() {
     }
 }
 
+
 /// `zeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.

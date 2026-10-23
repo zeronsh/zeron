@@ -23,13 +23,16 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Oh My Pi (omp.sh), the Pi fork, driven over its native JSONL RPC
+    /// dialect (`omp --mode rpc-ui`).
+    Omp,
     /// Test harness; never shown in production pickers.
     Mock,
 }
 
 impl HarnessId {
     /// Every harness, in declaration order.
-    pub const ALL: [HarnessId; 10] = [
+    pub const ALL: [HarnessId; 11] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -39,6 +42,7 @@ impl HarnessId {
         HarnessId::Pi,
         HarnessId::Opencode,
         HarnessId::Antigravity,
+        HarnessId::Omp,
         HarnessId::Mock,
     ];
 
@@ -54,6 +58,7 @@ impl HarnessId {
             HarnessId::Pi => "pi",
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",
+            HarnessId::Omp => "omp",
             HarnessId::Mock => "mock",
         }
     }

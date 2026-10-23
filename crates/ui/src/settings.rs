@@ -972,7 +972,7 @@ impl SkillCompletionSettings {
     }
 }
 
-pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
+pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
     (zeron_proto::HarnessId::Antigravity, "Antigravity"),
     (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
     (zeron_proto::HarnessId::Codex, "Codex"),
@@ -981,6 +981,7 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
     (zeron_proto::HarnessId::Grok, "Grok"),
     (zeron_proto::HarnessId::Hermes, "Hermes"),
     (zeron_proto::HarnessId::Pi, "Pi"),
+    (zeron_proto::HarnessId::Omp, "Oh My Pi"),
     (zeron_proto::HarnessId::Opencode, "OpenCode"),
 ];
 
