@@ -78,7 +78,7 @@ pub struct ComposerDefaults {
 impl ComposerDefaults {
     /// Load from `{data_dir}/composer-defaults.json`; defaults on any failure.
     pub fn load(data_dir: &Path) -> Self {
-        match std::fs::read_to_string(Self::path(data_dir)) {
+        match Self::read_with_retry(&Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<ComposerDefaults>(&text) {
                 Ok(defaults) => defaults,
                 Err(err) => {
@@ -87,6 +87,22 @@ impl ComposerDefaults {
                 }
             },
             Err(_) => Self::default(),
+        }
+    }
+
+    /// `save` replaces the file by rename. On Windows a reader that lands in
+    /// the replacement window gets a transient sharing/permission error, which
+    /// is not "no preference saved" — retry briefly before giving up.
+    fn read_with_retry(path: &Path) -> io::Result<String> {
+        let mut attempts = 0;
+        loop {
+            match std::fs::read_to_string(path) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound && attempts < 5 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
         }
     }
 
