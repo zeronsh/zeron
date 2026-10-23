@@ -738,7 +738,11 @@ async fn target_device_id_routes_over_the_relay() {
     assert!(remote.is_array());
 
     // Generated media uses the same jail locally and over a targeted peer RPC.
-    let generated_root = dirs.path().join("generated_images");
+    // The unimported source must sit outside every read root: the OS temp dir
+    // is one since #885 (agents save screenshots into their scratchpads
+    // there), so the fixture lives under the target dir instead.
+    let generated_root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("device-routing-generated-{}", std::process::id()));
     std::fs::create_dir_all(&generated_root).unwrap();
     let source = generated_root.join("codex.png");
     let payload = b"\x89PNG\r\n\x1a\nremote-generated-image";

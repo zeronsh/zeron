@@ -402,6 +402,42 @@ impl Uploads {
     }
 }
 
+/// OS scratch dirs agents save screenshots into (#885): Claude Code's
+/// scratchpad lives under `%TEMP%\claude\…` on Windows and `/tmp/claude-…`
+/// on Linux/macOS, Playwright and friends write to the temp dir too. The RPC
+/// layer adds these to the read jail beside the chat cwds; like every
+/// non-upload root they serve images only. macOS `$TMPDIR` is a per-user
+/// `/var/folders/…` dir, so `/tmp` is listed explicitly on Unix.
+pub fn scratch_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    #[cfg(unix)]
+    roots.push(PathBuf::from("/tmp"));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if is_scratch_root(&root) && !out.contains(&root) {
+            out.push(root);
+        }
+    }
+    out
+}
+
+/// A usable scratch root is absolute and NOT a filesystem root: a `TMPDIR=/`
+/// (or `C:\`) must not open the whole disk to image reads.
+fn is_scratch_root(root: &Path) -> bool {
+    use std::path::Component;
+    // `lexical_components` refuses UNC and other non-disk prefixes; past it,
+    // at least one named folder must survive `..` resolution.
+    lexical_components(root).is_some()
+        && root
+            .components()
+            .fold(0usize, |depth, part| match part {
+                Component::Normal(_) => depth + 1,
+                Component::ParentDir => depth.saturating_sub(1),
+                _ => depth,
+            })
+            > 0
+}
+
 struct InspectedFile {
     resolved: PathBuf,
     name: String,
@@ -666,6 +702,49 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn scratch_roots_admit_temp_images_but_never_a_filesystem_root() {
+        // Filesystem roots never qualify, even when TMPDIR points at one.
+        assert!(!is_scratch_root(Path::new("/")));
+        assert!(!is_scratch_root(Path::new("relative/tmp")));
+        assert!(!is_scratch_root(Path::new("/tmp/..")));
+        #[cfg(windows)]
+        {
+            assert!(!is_scratch_root(Path::new(r"C:\")));
+            assert!(!is_scratch_root(Path::new(r"\\host\share\tmp")));
+            assert!(is_scratch_root(Path::new(r"C:\Users\me\AppData\Local\Temp")));
+        }
+        #[cfg(unix)]
+        assert!(is_scratch_root(Path::new("/tmp")));
+
+        let roots = scratch_roots();
+        assert!(roots.contains(&std::env::temp_dir()) || !is_scratch_root(&std::env::temp_dir()));
+        #[cfg(unix)]
+        assert!(roots.contains(&PathBuf::from("/tmp")));
+
+        // The #885 scenario: an agent screenshot in its temp scratchpad,
+        // outside every chat cwd, now previews; non-images there do not.
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let scratch = tempfile::Builder::new().prefix("claude").tempdir().unwrap();
+        let shot = scratch.path().join("m-chat-kb-light.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\nshot").unwrap();
+        let notes = scratch.path().join("notes.txt");
+        std::fs::write(&notes, b"secret").unwrap();
+        let shot = shot.to_str().unwrap();
+        assert!(uploads.read_chunk(shot, 0, &[]).is_err(), "not a root by default");
+        let chunk = uploads.read_chunk(shot, 0, &roots).unwrap();
+        assert_eq!(chunk.mime_type, "image/png");
+        assert!(uploads.read_chunk(notes.to_str().unwrap(), 0, &roots).is_err());
+        // The jail still refuses network paths and the scratch root itself.
+        for path in [r"\\host\share\x.png".to_string(), "//host/share/x.png".into()] {
+            assert!(uploads.read_chunk(&path, 0, &roots).is_err(), "{path}");
+        }
+        for root in &roots {
+            assert!(uploads.read_chunk(root.to_str().unwrap(), 0, &roots).is_err());
+        }
     }
 
     #[test]
