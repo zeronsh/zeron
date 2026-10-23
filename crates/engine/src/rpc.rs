@@ -1940,6 +1940,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_SESSION_SETTINGS
+            | methods::SET_SESSION_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -2391,6 +2393,14 @@ impl RpcService for EngineRpc {
                     .set_title_settings(p)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
+            }
+            methods::GET_SESSION_SETTINGS => RpcReply::value(&self.registry.session_settings()),
+            methods::SET_SESSION_SETTINGS => {
+                let p: crate::registry::SessionSettings = parse_params(params)?;
+                self.registry
+                    .set_session_settings(p)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.session_settings())
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

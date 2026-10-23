@@ -93,6 +93,7 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    sessions: SessionSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -107,6 +108,35 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// The idle windows offered for [`SessionSettings::idle_minutes`]; `None`
+/// keeps a parked session until it is archived or the engine stops.
+pub const SESSION_IDLE_CHOICES: [Option<u32>; 7] = [
+    Some(30),
+    Some(60),
+    Some(3 * 60),
+    Some(6 * 60),
+    Some(12 * 60),
+    Some(24 * 60),
+    None,
+];
+
+/// Per-device persistent session preferences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionSettings {
+    /// How long a parked session keeps its agent process after its last
+    /// turn. A missing field means the 30-minute default; `null` never reaps.
+    pub idle_minutes: Option<u32>,
+}
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self {
+            idle_minutes: Some(30),
+        }
+    }
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -532,6 +562,27 @@ impl HarnessRegistry {
         self.prefs().titles = settings;
         self.persist_prefs();
         Ok(())
+    }
+
+    pub fn session_settings(&self) -> SessionSettings {
+        self.prefs().sessions.clone()
+    }
+
+    pub fn set_session_settings(&self, settings: SessionSettings) -> Result<(), String> {
+        if !SESSION_IDLE_CHOICES.contains(&settings.idle_minutes) {
+            return Err("Choose one of the offered idle windows".into());
+        }
+        self.prefs().sessions = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    /// The idle reaper's window for a parked session; `None` never reaps.
+    pub fn session_idle(&self) -> Option<std::time::Duration> {
+        self.prefs()
+            .sessions
+            .idle_minutes
+            .map(|minutes| std::time::Duration::from_secs(u64::from(minutes) * 60))
     }
 
     pub fn register(&self, harness: Arc<dyn Harness>) {
@@ -1382,9 +1433,44 @@ mod title_tests {
     }
 
     #[test]
+    fn session_idle_preference_persists_and_rejects_unoffered_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(
+            registry.session_idle(),
+            Some(std::time::Duration::from_secs(30 * 60))
+        );
+        let never = SessionSettings { idle_minutes: None };
+        registry.set_session_settings(never.clone()).unwrap();
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.session_settings(), never);
+        assert_eq!(reloaded.session_idle(), None);
+        assert!(
+            registry
+                .set_session_settings(SessionSettings {
+                    idle_minutes: Some(0)
+                })
+                .is_err()
+        );
+        registry
+            .set_session_settings(SessionSettings {
+                idle_minutes: Some(3 * 60),
+            })
+            .unwrap();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(
+            reloaded.session_idle(),
+            Some(std::time::Duration::from_secs(3 * 60 * 60))
+        );
+    }
+
+    #[test]
     fn old_harness_preferences_default_to_automatic_titles() {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
+        assert_eq!(prefs.sessions, SessionSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
     }
 }

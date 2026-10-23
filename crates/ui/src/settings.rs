@@ -26,6 +26,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod session_idle;
 pub mod shortcuts;
 pub mod thread_naming;
 pub mod wallpaper;

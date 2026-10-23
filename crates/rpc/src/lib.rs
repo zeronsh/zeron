@@ -51,6 +51,9 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// The device's persistent session preferences (Settings → General).
+    pub const GET_SESSION_SETTINGS: &str = "GetSessionSettings";
+    pub const SET_SESSION_SETTINGS: &str = "SetSessionSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

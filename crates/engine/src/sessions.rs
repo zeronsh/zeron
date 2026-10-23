@@ -2884,30 +2884,39 @@ async fn drive_run(
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS). A voice
-    // orchestrator holds Codex and its MCP servers (~200 MB) for calls only,
-    // so it goes after 5 minutes. A call holds the reaper off, and the window
-    // restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides both (tests).
-    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
+    // latency. `Some(when)` = idle since then; the reaper below ends a
+    // session nobody comes back to (zeron SESSION_IDLE_MS) after the device's
+    // Settings → General window (30 min by default, or never). It is re-read
+    // on every loop pass — the 15s heartbeat included — so a change reaches
+    // already-parked sessions. A voice orchestrator holds Codex and its MCP
+    // servers (~200 MB) for calls only, so it goes after 5 minutes. A call
+    // holds the reaper off, and the window restarts at hang-up.
+    // `ZERON_SESSION_IDLE_MS` overrides both (tests).
+    let idle_override = std::env::var("ZERON_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(
-            if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
-                5 * 60
+        .map(std::time::Duration::from_millis);
+    let voice_orchestrator = zeron_proto::voice::is_orchestrator_chat(&chat_id);
+    let session_idle = || {
+        idle_override.or_else(|| {
+            if voice_orchestrator {
+                Some(std::time::Duration::from_secs(5 * 60))
             } else {
-                30 * 60
-            },
-        ));
+                inner.registry.session_idle()
+            }
+        })
+    };
     // A live subagent stretches the window, but never unbounded: every
     // driver's subagent terminal is a best-effort vendor signal (claude's
     // untagged task_notification, grok's subagent_finished, codex thread
     // closure), and one lost signal would otherwise pin the child — and this
     // loop's registry heartbeat — until the chat is archived. A subagent
     // silent this long (4h by default) is presumed lost; the reap stamps its
-    // chip failed.
-    let subagent_silence = session_idle * 8;
+    // chip failed. With reaping off it still bounds how long such a subagent
+    // holds off a harness update.
+    let subagent_silence = |idle: Option<std::time::Duration>| {
+        idle.unwrap_or(std::time::Duration::from_secs(30 * 60)) * 8
+    };
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     // A parked runtime whose agent reports background work (see
@@ -2993,6 +3002,8 @@ async fn drive_run(
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
+            let session_idle = session_idle();
+            let subagent_silence = subagent_silence(session_idle);
             let raw_event = tokio::select! {
                 biased;
                 changed = cancel_rx.changed(), if !interrupted => {
@@ -3051,7 +3062,9 @@ async fn drive_run(
                 // `subagent_silence` while its sink is open.
                 _ = tokio::time::sleep_until(
                     {
-                        let window = if subagents.is_empty() { session_idle } else { subagent_silence };
+                        // Unset only when the branch is disabled below.
+                        let idle = session_idle.unwrap_or_default();
+                        let window = if subagents.is_empty() { idle } else { subagent_silence };
                         let base = idle_since
                             .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
                         match (base, reap_deferred_until) {
@@ -3059,7 +3072,8 @@ async fn drive_run(
                             (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
                         }
                     }
-                ), if idle_since.is_some() && !resume_state.voice_active.live() => {
+                ), if idle_since.is_some() && session_idle.is_some() && !resume_state.voice_active.live() => {
+                    let session_idle = session_idle.unwrap_or_default();
                     // A call that began after this wait was armed holds it off.
                     if resume_state.voice_active.live() {
                         continue;

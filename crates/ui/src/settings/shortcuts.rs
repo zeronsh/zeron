@@ -84,6 +84,8 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    /// Settings → General's idle session window (the engine's reaper).
+    session_idle: Entity<crate::settings::session_idle::SessionIdleCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
@@ -128,6 +130,10 @@ impl ShortcutsPage {
             thread_naming: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
+            },
+            session_idle: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::session_idle::SessionIdleCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
             _state: state,
@@ -958,6 +964,7 @@ impl Render for ShortcutsPage {
                                             .child(pull_request_destination_row),
                                     ))
                                     .child(self.thread_naming.clone())
+                                    .child(self.session_idle.clone())
                                     .child(self.worktrees.clone()),
                             ),
                     )
