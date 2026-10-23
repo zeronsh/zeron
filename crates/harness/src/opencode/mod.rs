@@ -53,7 +53,7 @@
 //! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) errors
 //! out instead of spinning "Working" forever.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,6 +82,19 @@ const STARTUP_TIMEOUT_ENV: &str = "ZERON_OPENCODE_STARTUP_TIMEOUT_SECS";
 
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
+
+/// Command-registry readiness. `/command` is filled by an async plugin that
+/// registers built-ins before it resolves MCP prompts, so a fresh server can
+/// answer with `init`/`review` only (or nothing) while MCP servers are still
+/// starting. Discovery waits for the registry to be non-empty *and* for the
+/// MCP servers named in the config to stop reporting `pending`.
+const COMMANDS_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMANDS_POLL: Duration = Duration::from_millis(100);
+/// Older wires don't expose a config we can read reliably. When the MCP
+/// config is unknown, `/mcp` is empty both for "no servers" and "config not
+/// loaded yet"; confirm the empty answer for a moment before accepting an
+/// early `init`/`review` catalog.
+const MCP_DISCOVERY_GRACE: Duration = Duration::from_millis(500);
 
 /// Bound on ordinary (non-SSE) HTTP calls: everything is loopback and the
 /// only slow route is a cold /provider catalog. The synchronous per-turn
@@ -329,8 +342,9 @@ impl OpencodeHarness {
                         .into(),
                 ));
             }
-            if let Ok(commands) = server.commands_wire(None).await {
-                let _ = self.commands_cache.set(commands_from_wire(&commands));
+            if let Ok(commands) = server.commands_ready(None).await {
+                let commands = commands_for_display(&commands);
+                let _ = self.commands_cache.set(commands);
             }
             Ok(models)
         }
@@ -346,9 +360,9 @@ impl OpencodeHarness {
         }
         let mut server = self.server(None, None).await?;
         let result = server
-            .commands_wire(None)
+            .commands_ready(None)
             .await
-            .map(|v| commands_from_wire(&v));
+            .map(|v| commands_for_display(&v));
         server.shutdown(self.kill_grace).await;
         result
     }
@@ -460,9 +474,9 @@ impl Harness for OpencodeHarness {
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
         let mut server = self.server(Some(directory), None).await?;
         let result = server
-            .commands_wire(Some(directory))
+            .commands_ready(Some(directory))
             .await
-            .map(|v| commands_from_wire(&v));
+            .map(|v| commands_for_display(&v));
         server.shutdown(self.kill_grace).await;
         result
     }
@@ -600,6 +614,21 @@ impl Server {
             client: http_client(),
             stderr_tail: crate::StderrTail::default(),
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Transport-only clone for a request that outlives the caller. The child
+    /// is deliberately not cloned, so dropping this value cannot stop the
+    /// server the request is talking to.
+    fn detached(&self) -> Self {
+        Self {
+            child: None,
+            base: self.base.clone(),
+            auth: self.auth.clone(),
+            client: self.client.clone(),
+            stderr_tail: self.stderr_tail.clone(),
+            protocol: self.protocol.clone(),
             version: tokio::sync::OnceCell::new(),
         }
     }
@@ -936,7 +965,8 @@ impl Server {
     }
 
     /// Slash commands; both wires carry `{name, description}` entries (2.x
-    /// wrapped in `{data}`).
+    /// wrapped in `{data}`). One read — use [`Self::commands_ready`] when the
+    /// catalog is shown to the user.
     async fn commands_wire(&self, directory: Option<&str>) -> Result<Value, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => "/command",
@@ -944,6 +974,75 @@ impl Server {
         };
         let raw = self.get_json(path, directory).await?;
         Ok(unwrap_data(raw))
+    }
+
+    /// The command catalog after OpenCode's asynchronous registration has
+    /// finished. Health answers before the command plugin runs and MCP
+    /// prompts are only registered once their servers connect, so a one-shot
+    /// read can legitimately return `[]` or built-ins only.
+    async fn commands_ready(&self, directory: Option<&str>) -> Result<Value, HarnessError> {
+        let deadline = tokio::time::Instant::now() + COMMANDS_READY_TIMEOUT;
+        let mut data = self.commands_wire(directory).await?;
+        let mut configured = None;
+        let mut unknown_since = None;
+        loop {
+            let Some(list) = data.as_array() else {
+                return Ok(data);
+            };
+            let now = tokio::time::Instant::now();
+            let ready = if list.is_empty() {
+                false
+            } else {
+                let count = match configured {
+                    Some(count) => count,
+                    None => *configured.insert(self.mcp_configured(directory).await),
+                };
+                // No MCP server configured: built-ins are the whole catalog.
+                count == Some(0)
+                    || match self.mcp_state(directory, count).await {
+                        McpState::Ready => true,
+                        McpState::Pending => false,
+                        // Status unreadable or ambiguous: accept after the grace.
+                        McpState::Unknown => {
+                            let since = *unknown_since.get_or_insert(now);
+                            now.duration_since(since) >= MCP_DISCOVERY_GRACE
+                        }
+                    }
+            };
+            if ready || now >= deadline {
+                return Ok(data);
+            }
+            tokio::time::sleep(COMMANDS_POLL).await;
+            // A failed re-poll keeps the last good catalog.
+            if let Ok(next) = self.commands_wire(directory).await {
+                data = next;
+            }
+        }
+    }
+
+    /// Number of MCP servers in the 2.x config, or `None` when the config
+    /// endpoint can't give a reliable answer. This distinguishes "no MCP
+    /// configured" from "MCP config hasn't loaded into `/mcp` yet".
+    async fn mcp_configured(&self, directory: Option<&str>) -> Option<usize> {
+        if self.protocol().await == Protocol::V1 {
+            return None;
+        }
+        let config = self.get_json("/api/config", directory).await.ok()?;
+        configured_mcp_count(&unwrap_data(config))
+    }
+
+    /// MCP prompts are registered only after their server connects. `expected`
+    /// is the configured server count; an empty status list is `Pending`
+    /// while servers are still starting, `Unknown` when the count is unknown.
+    async fn mcp_state(&self, directory: Option<&str>, expected: Option<usize>) -> McpState {
+        let path = match self.protocol().await {
+            Protocol::V1 => "/mcp",
+            Protocol::V2 => "/api/mcp",
+        };
+        let Ok(status) = self.get_json(path, directory).await else {
+            return McpState::Unknown;
+        };
+        mcp_state(&status, expected)
     }
 
     /// Is the session mid-turn? V1 keeps a status map on `/session/status`;
@@ -1260,6 +1359,25 @@ fn commands_from_wire(commands: &Value) -> Vec<SlashCommand> {
         .unwrap_or_default()
 }
 
+/// Commands the composer must offer even though OpenCode does not publish
+/// them through `/command`. `/compact` is a client action in the TUI and has
+/// dedicated session endpoints on both wires; see [`post_prompt`].
+fn with_compact(mut commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
+    if !commands.iter().any(|command| command.name == "compact") {
+        commands.push(SlashCommand {
+            name: "compact".into(),
+            description: "Compact this conversation's context".into(),
+            input_hint: None,
+        });
+    }
+    commands
+}
+
+/// The user-facing catalog: wire entries plus harness-side client actions.
+fn commands_for_display(commands: &Value) -> Vec<SlashCommand> {
+    with_compact(commands_from_wire(commands))
+}
+
 /// `GET /api/model` (2.x): `{"location": .., "data": [Model.Info]}`.
 #[derive(Debug, serde::Deserialize)]
 struct V2ModelList {
@@ -1342,6 +1460,66 @@ fn unwrap_data(value: Value) -> Value {
         .cloned()
         .filter(|d| d.is_object() || d.is_array())
         .unwrap_or(value)
+}
+
+/// MCP status is a map on 1.x (`{name: Status}`) and a list under `data` on
+/// 2.x. An empty list is ambiguous (no servers vs. config still loading), so
+/// it is reported as `Unknown` rather than ready.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum McpState {
+    Ready,
+    Pending,
+    Unknown,
+}
+
+fn mcp_state(status: &Value, expected: Option<usize>) -> McpState {
+    let servers: Vec<&Value> = if let Some(list) = status.get("data").and_then(Value::as_array) {
+        list.iter()
+            .filter_map(|server| server.get("status"))
+            .collect()
+    } else if let Some(map) = status.as_object() {
+        map.values().collect()
+    } else {
+        return McpState::Unknown;
+    };
+    if let Some(expected) = expected
+        && servers.len() < expected
+    {
+        return McpState::Pending;
+    }
+    if servers.is_empty() {
+        return McpState::Unknown;
+    }
+    if servers.iter().any(|server| {
+        matches!(
+            server.get("status").and_then(Value::as_str),
+            Some("pending" | "connecting" | "starting")
+        )
+    }) {
+        McpState::Pending
+    } else {
+        McpState::Ready
+    }
+}
+
+/// Distinct MCP servers declared across the 2.x config documents. `None`
+/// means there were no documents to read, not "no servers".
+fn configured_mcp_count(config: &Value) -> Option<usize> {
+    let docs = config.as_array()?;
+    if docs.is_empty() {
+        return None;
+    }
+    let mut names = HashSet::new();
+    for doc in docs {
+        let info = doc.get("info").unwrap_or(doc);
+        let Some(mcp) = info.get("mcp").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(servers) = mcp.get("servers").and_then(Value::as_object) {
+            names.extend(servers.keys().cloned());
+        }
+    }
+    Some(names.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -1668,19 +1846,24 @@ async fn run_session(session: Session) {
     }
 
     // Advertise slash commands (composer popup); a warm cache skips the call.
+    // A slash turn must route against the settled catalog (MCP prompts register
+    // after their server connects); other turns skip the wait.
     let commands = match known_commands {
         Some(commands) => commands,
-        None => server
-            .commands_wire(dir)
-            .await
-            .map(|v| commands_from_wire(&v))
-            .unwrap_or_default(),
+        None => {
+            let wire = if zeron_proto::invocation::leading_command(&request.prompt).is_some() {
+                server.commands_ready(dir).await
+            } else {
+                server.commands_wire(dir).await
+            };
+            wire.map(|v| commands_from_wire(&v)).unwrap_or_default()
+        }
     };
     if !commands.is_empty()
         && !send(
             &event_tx,
             AgentEvent::AvailableCommands {
-                commands: commands.clone(),
+                commands: with_compact(commands.clone()),
             },
         )
         .await
@@ -2617,6 +2800,42 @@ fn command_body_v2(
     }
 }
 
+/// POST a native command/compaction request without blocking the turn loop.
+/// The endpoint can run for the whole turn and the bus carries the real
+/// events; only HTTP/transport failures are reported back to this generation.
+fn spawn_native_post(
+    server: Server,
+    path: String,
+    body: Value,
+    dir: Option<&str>,
+    turn_generation: u64,
+    command_failure_tx: &mpsc::UnboundedSender<NativeCommandFailure>,
+) {
+    let dir = dir.map(str::to_owned);
+    let command_failure_tx = command_failure_tx.clone();
+    tokio::spawn(async move {
+        // This request can take the whole turn; it must not be cut off
+        // mid-turn by CALL_TIMEOUT.
+        let mut req = server.request(reqwest::Method::POST, &path).json(&body);
+        req = server.scoped(req, dir.as_deref()).await;
+        let failure = match req.send().await {
+            Ok(response) if response.status().is_success() => None,
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                Some(post_error_message(&path, status, &body))
+            }
+            Err(error) => Some(format!("opencode POST {path}: {error}")),
+        };
+        if let Some(message) = failure {
+            let _ = command_failure_tx.send(NativeCommandFailure {
+                generation: turn_generation,
+                message,
+            });
+        }
+    });
+}
+
 /// Send a turn: a leading `/command` known to the agent routes through the
 /// command endpoint (the desktop parity — the server does NOT parse slash
 /// text out of an ordinary prompt); everything else is a prompt.
@@ -2641,6 +2860,49 @@ async fn post_prompt(
         attachments,
     } = spec;
     let protocol = server.protocol().await;
+
+    // `/compact` is a client-side TUI action, not a `/command` entry. Unless
+    // the project defines its own `compact` command, route it to the session
+    // compaction endpoint.
+    if let Some((name, arguments)) = zeron_proto::invocation::leading_command(prompt)
+        && name == "compact"
+        && !commands.iter().any(|command| command.name == "compact")
+    {
+        if !arguments.is_empty() {
+            return Err(HarnessError::Protocol(
+                "/compact takes no arguments; send other text separately".into(),
+            ));
+        }
+        if !attachments.is_empty() {
+            return Err(HarnessError::Protocol(
+                "/compact cannot include attachments; send them in a separate prompt".into(),
+            ));
+        }
+        let (path, body) = match protocol {
+            Protocol::V1 => {
+                let Some((provider, model_id)) = model else {
+                    return Err(HarnessError::Protocol(
+                        "OpenCode /compact on 1.x needs a selected model".into(),
+                    ));
+                };
+                (
+                    format!("/session/{session_id}/summarize"),
+                    json!({ "providerID": provider, "modelID": model_id }),
+                )
+            }
+            Protocol::V2 => (format!("/api/session/{session_id}/compact"), json!({})),
+        };
+        spawn_native_post(
+            server.detached(),
+            path,
+            body,
+            dir,
+            turn_generation,
+            command_failure_tx,
+        );
+        return Ok(());
+    }
+
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {
@@ -2661,45 +2923,14 @@ async fn post_prompt(
                 command_body_v2(server.version.get(), name, &arguments, attachments),
             ),
         };
-        let server_base = server.base.clone();
-        let auth = server.auth.clone();
-        let dir_owned = dir.map(str::to_owned);
-        let path_owned = path.clone();
-        let protocol = server.protocol.clone();
-        let command_failure_tx = command_failure_tx.clone();
-        tokio::spawn(async move {
-            let server = Server {
-                child: None,
-                base: server_base,
-                auth,
-                client: http_client(),
-                stderr_tail: crate::StderrTail::default(),
-                protocol,
-                version: tokio::sync::OnceCell::new(),
-            };
-            // The command endpoint blocks for the whole turn; the bus
-            // carries the real events, so this response is ignored —
-            // but it must not be cut off mid-turn by CALL_TIMEOUT.
-            let mut req = server
-                .request(reqwest::Method::POST, &path_owned)
-                .json(&cmd_body);
-            req = server.scoped(req, dir_owned.as_deref()).await;
-            let failure = match req.send().await {
-                Ok(response) if response.status().is_success() => None,
-                Ok(response) => {
-                    let status = response.status();
-                    let body = response.text().await.unwrap_or_default();
-                    Some(post_error_message(&path_owned, status, &body))
-                }
-                Err(error) => Some(format!("opencode POST {path_owned}: {error}")),
-            };
-            if let Some(message) = failure {
-                let _ = command_failure_tx.send(NativeCommandFailure {
-                    generation: turn_generation,
-                    message,
-                });
-            }
-        });
+        spawn_native_post(
+            server.detached(),
+            path,
+            cmd_body,
+            dir,
+            turn_generation,
+            command_failure_tx,
+        );
         return Ok(());
     }
     let (path, body) = match protocol {

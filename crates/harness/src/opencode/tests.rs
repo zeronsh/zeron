@@ -104,6 +104,7 @@ impl TurnWire {
         let (request_tx, requests) = mpsc::unbounded_channel();
         let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = posts.clone();
+        let discover_commands = overrides["discoverCommands"].as_bool().unwrap_or(false);
         let hold_prompt = overrides["holdPrompt"].as_bool().unwrap_or(false);
         let busy_polls = overrides["busyPolls"].as_u64().unwrap_or(0) as usize;
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -198,7 +199,7 @@ impl TurnWire {
                         match path.as_str() {
                             "/api/health" => ("200 OK", health.as_str()),
                             "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
-                            "/api/command" => ("200 OK", r#"{"data":[]}"#),
+                            "/api/command" => ("200 OK", r#"{"location":{},"data":[{"name":"project-review","description":"Review"}]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
                             "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true},{"providerID":"opencode","id":"long-context","name":"Long Context","limit":{"context":2000},"enabled":true}]}"#),
                             _ => ("200 OK", "{}"),
@@ -280,16 +281,20 @@ impl TurnWire {
             request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
-            known_commands: Some(vec![SlashCommand {
-                name: if native_command_reply.is_some() {
-                    "project-review"
-                } else {
-                    "test"
-                }
-                .into(),
-                description: String::new(),
-                input_hint: None,
-            }]),
+            // `discoverCommands`: exercise the run-path catalog read instead of
+            // the injected cache.
+            known_commands: (!discover_commands).then(|| {
+                vec![SlashCommand {
+                    name: if native_command_reply.is_some() {
+                        "project-review"
+                    } else {
+                        "test"
+                    }
+                    .into(),
+                    description: String::new(),
+                    input_hint: None,
+                }]
+            }),
             initial_native_command_selected: native_command_reply.is_some(),
         }));
         Self {
@@ -1453,6 +1458,75 @@ fn commands_map_from_wire() {
 }
 
 #[test]
+fn mcp_state_waits_for_pending_servers() {
+    // 1.x: map of name -> status. Empty is ambiguous, not "ready".
+    assert_eq!(mcp_state(&json!({}), None), McpState::Unknown);
+    assert_eq!(
+        mcp_state(&json!({"mcp": {"status": "pending"}}), None),
+        McpState::Pending
+    );
+    assert_eq!(
+        mcp_state(&json!({"mcp": {"status": "connected"}}), None),
+        McpState::Ready
+    );
+    assert_eq!(
+        mcp_state(&json!({"mcp": {"status": "failed", "error": "boom"}}), None),
+        McpState::Ready
+    );
+    // 2.x: `{data: [{name, status}]}`. Wait until every configured server is
+    // represented, not just the first one to connect.
+    assert_eq!(
+        mcp_state(
+            &json!({"data": [{"name": "a", "status": {"status": "connected"}}]}),
+            Some(2)
+        ),
+        McpState::Pending
+    );
+    assert_eq!(
+        mcp_state(
+            &json!({"data": [
+                {"name": "a", "status": {"status": "connected"}},
+                {"name": "b", "status": {"status": "pending"}}
+            ]}),
+            Some(2)
+        ),
+        McpState::Pending
+    );
+    assert_eq!(
+        mcp_state(
+            &json!({"data": [
+                {"name": "a", "status": {"status": "connected"}},
+                {"name": "b", "status": {"status": "failed"}}
+            ]}),
+            Some(2)
+        ),
+        McpState::Ready
+    );
+}
+
+#[test]
+fn configured_mcp_count_reads_v2_config_documents() {
+    assert_eq!(
+        configured_mcp_count(&json!([
+            {"type": "directory", "path": "/project"},
+            {"type": "document", "info": {"mcp": {"servers": {
+                "a": {"type": "local"},
+                "b": {"type": "remote"}
+            }}}},
+            {"type": "document", "info": {"mcp": {"servers": {
+                "b": {"type": "local"}
+            }}}}
+        ])),
+        Some(2)
+    );
+    assert_eq!(
+        configured_mcp_count(&json!([{"type": "directory"}])),
+        Some(0)
+    );
+    assert_eq!(configured_mcp_count(&json!([])), None);
+}
+
+#[test]
 fn canonical_command_removed_after_discovery_is_not_downgraded_to_prompt_text() {
     use zeron_proto::invocation::{Invocation, harness_prompt};
 
@@ -2238,6 +2312,62 @@ async fn command_http_failure_errors_turn_without_watchdog() {
         assert_eq!(body[key], "test");
         assert_eq!(body[if v2 { "text" } else { "arguments" }], "args");
     }
+}
+
+#[tokio::test]
+async fn v2_wrapped_command_catalog_routes_slash_text_to_the_command_endpoint() {
+    let wire = TurnWire::start_config(
+        false,
+        true,
+        true,
+        None,
+        "2.0.3",
+        json!({"prompt":"/project-review src","discoverCommands":true}),
+        false,
+    )
+    .await;
+
+    let body = wire.posted("/api/session/fixture/command").await;
+    assert_eq!(body["text"], "src");
+    assert!(
+        !wire
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path.ends_with("/prompt"))
+    );
+}
+
+#[tokio::test]
+async fn v2_compact_uses_the_session_compact_endpoint() {
+    let mut wire = TurnWire::start_config(
+        false,
+        true,
+        true,
+        None,
+        "2.0.3",
+        json!({"prompt":"/compact"}),
+        false,
+    )
+    .await;
+
+    assert_eq!(wire.posted("/api/session/fixture/compact").await, json!({}));
+    assert!(
+        !wire
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path.ends_with("/prompt"))
+    );
+
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+    assert_eq!(wire.done().await.0, DoneStatus::Completed);
 }
 
 #[test]

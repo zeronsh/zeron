@@ -36,6 +36,14 @@ struct FakeOpencode {
     providers: Arc<Mutex<Value>>,
     statuses: Arc<Mutex<serde_json::Map<String, Value>>>,
     commands: Arc<Mutex<Value>>,
+    /// Leading `GET /command` bodies to answer before the stable catalog.
+    /// Models the post-health boot window (empty) and registry updates
+    /// (built-ins, then project commands).
+    command_reads: Arc<Mutex<std::collections::VecDeque<Value>>>,
+    /// Queued `/mcp` status bodies, consumed per discovery read. Lets a test
+    /// hold the command catalog at "built-ins only" while an MCP server is
+    /// still pending.
+    mcp_reads: Arc<Mutex<std::collections::VecDeque<Value>>>,
     /// Whether an SSE subscriber existed when the FIRST prompt_async landed
     /// (the no-replay bus makes prompting before the subscription a real
     /// event-loss race — observed live on fast-failing turns).
@@ -62,6 +70,8 @@ impl FakeOpencode {
             commands: Arc::new(Mutex::new(
                 json!([{ "name": "init", "description": "Create AGENTS.md" }]),
             )),
+            command_reads: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            mcp_reads: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
             fail_aborts: Arc::new(Mutex::new(false)),
@@ -216,7 +226,19 @@ impl FakeOpencode {
         match (method, path) {
             ("GET", "/global/health") => ("200 OK", json!({ "healthy": true })),
             ("GET", "/provider") => ("200 OK", self.providers.lock().unwrap().clone()),
-            ("GET", "/command") => ("200 OK", self.commands.lock().unwrap().clone()),
+            ("GET", "/command") => {
+                let mut queued = self.command_reads.lock().unwrap();
+                (
+                    "200 OK",
+                    queued
+                        .pop_front()
+                        .unwrap_or_else(|| self.commands.lock().unwrap().clone()),
+                )
+            }
+            ("GET", "/mcp") => {
+                let mut queued = self.mcp_reads.lock().unwrap();
+                ("200 OK", queued.pop_front().unwrap_or_else(|| json!({})))
+            }
             ("POST", "/session") => {
                 let mut fails = self.fail_session_creates.lock().unwrap();
                 if *fails > 0 {
@@ -241,6 +263,7 @@ impl FakeOpencode {
             ),
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
+            ("POST", p) if p.ends_with("/summarize") => ("200 OK", json!(true)),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
             ("POST", p) if p.ends_with("/abort") && *self.fail_aborts.lock().unwrap() => (
                 "500 Internal Server Error",
@@ -384,11 +407,11 @@ async fn thinking_streams_and_the_turn_settles_only_on_idle() {
         &started,
         AgentEvent::SessionStarted { session_id, .. } if session_id == "ses_test"
     ));
-    // AvailableCommands from /command.
+    // AvailableCommands from /command (plus the synthetic /compact).
     let commands = next_event(&mut stream).await;
     assert!(matches!(
         &commands,
-        AgentEvent::AvailableCommands { commands } if commands.len() == 1
+        AgentEvent::AvailableCommands { commands } if commands.len() == 2
     ));
 
     assistant_message(&fake, "ses_test", "msg_1");
@@ -1161,6 +1184,61 @@ async fn slash_command_routes_through_the_command_endpoint() {
 }
 
 #[tokio::test]
+async fn slash_turn_waits_for_mcp_prompts_before_routing() {
+    // The first catalog read is built-ins only; the MCP prompt command exists
+    // once its server connects. Routing against the first read would send
+    // `/mcp-prompt` as plain prompt text.
+    let fake = FakeOpencode::start().await;
+    *fake.mcp_reads.lock().unwrap() = [
+        json!({ "srv": { "status": "pending" } }),
+        json!({ "srv": { "status": "connected" } }),
+    ]
+    .into();
+    *fake.command_reads.lock().unwrap() =
+        [json!([{ "name": "init", "description": "Create AGENTS.md" }])].into();
+    *fake.commands.lock().unwrap() = json!([
+        { "name": "init", "description": "Create AGENTS.md" },
+        { "name": "srv:mcp-prompt", "description": "From MCP" },
+    ]);
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness(&fake)
+        .run(request("/srv:mcp-prompt go"), controls)
+        .await
+        .expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+
+    let commands = wait_posts(&fake, "/session/ses_test/command", 1).await;
+    assert_eq!(commands[0]["command"], "srv:mcp-prompt");
+    assert!(fake.posts_to("/session/ses_test/prompt_async").is_empty());
+
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn compact_routes_to_the_summarize_endpoint() {
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut req = request("/compact");
+    req.model = Some("opencode/big-pickle".into());
+    let mut stream = harness(&fake).run(req, controls).await.expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+
+    let posts = wait_posts(&fake, "/session/ses_test/summarize", 1).await;
+    assert_eq!(posts[0]["providerID"], "opencode");
+    assert_eq!(posts[0]["modelID"], "big-pickle");
+    assert!(fake.posts_to("/session/ses_test/prompt_async").is_empty());
+    assert!(fake.posts_to("/session/ses_test/command").is_empty());
+
+    assistant_message(&fake, "ses_test", "msg_1");
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
 async fn first_prompt_waits_for_the_live_event_subscription() {
     // The v1 bus has no replay: a fast-failing turn (bad model id) emits
     // busy → session.error → idle within ~200ms of the prompt. Prompting
@@ -1232,6 +1310,44 @@ async fn models_discover_from_the_provider_catalog() {
     // Commands were primed off the same probe.
     let commands = harness.commands().await.expect("commands");
     assert_eq!(commands[0].name, "init");
+}
+
+#[tokio::test]
+async fn commands_wait_for_mcp_prompts() {
+    // Health answers before OpenCode registers built-ins, and MCP prompt
+    // commands appear only after their servers connect. Returning the first
+    // non-empty catalog leaves the composer with init/review only.
+    let fake = FakeOpencode::start().await;
+    *fake.command_reads.lock().unwrap() = [
+        json!([]),
+        json!([{ "name": "init", "description": "Create AGENTS.md" }]),
+    ]
+    .into();
+    *fake.mcp_reads.lock().unwrap() = [
+        json!({ "codebase-memory-mcp": { "status": "pending" } }),
+        json!({ "codebase-memory-mcp": { "status": "connected" } }),
+    ]
+    .into();
+    *fake.commands.lock().unwrap() = json!([
+        { "name": "init", "description": "Create AGENTS.md" },
+        { "name": "project-review", "description": "Review this project" },
+        { "name": "codebase-memory-mcp:explore_codebase", "description": "Explore" },
+    ]);
+    let harness = OpencodeHarness::new().with_base_url(fake.base.clone());
+    let cwd = tempfile::tempdir().unwrap();
+
+    let commands = harness.commands_for(cwd.path()).await.expect("commands");
+    let names: Vec<_> = commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert!(names.contains(&"init"), "{names:?}");
+    assert!(names.contains(&"project-review"), "{names:?}");
+    assert!(
+        names.contains(&"codebase-memory-mcp:explore_codebase"),
+        "{names:?}"
+    );
+    assert!(names.contains(&"compact"), "{names:?}");
 }
 
 #[tokio::test]
