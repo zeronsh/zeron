@@ -82,6 +82,16 @@ pub(crate) struct SystemFrame {
     /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
     pub tasks: Option<Vec<Value>>,
+    /// `compact_boundary`: sizes around a `/compact` or auto-compaction.
+    #[serde(default)]
+    pub compact_metadata: Option<CompactMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CompactMetadata {
+    /// Context tokens left after compaction (absent on older CLIs).
+    #[serde(default)]
+    pub post_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
