@@ -698,9 +698,14 @@ impl Normalizer {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
                 };
+                let aborted = interrupted
+                    || f
+                        .terminal_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("aborted"));
                 let done = if f.subtype == "success" {
                     AgentEvent::Done {
-                        status: if interrupted {
+                        status: if aborted {
                             DoneStatus::Interrupted
                         } else {
                             DoneStatus::Completed
@@ -749,7 +754,7 @@ impl Normalizer {
                         }
                     };
                     AgentEvent::Done {
-                        status: if interrupted {
+                        status: if aborted {
                             DoneStatus::Interrupted
                         } else {
                             DoneStatus::Errored

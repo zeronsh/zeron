@@ -207,6 +207,8 @@ pub(crate) struct ResultFrame {
     #[serde(default)]
     pub subtype: String,
     #[serde(default)]
+    pub terminal_reason: Option<String>,
+    #[serde(default)]
     pub result: Option<String>,
     #[serde(default)]
     pub errors: Vec<Value>,

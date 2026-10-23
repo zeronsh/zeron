@@ -143,7 +143,7 @@ case "$first" in
   ;;
 
 *scenario:lifecycle-now-steer*)
-  # CLI 2.1.286, captured live: every uuid-tagged user line gets
+  # CLI 2.1.295, captured live: every uuid-tagged user line gets
   # `command_lifecycle` frames. A `now` steer aborts the streaming turn
   # (result, terminal_reason aborted_streaming), the first command is
   # cancelled and the steer's own turn starts. That turn then runs a tool
@@ -159,7 +159,7 @@ case "$first" in
   case "$steer" in *'"priority":"now"'*) ;; *) exit 9 ;; esac
   sid=$(uuid_of "$steer")
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"queued\"}"
-  emit '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming","result":"essay","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-lc"}'
+  emit '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","errors":["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-lc"}'
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$fid\",\"state\":\"cancelled\"}"
   emit "{\"type\":\"command_lifecycle\",\"command_uuid\":\"$sid\",\"state\":\"started\"}"
   emit '{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-lc"}'
