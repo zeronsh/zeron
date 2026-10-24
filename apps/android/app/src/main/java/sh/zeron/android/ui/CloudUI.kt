@@ -120,7 +120,7 @@ fun CloudPage(
             item("header") { ScreenHeader(title, subtitle, actions = actions) }
             content()
         }
-        StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
+        StatusBarScrim(list)
     }
 }
 

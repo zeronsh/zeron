@@ -226,7 +226,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                 }
             }
         }
-        StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
+        StatusBarScrim(list)
     }
 }
 
