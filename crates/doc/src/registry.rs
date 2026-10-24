@@ -42,6 +42,12 @@ pub const KIND_PREFERENCES: &str = "preferences";
 
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
+/// Per-user feature flags (`preferences/labs`), synced to every device the
+/// user signs into. Fields are named for the feature: `chat3` births new
+/// chats on the chat3 transcript plane (docs/chat3-sync.md).
+pub const LABS_PREFERENCES_ID: &str = "labs";
+/// The labs features this build knows how to switch.
+pub const LABS_FLAGS: &[&str] = &["chat3"];
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 mod sidebar_pins;
 mod sidebar_sections;
@@ -1553,6 +1559,38 @@ impl RegistryDoc {
             .collect();
         sessions.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
         Ok(sessions)
+    }
+
+    // ── labs flags ──────────────────────────────────────────────────────────
+
+    /// A `preferences/labs` flag (false when unset or unknown).
+    pub fn labs_flag(&self, flag: &str) -> bool {
+        self.overlay_row(KIND_PREFERENCES, LABS_PREFERENCES_ID)
+            .and_then(|row| row.fields.get(flag).and_then(Value::as_bool))
+            .unwrap_or(false)
+    }
+
+    /// Switch a labs flag for this user on every device. Only flags this
+    /// build knows are accepted, so a typo can't silently do nothing.
+    pub fn set_labs_flag(&mut self, flag: &str, on: bool) -> Result<bool, DocError> {
+        if !LABS_FLAGS.contains(&flag) {
+            return Err(DocError::Schema(format!("unknown labs flag: {flag}")));
+        }
+        if self.labs_flag(flag) == on {
+            return Ok(false);
+        }
+        self.write(
+            KIND_PREFERENCES,
+            LABS_PREFERENCES_ID,
+            OpKind::Upsert,
+            fields([(flag, json!(on))]),
+        );
+        Ok(true)
+    }
+
+    /// The room generation a chat minted now is born on.
+    pub fn new_chat_room_gen(&self) -> u32 {
+        if self.labs_flag("chat3") { 3 } else { 2 }
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────

@@ -74,6 +74,34 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // chat3 transcript plane (docs/chat3-sync.md), host side. `chat3_items`
+    // remembers the hash of every row this host stored, so a reopened host
+    // publishes only what changed. `chat3_outbox` holds rows not yet acked,
+    // coalesced to the latest bytes per key (a part rewritten five times
+    // before the network returns uploads once). `chat3_outputs` holds full
+    // tool outputs awaiting upload.
+    "CREATE TABLE chat3_items (
+        doc_id TEXT NOT NULL,
+        ord REAL NOT NULL,
+        idx INTEGER NOT NULL,
+        hash INTEGER NOT NULL,
+        PRIMARY KEY(doc_id, ord, idx)
+     ) STRICT;
+     CREATE TABLE chat3_outbox (
+        doc_id TEXT NOT NULL,
+        ord REAL NOT NULL,
+        idx INTEGER NOT NULL,
+        entry TEXT NOT NULL,
+        bytes BLOB NOT NULL,
+        hash INTEGER NOT NULL,
+        PRIMARY KEY(doc_id, ord, idx)
+     ) STRICT;
+     CREATE TABLE chat3_outputs (
+        doc_id TEXT NOT NULL,
+        part TEXT NOT NULL,
+        bytes BLOB NOT NULL,
+        PRIMARY KEY(doc_id, part)
+     ) STRICT;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);

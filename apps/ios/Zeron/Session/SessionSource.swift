@@ -86,6 +86,8 @@ protocol SessionSource: AnyObject {
     func image(_ reference: String) async -> UIImage?
     /// Workspace files for `@` mentions.
     func searchFiles(_ query: String) async -> [FileMatch]
+    /// Page older history in (a chat3 transcript's "Load earlier messages").
+    func loadEarlier() async
 }
 
 enum QueueAction {
@@ -242,4 +244,5 @@ final class FixtureSessionSource: SessionSource {
 extension SessionSource {
     func modelPicker() -> UIViewController? { nil }
     func signInTarget() -> AgentAccountsViewController.Target? { nil }
+    func loadEarlier() async {}
 }

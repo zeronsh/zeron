@@ -194,6 +194,8 @@ pub(crate) struct SessionCore {
     write_gate: Mutex<()>,
     dirty: Arc<Mutex<Dirty>>,
     _subscription: loro::Subscription,
+    /// gen 3: the split doc's local transcript feeds the same dirty set.
+    _transcript_subscription: Option<loro::Subscription>,
     state: Mutex<CoreState>,
     transcript_tx: watch::Sender<Arc<SessionSnapshot>>,
     composer: RwLock<Arc<ComposerState>>,
@@ -218,6 +220,12 @@ impl SessionCore {
         let subscription = doc.doc().subscribe_root(Arc::new(move |event| {
             lock(&sink).observe(&event);
         }));
+        let transcript_sink = dirty.clone();
+        let transcript_subscription = doc.is_split().then(|| {
+            doc.transcript_doc().subscribe_root(Arc::new(move |event| {
+                lock(&transcript_sink).observe(&event);
+            }))
+        });
         let (transcript_tx, _) = watch::channel(Arc::new(SessionSnapshot {
             chat_id: chat_id.to_owned(),
             ..Default::default()
@@ -236,6 +244,7 @@ impl SessionCore {
             write_gate: Mutex::new(()),
             dirty,
             _subscription: subscription,
+            _transcript_subscription: transcript_subscription,
             state: Mutex::new(CoreState {
                 tracker: Tracker::new(),
                 queue: Vec::new(),
@@ -302,9 +311,11 @@ impl SessionCore {
         let Some(chat) = client.workspace.chat(&self.chat_id) else {
             return;
         };
-        if chat.room_gen.unwrap_or(1) < 2 {
-            // A retired legacy (s2) room: nothing to dial. Show what's local
-            // instead of an endless loader.
+        if !chat.on_chat2() {
+            // A retired legacy (s2) room — or a generation newer than this
+            // build: nothing to dial. Show what's local instead of an
+            // endless loader (an old build dialing a gen-3 chat's chat2 room
+            // saw an empty transcript and stranded what it sent).
             let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);
             if newly {
                 self.schedule_refresh();
@@ -352,6 +363,7 @@ impl SessionCore {
                 on_applied,
                 on_status,
                 cancel: client.cancel.clone(),
+                room_gen: chat.room_generation(),
             },
         );
         let mut slot = lock(&self.room);
@@ -455,7 +467,7 @@ impl SessionCore {
         {
             let mut st = lock(&self.state);
             send_before = oldest_state(&st.pending);
-            let change = st.tracker.refresh(self.doc.doc(), &dirty);
+            let change = st.tracker.refresh(self.doc.transcript_doc(), &dirty);
             if dirty.queue {
                 st.queue = self.doc.read_queue().unwrap_or_default();
             }
@@ -476,12 +488,15 @@ impl SessionCore {
             let live = LiveFlags {
                 working: indicator_working || streaming,
                 working_since_ms,
+                history_more: self.doc.is_split()
+                    && zeron_doc::transcript_plane::Reader::cursor(&self.doc).more_before,
                 cloud_booting,
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
+                || previous.history_more != live.history_more
                 || placeholder_changed;
             if change.is_some()
                 || echoes_changed
@@ -847,6 +862,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
+    history_more: bool,
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
@@ -960,6 +976,7 @@ fn build_snapshot(
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,
+        history_more: live.history_more,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
     };
@@ -1043,6 +1060,39 @@ impl SessionHandle {
 
     pub fn composer(&self) -> Arc<ComposerState> {
         self.core.composer()
+    }
+
+    /// gen 3: page older transcript history in from the room. Returns whether
+    /// still older history exists. A no-op for chat2 chats.
+    pub async fn load_earlier(&self) -> Result<bool> {
+        let Some(room) = self.core.room() else {
+            return Ok(false);
+        };
+        let more = room
+            .load_earlier()
+            .await
+            .map_err(|e| ClientError::Network(e.to_string()))?;
+        self.core.schedule_refresh();
+        Ok(more)
+    }
+
+    /// gen 3: a tool's full output (`chat3:{chatId}/{partId}` refs). `None`
+    /// when the room has none for it.
+    pub async fn tool_output(&self, output_ref: &str) -> Result<Option<String>> {
+        let Some((chat, part)) = zeron_sync::chat3::parse_output_ref(output_ref) else {
+            return Ok(None);
+        };
+        if chat != self.core.chat_id {
+            return Ok(None);
+        }
+        let Some(room) = self.core.room() else {
+            return Ok(None);
+        };
+        let bytes = room
+            .fetch_output(part)
+            .await
+            .map_err(|e| ClientError::Network(e.to_string()))?;
+        Ok(bytes.map(|b: Vec<u8>| String::from_utf8_lossy(&b).into_owned()))
     }
 
     /// Tell the client whether a transcript view is on screen (marks seen on

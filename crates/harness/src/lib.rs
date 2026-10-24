@@ -310,6 +310,7 @@ pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
+pub mod tool_output;
 pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;

@@ -446,7 +446,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, history_more: false };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();
@@ -1303,4 +1303,30 @@ fn errors_render_as_cards_with_a_log_in_button_when_signing_in_fixes_them() {
             assert!(button.x > text_right, "row {i}: button at {} beside text ending {text_right}", button.x);
         }
     }
+}
+
+#[test]
+fn a_chat3_transcript_with_older_history_offers_to_load_it_first() {
+    let mut w = worker(390.0);
+    let mut input = transcript_one("the newest page");
+    input.history_more = true;
+    w.input = input;
+    let frame = w.pass();
+    let first = frame.display(0).unwrap();
+    let actions: Vec<_> = first
+        .widgets
+        .iter()
+        .filter_map(|w| match &w.kind {
+            display::WidgetKind::Action { action, label } => Some((action.as_str(), label.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actions, [(super::rows::LOAD_EARLIER_ACTION, "Load earlier messages")]);
+
+    // Once everything is loaded the row goes away.
+    let mut w = worker(390.0);
+    w.input = transcript_one("the whole chat");
+    let frame = w.pass();
+    let first = frame.display(0).unwrap();
+    assert!(!first.widgets.iter().any(|w| matches!(w.kind, display::WidgetKind::Action { .. })));
 }

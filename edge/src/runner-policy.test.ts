@@ -91,6 +91,9 @@ describe("runner policy", () => {
       ["POST", "/registry/o/push"],
       // Gated per chat by runner-access.ts, not by path.
       ["GET", "/chat2/c1/ws"],
+      ["GET", "/chat3/c1/ws"],
+      ["POST", "/chat3/c1/items"],
+      ["PUT", "/chat3/c1/outputs/p1"],
       ["PUT", "/blob/c1/p1"],
       ["POST", "/runner/heartbeat"],
       ["PUT", "/attachments/a1"],

@@ -4583,6 +4583,15 @@ impl Transcript {
     }
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
+    /// gen 3: show "Load earlier messages" — the primary transcript is
+    /// scrolled to its first row and the room holds older history.
+    pub fn earlier_button_shown(&self, cx: &gpui::App) -> bool {
+        self.doc_override.is_none()
+            && !self.rows.is_empty()
+            && self.list.logical_scroll_top().item_ix == 0
+            && self.state.read(cx).transcript_history_more
+    }
+
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();

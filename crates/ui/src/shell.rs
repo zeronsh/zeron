@@ -11553,6 +11553,8 @@ impl Shell {
                         })
                         .child(self.transcript.clone()),
                 )
+                // gen 3: older history is paged in on request.
+                .when(!departing_transcript, |el| el.children(self.render_load_earlier(cx)))
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
                 .when(departing_transcript, |el| {
@@ -11826,6 +11828,59 @@ impl Shell {
                 .flex()
                 .justify_center()
                 .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
+                .into_any_element(),
+        )
+    }
+
+    /// "Load earlier messages" (docs/chat3-sync.md): a gen-3 transcript
+    /// holds the newest page; this pill, centered at the top of the
+    /// transcript while it's scrolled to its first row, pages older history
+    /// in. Same surface as the jump pill so the two read as one family.
+    fn render_load_earlier(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.transcript.read(cx).earlier_button_shown(cx) {
+            return None;
+        }
+        let loading = self.state.read(cx).loading_earlier;
+        let theme = Theme::of(cx).for_popup();
+        let glass = theme.is_frost();
+        let hover_key = "load-earlier-pill";
+        let base = if glass {
+            popover::surface_bg(&theme)
+        } else {
+            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
+        };
+        let state = self.state.clone();
+        Some(
+            div()
+                .absolute()
+                .top(px(12.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("load-earlier")
+                        .h(px(30.0))
+                        .px(px(14.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border)
+                        .when(!glass, |el| el.shadow_md())
+                        .bg(base)
+                        .flex()
+                        .items_center()
+                        .text_size(px(13.0))
+                        .text_color(theme.text_muted)
+                        .when(!loading, |el| {
+                            el.cursor_pointer()
+                                .on_hover(motion::hover_listener(hover_key))
+                                .on_click(move |_, _, cx| {
+                                    state.update(cx, |state, cx| state.load_earlier_messages(cx));
+                                })
+                        })
+                        .child(if loading { "Loading earlier messages…" } else { "Load earlier messages" }),
+                )
                 .into_any_element(),
         )
     }

@@ -715,6 +715,21 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.chat(chat_id))?)
     }
 
+    /// The room generation a chat minted now is born on: 3 when this user's
+    /// `chat3` labs flag is on (docs/chat3-sync.md), else 2.
+    pub fn new_chat_room_gen(&self) -> u32 {
+        self.read(|doc| doc.new_chat_room_gen())
+    }
+
+    pub fn labs_flag(&self, flag: &str) -> bool {
+        self.read(|doc| doc.labs_flag(flag))
+    }
+
+    /// Switch a labs flag for this user (syncs to every device).
+    pub fn set_labs_flag(&self, flag: &str, on: bool) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_labs_flag(flag, on))?)
+    }
+
     /// The space row as currently known (overlay view).
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, EngineError> {
         Ok(self.read(|doc| doc.space(space_id))?)
@@ -1086,10 +1101,11 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
-                // Born on chat2: a brand-new chat has an empty doc — nothing
-                // to seed, no migration race to lose. Only pre-existing chats
-                // go through the seed+flip path (the host migration sweep).
-                room_gen: Some(2),
+                // Born on chat2 (or chat3 under the labs flag): a brand-new
+                // chat has an empty doc — nothing to seed, no migration race
+                // to lose. Only pre-existing chats go through the seed+flip
+                // path (the host migration sweep).
+                room_gen: Some(doc.new_chat_room_gen()),
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),

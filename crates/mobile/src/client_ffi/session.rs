@@ -514,6 +514,21 @@ impl SessionHandle {
         })
     }
 
+    /// gen 3 (docs/chat3-sync.md): page older history in from the room —
+    /// the transcript's "Load earlier messages" row. Returns whether still
+    /// older history exists. A no-op for chat2 chats.
+    pub async fn load_earlier(&self) -> CoreResult<bool> {
+        let handle = self.inner.clone();
+        on_runtime(async move { handle.load_earlier().await }).await
+    }
+
+    /// gen 3: a tool's full output by its part's `outputRef`
+    /// (`chat3:{chatId}/{partId}`). `None` when the room has none.
+    pub async fn tool_output(&self, output_ref: String) -> CoreResult<Option<String>> {
+        let handle = self.inner.clone();
+        on_runtime(async move { handle.tool_output(&output_ref).await }).await
+    }
+
     /// A transcript view is on/off screen (marks seen on attach).
     pub fn set_view_attached(&self, attached: bool) {
         self.inner.set_view_attached(attached);

@@ -754,6 +754,15 @@ pub enum AgentEvent {
         id: String,
         call: ToolCall,
     },
+    /// Incremental output of a running tool (codex `outputDelta`). Display
+    /// only: gen-3 chats stream it to viewers and store the full output when
+    /// the tool resolves (docs/chat3-sync.md); gen-2 folds ignore it. Never
+    /// journaled — the result carries what survives.
+    #[serde(rename_all = "camelCase")]
+    ToolOutputDelta {
+        id: String,
+        text: String,
+    },
     #[serde(rename_all = "camelCase")]
     ToolResult {
         id: String,

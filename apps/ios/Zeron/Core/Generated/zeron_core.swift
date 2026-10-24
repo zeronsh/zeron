@@ -3857,6 +3857,13 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     
     func interrupt() throws 
     
+    /**
+     * gen 3 (docs/chat3-sync.md): page older history in from the room —
+     * the transcript's "Load earlier messages" row. Returns whether still
+     * older history exists. A no-op for chat2 chats.
+     */
+    func loadEarlier() async throws  -> Bool
+    
     func markSeen() 
     
     /**
@@ -3902,6 +3909,12 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      * A transcript view is on/off screen (marks seen on attach).
      */
     func setViewAttached(attached: Bool) 
+    
+    /**
+     * gen 3: a tool's full output by its part's `outputRef`
+     * (`chat3:{chatId}/{partId}`). `None` when the room has none.
+     */
+    func toolOutput(outputRef: String) async throws  -> String?
     
     func transcriptStatus()  -> TranscriptStatus
     
@@ -4068,6 +4081,27 @@ open func interrupt()throws   {try rustCallWithError(FfiConverterTypeCoreError_l
 }
 }
     
+    /**
+     * gen 3 (docs/chat3-sync.md): page older history in from the room —
+     * the transcript's "Load earlier messages" row. Returns whether still
+     * older history exists. A no-op for chat2 chats.
+     */
+open func loadEarlier()async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_sessionhandle_load_earlier(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_i8,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_i8,
+            freeFunc: ffi_zeron_mobile_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
 open func markSeen()  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_sessionhandle_mark_seen(
@@ -4216,6 +4250,26 @@ open func setViewAttached(attached: Bool)  {try! rustCall() {
         FfiConverterBool.lower(attached),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * gen 3: a tool's full output by its part's `outputRef`
+     * (`chat3:{chatId}/{partId}`). `None` when the room has none.
+     */
+open func toolOutput(outputRef: String)async throws  -> String?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_sessionhandle_tool_output(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(outputRef)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
 open func transcriptStatus() -> TranscriptStatus  {
@@ -20040,6 +20094,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_interrupt() != 42793) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_load_earlier() != 55632) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_mark_seen() != 7987) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20071,6 +20128,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_set_view_attached() != 11843) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_tool_output() != 32723) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_transcript_status() != 12910) {

@@ -151,7 +151,7 @@ export default {
         return forward(env.REGISTRY_ROOMS, room, request, auth, `/${parts[2]}`, url.search);
       }
     }
-    if (parts[0] === "chat2" && parts[1] && id.test(parts[1])) {
+    if ((parts[0] === "chat2" || parts[0] === "chat3") && parts[1] && id.test(parts[1])) {
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;
     }

@@ -13,6 +13,9 @@ pub(crate) struct ChatPersistence {
     doc: Weak<SessionDoc>,
     store: Arc<DocsStore>,
     chat_id: String,
+    /// Lineage stamped on the snapshot: 2 for chat2, 3 for a split gen-3
+    /// doc, which also saves its local transcript beside it.
+    epoch: u32,
     cursor: AtomicU64,
     generation: AtomicU64,
     saved: AtomicU64,
@@ -37,10 +40,16 @@ impl ChatPersistence {
         let verified = store.snapshot_cursor_verified(&chat_id).unwrap_or(false);
         let runtime = tokio::runtime::Handle::try_current().ok();
         let (tx, rx) = mpsc::channel(1);
+        let epoch = if doc.is_split() {
+            super::chat2_host::CHAT3_DOC_EPOCH
+        } else {
+            super::chat2_host::CHAT2_DOC_EPOCH
+        };
         let this = Arc::new(Self {
             doc: Arc::downgrade(doc),
             store,
             chat_id,
+            epoch,
             // Legacy cursors can have holes. Don't certify one before the
             // one-time repair has established a contiguous applied prefix.
             cursor: AtomicU64::new(if verified { cursor } else { 0 }),
@@ -160,14 +169,23 @@ impl ChatPersistence {
                 .export_snapshot()
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {
-                    self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+                    // The transcript first: a crash between the two saves
+                    // then leaves a state doc no newer than its transcript.
+                    let transcript = doc.export_transcript_snapshot().map_err(|e| e.to_string())?;
+                    let transcript_len = transcript.as_ref().map_or(0, Vec::len);
+                    if let Some(transcript) = transcript {
+                        self.store
+                            .save_snapshot_with_cursor(
+                                &super::chat2_host::transcript_doc_id(&self.chat_id),
+                                &transcript,
+                                0,
+                                self.epoch,
+                            )
+                            .map_err(|e| e.to_string())?;
+                    }
+                    self.snapshot_bytes.store(bytes.len() + transcript_len, Ordering::Relaxed);
                     self.store
-                        .save_verified_snapshot_with_cursor(
-                            &self.chat_id,
-                            &bytes,
-                            cursor,
-                            super::chat2_host::CHAT2_DOC_EPOCH,
-                        )
+                        .save_verified_snapshot_with_cursor(&self.chat_id, &bytes, cursor, self.epoch)
                         .map_err(|e| e.to_string())
                 });
             match result {

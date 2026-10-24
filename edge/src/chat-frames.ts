@@ -46,7 +46,23 @@ export const FRAME = {
   /** `{headSeq}` — probe answer. */
   probeOk: 0x0a,
   /** `{code, message}` — recoverable rejection (socket stays open). */
-  error: 0x0b
+  error: 0x0b,
+
+  // chat3 transcript plane (docs/chat3-sync.md). gen-2 rooms never see these.
+  /** `{ord, idx, entry}` + item JSON — one host upsert inside a `POST /items`
+   * body (HTTP only: the response is the ack). */
+  itemPut: 0x10,
+  /** `{entry, ord, idx, op, at?}` + payload, both directions. `op: "part"`
+   * carries a part's full JSON, `op: "append"` the text appended after UTF-8
+   * offset `at`. Relayed to the other sockets and cached in memory while the
+   * part is open; never stored. */
+  live: 0x11,
+  /** `{ord, idx, entry, rev}` + item JSON — a stored row (page, change feed,
+   * or the live relay of a host upsert). */
+  item: 0x12,
+  /** `{headRev, more}` — end of a page (`more` = older rows exist) or of a
+   * change feed. Absent when a buffered response was truncated at its cap. */
+  itemsDone: 0x13
 } as const;
 
 export type FrameType = (typeof FRAME)[keyof typeof FRAME];

@@ -69,6 +69,7 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
       if (parts.length === 3 && parts[2] === "ws") return undefined;
       return "runner tokens cannot use this route";
     case "chat2":
+    case "chat3":
     case "blob":
       // Gated per chat on the registry's host field (runner-access.ts).
       return undefined;

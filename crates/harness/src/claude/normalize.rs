@@ -824,7 +824,7 @@ impl Normalizer {
                                 AgentEvent::ToolResult {
                                     id: b.tool_use_id.clone(),
                                     is_error: b.is_error.unwrap_or(false),
-                                    output: None,
+                                    output: b.tool_result_text(),
                                     diff: None,
                                 },
                             )
@@ -853,7 +853,9 @@ impl Normalizer {
                     .map(|b| AgentEvent::ToolResult {
                         id: b.tool_use_id.clone(),
                         is_error: b.is_error.unwrap_or(false),
-                        output: None,
+                        // Kept for gen-3 chats' stored outputs; the gen-2
+                        // fold still drops it.
+                        output: b.tool_result_text(),
                         diff: None,
                     })
                     .collect()
@@ -1217,6 +1219,24 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn tool_results_carry_their_text_output() {
+        let mut norm = Normalizer::new();
+        let frame = crate::claude::wire::parse_frame(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"line one\nline two"},{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":[{"type":"text","text":"boom"},{"type":"image","source":{}}]},{"type":"tool_result","tool_use_id":"t3"}]}}"#,
+        )
+        .expect("parses");
+        let outputs: Vec<Option<String>> = norm
+            .normalize(frame, false)
+            .into_iter()
+            .map(|ev| match ev {
+                AgentEvent::ToolResult { output, .. } => output,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(outputs, [Some("line one\nline two".into()), Some("boom".into()), None]);
     }
 
     #[test]

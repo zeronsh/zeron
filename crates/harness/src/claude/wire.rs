@@ -201,6 +201,27 @@ pub(crate) struct ContentBlock {
     pub tool_use_id: String,
     #[serde(default)]
     pub is_error: Option<bool>,
+    /// `tool_result` body: a string, or an array of content blocks.
+    #[serde(default)]
+    pub content: Value,
+}
+
+impl ContentBlock {
+    /// A `tool_result`'s text (string body, or its `text` blocks joined),
+    /// capped for the engine. `None` when it carried no text (images only).
+    pub(crate) fn tool_result_text(&self) -> Option<String> {
+        let text = match &self.content {
+            Value::String(text) => text.clone(),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        (!text.trim().is_empty()).then(|| crate::tool_output::cap_tool_output(&text))
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

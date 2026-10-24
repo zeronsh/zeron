@@ -70,9 +70,11 @@ pub(crate) fn registry_push_target(edge: &str, org_id: &str, device_id: &str) ->
     )
 }
 
-pub(crate) fn chat_ws(edge: &str, chat_id: &str, token: &str, device_id: &str) -> String {
+/// `room` is the generation's route prefix: `chat2`, or `chat3` (whose state
+/// log is the same relay, docs/chat3-sync.md).
+pub(crate) fn chat_ws(edge: &str, room: &str, chat_id: &str, token: &str, device_id: &str) -> String {
     format!(
-        "{}/chat2/{}/ws?token={}&device={}",
+        "{}/{room}/{}/ws?token={}&device={}",
         ws_base(edge),
         encode(chat_id),
         encode(token),
@@ -80,30 +82,45 @@ pub(crate) fn chat_ws(edge: &str, chat_id: &str, token: &str, device_id: &str) -
     )
 }
 
-pub(crate) fn chat_checkpoint(edge: &str, chat_id: &str) -> String {
+pub(crate) fn chat_checkpoint(edge: &str, room: &str, chat_id: &str) -> String {
     format!(
-        "{}/chat2/{}/checkpoint",
+        "{}/{room}/{}/checkpoint",
         edge.trim_end_matches('/'),
         encode(chat_id)
     )
 }
 
-pub(crate) fn chat_rows(edge: &str, chat_id: &str, after: u64, device_id: &str) -> String {
+pub(crate) fn chat_rows(edge: &str, room: &str, chat_id: &str, after: u64, device_id: &str) -> String {
     format!(
-        "{}/chat2/{}/rows?after={after}&device={}",
+        "{}/{room}/{}/rows?after={after}&device={}",
         edge.trim_end_matches('/'),
         encode(chat_id),
         encode(device_id)
     )
 }
 
-pub(crate) fn chat_push(edge: &str, chat_id: &str, batch_id: &str, device_id: &str) -> String {
+pub(crate) fn chat_push(edge: &str, room: &str, chat_id: &str, batch_id: &str, device_id: &str) -> String {
     format!(
-        "{}/chat2/{}/rows?batchId={}&device={}",
+        "{}/{room}/{}/rows?batchId={}&device={}",
         edge.trim_end_matches('/'),
         encode(chat_id),
         encode(batch_id),
         encode(device_id)
+    )
+}
+
+/// chat3 transcript plane: a page (`limit=…&before=…`) or the feed (`since=…`).
+pub(crate) fn chat3_items(edge: &str, chat_id: &str, query: &str) -> String {
+    format!("{}/chat3/{}/items?{query}", edge.trim_end_matches('/'), encode(chat_id))
+}
+
+/// chat3 full tool output for one part.
+pub(crate) fn chat3_output(edge: &str, chat_id: &str, part_id: &str) -> String {
+    format!(
+        "{}/chat3/{}/outputs/{}",
+        edge.trim_end_matches('/'),
+        encode(chat_id),
+        encode(part_id)
     )
 }
 
@@ -132,8 +149,20 @@ mod tests {
             "wss://e.sh/registry/org_1/ws?token=a.b&device=ios-1"
         );
         assert_eq!(
-            chat_ws("https://e.sh", "c1", "t@o", "ios-1"),
+            chat_ws("https://e.sh", "chat2", "c1", "t@o", "ios-1"),
             "wss://e.sh/chat2/c1/ws?token=t%40o&device=ios-1"
+        );
+        assert_eq!(
+            chat_ws("https://e.sh", "chat3", "c1", "t", "ios-1"),
+            "wss://e.sh/chat3/c1/ws?token=t&device=ios-1"
+        );
+        assert_eq!(
+            chat3_items("https://e.sh", "c1", "limit=200"),
+            "https://e.sh/chat3/c1/items?limit=200"
+        );
+        assert_eq!(
+            chat3_output("https://e.sh", "c1", "toolu:1"),
+            "https://e.sh/chat3/c1/outputs/toolu%3A1"
         );
         assert_eq!(
             registry_rows("https://e.sh", "o", "d", 0),

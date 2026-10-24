@@ -580,6 +580,19 @@ fn decode_visual_assets(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ChatIdParams {
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLabsFlagParams {
+    flag: String,
+    on: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FetchToolBlobParams {
     /// Doc-resident sidecar ref (`{chatId}/{partId}` or `…​.diff`).
     blob_ref: String,
@@ -2229,20 +2242,27 @@ fn doc_messages_stream(
                     }
                     _ => None,
                 };
+                let history_more = current.history_more;
+                let history_changed = prev.as_ref().is_some_and(|p| p.history_more != history_more);
                 prev = Some(current);
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
                 let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
+                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() && !history_changed {
                     continue;
                 }
                 previous_usage = usage;
-                let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
                     replay_baseline,
                 })
                 .ok()?;
+                // gen 3 (docs/chat3-sync.md): older history exists in the
+                // room. Sent while true and once when it turns false.
+                if history_more || history_changed {
+                    value["historyMore"] = serde_json::Value::Bool(history_more);
+                }
                 return Some((value, (rx, prev, doc, previous_usage, opening_baseline)));
             }
         },
@@ -2735,9 +2755,11 @@ impl RpcService for EngineRpc {
                 chat.last_seen_at = None;
                 chat.harness_session_id = None;
                 chat.harness_session_cwd = None;
-                chat.room_gen = Some(2);
-                // Missing rows open on chat2. Persist history before publishing
-                // the registry row so a crash cannot leave a discoverable empty fork.
+                // The fork's doc opens below before its row exists, so its
+                // generation is the one an absent row assumes: the flag's.
+                chat.room_gen = Some(self.workspace.new_chat_room_gen());
+                // Persist history before publishing the registry row so a
+                // crash cannot leave a discoverable empty fork.
                 let target = self.doc_host.open(&chat.id).map_err(failed)?;
                 let existing = target
                     .doc()
@@ -4599,6 +4621,31 @@ impl RpcService for EngineRpc {
                     "checkedInteractions": report.interactions,
                     "printed": report.logs,
                 }))
+            }
+            methods::FETCH_EARLIER_MESSAGES => {
+                let p: ChatIdParams = parse_params(params)?;
+                let more = self
+                    .doc_host
+                    .load_earlier_messages(&p.chat_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "more": more }))
+            }
+            methods::GET_LABS_FLAGS => {
+                let ws = &self.workspace;
+                let flags: serde_json::Map<String, serde_json::Value> = zeron_doc::LABS_FLAGS
+                    .iter()
+                    .map(|flag| (flag.to_string(), serde_json::Value::Bool(ws.labs_flag(flag))))
+                    .collect();
+                RpcReply::value(&flags)
+            }
+            methods::SET_LABS_FLAG => {
+                let p: SetLabsFlagParams = parse_params(params)?;
+                let changed = self
+                    .workspace
+                    .set_labs_flag(&p.flag, p.on)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "changed": changed }))
             }
             methods::FETCH_TOOL_BLOB => {
                 let p: FetchToolBlobParams = parse_params(params)?;

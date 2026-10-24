@@ -667,7 +667,7 @@ impl Client {
             )
             .await
             .map_err(Failure::into_error)?;
-        let chat = Chat {
+        let mut chat = Chat {
             id: chat_id.clone(),
             device_id: session.device_id,
             title: title.filter(|t| !t.trim().is_empty()),
@@ -691,7 +691,11 @@ impl Client {
             room_gen: Some(2),
             parent_chat_id: None,
         };
-        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        self.inner.registry_write(|doc| {
+            // Born on the generation the user's labs flag names (chat3 when on).
+            chat.room_gen = Some(doc.new_chat_room_gen());
+            doc.upsert_chat(&chat)
+        })?;
         Ok(chat_id)
     }
 

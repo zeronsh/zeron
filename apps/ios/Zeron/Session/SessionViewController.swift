@@ -75,7 +75,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // Hidden while following (the runway glide and tail spring travel).
         // An error card's "Log in": that provider's sign-in, started at once.
         list.onAction = { [weak self] action in
-            guard let self, action == "sign-in", let target = self.source.signInTarget() else { return }
+            guard let self else { return }
+            // A chat3 transcript's first row: page older history in.
+            if action == "load-earlier" {
+                Task { await self.source.loadEarlier() }
+                return
+            }
+            guard action == "sign-in", let target = self.source.signInTarget() else { return }
             let accounts = AgentAccountsViewController(app: self.app, target: target, signIn: true)
             let nav = UINavigationController(rootViewController: accounts)
             if let sheet = nav.sheetPresentationController {

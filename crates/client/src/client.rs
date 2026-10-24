@@ -754,7 +754,7 @@ impl Client {
                 (device_id.clone(), None, cwd)
             }
         };
-        let chat = Chat {
+        let mut chat = Chat {
             id,
             device_id,
             title: new.title.filter(|t| !t.trim().is_empty()),
@@ -776,7 +776,11 @@ impl Client {
             parent_chat_id: None,
         };
         let id = chat.id.clone();
-        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        self.inner.registry_write(|doc| {
+            // Born on the generation the user's labs flag names (chat3 when on).
+            chat.room_gen = Some(doc.new_chat_room_gen());
+            doc.upsert_chat(&chat)
+        })?;
         Ok(id)
     }
 
@@ -1143,13 +1147,13 @@ impl Client {
         if let Some(core) = self.inner.session_core(chat_id) {
             return Ok(SessionHandle { core });
         }
-        if self.inner.workspace.chat(chat_id).is_none() {
+        let Some(chat) = self.inner.workspace.chat(chat_id) else {
             return Err(ClientError::NotFound(chat_id.to_owned()));
-        }
+        };
         let (doc, cursor, hydrated) = match self.inner.backend() {
             Backend::Demo(demo) => (demo.session_doc(chat_id)?, 0, true),
             Backend::Live(live) => {
-                let local = crate::live::room::load_local(&live.store, chat_id);
+                let local = crate::live::room::load_local(&live.store, chat_id, chat.room_generation());
                 (local.doc, local.cursor, local.had_content)
             }
         };

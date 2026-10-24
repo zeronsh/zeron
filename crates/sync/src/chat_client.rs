@@ -150,6 +150,9 @@ pub trait ChatDocSink: Send + Sync + 'static {
     fn contains_frontier(&self, frontier: &[u8]) -> bool;
     /// An own-write ack advanced the cursor with no content change.
     fn advance_cursor(&self, cursor: u64);
+    /// A chat3 transcript-plane frame (`item`, `live`, `itemsDone`) arrived
+    /// on this socket (docs/chat3-sync.md). gen-2 sinks never see one.
+    fn apply_transcript_frame(&self, _kind: u8, _header: &serde_json::Value, _payload: &[u8]) {}
 }
 
 /// `GET /chat2/{chatId}/checkpoint` over HTTP. Implementations should resume
@@ -460,6 +463,9 @@ pub struct ChatClient {
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
     presence_out: mpsc::Sender<(i64, Vec<u8>)>,
+    /// chat3 live frames, already encoded. Best effort like presence: a full
+    /// channel or a dropped socket loses a frame, never a stored row.
+    live_out: mpsc::Sender<Vec<u8>>,
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
     offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -582,6 +588,7 @@ impl ChatClient {
         let (probe_tx, probe_rx) = mpsc::channel(1);
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
+        let (live_tx, live_rx) = mpsc::channel(64);
         let shared = Arc::new(Mutex::new(Shared {
             cursor: initial_cursor,
             pending: sink
@@ -612,6 +619,7 @@ impl ChatClient {
             probe_rx,
             redial_rx,
             presence_rx,
+            live_rx,
             flags: flags.clone(),
             resumed: false,
             cursor_amnesty_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -632,6 +640,7 @@ impl ChatClient {
             probe: probe_tx,
             redial: redial_tx,
             presence_out: presence_tx,
+            live_out: live_tx,
             flags,
             task: Some(task),
             offline_task,
@@ -696,6 +705,12 @@ impl ChatClient {
     /// positions etc. — relayed verbatim, never stored).
     pub fn send_presence(&self, at: i64, payload: Vec<u8>) {
         let _ = self.presence_out.try_send((at, payload));
+    }
+
+    /// Send one encoded chat3 live frame on the socket (dropped when the
+    /// socket is down or the channel is full — live frames are best effort).
+    pub fn send_live(&self, frame: Vec<u8>) {
+        let _ = self.live_out.try_send(frame);
     }
 
     /// Liveness hint: probe the room now (deadline-checked).
@@ -842,6 +857,7 @@ struct Actor {
     probe_rx: mpsc::Receiver<()>,
     redial_rx: mpsc::Receiver<()>,
     presence_rx: mpsc::Receiver<(i64, Vec<u8>)>,
+    live_rx: mpsc::Receiver<Vec<u8>>,
     flags: Arc<Flags>,
     /// Once-per-actor cursor amnesty (see run_session): a cursor above the
     /// room's checkpoint is re-verified by refetching the rows above it.
@@ -1385,6 +1401,13 @@ impl Actor {
                         }
                     }
                 }
+                live = self.live_rx.recv() => {
+                    if let Some(frame) = live
+                        && pipe.tx.send(frame).await.is_err()
+                    {
+                        return SessionEnd::Reconnect;
+                    }
+                }
                 _ = self.probe_rx.recv() => {
                     if !self.send_probe(&mut pipe, &mut probe_deadline).await {
                         return SessionEnd::Reconnect;
@@ -1822,6 +1845,10 @@ impl Actor {
             }
             frame_type::PRESENCE => {
                 let _ = self.events.send(ChatEvent::Presence);
+            }
+            frame_type::ITEM | frame_type::LIVE | frame_type::ITEMS_DONE => {
+                self.sink
+                    .apply_transcript_frame(frame.kind, &frame.header, &frame.payload);
             }
             frame_type::ROWS_DONE => {
                 let mut shared = lock(&self.shared);

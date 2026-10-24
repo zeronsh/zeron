@@ -35,6 +35,10 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
+ *   /chat3/:chatId/{ws,rows,checkpoint,stats,reset} — chat3 room: the chat2
+ *                                       log for state (docs/chat3-sync.md)
+ *   GET|POST /chat3/:chatId/items      — transcript plane: page / feed / host upsert
+ *   GET|PUT  /chat3/:chatId/outputs/:partId — full tool output, fetched on expand
  *
  * Cloud device + credential vault (docs/design/cloud-device.md):
  *   POST /runner/enroll | /runner/token — pre-bearer runner identity
@@ -224,7 +228,7 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
-    if (parts[0] === "chat2" && parts[1] && ID_RE.test(parts[1])) {
+    if ((parts[0] === "chat2" || parts[0] === "chat3") && parts[1] && ID_RE.test(parts[1])) {
       // A Cloud runner reaches only the chats its device hosts.
       const notHost = await runnerChatGate(env, auth, parts[1]);
       if (notHost) return notHost;

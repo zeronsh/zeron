@@ -384,28 +384,72 @@ pub struct ProviderSessionMark {
 }
 
 /// A session doc handle: typed access over a LoroDoc with the schema above.
+///
+/// Two Loro handles: `doc` holds `meta`, `commands` and `queue` (the state
+/// every device co-edits and the chat2 log syncs); `transcript` holds
+/// `messages`. For gen ≤ 2 chats they are the SAME doc (a reference clone),
+/// so nothing about those chats changes. A gen-3 chat splits them
+/// (docs/chat3-sync.md): the transcript doc is local-only, written by the
+/// host and filled on readers from the room's transcript plane.
 pub struct SessionDoc {
     doc: LoroDoc,
+    transcript: LoroDoc,
+    split: bool,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        let transcript = doc.clone();
+        Self {
+            doc,
+            transcript,
+            split: false,
+        }
+    }
+
+    /// A gen-3 doc: the synced state doc plus its local transcript doc.
+    pub fn from_split(doc: LoroDoc, transcript: LoroDoc) -> Self {
+        Self {
+            doc,
+            transcript,
+            split: true,
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
     pub fn init(chat_id: &str) -> Result<Self, DocError> {
+        Ok(Self::from_doc(Self::init_state(chat_id)?))
+    }
+
+    /// [`Self::init`] for a gen-3 chat: the same `meta`, an empty transcript.
+    pub fn init_split(chat_id: &str) -> Result<Self, DocError> {
+        Ok(Self::from_split(Self::init_state(chat_id)?, LoroDoc::new()))
+    }
+
+    fn init_state(chat_id: &str) -> Result<LoroDoc, DocError> {
         let doc = LoroDoc::new();
         let meta = doc.get_map("meta");
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(doc)
     }
 
+    /// The synced state doc (`meta`, `commands`, `queue`; also `messages`
+    /// unless [`Self::is_split`]). Sync, checkpoints and imports use this.
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
+    }
+
+    /// The doc holding `messages`: [`Self::doc`] itself unless split.
+    pub fn transcript_doc(&self) -> &LoroDoc {
+        &self.transcript
+    }
+
+    /// True for a gen-3 doc whose transcript lives in its own Loro doc.
+    pub fn is_split(&self) -> bool {
+        self.split
     }
 
     /// A single atomic value prevents tokens and capacity from tearing on sync.
@@ -526,29 +570,37 @@ impl SessionDoc {
     /// Insert a complete message entry (user/system messages, command-side inserts).
     /// Streaming assistant entries go through [`SegmentWriter`].
     pub fn push_message(&self, entry: &SessionMessageEntry) -> Result<(), DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
+        let ord = self.split.then(|| ord_between(&messages, messages.len()));
         let map = messages.push_container(LoroMap::new())?;
         write_entry_scalar_fields(&map, entry)?;
+        if let Some(ord) = ord {
+            map.insert("ord", ord)?;
+        }
         let parts = map.insert_container("parts", LoroList::new())?;
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.transcript.commit();
         Ok(())
     }
 
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
     pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         let at = messages.len().saturating_sub(from_end);
+        let ord = self.split.then(|| ord_between(&messages, at));
         let map = messages.insert_container(at, LoroMap::new())?;
         write_entry_scalar_fields(&map, entry)?;
+        if let Some(ord) = ord {
+            map.insert("ord", ord)?;
+        }
         let parts = map.insert_container("parts", LoroList::new())?;
         for part in &entry.parts {
             push_part(&parts, part)?;
         }
-        self.doc.commit();
+        self.transcript.commit();
         Ok(())
     }
 
@@ -563,7 +615,7 @@ impl SessionDoc {
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
         let messages = self
-            .doc
+            .transcript
             .get_list("messages")
             .get_deep_value()
             .to_json_value();
@@ -593,7 +645,7 @@ impl SessionDoc {
         max_parts: usize,
     ) -> Result<Vec<SessionMessageEntry>, DocError> {
         use loro::{Container, ValueOrContainer};
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         let mut remaining = max_parts;
         let mut entries = Vec::new();
         for index in (0..messages.len()).rev() {
@@ -736,7 +788,7 @@ impl SessionDoc {
         message_id: &str,
         status: MessageStatus,
     ) -> Result<bool, DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         for i in 0..messages.len() {
             if let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
                 messages.get(i)
@@ -747,7 +799,7 @@ impl SessionDoc {
                 );
                 if id_matches {
                     map.insert("status", status_str(status))?;
-                    self.doc.commit();
+                    self.transcript.commit();
                     return Ok(true);
                 }
             }
@@ -764,7 +816,7 @@ impl SessionDoc {
         part_id: &str,
         message: &str,
     ) -> Result<bool, DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
                 messages.get(i)
@@ -802,7 +854,7 @@ impl SessionDoc {
                     message: message.to_string(),
                 },
             )?;
-            self.doc.commit();
+            self.transcript.commit();
             return Ok(true);
         }
         Ok(false)
@@ -814,7 +866,7 @@ impl SessionDoc {
     /// question whose run already died — no fold owns the entry anymore.
     /// Returns `false` when no such part exists.
     pub fn resolve_input(&self, request_id: &str) -> Result<bool, DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
                 messages.get(i)
@@ -842,7 +894,7 @@ impl SessionDoc {
                 );
                 if is_input && id_matches {
                     part.insert("resolved", true)?;
-                    self.doc.commit();
+                    self.transcript.commit();
                     return Ok(true);
                 }
             }
@@ -862,7 +914,7 @@ impl SessionDoc {
         status: Option<&str>,
         tail: Option<&str>,
     ) -> Result<bool, DocError> {
-        let messages = self.doc.get_list("messages");
+        let messages = self.transcript.get_list("messages");
         for i in (0..messages.len()).rev() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
                 messages.get(i)
@@ -914,7 +966,7 @@ impl SessionDoc {
                     if let Some(t) = tail {
                         part.insert("subagentTail", t)?;
                     }
-                    self.doc.commit();
+                    self.transcript.commit();
                     return Ok(true);
                 }
             }
@@ -927,6 +979,56 @@ impl SessionDoc {
         self.doc
             .export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
+    }
+
+    /// The local transcript doc's snapshot — `None` unless split (an unsplit
+    /// doc's transcript is already inside [`Self::export_snapshot`]).
+    pub fn export_transcript_snapshot(&self) -> Result<Option<Vec<u8>>, DocError> {
+        if !self.split {
+            return Ok(None);
+        }
+        self.transcript
+            .export(ExportMode::Snapshot)
+            .map(Some)
+            .map_err(|e| DocError::Schema(e.to_string()))
+    }
+}
+
+/// The `ord` for an entry about to be inserted at list position `at`
+/// (docs/chat3-sync.md). Appends take `max(last + 1, now_ms)`: a wall-clock
+/// floor means a host whose local transcript is behind the room (a moved or
+/// restored host) still appends AFTER every existing row instead of reusing
+/// one's key, so it never has to block on catching up first. The
+/// provider-switch seam's insert takes the midpoint of its neighbours.
+/// Written once and never moved, so a row's key is stable for its whole life.
+fn ord_between(messages: &LoroList, at: usize) -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    ord_between_at(messages, at, now)
+}
+
+fn ord_between_at(messages: &LoroList, at: usize, now: f64) -> f64 {
+    let ord_at = |index: usize| match messages.get(index) {
+        Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => entry_ord(&map),
+        _ => None,
+    }
+    .unwrap_or(index as f64 + 1.0);
+    let before = if at == 0 { 0.0 } else { ord_at(at - 1) };
+    if at >= messages.len() {
+        (before + 1.0).max(now)
+    } else {
+        (before + ord_at(at)) / 2.0
+    }
+}
+
+/// A split doc's stamped entry position (absent on unsplit docs).
+pub(crate) fn entry_ord(map: &LoroMap) -> Option<f64> {
+    match map.get("ord") {
+        Some(loro::ValueOrContainer::Value(LoroValue::Double(ord))) => Some(ord),
+        Some(loro::ValueOrContainer::Value(LoroValue::I64(ord))) => Some(ord as f64),
+        _ => None,
     }
 }
 
@@ -965,6 +1067,71 @@ fn status_str(status: MessageStatus) -> &'static str {
 /// Append one part map to a parts list; text bodies become LoroText containers.
 fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     let map = parts.push_container(LoroMap::new())?;
+    fill_part_map(&map, part)
+}
+
+/// [`push_part`] at list position `at` (a transcript-plane reader prepending
+/// an older page's parts).
+pub(crate) fn insert_part(parts: &LoroList, at: usize, part: &MessagePart) -> Result<(), DocError> {
+    let map = parts.insert_container(at, LoroMap::new())?;
+    fill_part_map(&map, part)
+}
+
+pub(crate) fn push_part_pub(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
+    push_part(parts, part)
+}
+
+/// Replace a part map's content in place so it reads exactly as `part`:
+/// fields `part` lacks are deleted, text bodies are diffed into their
+/// LoroText. A kind change can't be expressed in place — the caller replaces
+/// the map. Used by transcript-plane readers, whose doc is local-only.
+pub(crate) fn overwrite_part(map: &LoroMap, part: &MessagePart) -> Result<(), DocError> {
+    let next = serde_json::to_value(to_doc_part(part)?)?;
+    let next = next.as_object().cloned().unwrap_or_default();
+    for key in map.keys() {
+        if !next.contains_key(key.as_str()) {
+            map.delete(&key)?;
+        }
+    }
+    for (key, value) in &next {
+        if key == "text" || key == "reasoning" {
+            let text = value.as_str().unwrap_or_default();
+            match map.get(key) {
+                Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) => {
+                    if t.to_string() != text {
+                        t.update(text, Default::default())
+                            .map_err(|e| DocError::Schema(e.to_string()))?;
+                    }
+                }
+                _ => {
+                    let t = map.insert_container(key, LoroText::new())?;
+                    t.insert(0, text)?;
+                }
+            }
+            continue;
+        }
+        let current = map.get(key).map(|v| v.get_deep_value().to_json_value());
+        if current.as_ref() != Some(value) {
+            map.insert(key, loro_value_from_json(value))?;
+        }
+    }
+    Ok(())
+}
+
+/// Decode one part map's deep JSON (strict, then salvage) — the per-part twin
+/// of [`decode_entry_json`] for transcript-plane rows.
+pub(crate) fn part_from_json(v: &serde_json::Value, entry_id: &str, ix: usize) -> Option<MessagePart> {
+    match serde_json::from_value::<DocPartJson>(v.clone()) {
+        Ok(p) => Some(from_doc_part(p)),
+        Err(_) => salvage_part(v, entry_id, ix),
+    }
+}
+
+pub(crate) fn write_entry_fields_pub(map: &LoroMap, entry: &SessionMessageEntry) -> Result<(), DocError> {
+    write_entry_scalar_fields(map, entry)
+}
+
+fn fill_part_map(map: &LoroMap, part: &MessagePart) -> Result<(), DocError> {
     let doc_part = to_doc_part(part)?;
     map.insert("id", doc_part.id.as_str())?;
     map.insert("kind", doc_part.kind.as_str())?;
@@ -1277,8 +1444,9 @@ impl<'a> SegmentWriter<'a> {
         device_id: &str,
         created_at: i64,
     ) -> Result<Self, DocError> {
-        let messages = doc.doc.get_list("messages");
+        let messages = doc.transcript.get_list("messages");
         let entry_index = messages.len();
+        let ord = doc.split.then(|| ord_between(&messages, entry_index));
         let map = messages.push_container(LoroMap::new())?;
         write_entry_scalar_fields(
             &map,
@@ -1293,8 +1461,11 @@ impl<'a> SegmentWriter<'a> {
                 duration_ms: None,
             },
         )?;
+        if let Some(ord) = ord {
+            map.insert("ord", ord)?;
+        }
         map.insert_container("parts", LoroList::new())?;
-        doc.doc.commit();
+        doc.transcript.commit();
         Ok(Self {
             doc,
             entry_index,
@@ -1319,7 +1490,7 @@ impl<'a> SegmentWriter<'a> {
     /// the seam that lets a sink hold `(entry_index, written)` between
     /// coalesced flushes instead of a doc-borrowing writer.
     pub fn resume(doc: &'a SessionDoc, entry_index: usize, written: Vec<MessagePart>) -> Self {
-        let created_at = match doc.doc.get_list("messages").get(entry_index) {
+        let created_at = match doc.transcript.get_list("messages").get(entry_index) {
             Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => {
                 match map.get("createdAt") {
                     Some(loro::ValueOrContainer::Value(LoroValue::I64(ms))) => ms,
@@ -1343,7 +1514,7 @@ impl<'a> SegmentWriter<'a> {
     }
 
     fn entry_map(&self) -> Result<LoroMap, DocError> {
-        let messages = self.doc.doc.get_list("messages");
+        let messages = self.doc.transcript.get_list("messages");
         match messages.get(self.entry_index) {
             Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => Ok(map),
             _ => Err(DocError::Schema("streaming entry map missing".into())),
@@ -1422,7 +1593,7 @@ impl<'a> SegmentWriter<'a> {
         }
 
         if dirty {
-            self.doc.doc.commit();
+            self.doc.transcript.commit();
         }
         Ok(())
     }
@@ -1440,7 +1611,7 @@ impl<'a> SegmentWriter<'a> {
         if self.duration_from > 0 {
             map.insert("durationMs", (now - self.duration_from).max(0))?;
         }
-        self.doc.doc.commit();
+        self.doc.transcript.commit();
         Ok(())
     }
 }

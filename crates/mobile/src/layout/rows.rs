@@ -52,7 +52,14 @@ pub struct TranscriptInput {
     pub working: bool,
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
+    /// gen 3 (docs/chat3-sync.md): older history exists in the room; the
+    /// first row offers to load it.
+    pub history_more: bool,
 }
+
+/// The "Load earlier messages" row's action (the platform asks its session
+/// source to page older history in).
+pub const LOAD_EARLIER_ACTION: &str = "load-earlier";
 
 pub(crate) fn row_key(id: &str) -> u64 {
     // FNV-1a: stable across launches so platform caches may persist keys.
@@ -104,6 +111,9 @@ pub(crate) enum Content {
     Working { since_ms: Option<i64>, streaming: bool },
     /// An agent visual: its height comes from its worker.
     Visual(Arc<crate::visual::VisualSlot>),
+    /// gen 3: a centered "Load earlier messages" button above the oldest
+    /// row held.
+    Earlier,
 }
 
 /// A width-independent row: identity, top gap class and prepared content.
@@ -155,6 +165,7 @@ pub(crate) mod geom {
     pub const NOTICE_PAD: f32 = 12.0;
     pub const NOTICE_BUTTON: f32 = 32.0;
     pub const NOTICE_BUTTON_W: f32 = 80.0;
+    pub const EARLIER_BUTTON_W: f32 = 200.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
     pub const VISUAL_LOADING: f32 = 18.0;
@@ -197,6 +208,7 @@ pub(crate) struct RowBuilder {
     entries: HashMap<String, EntryState>,
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
+    earlier: Option<Arc<RowCore>>,
     pub expanded: HashSet<u64>,
     pub collapsed: HashSet<u64>,
     /// Per-tool inline detail overrides (row detail key → open).
@@ -220,6 +232,23 @@ impl RowBuilder {
     /// Rows for `input`, reusing every row whose source is unchanged.
     pub fn build(&mut self, ctx: &mut Ctx, input: &TranscriptInput) -> Vec<Placed> {
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
+        if input.history_more && !input.entries.is_empty() {
+            let core = self
+                .earlier
+                .get_or_insert_with(|| {
+                    Arc::new(RowCore {
+                        key: row_key("#earlier"),
+                        version: next_version(),
+                        // A plain row kind: platforms style it like a chip.
+                        kind: RowKind::Chip,
+                        entry_id: Arc::from(""),
+                        content: Content::Earlier,
+                        copy_text: String::new(),
+                    })
+                })
+                .clone();
+            out.push(Placed { core, gap: Gap::First });
+        }
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
         let mut prev_role: Option<MessageRole> = None;
@@ -907,6 +936,21 @@ pub(crate) fn place_row(
             }
             h
         }
+        Content::Earlier => {
+            let (bw, bh) = (px.v(EARLIER_BUTTON_W), px.v(NOTICE_BUTTON));
+            let h = bh + px.v(8.0);
+            if let Some(out) = out {
+                out.widget(
+                    WidgetKind::Action {
+                        action: LOAD_EARLIER_ACTION.into(),
+                        label: "Load earlier messages".into(),
+                    },
+                    (x + (cw - bw).max(0.0) / 2.0, top, bw.min(cw), bh),
+                    None,
+                );
+            }
+            h
+        }
         Content::Working { since_ms, streaming } => {
             let h = px.v(WORKING);
             if let Some(out) = out {
@@ -1056,6 +1100,6 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Notice(n) => n.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
-        Content::Working { .. } | Content::Visual(_) => 0,
+        Content::Working { .. } | Content::Visual(_) | Content::Earlier => 0,
     }
 }

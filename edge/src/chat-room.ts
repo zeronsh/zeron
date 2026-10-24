@@ -31,7 +31,25 @@ import {
   setMeta
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
+import {
+  DEFAULT_PAGE_LIMIT,
+  ensureTranscript,
+  getOutput,
+  headRev,
+  ITEMS_BODY_CAP,
+  itemsPage,
+  itemsSince,
+  MAX_OUTPUT_BYTES,
+  PART_RE,
+  parseItemKey,
+  putItem,
+  putOutput,
+  resetTranscript,
+  transcriptStats,
+  validateItemKey
+} from "./chat-transcript";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { meterSql, newSqlMeter, type SqlMeter } from "./sql-meter";
 import {
   ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
   pendingChatWake, queueChatWake, retryChatWake, validWakeRoute
@@ -52,6 +70,20 @@ const PRESENCE_TTL_MS = 30_000;
 const QUOTA_WINDOW_MS = 60_000;
 const QUOTA_MAX_PUSHES = 300;
 const QUOTA_MAX_BYTES = 8 * 1024 * 1024;
+/** chat3: one `POST /items` batch (the host sends ≤ 4 MiB). */
+const MAX_ITEMS_BODY_BYTES = 8 * 1024 * 1024;
+/** chat3 live cache bounds: one open part's frames, and the room's total.
+ * Past them the oldest part is dropped — a viewer then waits for the next
+ * `part` frame or the stored row, which is all a dropped live frame costs. */
+const LIVE_PART_MAX_BYTES = 1024 * 1024;
+const LIVE_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
+/** One live frame's payload (a part's JSON or an append). */
+const MAX_LIVE_PAYLOAD_BYTES = 256 * 1024;
+
+interface LivePart {
+  frames: Uint8Array[];
+  bytes: number;
+}
 
 interface SocketState {
   userId: string;
@@ -78,6 +110,18 @@ export class ChatRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly env: Env;
   private readonly blobs: BlobStore;
+  /** Every statement this room runs, metered with the runtime's own billing
+   * counters (sql-meter.ts) and reported in `/stats`. */
+  private readonly sql: SqlStorage;
+  private readonly meter: SqlMeter = newSqlMeter();
+  /** chat3 tables exist (created on first transcript use: gen-2 rooms never
+   * pay for them). */
+  private transcriptReady = false;
+  /** chat3 open parts, `ord:idx` → the live frames that rebuild it (a `part`
+   * then its `append`s). Memory-only: a late viewer gets them after its
+   * backfill; a stored row for the key supersedes and drops them. */
+  private readonly live = new Map<string, LivePart>();
+  private liveBytes = 0;
   /** device → last presence beat (epoch ms). Memory-only by construction. */
   private readonly presence = new Map<string, number>();
   /** device → rolling push quota window. Memory-only. */
@@ -87,9 +131,10 @@ export class ChatRoom implements DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    ensureChatLog(ctx.storage.sql);
-    ensureChatWakes(ctx.storage.sql);
-    this.blobs = createBlobStore(ctx.storage.sql);
+    this.sql = meterSql(ctx.storage.sql, this.meter);
+    ensureChatLog(this.sql);
+    ensureChatWakes(this.sql);
+    this.blobs = createBlobStore(this.sql);
     // Runtime-answered keepalive; proves nothing about this DO's health.
     // Clients judge liveness by probe frames (same caveat as RegistryRoom).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -102,7 +147,7 @@ export class ChatRoom implements DurableObject {
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
 
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const owner = getMeta(sql, "owner");
 
     if (url.pathname === "/ws") {
@@ -314,6 +359,89 @@ export class ChatRoom implements DurableObject {
       });
     }
 
+    // ── chat3 transcript plane (docs/chat3-sync.md) ─────────────────────────
+    if (url.pathname === "/items" && request.method === "POST") {
+      return this.postItems(request, url);
+    }
+
+    if (url.pathname === "/items" && request.method === "GET") {
+      this.ensureTranscriptTables();
+      const frames: Uint8Array[] = [];
+      let bodyBytes = 0;
+      let truncated = false;
+      const add = (frame: Uint8Array): boolean => {
+        bodyBytes += 4 + frame.length;
+        if (bodyBytes > ITEMS_BODY_CAP) {
+          truncated = true;
+          return false;
+        }
+        frames.push(frame);
+        return true;
+      };
+      const itemFrame = (item: { ord: number; idx: number; entry: string; rev: number; bytes: Uint8Array }) =>
+        encodeFrame(FRAME.item, { ord: item.ord, idx: item.idx, entry: item.entry, rev: item.rev }, item.bytes);
+      // The head is read BEFORE the rows: a write landing mid-response then
+      // has a rev above it, so the reader's next feed still fetches it.
+      const head = headRev(sql);
+      let more = false;
+      const sinceRaw = url.searchParams.get("since");
+      if (sinceRaw !== null) {
+        const since = Number(sinceRaw);
+        if (!Number.isInteger(since) || since < 0) return json({ error: "bad_since" }, 400);
+        for (const item of itemsSince(sql, since)) {
+          if (!add(itemFrame(item))) break;
+        }
+      } else {
+        const beforeRaw = url.searchParams.get("before");
+        const before = beforeRaw === null ? undefined : parseItemKey(beforeRaw);
+        if (beforeRaw !== null && before === undefined) return json({ error: "bad_before" }, 400);
+        const limitRaw = Number(url.searchParams.get("limit") ?? DEFAULT_PAGE_LIMIT);
+        const page = itemsPage(sql, before, Number.isFinite(limitRaw) ? limitRaw : DEFAULT_PAGE_LIMIT);
+        more = page.more;
+        for (const item of page.items) {
+          if (!add(itemFrame(item))) break;
+        }
+      }
+      // Open parts ride every read so an HTTP-only viewer (or one that joined
+      // mid-stream) sees in-progress text without a socket.
+      if (!truncated) {
+        for (const part of this.live.values()) {
+          for (const frame of part.frames) if (!add(frame)) break;
+          if (truncated) break;
+        }
+      }
+      if (!truncated) frames.push(encodeFrame(FRAME.itemsDone, { headRev: head, more }));
+      return new Response(lengthPrefixed(frames), {
+        headers: { "content-type": "application/octet-stream" }
+      });
+    }
+
+    if (url.pathname.startsWith("/outputs/")) {
+      const part = decodeURIComponent(url.pathname.slice("/outputs/".length));
+      if (!PART_RE.test(part)) return json({ error: "bad_part" }, 400);
+      this.ensureTranscriptTables();
+      if (request.method === "PUT") {
+        const declared = Number(request.headers.get("content-length") ?? "0");
+        if (declared > MAX_OUTPUT_BYTES) return json({ error: "too_large" }, 413);
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (body.byteLength > MAX_OUTPUT_BYTES) return json({ error: "too_large" }, 413);
+        putOutput(sql, part, body);
+        return json({ ok: true, bytes: body.byteLength });
+      }
+      if (request.method === "GET") {
+        const bytes = getOutput(sql, part);
+        if (!bytes) return json({ error: "not_found" }, 404);
+        return new Response(bytes, {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "content-length": String(bytes.byteLength),
+            // Outputs are written once, when the tool settles.
+            "cache-control": "private, max-age=300"
+          }
+        });
+      }
+    }
+
     if (url.pathname === "/stats" && request.method === "GET") {
       this.sweepPresence();
       return json({
@@ -326,7 +454,13 @@ export class ChatRoom implements DurableObject {
           string,
           PushOutcome
         >,
-        lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0")
+        lastBackupSeq: Number(getMeta(sql, "backupSeq") ?? "0"),
+        // What this DO instance has cost since it last started, in the
+        // runtime's own billing units (in memory; resets on eviction).
+        billing: { ...this.meter },
+        ...(this.hasTranscriptTables()
+          ? { transcript: { ...transcriptStats(sql), liveParts: this.live.size, liveBytes: this.liveBytes } }
+          : {})
       });
     }
 
@@ -338,6 +472,9 @@ export class ChatRoom implements DurableObject {
       sql.exec("DELETE FROM meta");
       sql.exec("DELETE FROM blobs");
       sql.exec("DELETE FROM chat_wake");
+      if (this.hasTranscriptTables()) resetTranscript(sql);
+      this.live.clear();
+      this.liveBytes = 0;
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "chat room reset");
@@ -382,7 +519,10 @@ export class ChatRoom implements DurableObject {
         this.handlePresence(ws, state, frame.header, frame.payload);
         return;
       case FRAME.probe:
-        send(ws, FRAME.probeOk, { headSeq: headSeq(this.ctx.storage.sql) });
+        send(ws, FRAME.probeOk, { headSeq: headSeq(this.sql) });
+        return;
+      case FRAME.live:
+        this.handleLive(ws, state, frame.header, frame.payload, new Uint8Array(message));
         return;
       default:
         send(ws, FRAME.error, { code: "bad_frame", message: `unexpected type ${frame.type}` });
@@ -403,7 +543,7 @@ export class ChatRoom implements DurableObject {
     }
     state.ready = true;
     ws.serializeAttachment(state);
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const stats = logStats(sql);
     const frontier = this.blobs.get(FRONTIER_BLOB) ?? new Uint8Array(0);
     // Metadata + frontier only — the CLIENT decides what to load next
@@ -431,7 +571,7 @@ export class ChatRoom implements DurableObject {
     }
     const after = typeof header.after === "number" && header.after >= 0 ? header.after : 0;
     const exclude = header.excludeOwn === true ? state.device : undefined;
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     for (const row of rowsAfter(sql, after, exclude)) {
       send(ws, FRAME.row, { seq: row.seq, device: row.device, batchId: row.batchId }, row.bytes);
     }
@@ -489,6 +629,130 @@ export class ChatRoom implements DurableObject {
     send(ws, FRAME.ack, { batchId, seq: outcome.seq, dup: outcome.dup });
   }
 
+  // ── chat3 transcript plane ───────────────────────────────────────────────
+
+  /** gen-2 rooms never create the chat3 tables; the first transcript call
+   * on an instance does (idempotent, so a cold instance just re-checks). */
+  private ensureTranscriptTables(): void {
+    if (this.transcriptReady) return;
+    ensureTranscript(this.sql);
+    this.transcriptReady = true;
+  }
+
+  private hasTranscriptTables(): boolean {
+    if (this.transcriptReady) return true;
+    return [...this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'")].length > 0;
+  }
+
+  /** Host batch upsert: a u32-LE length-prefixed run of `itemPut` frames.
+   * The JSON reply is the ack (per item: its rev, or why it was refused);
+   * changed rows are relayed to every other device's sockets. */
+  private async postItems(request: Request, url: URL): Promise<Response> {
+    const declared = Number(request.headers.get("content-length") ?? "0");
+    if (declared > MAX_ITEMS_BODY_BYTES) return json({ error: "too_large" }, 413);
+    const body = new Uint8Array(await request.arrayBuffer());
+    if (body.byteLength > MAX_ITEMS_BODY_BYTES) return json({ error: "too_large" }, 413);
+    const frames = splitLengthPrefixed(body);
+    if (!frames) return json({ error: "bad_body" }, 400);
+    this.ensureTranscriptTables();
+    const sql = this.sql;
+    const device = url.searchParams.get("device") ?? "";
+    const results: Record<string, unknown>[] = [];
+    const relay: Uint8Array[] = [];
+    await this.ctx.storage.transaction(async () => {
+      let changed = false;
+      for (const raw of frames) {
+        const frame = decodeFrame(raw);
+        if (!frame || frame.type !== FRAME.itemPut) {
+          results.push({ error: "bad_frame" });
+          continue;
+        }
+        const { header } = frame;
+        const invalid = validateItemKey(header);
+        if (invalid) {
+          results.push({ ord: header.ord, idx: header.idx, error: invalid });
+          continue;
+        }
+        const key = { ord: header.ord as number, idx: header.idx as number, entry: header.entry as string };
+        const outcome = putItem(sql, key, frame.payload);
+        if (!outcome.ok) {
+          results.push({ ord: key.ord, idx: key.idx, error: outcome.error });
+          continue;
+        }
+        results.push({ ord: key.ord, idx: key.idx, rev: outcome.rev, changed: outcome.changed });
+        if (!outcome.changed) continue;
+        changed = true;
+        this.dropLive(liveKey(key.ord, key.idx));
+        relay.push(encodeFrame(FRAME.item, { ...key, rev: outcome.rev }, frame.payload));
+      }
+      // One dirty mark per batch, and none while already dirty: a flag that
+      // is already "1" would only bill a row to rewrite itself.
+      if (changed && getMeta(sql, "backupDirty") !== "1") {
+        this.backupDirty();
+        await this.scheduleAlarm();
+      }
+    });
+    if (relay.length > 0) {
+      for (const socket of this.ctx.getWebSockets()) {
+        const socketState = socket.deserializeAttachment() as SocketState | null;
+        if (!socketState?.ready || (device !== "" && socketState.device === device)) continue;
+        for (const frame of relay) sendRaw(socket, frame);
+      }
+    }
+    return json({ headRev: headRev(sql), results });
+  }
+
+  /** Relay an open part to the other sockets and keep enough of it in memory
+   * to rebuild it for a late viewer. Never touches storage. */
+  private handleLive(
+    ws: WebSocket,
+    state: SocketState,
+    header: Record<string, unknown>,
+    payload: Uint8Array,
+    raw: Uint8Array
+  ): void {
+    if (!state.ready) return;
+    if (validateItemKey(header) || payload.byteLength > MAX_LIVE_PAYLOAD_BYTES) return;
+    if (header.op !== "part" && header.op !== "append") return;
+    const key = liveKey(header.ord as number, header.idx as number);
+    const frame = raw.slice();
+    if (header.op === "part") {
+      this.dropLive(key);
+      this.live.set(key, { frames: [frame], bytes: frame.byteLength });
+      this.liveBytes += frame.byteLength;
+    } else {
+      // An append with no base in memory can't rebuild anything (the room
+      // restarted mid-part); it is still relayed to viewers that have one.
+      const part = this.live.get(key);
+      if (part) {
+        this.live.delete(key); // re-insert: the map's order is recency
+        part.frames.push(frame);
+        part.bytes += frame.byteLength;
+        this.liveBytes += frame.byteLength;
+        if (part.bytes > LIVE_PART_MAX_BYTES) this.liveBytes -= part.bytes;
+        else this.live.set(key, part);
+      }
+    }
+    while (this.liveBytes > LIVE_TOTAL_MAX_BYTES) {
+      const oldest = this.live.keys().next();
+      if (oldest.done) break;
+      this.dropLive(oldest.value);
+    }
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === ws) continue;
+      const socketState = socket.deserializeAttachment() as SocketState | null;
+      if (!socketState?.ready) continue;
+      sendRaw(socket, frame);
+    }
+  }
+
+  private dropLive(key: string): void {
+    const part = this.live.get(key);
+    if (!part) return;
+    this.live.delete(key);
+    this.liveBytes -= part.bytes;
+  }
+
   private handlePresence(
     ws: WebSocket,
     state: SocketState,
@@ -531,7 +795,7 @@ export class ChatRoom implements DurableObject {
   }
 
   private recordPush(device: string, ok: boolean): void {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const key = device === "" ? "(unknown)" : device;
     const outcomes = JSON.parse(getMeta(sql, "pushOutcomes") ?? "{}") as Record<
       string,
@@ -551,7 +815,7 @@ export class ChatRoom implements DurableObject {
   /** SQL rows, wake receipt, and alarm are one SQLite storage transaction.
    * ACKs therefore cannot outrun the durable host-discovery obligation. */
   private async acceptRow(device: string, batch: string, payload: Uint8Array, user: string, chat: string, host: string) {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const outcome = await this.ctx.storage.transaction(async () => {
       const result = appendRow(sql, device, batch, payload, Date.now());
       if (!result.ok) return result;
@@ -568,7 +832,7 @@ export class ChatRoom implements DurableObject {
   }
 
   private backupDirty(): void {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     setMeta(sql, "backupDirty", "1");
     if (!getMeta(sql, "backupDue")) setMeta(sql, "backupDue", String(Date.now() + DAY_MS));
   }
@@ -583,7 +847,7 @@ export class ChatRoom implements DurableObject {
   /** Always called inside a storage transaction: a backup can't overwrite
    * an earlier wake alarm, including when requests interleave with retries. */
   private async scheduleAlarm(): Promise<void> {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const wake = pendingChatWake(sql);
     const backup = getMeta(sql, "backupDirty") === "1"
       ? Number(getMeta(sql, "backupDue") ?? Date.now() + DAY_MS) : Infinity;
@@ -600,7 +864,7 @@ export class ChatRoom implements DurableObject {
   }
 
   private async deliverWake(): Promise<void> {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     const wake = pendingChatWake(sql);
     if (!wake) return;
     let accepted = false;
@@ -635,15 +899,15 @@ export class ChatRoom implements DurableObject {
   /** Wake retry + nightly backup share the DO's single durable alarm. */
   async alarm(): Promise<void> {
     try {
-      const wake = pendingChatWake(this.ctx.storage.sql);
+      const wake = pendingChatWake(this.sql);
       if (wake && wake.next_at <= Date.now()) await this.flushWake();
-      const due = Number(getMeta(this.ctx.storage.sql, "backupDue") ?? "0");
+      const due = Number(getMeta(this.sql, "backupDue") ?? "0");
       if (due <= Date.now()) {
         try { await this.backup(); }
         catch (error) {
           // Do not exhaust the runtime's finite automatic retries or spin
           // on an expired deadline during an R2 outage.
-          setMeta(this.ctx.storage.sql, "backupDue", String(Date.now() + 60_000));
+          setMeta(this.sql, "backupDue", String(Date.now() + 60_000));
           console.warn("chat2 backup retrying", error);
         }
       }
@@ -654,16 +918,29 @@ export class ChatRoom implements DurableObject {
 
   /** Seq-monotonic backup; concurrent new rows retain their dirty flag. */
   private async backup(): Promise<void> {
-    const sql = this.ctx.storage.sql;
+    const sql = this.sql;
     if (getMeta(sql, "backupDirty") !== "1") return; // idle: stop the chain
     const head = headSeq(sql);
-    if (head > Number(getMeta(sql, "backupSeq") ?? "0")) {
+    // chat3 rooms also back up their transcript rows (tool outputs are not:
+    // they are re-derivable on the host and dwarf everything else).
+    const transcript = this.hasTranscriptTables();
+    const rev = transcript ? headRev(sql) : 0;
+    if (head > Number(getMeta(sql, "backupSeq") ?? "0") || rev > Number(getMeta(sql, "backupRev") ?? "0")) {
       const rows = [...rowsAfter(sql, 0)].map((row) => ({
         seq: row.seq,
         device: row.device,
         batchId: row.batchId,
         bytes: encodeBase64(row.bytes)
       }));
+      const items = transcript
+        ? [...itemsSince(sql, 0)].map((item) => ({
+            ord: item.ord,
+            idx: item.idx,
+            entry: item.entry,
+            rev: item.rev,
+            bytes: encodeBase64(item.bytes)
+          }))
+        : undefined;
       const checkpoint = this.blobs.get(CHECKPOINT_BLOB);
       const frontier = this.blobs.get(FRONTIER_BLOB);
       await this.env.BLOBS.put(
@@ -673,12 +950,14 @@ export class ChatRoom implements DurableObject {
           ...logStats(sql),
           checkpoint: checkpoint ? encodeBase64(checkpoint) : null,
           frontier: frontier ? encodeBase64(frontier) : null,
-          rows
+          rows,
+          ...(items ? { items } : {})
         })
       );
       setMeta(sql, "backupSeq", String(head));
+      if (transcript) setMeta(sql, "backupRev", String(rev));
     }
-    if (headSeq(sql) === head) {
+    if (headSeq(sql) === head && (!transcript || headRev(sql) === rev)) {
       setMeta(sql, "backupDirty", "0");
       sql.exec("DELETE FROM meta WHERE key='backupDue'");
     } else {
@@ -702,6 +981,45 @@ const send = (
   } catch {
     /* socket already gone; hibernation API cleans it up */
   }
+};
+
+const sendRaw = (ws: WebSocket, frame: Uint8Array): void => {
+  try {
+    ws.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer);
+  } catch {
+    /* socket already gone; hibernation API cleans it up */
+  }
+};
+
+const liveKey = (ord: number, idx: number): string => `${ord}:${idx}`;
+
+/** u32-LE length-prefixed frames — the `/rows` body encoding. */
+const lengthPrefixed = (frames: Uint8Array[]): Uint8Array => {
+  const total = frames.reduce((n, f) => n + 4 + f.length, 0);
+  const body = new Uint8Array(total);
+  const view = new DataView(body.buffer);
+  let off = 0;
+  for (const f of frames) {
+    view.setUint32(off, f.length, true);
+    body.set(f, off + 4);
+    off += 4 + f.length;
+  }
+  return body;
+};
+
+/** Inverse of `lengthPrefixed`; undefined if a length runs past the body. */
+const splitLengthPrefixed = (body: Uint8Array): Uint8Array[] | undefined => {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const frames: Uint8Array[] = [];
+  let off = 0;
+  while (off < body.byteLength) {
+    if (off + 4 > body.byteLength) return undefined;
+    const len = view.getUint32(off, true);
+    if (off + 4 + len > body.byteLength) return undefined;
+    frames.push(body.subarray(off + 4, off + 4 + len));
+    off += 4 + len;
+  }
+  return frames;
 };
 
 const json = (value: unknown, status = 200): Response =>

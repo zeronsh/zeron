@@ -253,6 +253,14 @@ pub mod methods {
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
+    /// Page older transcript history into a gen-3 chat (docs/chat3-sync.md).
+    /// `{chatId}` → `{more}`. Edge-direct, like FETCH_TOOL_BLOB.
+    pub const FETCH_EARLIER_MESSAGES: &str = "FetchEarlierMessages";
+    /// Per-user labs flags (`preferences/labs`), synced to every device.
+    /// `{}` → `{flag: bool, …}`.
+    pub const GET_LABS_FLAGS: &str = "GetLabsFlags";
+    /// `{flag, on}` → `{changed}`. Unknown flags are refused.
+    pub const SET_LABS_FLAG: &str = "SetLabsFlag";
     // Updates (ControlRpc, relay-forwardable — a device reports/applies its own
     // binary's update). Stream: current UpdateStatus, then every change.
     pub const UPDATE_STATUS: &str = "UpdateStatus";

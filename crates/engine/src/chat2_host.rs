@@ -22,6 +22,20 @@ use crate::http_error::describe_http_error;
 /// thin docs are lineage epoch 2; M3 readers discard-and-adopt below it).
 pub const CHAT2_DOC_EPOCH: u32 = 2;
 
+/// Epoch of a gen-3 (split) chat's snapshots (docs/chat3-sync.md): the state
+/// doc under the chat id, the local transcript under [`transcript_doc_id`].
+pub const CHAT3_DOC_EPOCH: u32 = 3;
+
+/// Local store id of a split chat's transcript snapshot.
+pub fn transcript_doc_id(chat_id: &str) -> String {
+    format!("{chat_id}.t3")
+}
+
+/// Edge path prefix of a room generation's routes.
+pub fn room_prefix(room_gen: u32) -> &'static str {
+    if room_gen == 3 { "chat3" } else { "chat2" }
+}
+
 /// [`ChatDocSink`] over a live [`SessionDoc`] + the cursor-bearing store.
 ///
 /// Loro import of a remote row/checkpoint fires the doc's root subscription,
@@ -191,6 +205,13 @@ impl ChatDocSink for EngineChatSink {
         }
     }
 
+    fn apply_transcript_frame(&self, kind: u8, header: &serde_json::Value, payload: &[u8]) {
+        let Some(handle) = self.handle.upgrade() else { return };
+        if let Some(chat3) = handle.chat3() {
+            chat3.apply_frame(handle.doc(), kind, header, payload);
+        }
+    }
+
     fn contains_frontier(&self, frontier: &[u8]) -> bool {
         let Some(doc) = self.doc.upgrade() else {
             return true; // evicted: claim contained so the client idles, not refetches
@@ -240,11 +261,18 @@ pub struct EdgeCheckpointFetcher {
     http: reqwest::Client,
     edge: EdgeConfig,
     chat_id: String,
+    room: &'static str,
 }
 
 impl EdgeCheckpointFetcher {
     pub fn with_priority(mut self, priority: zeron_sync::budget::Priority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// The room generation's route prefix (`chat2` unless set).
+    pub fn with_room(mut self, room: &'static str) -> Self {
+        self.room = room;
         self
     }
 
@@ -254,6 +282,7 @@ impl EdgeCheckpointFetcher {
             http,
             edge,
             chat_id: chat_id.into(),
+            room: "chat2",
         }
     }
 }
@@ -264,8 +293,9 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
         let http = self.http.clone();
         let edge = self.edge.clone();
         let url = format!(
-            "{}/chat2/{}/checkpoint",
+            "{}/{}/{}/checkpoint",
             edge.url.trim_end_matches('/'),
+            self.room,
             self.chat_id
         );
         Box::pin(async move {
@@ -358,9 +388,16 @@ pub struct EdgeChatTransport {
     chat_id: String,
     device_id: String,
     host_device: Option<String>,
+    room: &'static str,
 }
 
 impl EdgeChatTransport {
+    /// The room generation's route prefix (`chat2` unless set).
+    pub fn with_room(mut self, room: &'static str) -> Self {
+        self.room = room;
+        self
+    }
+
     pub fn with_host_device(mut self, host: Option<String>) -> Self {
         self.host_device = host;
         self
@@ -384,13 +421,15 @@ impl EdgeChatTransport {
             chat_id: chat_id.into(),
             device_id: device_id.into(),
             host_device: None,
+            room: "chat2",
         }
     }
 
     fn rows_url(&self) -> String {
         format!(
-            "{}/chat2/{}/rows",
+            "{}/{}/{}/rows",
             self.edge.url.trim_end_matches('/'),
+            self.room,
             self.chat_id
         )
     }
