@@ -96,6 +96,7 @@ pub(crate) mod spaces;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
+use tabs::NewSessionTarget;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -13840,7 +13841,10 @@ impl Render for Shell {
                         this.open_add_space_on_device(&action.device, cx);
                         return;
                     }
-                    this.open_new_session(Some(action.project_id.clone()), cx);
+                    this.open_new_session(
+                        Some(NewSessionTarget::Project(action.project_id.clone())),
+                        cx,
+                    );
                     // Stage after the composer has swapped to the new
                     // session's draft, which runs on the state observation
                     // `open_new_session` just queued. A draft already waiting
@@ -17596,15 +17600,79 @@ mod exit_regressions {
                     state.apply_spaces(vec![space("one"), space("two")]);
                 });
                 shell.settings.space_filter = None;
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
                 assert_eq!(state.selected_space.as_deref(), Some("two"));
 
                 // The explicit project wins over a standing filter.
                 shell.settings.space_filter = Some("one".into());
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("two"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn new_session_without_a_project_homes_the_canvas_on_that_device(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "repo".into(),
+                        device_id: "local".into(),
+                        path: "/repo".into(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        repository_id: None,
+                        github_repo: None,
+                        created_at: Utc::now(),
+                    }]);
+                    state.select_space(Some("repo".into()), cx);
+                });
+                // The opt-out wins over a standing filter, which the shell
+                // then drops so the first send stays visible.
+                shell.settings.space_filter = Some("repo".into());
+                shell.open_new_session(Some(NewSessionTarget::NoProject("remote".into())), cx);
+                let state = shell.state.read(cx);
+                assert!(state.selected_chat.is_none());
+                assert!(state.no_project);
+                assert!(state.selected_space.is_none());
+                assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.settings.space_filter.is_none());
             })
             .unwrap();
     }
