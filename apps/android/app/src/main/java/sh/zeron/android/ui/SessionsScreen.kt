@@ -122,16 +122,19 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
         else -> model.accountDetail.takeIf { it.isNotEmpty() }
     }
 
-    val archive: (SessionRow) -> Unit = { row -> model.archive(row.id) }
-    // "New section…" from a row's Move menu files that row into it.
-    val actions = RowActions(
-        model = model,
-        onOpen = onOpen,
-        archive = archive,
-        sections = ws?.front?.sections.orEmpty().map { it.id to it.name },
-        newSection = { chatId -> newSection = chatId ?: "" },
-        selected = selected,
-    )
+    // "New section…" from a row's Move menu files that row into it. Remembered: every row
+    // takes `actions`, so a fresh instance per recomposition re-composes every visible row.
+    val userSections = ws?.front?.sections
+    val actions = remember(model, onOpen, selected, userSections) {
+        RowActions(
+            model = model,
+            onOpen = onOpen,
+            archive = { row -> model.archive(row.id) },
+            sections = userSections.orEmpty().map { it.id to it.name },
+            newSection = { chatId -> newSection = chatId ?: "" },
+            selected = selected,
+        )
+    }
 
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
     val density = androidx.compose.ui.platform.LocalDensity.current
@@ -268,7 +271,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
                 if (empty) item("empty") { EmptyState(filter) }
             }
         }
-        StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
+        StatusBarScrim(list)
     }
 
     newSection?.let { chatId ->

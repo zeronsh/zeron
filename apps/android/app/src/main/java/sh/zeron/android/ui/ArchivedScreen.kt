@@ -74,7 +74,7 @@ fun ArchivedScreen(model: AppModel, onBack: () -> Unit, onOpen: (String) -> Unit
                 }
             }
         }
-        StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
+        StatusBarScrim(list)
     }
 }
 
