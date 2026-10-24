@@ -3487,10 +3487,15 @@ impl Pickers {
             return;
         }
         // ⌘1…⌘9 jump-picks the Nth visible model row (t3 modelPickerKeys;
-        // the chips on the rows advertise these).
+        // the chips on the rows advertise these). Read the digit through the
+        // layout: AZERTY types ⌘1 as ⌘&.
         if self.open_kind() == Some(PickerKind::HarnessModel)
             && event.keystroke.modifiers.platform
-            && let Ok(n) = event.keystroke.key.parse::<usize>()
+            && let Some(n) = crate::settings::canonical_key(
+                &event.keystroke.key,
+                &crate::settings::key_equivalents(cx),
+            )
+            .and_then(|key| key.parse::<usize>().ok())
             && (1..=9).contains(&n)
         {
             self.activate_model_index(n - 1, cx);
@@ -5148,7 +5153,8 @@ impl Pickers {
             }))
             .child(body);
         if ix < 9 {
-            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
+            let key = crate::settings::bound_key(&(ix + 1).to_string());
+            el = el.child(popover::kbd_hint(&theme, &format!("⌘{key}")));
         }
         // A model configured in place opens its settings card on hover.
         // The title picker has no settings, so no card either.

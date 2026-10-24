@@ -423,10 +423,18 @@ impl NativePage {
                 return event.as_ptr();
             }
             let mods = e.modifierFlags();
+            // A dead key (AZERTY's ^, where ⌘[ lives) reports no characters
+            // with ⌘ down; ask for the key as typed alone, as gpui does.
             let key = e
                 .charactersIgnoringModifiers()
-                .map(|s| s.to_string().to_lowercase())
-                .unwrap_or_default();
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    e.charactersByApplyingModifiers(mods & NSEventModifierFlags::Shift)
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default()
+                .to_lowercase();
             let mut combo = String::new();
             if mods.contains(NSEventModifierFlags::Command) {
                 combo.push_str("cmd-");
@@ -444,14 +452,32 @@ impl NativePage {
             let Ok(keystroke) = gpui::Keystroke::parse(&combo) else {
                 return event.as_ptr();
             };
+            // Shortcuts are written in US keys and bound where the layout
+            // types them (AZERTY ⌘1 is ⌘&): match the US spelling, then
+            // forward the keystroke as typed.
+            let us = crate::settings::bound_canonical_combo(&combo);
             let browser_key = matches!(
-                combo.as_str(),
-                "cmd-l" | "cmd-t" | "cmd-w" | "cmd-[" | "cmd-]" | "cmd-shift-r" | "cmd-k" | "cmd-,"
+                us.as_deref(),
+                Some(
+                    "cmd-l"
+                        | "cmd-t"
+                        | "cmd-w"
+                        | "cmd-["
+                        | "cmd-]"
+                        | "cmd-shift-r"
+                        | "cmd-k"
+                        | "cmd-,"
+                )
             );
-            let app_key = monitor_shortcuts
-                .borrow()
-                .iter()
-                .any(|s| gpui::Keystroke::parse(s).is_ok_and(|s| s == keystroke));
+            let app_key = us
+                .as_deref()
+                .and_then(|us| gpui::Keystroke::parse(us).ok())
+                .is_some_and(|us| {
+                    monitor_shortcuts
+                        .borrow()
+                        .iter()
+                        .any(|s| gpui::Keystroke::parse(s).is_ok_and(|s| s == us))
+                });
             if browser_key || app_key {
                 if monitor_tx.try_send(NativeEvent::Key(keystroke)).is_ok() {
                     std::ptr::null_mut()

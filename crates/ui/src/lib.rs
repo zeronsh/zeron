@@ -175,7 +175,12 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
-        let ui_settings = settings::UiSettings::load(&data_dir);
+        let mut ui_settings = settings::UiSettings::load(&data_dir);
+        // Older keymaps stored custom combos as the recording layout typed
+        // them; convert against the layout, which only the app can read.
+        ui_settings
+            .keymap
+            .adopt_layout_neutral(&settings::key_equivalents(cx));
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
@@ -298,6 +303,15 @@ pub fn run_app(config: UiConfig) {
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
         cx.set_menus(app_menus::app_menus());
+        // Switching keyboard layout moves the keys behind ⌘-shortcuts (AZERTY
+        // reaches ⌘1 as ⌘&): rebind against the new layout, then refresh the
+        // menu bar's snapshot of the keymap.
+        cx.on_keyboard_layout_change(|cx| {
+            let settings = settings::current(cx);
+            shell::apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+            cx.set_menus(app_menus::app_menus());
+        })
+        .detach();
         cx.activate(true);
     });
 }
