@@ -74,7 +74,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--es route chat:<id>` / `new` / `search` / `settings` (`more`) / `archived` | Open a screen at launch (with nobody signed in, on the demo) |
 | `--es route cloud` / `cloud:billing` / `cloud:repos` / `billing` / `providers[:cloud\|:<device id>]` / `accounts:cloud:<harness>` / `accounts:device:<id>:<harness>` / `new:cloud` / `welcome[:<step>]` | Cloud pages, a new session set to Cloud, the welcome pages |
 | `--ez cloud true` | Offer Cloud in the demo (its pages read the demo's Cloud) |
-| `--es companion companions` / `terminal` / `side-chat:<id>` / `subagent:<tool id>` | With `route chat:<id>`, open the companions sheet, a terminal, a side chat or a subagent over it |
+| `--es companion companions` / `terminal` / `side-chat:<id>` / `subagent:<tool id>` / `model-picker` | With `route chat:<id>`, open the companions sheet, a terminal, a side chat, a subagent or the model picker over it (`model-picker` also works with `route new`) |
 | `--ez terminal-demo true` | The opened terminal types a short script (screenshots) |
 | `--ez signedout true` | Clear stored credentials |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |

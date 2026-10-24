@@ -204,6 +204,8 @@ fun SessionScreen(
 
     // Companions: subagents, side chats (a side chat's siblings live with its parent), terminals.
     val parentId = row?.parentChatId
+    // `companion model-picker` (screenshots): the model picker opens once the session is up.
+    val openPicker = remember(chatId) { openCompanion == "model-picker" }
     val isCloud = row?.isCloud == true
     val cloudOutOfCredits = isCloud && model.cloud.outOfCredits
     var nudges by remember { mutableIntStateOf(0) }
@@ -351,7 +353,7 @@ fun SessionScreen(
             if (input != null) {
                 QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
             } else {
-                Composer(model, core, handle, composer, row, transcript, draft, beforeSend = {
+                Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
                     // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
                     if (cloudOutOfCredits) nudges++
                     !cloudOutOfCredits

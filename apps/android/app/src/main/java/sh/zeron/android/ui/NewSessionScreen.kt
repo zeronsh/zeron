@@ -291,7 +291,14 @@ fun NewSessionScreen(
                 } else if (project != null && project.gitDetected) {
                     BranchChip(model, draft, project.deviceId, project.path) { draft = it }
                 }
-                ModelChip(draft, choice, models) { draft = it }
+                ModelChip(
+                    draft,
+                    choice,
+                    models,
+                    host = if (runsOnCloud) "Cloud" else project?.deviceName ?: hosts.firstOrNull { it.id == draft.hostId }?.name ?: "This computer",
+                    hostIcon = if (runsOnCloud) ZIcons.Cloud else ZIcons.Laptop,
+                    openAtStart = model.launch.companion == "model-picker",
+                ) { draft = it }
                 val efforts = choice?.model?.reasoningLevels.orEmpty()
                 if (efforts.isNotEmpty()) {
                     val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
@@ -606,20 +613,42 @@ private fun ModelChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     choice: ModelChoice?,
     models: List<ModelChoice>,
+    host: String,
+    @androidx.annotation.DrawableRes hostIcon: Int,
+    openAtStart: Boolean = false,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (openAtStart) {
+            kotlinx.coroutines.delay(600)
+            open = true
+        }
+    }
     // Never the harness name in place of a model.
     val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
-    ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true }) {
-        ChoiceMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
-            MenuSection(list.first().harnessLabel, list.map { m ->
-                MenuChoice(m.model.label, m.harness == draft.harness && m.model.id == choice?.model?.id, leading = { HarnessMark(harness, 18.dp) }) {
-                    onPick(draft.copy(harness = m.harness, model = m.model.id, effort = null))
-                }
-            })
-        })
+    ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true })
+    if (open) {
+        // A tab per provider the target runs (the draft's first), each listing the models already loaded for it.
+        val order = (listOf(draft.harness) + models.map { it.harness }).distinct()
+        val tabs = order.mapNotNull { h ->
+            val list = models.filter { it.harness == h }
+            val first = list.firstOrNull() ?: return@mapNotNull null
+            val rows = list.map { ModelPickerRow(it.model.id, it.model.label, it.model.description) }
+            ModelPickerTab(h, first.harnessLabel) { rows }
+        }
+        ModelPickerSheet(
+            tabs,
+            draft.harness,
+            draft.model ?: choice?.model?.id,
+            host = host,
+            hostIcon = hostIcon,
+            onPick = { harness, row ->
+                onPick(draft.copy(harness = harness, model = row.id, effort = if (harness != draft.harness) null else draft.effort))
+            },
+            onDismiss = { open = false },
+        )
     }
 }
 

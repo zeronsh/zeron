@@ -68,6 +68,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -120,8 +121,19 @@ fun Composer(
     draft: ComposerModel,
     /** Asked before a new message goes out; false keeps it (a Cloud chat out of credits). */
     beforeSend: () -> Boolean = { true },
+    /** Open the model picker once (a debug launch extra, for screenshots). */
+    openModelPicker: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
+    // The model picker lives here, not in the chips: those leave with the expanded card.
+    var picker by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (openModelPicker) {
+            kotlinx.coroutines.delay(600)
+            picker = true
+        }
+    }
+    SessionModelPicker(client, c, row, picker, onDismiss = { picker = false })
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
     var delivery by remember { mutableStateOf(Delivery.Queue) }
@@ -278,7 +290,7 @@ fun Composer(
             focusRequester = focus,
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
-            SessionChips(client, c, row)
+            SessionChips(client, c, row, onOpenPicker = { picker = true })
         }
     }
 }
@@ -319,7 +331,7 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
 }
 
 @Composable
-private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?) {
+private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?, onOpenPicker: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
@@ -338,13 +350,11 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
         runCatching { client.setSessionConfig(c.chatId, change(current)) }
     }
 
-    val modelLabel = row?.modelLabel ?: row?.harnessLabel
+    // No model of its own: it runs the provider's default, so that's the one named.
+    val fallback = remember(harness) { fallbackModels(harness).firstOrNull() }
+    val modelLabel = row?.modelLabel ?: fallback?.label ?: row?.harnessLabel
     if (modelLabel != null) {
-        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
-            ChoiceMenu(menu == "model", { menu = null }, listOf(MenuSection(row?.harnessLabel, models.orEmpty().map { m ->
-                MenuChoice(m.label, m.id == row?.model, m.description) { setConfig { it.copy(model = m.id) } }
-            })))
-        }
+        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = onOpenPicker)
     }
     row?.reasoning?.takeIf { it.isNotEmpty() }?.let { level ->
         ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
@@ -454,4 +464,75 @@ private fun gate(item: QueueItem): String? = when (val g = item.gate) {
     is QueueGate.Editing -> if (g.mine) "Editing" else "Being edited"
     is QueueGate.ReviewRequired -> "Needs review"
     null -> if (item.actionPending) "Updating" else null
+}
+
+
+/**
+ * The session's model picker (iOS `CoreSessionSource.modelPicker`): the
+ * chat's provider first, then — between turns, on a host that can switch —
+ * the others it offers, each noting the chat continues there.
+ */
+@Composable
+private fun SessionModelPicker(client: CoreClient, c: ComposerState, row: SessionRow?, open: Boolean, onDismiss: () -> Unit) {
+    val harness = row?.harness ?: "claude-code"
+    fun setConfig(change: (ChatConfig) -> ChatConfig) {
+        val current = client.sessionConfig(c.chatId) ?: ChatConfig(harness, row?.model, row?.reasoning, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
+        runCatching { client.setSessionConfig(c.chatId, change(current)) }
+    }
+    // Another provider only between turns, on a host that can switch (and not while a send is on its way).
+    val sendPending = c.sendState == uniffi.zeron_core.SendState.SENDING || c.sendState == uniffi.zeron_core.SendState.QUEUED
+    val hostSwitches = c.host.capabilities.providerSwitch
+    val canSwitch = hostSwitches && !c.live.turnRunning && !sendPending
+    val cloud = row?.isCloud == true
+    // The host's providers, read ahead so the picker opens with its tabs.
+    var hostHarnesses by remember { mutableStateOf<List<uniffi.zeron_core.HarnessInfo>>(emptyList()) }
+    LaunchedEffect(c.host.deviceId, canSwitch, cloud) {
+        if (canSwitch && !cloud && hostHarnesses.isEmpty()) hostHarnesses = runCatching { client.listHarnesses(c.host.deviceId) }.getOrNull().orEmpty()
+    }
+    // No model of its own: it runs the provider's default, so that's the one named and ticked.
+    val fallback = remember(harness) { fallbackModels(harness).firstOrNull() }
+    val currentModel = row?.model ?: fallback?.id
+    if (open) {
+        suspend fun rowsFor(h: String): List<ModelPickerRow> {
+            // A host that doesn't answer gets the built-in catalog, as one that errors does.
+            val listed = within(5_000) {
+                if (cloud) runCatching { client.cloudModels(h) }.getOrNull() else runCatching { client.listModels(c.host.deviceId, h) }.getOrNull()
+            }
+            return (listed?.takeIf { it.isNotEmpty() } ?: fallbackModels(h)).map { ModelPickerRow(it.id, it.label, it.description) }
+        }
+        val label = row?.harnessLabel ?: uniffi.zeron_core.agentLoginRules(harness).name.ifEmpty { harness }
+        // A computer offers what it reports; Cloud runs the agents it has accounts for.
+        val others = if (!canSwitch) emptyList() else if (cloud) {
+            sh.zeron.android.core.CloudStore.agents.map { it.harness to it.name }
+        } else {
+            hostHarnesses.filter { it.offered }.map { it.id to it.label }
+        }
+        val tabs = listOf(ModelPickerTab(harness, label) { rowsFor(harness) }) +
+            others.filter { it.first != harness }.map { (h, l) -> ModelPickerTab(h, l, "Your next message continues this chat with $l.") { rowsFor(h) } }
+        val note = when {
+            canSwitch -> null
+            c.live.turnRunning -> "You can switch provider when this turn ends."
+            hostSwitches -> null
+            else -> "This computer needs a newer Zeron to switch provider."
+        }
+        ModelPickerSheet(
+            tabs,
+            harness,
+            currentModel,
+            host = if (cloud) "Cloud" else c.host.name ?: "This computer",
+            hostIcon = if (cloud) ZIcons.Cloud else ZIcons.Laptop,
+            note = note,
+            onPick = { picked, model ->
+                // Re-checked at the pick: a turn may have started since the sheet opened.
+                if (picked == harness || canSwitch) {
+                    setConfig {
+                        // The old provider's effort and options don't carry over.
+                        val switched = if (picked != it.harness) it.copy(harness = picked, reasoning = null, modelOptions = emptyMap()) else it
+                        switched.copy(model = model.id)
+                    }
+                }
+            },
+            onDismiss = onDismiss,
+        )
+    }
 }
