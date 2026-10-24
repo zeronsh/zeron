@@ -676,6 +676,19 @@ impl Render for BrowserSurface {
                                 (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
                             let dragging = cx.has_active_drag();
+                            // GPUIView refuses first responder, so a click on GPUI
+                            // content leaves the keyboard with the page. AppKit
+                            // gives presses on the page to WebKit, so every press
+                            // GPUI sees is outside it: take the keyboard back on
+                            // each, as zui does on Windows.
+                            let page = native.clone();
+                            window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, _| {
+                                if phase == gpui::DispatchPhase::Capture
+                                    && let Some(page) = page.upgrade()
+                                {
+                                    page.borrow().focus_chrome();
+                                }
+                            });
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {
                                     native

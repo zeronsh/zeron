@@ -365,6 +365,15 @@ fn main() -> anyhow::Result<()> {
                     while !first.read_with(cx, |b,_| b.page.title == "Unexpected page click") {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
                     }
+                    // That click made the page AppKit's first responder. A click on
+                    // GPUI content must take it back, or keys keep reaching the page
+                    // before the focused GPUI input.
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "page click did not take keyboard focus");
+                    first.read_with(cx, |b,_| b.fixture_click((left*0.5) as f64,(top+150.) as f64));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while first.read_with(cx, |b,_| b.fixture_focused()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "page kept keyboard focus after a click on GPUI content"); pause(cx,50).await;
+                    }
                     first.read_with(cx, |b,_| b.fixture_eval("document.title = 'Fieldnotes'"));
                 }
                 #[cfg(not(target_os = "macos"))]
