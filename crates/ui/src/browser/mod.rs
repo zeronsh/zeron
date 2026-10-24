@@ -701,6 +701,10 @@ impl BrowserSurface {
     pub fn fixture_click(&self, x: f64, y: f64) {
         self.native.as_ref().unwrap().fixture_click(x, y);
     }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_wheel(&self, lines: i32, x: f64, y: f64) -> bool {
+        self.native.as_ref().unwrap().fixture_wheel(lines, x, y)
+    }
     pub fn fixture_native_visible(&self) -> bool {
         #[cfg(target_os = "macos")]
         {

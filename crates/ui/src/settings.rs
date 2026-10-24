@@ -512,6 +512,19 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+/// Read on every wheel notch, so without cloning the settings. Without a
+/// store (not the app) wheel input is left alone.
+pub fn smooth_scrolling(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.smooth_scrolling)
+}
+
+pub fn set_smooth_scrolling(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.smooth_scrolling = enabled;
+    });
+}
+
 /// Copy a selected image into Zeron's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -1193,6 +1206,9 @@ pub struct UiSettings {
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
+    /// Mouse-wheel notches glide instead of jumping (`smooth_scroll`).
+    /// Trackpads already scroll smoothly; reduced motion overrides.
+    pub smooth_scrolling: bool,
     /// Stable native Codex voice id only; devices and microphone state are never persisted.
     #[serde(default)]
     pub codex_voice: Option<String>,
@@ -1298,6 +1314,7 @@ impl Default for UiSettings {
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
+            smooth_scrolling: true,
             codex_voice: None,
             codex_voice_device: None,
             legacy_accent_color: None,
@@ -1947,6 +1964,7 @@ impl UiSettings {
             new_thread_background_effect,
             reduce_motion,
             pause_animations_in_background,
+            smooth_scrolling,
             codex_voice,
             codex_voice_device,
             legacy_accent_color,
@@ -2280,6 +2298,7 @@ mod tests {
         );
         assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
         assert!(!loaded.pause_animations_in_background);
+        assert!(loaded.smooth_scrolling);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -3067,6 +3086,7 @@ mod tests {
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
+            smooth_scrolling: false,
             legacy_accent_color: None,
             onboarding_completed: false,
         };
@@ -3085,6 +3105,7 @@ mod tests {
         assert!(json.contains(r#""zoom": 1.8"#));
         assert!(json.contains(r#""reduceMotion": "on""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
+        assert!(json.contains(r#""smoothScrolling": false"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
