@@ -441,14 +441,19 @@ impl RowBuilder {
                             });
                             rows.push(Placed { core, gap });
                         }
-                        MessagePart::Input { id, questions, resolved, .. } => {
-                            let text = if *resolved {
-                                "Answered a question".to_owned()
-                            } else {
-                                questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone())
+                        MessagePart::Input { id, questions, resolved, answers, .. } => {
+                            use zeron_proto::view::InputOutcome;
+                            let (text, white_space) = match zeron_proto::view::input_outcome(questions, *resolved, answers.as_deref()) {
+                                InputOutcome::Pending => (questions.first().map_or("Awaiting your answer…".to_owned(), |q| q.question.clone()), WhiteSpace::Normal),
+                                // Resolved before answers were recorded.
+                                InputOutcome::Unrecorded => ("Answered a question".to_owned(), WhiteSpace::Normal),
+                                InputOutcome::Closed(line) => (line.to_string(), WhiteSpace::Normal),
+                                // `Recherche → Deep dive`, one line per question: each
+                                // line is already single-line, so the breaks are the joins.
+                                InputOutcome::Answered(lines) => (lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"), WhiteSpace::PreLine),
                             };
                             let gap = gap_for(&rows, false);
-                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text)), gap });
+                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "questionmark.bubble", ColorRole::Accent, &text, white_space)), gap });
                         }
                         MessagePart::Error { id, message } => {
                             let gap = gap_for(&rows, false);
@@ -457,7 +462,7 @@ impl RowBuilder {
                         MessagePart::Fork { id, source_title, .. } => {
                             let gap = gap_for(&rows, false);
                             let text = format!("Forked from {source_title}");
-                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text)), gap });
+                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text, WhiteSpace::Normal)), gap });
                         }
                         MessagePart::Switch { id, from, to, from_harness, to_harness } => {
                             let gap = gap_for(&rows, false);
@@ -729,7 +734,7 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
     }
 }
 
-fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
+fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str, white_space: WhiteSpace) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);
@@ -741,7 +746,7 @@ fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, co
         content: Content::Chip(Chip {
             icon,
             color,
-            text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Normal),
+            text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, white_space),
         }),
         copy_text: text.to_owned(),
     }

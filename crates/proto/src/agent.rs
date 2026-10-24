@@ -807,6 +807,12 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,
+        /// What the person answered, exactly as the run received it. Empty
+        /// when the questions closed without an answer (dismissed, or the run
+        /// stopped waiting). Absent on events written before answers were
+        /// recorded — nothing is known about them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<UserInputAnswer>>,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.

@@ -40,6 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
+use zeron_proto::view::{AnswerLine, InputOutcome};
 use zeron_proto::{HarnessId, ToolCall};
 
 use crate::markdown::mermaid_cache::{self, MermaidCache};
@@ -1091,13 +1092,15 @@ pub enum RowKind {
         compact_shell: bool,
     },
     InputChip {
-        /// First question's header (chat-view.tsx `InputChip`: the resolved
-        /// chip shows it; unresolved shows "Awaiting your answer…" — which
-        /// stays TRUE even across a run death: the composer keeps the panel
-        /// up until the user answers, and the engine delivers a dead run's
-        /// answer as a resumed turn).
+        /// First question's header (chat-view.tsx `InputChip`): the value of
+        /// a chip whose answers were never recorded, and the label of one
+        /// that closed unanswered.
         header: SharedString,
-        resolved: bool,
+        /// What became of the questions. Pending shows "Awaiting your
+        /// answer…" — which stays TRUE even across a run death: the composer
+        /// keeps the panel up until the user answers or closes it, and the
+        /// engine delivers a dead run's answer as a resumed turn.
+        outcome: InputOutcome,
     },
     ErrorChip {
         message: SharedString,
@@ -1684,24 +1687,22 @@ pub fn rows_for_entry(
                         id: part_id,
                         questions,
                         resolved,
+                        answers,
                         ..
                     } => {
                         // Model-generated header onto the one-line chip.
-                        let header: SharedString = single_line(
-                            &questions
-                                .first()
-                                .map(|q| q.header.clone())
-                                .unwrap_or_else(|| "Question".to_string()),
-                        )
-                        .into();
+                        let header: SharedString =
+                            zeron_proto::view::input_header(questions).into();
+                        let outcome = zeron_proto::view::input_outcome(
+                            questions,
+                            *resolved,
+                            answers.as_deref(),
+                        );
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(format!("{header}\0{outcome:?}").as_bytes()),
                             turn_start: false,
-                            kind: RowKind::InputChip {
-                                header,
-                                resolved: *resolved,
-                            },
+                            kind: RowKind::InputChip { header, outcome },
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
@@ -7642,9 +7643,7 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
-            }
+            RowKind::InputChip { header, outcome } => input_chip(header.clone(), outcome, &theme),
             RowKind::GeneratedImage {
                 owner,
                 path,
@@ -9341,29 +9340,98 @@ fn switch_marker(
         .into_any_element()
 }
 
-/// A passive one-line chip marking a question the agent asked — the
-/// interactive controls live in the composer (chat-view.tsx `InputChip`):
-/// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
-/// text-[12px]`, a 20px `bg-white/[0.09]` icon tile with a 12px
-/// ChatRoundLine, the medium "Question" label, then the truncating value —
-/// the first question's header once resolved, "Awaiting your answer…" while
-/// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
+/// A passive chip marking a question the agent asked — the interactive
+/// controls live in the composer (chat-view.tsx `InputChip`): 34px row,
+/// `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2 text-[12px]`, a
+/// 20px `bg-white/[0.09]` icon tile with a 12px ChatRoundLine, the medium
+/// "Question" label, then the truncating value: "Awaiting your answer…"
+/// while pending, `header → answer` once answered (`header → Not answered`
+/// when it closed without one), the bare header on parts from before answers
+/// were recorded. Several questions read "N questions", one `label → answer`
+/// line each under the row. Neutral tones throughout; resolution never
+/// recolors the chip.
+fn input_chip(header: SharedString, outcome: &InputOutcome, theme: &Theme) -> AnyElement {
+    // `label → answer`, the answer truncating first; a quiet answer is one
+    // that says nothing was given.
+    let answer_line = |label: SharedString, answer: SharedString, quiet: bool| {
+        div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.5))
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+            .child(
+                crate::icons::icon(crate::icons::ARROW_RIGHT)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(if quiet {
+                        theme.text_muted.opacity(0.7)
+                    } else {
+                        theme.text.opacity(0.9)
+                    })
+                    .child(answer),
+            )
+            .into_any_element()
+    };
+    let plain = |value: SharedString| {
+        div()
+            .min_w_0()
+            .flex_1()
+            .truncate()
+            .text_color(theme.text.opacity(0.9))
+            .child(value)
+            .into_any_element()
+    };
+    let lines: &[AnswerLine] = match outcome {
+        InputOutcome::Answered(lines) if lines.len() > 1 => lines,
+        _ => &[],
+    };
+    let label: SharedString = if lines.is_empty() {
+        "Question".into()
     } else {
-        "Awaiting your answer…".into()
+        format!("{} questions", lines.len()).into()
+    };
+    let value = match outcome {
+        InputOutcome::Pending => Some(plain("Awaiting your answer…".into())),
+        InputOutcome::Unrecorded => Some(plain(header)),
+        InputOutcome::Closed(line) => Some(answer_line(
+            line.label.clone().into(),
+            line.answer.clone().into(),
+            line.skipped,
+        )),
+        InputOutcome::Answered(answered) => match answered.as_slice() {
+            [line] => Some(answer_line(
+                line.label.clone().into(),
+                line.answer.clone().into(),
+                line.skipped,
+            )),
+            _ => None,
+        },
     };
     div()
         .py(px(4.0))
         .w_full()
         .child(
             div()
-                .h(px(34.0))
                 .w_full()
                 .flex()
-                .items_center()
-                .gap(px(8.0))
+                .flex_col()
                 .overflow_hidden()
                 .rounded(px(10.0))
                 .border_1()
@@ -9373,34 +9441,52 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                 .text_size(px(12.0))
                 .child(
                     div()
-                        .flex_none()
-                        .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(crate::theme::ink(0.09))
+                        .h(px(34.0))
+                        .w_full()
                         .flex()
                         .items_center()
-                        .justify_center()
+                        .gap(px(8.0))
+                        .overflow_hidden()
                         .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
+                            div()
+                                .flex_none()
+                                .size(px(20.0))
+                                .rounded(px(6.0))
+                                .bg(crate::theme::ink(0.09))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
+                                .child(label),
+                        )
+                        .children(value),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.text.opacity(0.9))
-                        .child(value),
-                ),
+                // Several questions: one line each, aligned under the label.
+                .when(!lines.is_empty(), |card| {
+                    card.pb(px(6.0)).children(lines.iter().map(|line| {
+                        div()
+                            .h(px(22.0))
+                            .w_full()
+                            .pl(px(28.0))
+                            .flex()
+                            .items_center()
+                            .child(answer_line(
+                                line.label.clone().into(),
+                                line.answer.clone().into(),
+                                line.skipped,
+                            ))
+                    }))
+                }),
         )
         .into_any_element()
 }
@@ -10366,8 +10452,21 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
-        if let MessagePart::Input { resolved, .. } = part {
-            acc.push(0x10 | *resolved as u8);
+        if let MessagePart::Input {
+            resolved, answers, ..
+        } = part
+        {
+            acc.push(0x10 | *resolved as u8 | (answers.is_some() as u8) << 1);
+            // Answers land in place — on a completed entry when a dead run's
+            // question is answered — and a same-length change slips past
+            // `byte_len`: hash what was picked.
+            for answer in answers.iter().flatten() {
+                for label in &answer.labels {
+                    acc.extend_from_slice(label.as_bytes());
+                    acc.push(0);
+                }
+                acc.push(1);
+            }
         }
     }
     fnv1a(&acc)
@@ -12152,6 +12251,84 @@ mod tests {
             rows_for_entry(&switch_entry(from, Some("codex")), false, false, &mut parse)[0].version
         };
         assert_ne!(version(Some("claude-code")), version(Some("cursor")));
+    }
+
+    fn question_entry(
+        resolved: bool,
+        answers: Option<Vec<zeron_proto::UserInputAnswer>>,
+    ) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m-ask".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: "r1".into(),
+                request_id: "r1".into(),
+                questions: vec![zeron_proto::UserInputQuestion {
+                    id: "q".into(),
+                    header: "Recherche".into(),
+                    question: "How deep should the research go?".into(),
+                    options: vec!["Quick".into(), "Deep dive".into()],
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                }],
+                resolved,
+                answers,
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn question_chip_carries_what_was_answered_and_rekeys_when_it_lands() {
+        let picked = |label: &str| {
+            Some(vec![zeron_proto::UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec![label.into()],
+            }])
+        };
+        let outcome = |entry: &SessionMessageEntry| {
+            let rows = rows_for_entry(entry, false, false, &mut parse);
+            match &rows[0].kind {
+                RowKind::InputChip { outcome, .. } => outcome.clone(),
+                _ => panic!("expected a question chip"),
+            }
+        };
+        assert_eq!(outcome(&question_entry(false, None)), InputOutcome::Pending);
+        assert_eq!(
+            outcome(&question_entry(true, None)),
+            InputOutcome::Unrecorded
+        );
+        assert!(matches!(
+            outcome(&question_entry(true, Some(vec![]))),
+            InputOutcome::Closed(_)
+        ));
+        match outcome(&question_entry(true, picked("Deep dive"))) {
+            InputOutcome::Answered(lines) => {
+                assert_eq!(lines[0].to_string(), "Recherche → Deep dive")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Answers land on a settled entry in place: its cached rows must
+        // rebuild — even for a same-length change.
+        let base = question_entry(true, picked("Quick"));
+        let version = |entry: &SessionMessageEntry| {
+            rows_for_entry(entry, false, false, &mut parse)[0].version
+        };
+        for changed in [
+            question_entry(true, None),
+            question_entry(true, picked("Qu1ck")),
+        ] {
+            assert_ne!(
+                entry_fingerprint(&changed, false),
+                entry_fingerprint(&base, false)
+            );
+            assert_ne!(version(&changed), version(&base));
+        }
     }
 
     #[test]

@@ -2751,7 +2751,14 @@ impl RpcService for EngineRpc {
                     // Historical approvals belong to the source runtime; they
                     // must never block or send answers from the new composer.
                     for part in &mut entry.parts {
-                        if let zeron_doc::MessagePart::Input { resolved, .. } = part {
+                        if let zeron_doc::MessagePart::Input {
+                            resolved, answers, ..
+                        } = part
+                        {
+                            if !*resolved {
+                                // Never answered in the source; closed here.
+                                *answers = Some(Vec::new());
+                            }
                             *resolved = true;
                         }
                     }

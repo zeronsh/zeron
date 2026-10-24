@@ -375,14 +375,20 @@ impl DemoHost {
                     request_id,
                     answers,
                 } => {
-                    let _ = core.write(|doc| doc.resolve_input(&request_id));
-                    let labels: Vec<String> = answers.into_iter().flat_map(|a| a.labels).collect();
-                    self.spawn_turn(
-                        chat_id.to_owned(),
-                        None,
-                        transcripts::answered(&labels),
-                        None,
-                    );
+                    let _ = core.write(|doc| doc.resolve_input(&request_id, &answers));
+                    if answers.is_empty() {
+                        // Closed unanswered: there is nothing to reply to.
+                        self.set_status(&client, chat_id, SessionStatus::Idle, None);
+                    } else {
+                        let labels: Vec<String> =
+                            answers.into_iter().flat_map(|a| a.labels).collect();
+                        self.spawn_turn(
+                            chat_id.to_owned(),
+                            None,
+                            transcripts::answered(&labels),
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -711,6 +717,7 @@ impl DemoHost {
                         request_id,
                         questions,
                         resolved: false,
+                        answers: None,
                     });
                     sync(&parts, &mut written, &mut index);
                     awaiting = true;

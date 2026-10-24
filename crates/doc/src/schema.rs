@@ -91,6 +91,10 @@ struct DocPartJson {
     questions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<bool>,
+    /// What an input part's questions were answered (additive): presence is
+    /// the record — `[]` when they closed unanswered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answers: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     /// Fork seam (`kind: "fork"`, additive): the chat the history above was
@@ -220,11 +224,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             request_id,
             questions,
             resolved,
+            answers,
         } => DocPartJson {
             id: request_id.clone(),
             kind: "input".into(),
             questions: Some(serde_json::to_value(questions)?),
             resolved: Some(*resolved),
+            answers: answers.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Error { id, message } => DocPartJson {
@@ -311,6 +317,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 .and_then(|q| serde_json::from_value(q).ok())
                 .unwrap_or_default(),
             resolved: p.resolved.unwrap_or(false),
+            answers: p.answers.and_then(|a| serde_json::from_value(a).ok()),
         },
         "error" => MessagePart::Error {
             id: p.id,
@@ -808,12 +815,17 @@ impl SessionDoc {
         Ok(false)
     }
 
-    /// Mark the input part carrying `request_id` resolved, wherever it lives
-    /// (input parts store the request id as their part id). The live-run path
-    /// resolves through the entry fold; this direct write is for answers to a
-    /// question whose run already died — no fold owns the entry anymore.
-    /// Returns `false` when no such part exists.
-    pub fn resolve_input(&self, request_id: &str) -> Result<bool, DocError> {
+    /// Mark the input part carrying `request_id` resolved with `answers`,
+    /// wherever it lives (input parts store the request id as their part
+    /// id). The live-run path resolves through the entry fold; this direct
+    /// write is for answers to a question whose run already died — no fold
+    /// owns the entry anymore. Empty `answers` record the questions closed
+    /// unanswered. Returns `false` when no such part exists.
+    pub fn resolve_input(
+        &self,
+        request_id: &str,
+        answers: &[zeron_proto::UserInputAnswer],
+    ) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -842,6 +854,10 @@ impl SessionDoc {
                 );
                 if is_input && id_matches {
                     part.insert("resolved", true)?;
+                    part.insert(
+                        "answers",
+                        loro_value_from_json(&serde_json::to_value(answers)?),
+                    )?;
                     self.doc.commit();
                     return Ok(true);
                 }
@@ -998,6 +1014,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
+    }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
@@ -1475,6 +1494,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
+    }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
@@ -1979,16 +2001,18 @@ mod tests {
 
     #[test]
     fn resolve_input_stamps_the_part_in_place() {
+        let input = |id: &str| MessagePart::Input {
+            id: id.into(),
+            request_id: id.into(),
+            questions: vec![],
+            resolved: false,
+            answers: None,
+        };
         let doc = SessionDoc::init("chat-1").unwrap();
         doc.push_message(&SessionMessageEntry {
             id: "m1".into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Input {
-                id: "r1".into(),
-                request_id: "r1".into(),
-                questions: vec![],
-                resolved: false,
-            }],
+            parts: vec![input("r1"), input("r2")],
             created_at: 1,
             device_id: "dev-a".into(),
             // The orphan case: the run died and recovery stamped the entry.
@@ -1997,13 +2021,60 @@ mod tests {
             duration_ms: None,
         })
         .unwrap();
-        assert!(!doc.resolve_input("nope").unwrap());
-        assert!(doc.resolve_input("r1").unwrap());
+        let picked = vec![zeron_proto::UserInputAnswer {
+            question_id: "q".into(),
+            labels: vec!["B".into()],
+        }];
+        assert!(!doc.resolve_input("nope", &picked).unwrap());
+        assert!(doc.resolve_input("r1", &picked).unwrap());
+        // Closed without an answer records an empty list, not nothing.
+        assert!(doc.resolve_input("r2", &[]).unwrap());
         let entries = doc.read_entries().unwrap();
         assert!(matches!(
             &entries[0].parts[0],
-            MessagePart::Input { resolved: true, .. }
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if *a == picked
         ));
+        assert!(matches!(
+            &entries[0].parts[1],
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if a.is_empty()
+        ));
+    }
+
+    #[test]
+    fn input_answers_round_trip_and_old_parts_read_as_unrecorded() {
+        let answered = MessagePart::Input {
+            id: "r1".into(),
+            request_id: "r1".into(),
+            questions: vec![],
+            resolved: true,
+            answers: Some(vec![zeron_proto::UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec!["Deep dive".into()],
+            }]),
+        };
+        let doc = SessionDoc::init("chat-1").unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "m1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![answered.clone()],
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts[0], answered);
+        // A part map written before answers were recorded has no `answers`
+        // key at all.
+        let legacy = from_doc_part(DocPartJson {
+            id: "r0".into(),
+            kind: "input".into(),
+            questions: Some(serde_json::json!([])),
+            resolved: Some(true),
+            ..Default::default()
+        });
+        assert!(matches!(legacy, MessagePart::Input { answers: None, .. }));
     }
 
     #[test]

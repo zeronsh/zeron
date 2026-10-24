@@ -136,6 +136,9 @@ pub struct RunControls {
     /// Standalone callers without an update coordinator can leave it unset.
     pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
+    /// No answers at all — an empty list, or a dropped sender — is a decline:
+    /// the person closed the questions, or the run stopped waiting. Drivers
+    /// answer it with their protocol's own decline where it has one.
     pub request_input: Box<
         dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
     >,

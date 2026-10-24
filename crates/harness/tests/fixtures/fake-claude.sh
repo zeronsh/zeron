@@ -128,6 +128,21 @@ case "$first" in
   esac
   ;;
 
+*scenario:closed-question*)
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-ask"}'
+  # Questions closed unanswered come back as a deny, never an empty allow.
+  emit '{"type":"control_request","request_id":"cr-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"header":"Choice","question":"Pick one","options":["A","B"],"multiSelect":false}]}}}'
+  read -r resp1 || exit 1
+  case "$resp1" in
+  *'"request_id":"cr-1"'*'"behavior":"deny"'*'dismissed'*)
+    emit '{"type":"result","subtype":"success","result":"declined","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ask"}'
+    ;;
+  *)
+    emit '{"type":"result","subtype":"error_during_execution","errors":["closed questions were not denied"],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-ask"}'
+    ;;
+  esac
+  ;;
+
 *scenario:steer*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-steer"}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"first"}}}'
