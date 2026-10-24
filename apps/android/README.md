@@ -29,6 +29,21 @@ iterating on Kotlin; `ZERON_ANDROID_ABIS=arm64-v8a` builds one ABI.
 (needs `rsvg-convert`). The Geist fonts are read straight from the iOS app's
 `Fonts/` folder, so both platforms measure and draw the same bytes.
 
+## Releases
+
+`.github/workflows/android.yml` builds a release APK (arm64, the core at the
+`mobile-dist` profile) whenever the app or the Rust core changes: pull requests
+get it as a workflow artifact, and pushes to `main` publish it to
+`zeron.sh/releases/zeron-android-arm64.apk` — the website's Android download —
+with a versioned copy (`zeron-<version>-android-arm64.apk`) and `.sha256`s.
+
+The version is the workspace's (`Cargo.toml`); the build number grows with each
+run. Publishing needs the upload key in repository secrets
+(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+`ANDROID_KEY_PASSWORD`) so each build installs over the last; without them the
+APK is debug-signed and not published. Locally, `ZERON_ANDROID_KEYSTORE` (and
+the three variables beside it) signs `assembleRelease` the same way.
+
 ## Layout
 
 ```

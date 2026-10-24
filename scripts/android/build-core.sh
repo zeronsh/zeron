@@ -9,7 +9,9 @@
 # `rustup target add aarch64-linux-android x86_64-linux-android`); it is
 # skipped with a note when they are missing. Run by the app's `buildCore`
 # Gradle task (apps/android). `ZERON_ANDROID_ABIS` picks the ABIs (default
-# arm64-v8a x86_64).
+# arm64-v8a x86_64); `ZERON_ANDROID_PROFILE` the core's Cargo profile (default
+# `mobile`; `mobile-dist` for published builds: thin LTO, stripped, as iOS
+# archives).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -30,7 +32,7 @@ if command -v cargo-ndk >/dev/null && [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
   # The core links C++ (the terminal emulator and GPU paths): ship the NDK's
   # libc++_shared.so beside it.
   cargo ndk "${ABIS[@]}" --link-libcxx-shared -o "$OUT/jniLibs" \
-    build --locked -p zeron-mobile --lib --profile mobile
+    build --locked -p zeron-mobile --lib --profile "${ZERON_ANDROID_PROFILE:-mobile}"
   echo "jniLibs: $OUT/jniLibs"
 else
   echo "note: cargo-ndk / ANDROID_NDK_HOME not found — skipped the .so build"

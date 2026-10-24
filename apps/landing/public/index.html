@@ -238,6 +238,7 @@
   .btn[data-download-os="macos"] { --download-icon: url('/assets/icons/native/apple.svg'); }
   .btn[data-download-os^="windows"] { --download-icon: url('/assets/icons/native/windows.svg'); }
   .btn[data-download-os^="linux"] { --download-icon: url('/assets/icons/native/linux.svg'); }
+  .btn[data-download-os="android"] { --download-icon: url('/assets/icons/native/android.svg'); }
   /* one paragraph: the bold lead in --ink, the rest in --dim */
   .hero h1 {
     font-size: clamp(21px, 2.1vw, 25px);
@@ -1151,7 +1152,7 @@
     <div class="wrap" id="downloads">
       <div class="dl-lede">
         <h2 id="downloads-title">Download Zeron.</h2>
-        <p class="sub">Available for macOS, Windows and Linux. iOS is on the way.</p>
+        <p class="sub">Available for macOS, Windows, Linux and Android. iOS is on the way.</p>
       </div>
       <div class="dl-rows">
         <div class="dl-row">
@@ -1170,9 +1171,10 @@
         <div class="dl-row">
           <div class="dl-lead">
             <h3>Zeron for mobile.</h3>
-            <p>iPhone and iPad.</p>
+            <p>Android, iPhone and iPad.</p>
           </div>
           <ul class="dl-list">
+            <li><span class="dl-name">Android</span><span class="dl-meta">arm64 · apk</span><a class="btn ghost" id="android-download" href="https://zeron.sh/releases/zeron-android-arm64.apk">Download</a></li>
             <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
           </ul>
         </div>
