@@ -206,6 +206,15 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
+*scenario:view-image*)
+  # `view_image` (live 0.164.0 shape): started and completed arrive together.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"item/started","params":{"item":{"type":"imageView","id":"exec-view-1","path":"/Users/me/Documents/Codex/mockup.png"},"threadId":"th-1","turnId":"t-1","startedAtMs":1792848136768},"emittedAtMs":1792848136769}'
+  emit '{"method":"item/completed","params":{"item":{"type":"imageView","id":"exec-view-1","path":"/Users/me/Documents/Codex/mockup.png"},"threadId":"th-1","turnId":"t-1","completedAtMs":1792848136769},"emittedAtMs":1792848136772}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"The preview is above."}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:title*)
   for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
