@@ -394,6 +394,43 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     }
 }
 
+/// A saved side chat's menu offers "Move to sidebar"; a top-level session's
+/// does not.
+#[gpui::test]
+fn only_a_saved_side_chat_menu_offers_move_to_sidebar(cx: &mut TestAppContext) {
+    let (_dir, shell, cx) = setup(cx);
+    change(&shell, cx, |shell, _, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "side", "title": "Side chat", "parentChatId": "a",
+                    "deviceId": "local", "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap(),
+            );
+            cx.notify();
+        });
+    });
+    for (chat_id, offered) in [("side", true), ("a", false), ("unsent", false)] {
+        change(&shell, cx, |shell, _, _| {
+            shell.chat_menu.open(ChatMenuState {
+                chat_id: chat_id.into(),
+                tab: None,
+                position: gpui::point(px(800.0), px(200.0)),
+                page: ChatMenuPage::Root,
+            });
+        });
+        settled(&shell, cx);
+        assert_eq!(
+            cx.debug_bounds("chat-menu-promote").is_some(),
+            offered,
+            "{chat_id}"
+        );
+        change(&shell, cx, |shell, _, cx| shell.close_chat_menu(cx));
+        settled(&shell, cx);
+    }
+}
+
 #[gpui::test]
 fn side_chat_menu_rename_keeps_the_editor_visible_without_opening_files(cx: &mut TestAppContext) {
     let (_dir, shell, cx) = setup(cx);

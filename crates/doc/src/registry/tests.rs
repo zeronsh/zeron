@@ -586,6 +586,22 @@ fn field_mutators_round_trip() {
 }
 
 #[test]
+fn clear_chat_parent_promotes_a_child_across_replicas() {
+    let mut child = chat("side", "dev-a");
+    child.parent_chat_id = Some("chat-1".into());
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_chat(&child).unwrap();
+    assert!(!a.chat("side").unwrap().unwrap().is_top_level());
+
+    assert!(a.clear_chat_parent("side").unwrap());
+    assert!(a.chat("side").unwrap().unwrap().is_top_level());
+    // Idempotent, and a missing row is reported rather than invented.
+    assert!(a.clear_chat_parent("side").unwrap());
+    assert!(!a.clear_chat_parent("nope").unwrap());
+    assert_eq!(a.read_chats().unwrap().len(), 1);
+}
+
+#[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();

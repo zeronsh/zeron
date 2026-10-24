@@ -549,9 +549,19 @@ impl Shell {
         };
         let open_id = row.chat_id.clone();
         let menu_id = row.chat_id.clone();
+        let drag = SideChatDrag {
+            chat_id: row.chat_id.clone(),
+            title: row.title.clone(),
+        };
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key.clone()))
             .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
+            // Dragged onto the sidebar, the side chat moves there.
+            .on_drag(drag, |payload, _point, _, cx| {
+                let title = payload.title.clone();
+                cx.stop_propagation();
+                cx.new(|_| SurfaceTabGhost { title })
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.close_session_info_overlay(cx);

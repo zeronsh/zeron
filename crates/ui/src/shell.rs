@@ -213,7 +213,8 @@ const CHAT_MENU_ROW_PIN: u8 = 1;
 const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
-const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_PROMOTE: u8 = 5;
+const CHAT_MENU_ROW_TAB: u8 = 6;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -1166,6 +1167,17 @@ struct RightTabDrag {
     from: usize,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
+    /// A saved side chat's tab: dropping it on the sidebar moves the chat
+    /// there as a session of its own.
+    side_chat: Option<String>,
+}
+
+/// A side chat's row carried out of the session card's lanes. Dropped on
+/// the sidebar, the chat moves there as a session of its own.
+#[derive(Clone)]
+struct SideChatDrag {
+    chat_id: String,
+    title: SharedString,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -1964,11 +1976,36 @@ impl Render for SidebarPane {
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
-        let inner = shell.update(cx, |shell, cx| {
+        let (inner, theme) = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            shell.render_chat_sidebar(&theme, cx)
+            (shell.render_chat_sidebar(&theme, cx), theme)
         });
-        div().size_full().child(inner).into_any_element()
+        // A side chat dragged here from the session card or its tab moves
+        // into the sidebar. Rows take only their own payloads, so these
+        // drops bubble up to the pane.
+        let lanes_shell = shell.clone();
+        let tab_shell = shell.clone();
+        div()
+            .id("sidebar-pane")
+            .debug_selector(|| "sidebar-pane".into())
+            .size_full()
+            .relative()
+            .child(inner)
+            .on_drop::<SideChatDrag>(move |payload, _, cx| {
+                lanes_shell.update(cx, |shell, cx| {
+                    shell.promote_side_chat(payload.chat_id.clone(), cx)
+                });
+            })
+            .on_drop::<RightTabDrag>(move |payload, _, cx| {
+                if let Some(chat_id) = payload.side_chat.clone() {
+                    tab_shell.update(cx, |shell, cx| {
+                        shell.right_tab_drag = None;
+                        shell.promote_side_chat(chat_id, cx)
+                    });
+                }
+            })
+            .child(Shell::side_chat_drop_overlay(&theme))
+            .into_any_element()
     }
 }
 
@@ -6396,6 +6433,44 @@ impl Shell {
             cx,
         );
         cx.notify();
+    }
+
+    /// Move a side chat out of the right pane into the sidebar as a session
+    /// of its own, and open it in the main area. The tab closes only once
+    /// the engine has taken the change, so a failure leaves it where it was.
+    fn promote_side_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.show_notice(crate::toast::ToastKind::Error, "Engine not connected", cx);
+            return;
+        };
+        let params = serde_json::json!({ "op": "promoteSideChat", "chatId": chat_id });
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |shell, cx| match result {
+                Ok(_) => {
+                    // Selecting nothing in the side chat's own state is how a
+                    // deleted one leaves the pane: it drops the tab and closes
+                    // an emptied pane.
+                    let tabs: Vec<_> = shell
+                        .side_chats
+                        .values()
+                        .map(|tab| tab.state.clone())
+                        .filter(|state| state.read(cx).selected_chat.as_deref() == Some(&chat_id))
+                        .collect();
+                    for state in tabs {
+                        state.update(cx, |state, cx| state.select_chat(None, cx));
+                    }
+                    shell.open_chat(chat_id, cx);
+                }
+                Err(err) => {
+                    shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
@@ -11019,14 +11094,18 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
-            let is_side_chat = matches!(menu_state.tab, Some((_, RightSurface::SideChat(_))))
-                || self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
+            // Only a saved child can move to the sidebar: an unsent side chat
+            // has no row yet.
+            let can_promote = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
+            let is_side_chat =
+                can_promote || matches!(menu_state.tab, Some((_, RightSurface::SideChat(_))));
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let promote_id = chat_id.clone();
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -11060,7 +11139,27 @@ impl Shell {
                     .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
                 let menu = if is_side_chat {
-                    menu
+                    if can_promote {
+                        let promote = popover::menu_row(
+                            &theme,
+                            false,
+                            format!("chat-menu-promote-{chat_id}"),
+                        )
+                        .id("chat-menu-promote")
+                        .debug_selector(|| "chat-menu-promote".into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.promote_side_chat(promote_id.clone(), cx)
+                        }))
+                        .child(
+                            icon(icons::ARROW_LEFT)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Move to sidebar"));
+                        menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PROMOTE, promote, cx))
+                    } else {
+                        menu
+                    }
                 } else {
                     let pin = popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
                         .id("chat-menu-pin")
@@ -12683,6 +12782,7 @@ impl Shell {
                     from: ix,
                     title: ghost_title,
                     workspace_path,
+                    side_chat: self.saved_side_chat(surface, cx),
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();

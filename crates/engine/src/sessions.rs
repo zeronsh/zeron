@@ -2671,7 +2671,9 @@ impl Inner {
         let side_chat = self
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
-            .is_some_and(|chat| chat.parent_chat_id.is_some());
+            .is_some_and(|chat| chat.parent_chat_id.is_some())
+            // A fork promoted to its own session keeps the bootstrap it is owed.
+            || doc.promoted_fork();
         let switched = doc.provider_switched();
         if native_command(prompt, harness_id) || !(side_chat || switched) {
             return None;
