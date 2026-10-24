@@ -2,7 +2,8 @@
  * Per-chat gate for runner bearers on chat-scoped data — `/chat2/{chatId}/*`
  * (transcripts, command rows a host executes) and `/blob/{chatId}/*` (tool
  * outputs): a runner may touch a chat only while the registry says its device
- * hosts it (`chats/{chatId}` live, `fields.deviceId === dev`). Without this a
+ * hosts it (`chats/{chatId}` live, `fields.deviceId === dev`; a subagent's
+ * doc goes by the chat that spawned it). Without this a
  * stolen runner key could read every transcript or append commands that a
  * LAPTOP host then executes.
  *
@@ -19,6 +20,11 @@ const POSITIVE_TTL_MS = 5 * 60_000;
 const MAX_CACHE = 10_000;
 const allowed = new Map<string, number>();
 
+/** A subagent's transcript doc is `{chatId}--sub--{toolUseId}` (nested ones
+ * are named after the root chat too) and has no registry row of its own: it
+ * belongs to whoever hosts the chat that spawned it. */
+export const gatedChat = (chatId: string): string => chatId.split("--sub--", 1)[0] || chatId;
+
 /** undefined = proceed; otherwise the refusal to return. */
 export const runnerChatGate = async (
   env: Pick<Env, "REGISTRY_ROOMS">,
@@ -29,7 +35,8 @@ export const runnerChatGate = async (
   if (auth.kind !== "runner") return undefined;
   const notHost = () => json({ error: "not_host", message: "This chat is not hosted by this Cloud device." }, 403);
   if (!auth.orgId || !auth.deviceId) return notHost();
-  const key = `${auth.orgId}/${auth.userId}/${auth.deviceId}/${chatId}`;
+  const chat = gatedChat(chatId);
+  const key = `${auth.orgId}/${auth.userId}/${auth.deviceId}/${chat}`;
   const until = allowed.get(key);
   if (until !== undefined && until > now) return undefined;
   allowed.delete(key);
@@ -38,7 +45,7 @@ export const runnerChatGate = async (
   let host: unknown;
   let parentHost: unknown;
   try {
-    const reply = await room.fetch(`https://registry/chat-host?chat=${encodeURIComponent(chatId)}`, {
+    const reply = await room.fetch(`https://registry/chat-host?chat=${encodeURIComponent(chat)}`, {
       headers: { [AUTH_USER_HEADER]: auth.userId }
     });
     if (!reply.ok) throw new Error(`registry ${reply.status}`);

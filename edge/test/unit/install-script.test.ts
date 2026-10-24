@@ -126,6 +126,8 @@ describe("cloud install script", { timeout: 60_000 }, () => {
     expect(unit).toContain(`ExecStart=${join(data, "app", "current", "zeron")} headless`);
     expect(unit).toContain("Restart=always");
     expect(calls().filter((c) => c.startsWith("curl"))).toHaveLength(2);
+    // A stalled download is dropped and retried, never waited on forever.
+    expect(calls().find((c) => c.includes(".tar.gz"))).toMatch(/--retry 3 .*--speed-limit \d+ --speed-time \d+/);
     expect(calls()).toContain("systemctl restart zeron-cloud.service");
 
     // A retried step: nothing to download, nothing changed, no restart.

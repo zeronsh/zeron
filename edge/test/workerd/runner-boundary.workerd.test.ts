@@ -104,6 +104,19 @@ describe("chat-scoped data", () => {
     expect((await call("PUT", `/blob/${laptopChat}/p1`, user, "out")).status).toBe(200);
   });
 
+  it("opens a subagent's doc by the chat that spawned it", async () => {
+    const { runner, cloud, laptopChat } = await world();
+    const cloudChat = `cc-${rand()}`;
+    expect((await push(runner, [upsert("chats", cloudChat, { deviceId: cloud, title: "cloud work" }, cloud)], cloud)).applied).toBe(1);
+
+    // No registry row of its own: the spawning chat's host decides.
+    expect((await call("GET", `/chat2/${cloudChat}--sub--toolu_01/stats`, runner)).status).toBe(200);
+    expect((await call("GET", `/chat2/${cloudChat}--sub--toolu_01--sub--toolu_02/stats`, runner)).status).toBe(200);
+    const denied = await call("GET", `/chat2/${laptopChat}--sub--toolu_01/stats`, runner);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({ error: "not_host" });
+  });
+
   it("refuses a runner's attempt to claim a laptop chat, so the chat stays closed to it", async () => {
     const { user, runner, cloud, laptop, laptopChat } = await world();
     const claim = await push(runner, [upsert("chats", laptopChat, { deviceId: cloud }, cloud)], cloud);

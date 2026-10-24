@@ -56,7 +56,7 @@ case "$(uname -m)" in
 esac
 
 # (No pipefail in POSIX sh: a failed fetch yields an empty version, refused below.)
-ver="$(curl -fsSL --retry 3 "$ZERON_EDGE_URL/releases/latest.txt" | tr -d '[:space:]')"
+ver="$(curl -fsSL --retry 3 --max-time 30 "$ZERON_EDGE_URL/releases/latest.txt" | tr -d '[:space:]')"
 case "$ver" in
   "" | *[!A-Za-z0-9._+-]*) echo "zeron cloud install: bad release version '$ver'" >&2; exit 1 ;;
 esac
@@ -68,7 +68,11 @@ if [ -x "$dest/zeron" ]; then
 else
   tmp="$(mktemp -d "$data/.download.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL --retry 3 -o "$tmp/zeron.tar.gz" "$ZERON_EDGE_URL/releases/zeron-$ver-linux-$arch.tar.gz"
+  # A stalled connection is dropped and redialed (curl retries the timeout):
+  # without a floor one bad connection trickled for good, holding the lock
+  # every retried install then queued behind.
+  curl -fsSL --retry 3 --connect-timeout 15 --speed-limit 1048576 --speed-time 15 \\
+    -o "$tmp/zeron.tar.gz" "$ZERON_EDGE_URL/releases/zeron-$ver-linux-$arch.tar.gz"
   mkdir "$tmp/unpacked"
   tar -xzf "$tmp/zeron.tar.gz" -C "$tmp/unpacked" --strip-components=1
   # Probe before switching: a binary that cannot start must not replace one that can.
