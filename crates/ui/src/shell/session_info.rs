@@ -1,6 +1,7 @@
-//! The session card: where this chat runs (device, project, branch), the
-//! ports its agents serve and the project's run actions, with the lanes card (its side chats and subagents,
-//! see `session_lanes`) stacked under it, both behind one toggle.
+//! The session card: where this chat runs (device, project, branch) and the
+//! project's run actions, with the ports card (the servers its agents and
+//! terminals started) and the lanes card (its side chats and subagents, see
+//! `session_lanes`) stacked under it, all behind one toggle.
 //! While the column has room, the card shows at its right on its own (until
 //! the user hides it), the transcript and composer shifting left as needed
 //! to clear it. Once clearing it would narrow the transcript, the card hides,
@@ -52,7 +53,7 @@ impl SessionDiffs {
     }
 }
 
-/// The selected chat's running servers, for the Ports section: the same
+/// The selected chat's running servers, for the ports card: the same
 /// `WatchPreviews` stream the browser's start page lists, kept without it.
 #[derive(Default)]
 pub(super) struct SessionPreviews {
@@ -440,9 +441,6 @@ impl Shell {
                 }))
         });
 
-        // ── The ports its agents and terminals serve.
-        let running = self.render_session_info_running(&chat.id, &theme, cx);
-
         // ── The project's run actions.
         let actions = self.render_session_info_actions(&theme, cx);
 
@@ -464,10 +462,12 @@ impl Shell {
             .child(device_row)
             .child(project_row)
             .children(branch_row)
-            .children(running)
             .children(actions);
 
-        // The session card keeps its height; only the lanes under it give.
+        // ── The ports its agents and terminals serve.
+        let ports = self.render_session_ports(&chat.id, !docked, &theme, cx);
+
+        // The session and ports cards keep their height; only the lanes give.
         let card = div()
             .w(px(SESSION_CARD_WIDTH))
             .flex_shrink_0()
@@ -515,30 +515,41 @@ impl Shell {
                     )
                 })
                 .child(frosted(card.into_any_element()))
+                .children(ports.map(frosted))
                 .child(frosted(lanes))
                 .into_any_element(),
         )
     }
 
-    /// The Ports section: a row per server this chat can preview (one a Zeron
+    /// The ports card: a row per server this chat can preview (one a Zeron
     /// agent or terminal started in its checkout, or one this chat's agent or
-    /// terminals started anywhere), opening it in a browser tab. Absent while
-    /// nothing runs.
-    fn render_session_info_running(
+    /// terminals started anywhere), opening it in a browser tab. `None` while
+    /// nothing runs; `floating` over the transcript, it casts the popover's
+    /// shadow.
+    fn render_session_ports(
         &mut self,
         chat_id: &str,
+        floating: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> Option<AnyElement> {
         self.ensure_session_previews(chat_id, cx);
         let snapshot = &self.session_previews.snapshot;
         if snapshot.services.is_empty() {
-            return Vec::new();
+            return None;
         }
-        let mut rows: Vec<AnyElement> = vec![
-            popover::picker_divider().into_any_element(),
-            popover::menu_heading(theme, "Ports").into_any_element(),
-        ];
+        let note = |text: SharedString| {
+            div()
+                .px(px(9.0))
+                .py(px(5.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(18.0))
+                .text_color(theme.text_muted)
+                .child(text)
+                .into_any_element()
+        };
+        let mut rows: Vec<AnyElement> =
+            vec![popover::menu_heading(theme, "Ports").into_any_element()];
         let available = snapshot.error.is_none();
         for service in &snapshot.services {
             let url = service.url(snapshot.proxy_port);
@@ -581,7 +592,29 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        rows
+        // Listed but unreachable: why.
+        if let Some(error) = &snapshot.error {
+            rows.push(note(error.clone().into()));
+        }
+        Some(
+            div()
+                .id("session-ports")
+                .debug_selector(|| "session-ports".into())
+                .w(px(SESSION_CARD_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap(px(popover::MENU_GAP))
+                .p(px(popover::CARD_INSET))
+                .rounded(px(popover::CARD_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(popover::surface_bg(theme))
+                .when(floating && !theme.is_frost(), |card| card.shadow_lg())
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     /// The Actions section: a row per project action (click runs it; the
