@@ -35,8 +35,9 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextAlign,
-    TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
+    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StyledImage as _, StyledText,
+    Subscription, Task, TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px,
+    size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -3350,6 +3351,11 @@ pub struct Transcript {
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
     pinned: bool,
+    /// The latest wheel/touch input headed for the top of a scrollable list
+    /// and broke the pin as it arrived ([`Transcript::on_scroll_wheel`]); the
+    /// deferred decision in [`Transcript::handle_scroll`] must not re-engage
+    /// it.
+    input_escaped: bool,
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
@@ -3696,6 +3702,7 @@ impl Transcript {
             show_jump_button: false,
             last_scroll_distance: 0.0,
             pinned,
+            input_escaped: false,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
             own_turn_kick: false,
@@ -3975,6 +3982,7 @@ impl Transcript {
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
+                let escaped = std::mem::take(&mut this.input_escaped);
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
@@ -3985,8 +3993,8 @@ impl Transcript {
                     this.last_scroll_distance = distance;
                     // Reaching the end preserves normal tail-follow intent
                     // without reasserting a possibly stale prompt hold.
-                    this.pinned =
-                        distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous);
+                    this.pinned = !escaped
+                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous));
                     this.spring.reset();
                     this.spring_last_tick = None;
                     // Re-stick only when returning to a short turn's actual
@@ -3998,7 +4006,11 @@ impl Transcript {
                                 >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
                         })
                     });
-                    if !released_own_turn && at_hold && Self::should_restick(distance, previous) {
+                    if !released_own_turn
+                        && !escaped
+                        && at_hold
+                        && Self::should_restick(distance, previous)
+                    {
                         if let Some(anchor) = this.own_turn.as_mut() {
                             anchor.held = true;
                             anchor.positioned = false;
@@ -4017,7 +4029,7 @@ impl Transcript {
                 let distance = this.distance_from_bottom();
                 let previous = this.last_scroll_distance;
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
+                if escaped || (distance > previous + 1.0 && distance > AT_BOTTOM_PX) {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
                     // scroll handler (mugen §1e: interrupt from input, not
@@ -4041,6 +4053,32 @@ impl Transcript {
             })
             .ok();
         });
+    }
+
+    /// Input headed for the top breaks the pin as it arrives, however little
+    /// it moved, as use-stick-to-bottom's wheel handler does. The distance
+    /// test in [`Self::handle_scroll`] can't see that on its own: a smoothed
+    /// wheel notch starts and ends with sub-pixel slices, and its slices
+    /// arrive on frames, where the spring's step runs before that deferred
+    /// decision, pulling the view back and recording the distance it then
+    /// compares against. Children bubble first, so the list has applied the
+    /// input by now.
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let toward_top = match event.delta {
+            ScrollDelta::Pixels(delta) => delta.y > px(0.0),
+            ScrollDelta::Lines(delta) => delta.y > 0.0,
+        };
+        self.input_escaped = toward_top && self.list.max_offset_for_scrollbar().y > px(0.0);
+        if self.input_escaped {
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+        }
     }
 
     fn on_selection_mouse_move(
@@ -10600,6 +10638,7 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -10657,6 +10696,77 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn a_glided_notch_leaves_the_bottom_and_stays_where_it_lands(cx: &mut gpui::TestAppContext) {
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::smooth_scroll::smooth_scroll(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant(
+                    "reply",
+                    MessageStatus::Complete,
+                    vec![text_part("text", &"History.\n\n".repeat(120))],
+                )];
+                state.transcript_revision += 1;
+            });
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        transcript.update(cx, |this, cx| {
+            this.rail_enabled = false;
+            this.sync(cx);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        // Frames at 120Hz in real time: the glide and the bottom spring both
+        // read the clock.
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            std::thread::sleep(Duration::from_millis(8));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear();
+            });
+        };
+        for _ in 0..30 {
+            frame(cx);
+        }
+        let distance = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| this.distance_from_bottom())
+        };
+        assert!(transcript.read_with(cx, |this, _| this.pinned));
+        assert!(distance(cx) <= 1.0, "{}", distance(cx));
+
+        // One 3-line notch up. Its glide starts and ends with slices well
+        // under a pixel.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(200.0), px(200.0)),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+            ..Default::default()
+        });
+        // The glide lands within 200ms; the rest shows the view stays there.
+        for _ in 0..50 {
+            frame(cx);
+        }
+        assert!(
+            !transcript.read_with(cx, |this, _| this.pinned),
+            "scrolling up must release the bottom"
+        );
+        let landed = distance(cx);
+        assert!(
+            (landed - 60.0).abs() <= 1.0,
+            "a 3-line notch scrolls 60px, as it does without smoothing: {landed}"
+        );
     }
 
     #[gpui::test]

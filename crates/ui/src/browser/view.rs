@@ -766,6 +766,15 @@ impl Render for BrowserSurface {
         };
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let body = body.child(self.empty_body(&theme, cx));
+        // WebView2 eases wheel notches itself; a glide would ease them twice.
+        // (AppKit hands macOS pages their wheel directly, and `macos::PageGlide`
+        // glides it there; the Linux page applies the smooth deltas it is sent
+        // as they come.)
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        let body = body.when(
+            cfg!(windows) && self.native.is_some() && self.page.error.is_none(),
+            |body| body.child(crate::smooth_scroll::raw_wheel_region()),
+        );
 
         #[cfg(target_os = "linux")]
         let body = body.when_some(self.linux_menu(&theme, cx), |el, menu| el.child(menu));
