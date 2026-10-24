@@ -1166,6 +1166,9 @@ struct RightTabDrag {
     from: usize,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
+    /// A saved side chat's id and title: dropped on a conversation, it
+    /// becomes a chat chip there, like a session dragged from the sidebar.
+    chat: Option<(String, SharedString)>,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -3661,6 +3664,24 @@ impl Shell {
             crate::files::WorkspacePathSource::FileTab,
             None,
         ))
+    }
+
+    /// The chat a side-chat tab can mention. Subagents are not chats, and an
+    /// unsaved side chat has no chat the agent could read yet.
+    fn chat_mention_for_surface(
+        &self,
+        surface: RightSurface,
+        title: SharedString,
+        cx: &App,
+    ) -> Option<(String, SharedString)> {
+        let RightSurface::SideChat(id) = surface else {
+            return None;
+        };
+        let state = self.side_chats.get(&id)?.state.read(cx);
+        if state.side_chat_unsaved() {
+            return None;
+        }
+        Some((state.selected_chat.clone()?, title))
     }
 
     /// Drag-reorder a surface tab within this chat's strip.
@@ -11639,7 +11660,8 @@ impl Shell {
                 - 24.0,
             cx,
         );
-        self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
+        let own_chat = self.state.read(cx).selected_chat.clone();
+        self.chat_dropzone("chat-dropzone", self.composer.clone(), own_chat.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
@@ -11801,7 +11823,7 @@ impl Shell {
                     .child(self.render_terminal_container(terminal_geometry, window, cx))
             })
             .child(Self::attachment_drop_overlay(theme))
-            .child(Self::mention_drop_overlay(theme))
+            .child(Self::mention_drop_overlay(theme, own_chat))
             .into_any_element()
     }
 
@@ -12587,6 +12609,7 @@ impl Shell {
             };
             let ghost_title = title.clone();
             let workspace_path = self.workspace_path_for_surface(surface, cx);
+            let chat_mention = self.chat_mention_for_surface(surface, title.clone(), cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
                 format!("{accessible_name}, unsaved changes")
@@ -12683,6 +12706,7 @@ impl Shell {
                     from: ix,
                     title: ghost_title,
                     workspace_path,
+                    chat: chat_mention,
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();

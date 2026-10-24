@@ -315,6 +315,7 @@ impl Shell {
         };
         let transcript = tab.transcript.clone();
         let composer = tab.composer.clone();
+        let own_chat = tab.state.read(cx).selected_chat.clone();
         // Share the main chat's docked width cap and responsive padding. Size
         // from the width the pane lays out at, not its mask, which an open or
         // close animates.
@@ -342,7 +343,8 @@ impl Shell {
                     cx,
                 ))
         });
-        self.chat_dropzone(("side-chat-dropzone", id), composer.clone(), cx)
+        let mention_overlay = Self::mention_drop_overlay(Theme::of(cx), own_chat.clone());
+        self.chat_dropzone(("side-chat-dropzone", id), composer.clone(), own_chat, cx)
             .size_full()
             .flex()
             .flex_col()
@@ -364,7 +366,7 @@ impl Shell {
             )
             .child(div().flex_none().child(composer))
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
-            .child(Self::mention_drop_overlay(Theme::of(cx)))
+            .child(mention_overlay)
             .into_any_element()
     }
 }
