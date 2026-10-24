@@ -7,6 +7,7 @@
 mod auth_cli;
 mod daemon;
 mod update_cli;
+mod visual_cli;
 
 use clap::{Parser, Subcommand};
 use zeron_app::{edge_url_from_env, engine_config_from_env, paths, workos_client_id_from_env};
@@ -58,6 +59,11 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Agent visuals (Luau scripts Zeron draws natively).
+    Visual {
+        #[command(subcommand)]
+        command: VisualCommand,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -68,6 +74,17 @@ enum Command {
     Update {
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum VisualCommand {
+    /// Run every visual in a file the way Zeron will: each ```zeron-visual
+    /// fence of a Markdown document, or a whole `.luau` script. Errors point
+    /// at the file's lines; exits 1 when any visual fails.
+    Check {
+        #[arg(value_name = "FILE")]
+        path: std::path::PathBuf,
     },
 }
 
@@ -155,6 +172,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp) => zeron_app::run_mcp(),
         Some(Command::Engine) => zeron_app::background::run(),
+        Some(Command::Visual {
+            command: VisualCommand::Check { path },
+        }) => {
+            if !visual_cli::check(&path)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
             zeron_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)

@@ -18,6 +18,7 @@
 //! script's random data is the same on every render and every device.
 
 pub mod assets;
+pub mod document;
 mod draw;
 pub mod image;
 mod model;
@@ -614,6 +615,14 @@ pub fn seed_for(id: &str) -> u64 {
     id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
+}
+
+/// The seed of a ```` ```zeron-visual ```` fence in a Markdown document:
+/// its code and its position among fences with identical code, so the
+/// Markdown preview and `zeron visual check` draw the same random data and a
+/// fence keeps it when the document around it changes.
+pub fn seed_for_document(code: &str, occurrence: usize) -> u64 {
+    seed_for(&format!("{:016x}:{occurrence}", seed_for(code)))
 }
 
 #[cfg(test)]
