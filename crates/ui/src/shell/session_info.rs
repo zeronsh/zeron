@@ -61,7 +61,16 @@ pub(super) struct SessionPreviews {
     /// The chat the running watch follows.
     chat: Option<String>,
     _watch: Option<Task<()>>,
+    /// Ports paged in past the first [`PORTS_INITIAL`]; per chat.
+    shown: usize,
+    scroll: gpui::ScrollHandle,
+    /// The card's floating scrollbar, the lanes card's treatment.
+    bar: popover::MenuScrollbarState,
 }
+
+/// The ports card lists this many, then pages in [`PORTS_PAGE`] at a time.
+const PORTS_INITIAL: usize = 3;
+const PORTS_PAGE: usize = 10;
 
 /// A non-interactive card row: icon slot, label, optional trailing detail.
 fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div {
@@ -464,8 +473,10 @@ impl Shell {
             .children(branch_row)
             .children(actions);
 
-        // ── The ports its agents and terminals serve.
-        let ports = self.render_session_ports(&chat.id, !docked, &theme, cx);
+        // ── The ports its agents and terminals serve, at most a third of the
+        // window tall before they scroll.
+        let ports_height = self.viewport_height / 3.0;
+        let ports = self.render_session_ports(&chat.id, !docked, ports_height, &theme, cx);
 
         // The session and ports cards keep their height; only the lanes give.
         let card = div()
@@ -523,13 +534,15 @@ impl Shell {
 
     /// The ports card: a row per server this chat can preview (one a Zeron
     /// agent or terminal started in its checkout, or one this chat's agent or
-    /// terminals started anywhere), opening it in a browser tab. `None` while
-    /// nothing runs; `floating` over the transcript, it casts the popover's
-    /// shadow.
+    /// terminals started anywhere), opening it in a browser tab: the first
+    /// [`PORTS_INITIAL`], then a page more per "Show more", scrolling past
+    /// `max_height`. `None` while nothing runs; `floating` over the
+    /// transcript, it casts the popover's shadow.
     fn render_session_ports(
         &mut self,
         chat_id: &str,
         floating: bool,
+        max_height: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -551,7 +564,9 @@ impl Shell {
         let mut rows: Vec<AnyElement> =
             vec![popover::menu_heading(theme, "Ports").into_any_element()];
         let available = snapshot.error.is_none();
-        for service in &snapshot.services {
+        let shown = self.session_previews.shown.max(PORTS_INITIAL);
+        let hidden = snapshot.services.len().saturating_sub(shown);
+        for service in snapshot.services.iter().take(shown) {
             let url = service.url(snapshot.proxy_port);
             let row_id = SharedString::from(format!("session-info-preview-{}", service.id));
             let port = SharedString::from(format!(":{}", service.port));
@@ -592,27 +607,74 @@ impl Shell {
                     .into_any_element(),
             );
         }
+        if hidden > 0 {
+            rows.push(
+                popover::picker_row(theme, false, false, "session-ports-more")
+                    .id("session-ports-more")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        let previews = &mut this.session_previews;
+                        previews.shown = previews.shown.max(PORTS_INITIAL) + PORTS_PAGE;
+                        cx.notify();
+                    }))
+                    .child(popover::picker_icon_slot(div().into_any_element()))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(format!("Show {} more", hidden.min(PORTS_PAGE))),
+                    )
+                    .into_any_element(),
+            );
+        }
         // Listed but unreachable: why.
         if let Some(error) = &snapshot.error {
             rows.push(note(error.clone().into()));
         }
+        let body = div()
+            .id("session-ports-body")
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.session_previews.scroll)
+            .p(px(popover::CARD_INSET))
+            .flex()
+            .flex_col()
+            .gap(px(popover::MENU_GAP))
+            .children(rows);
+        // The rail shows only once the ports outgrow the card and scroll.
+        let scrollbar = popover::rail_for(
+            self,
+            popover::RailAccess {
+                bar: |this: &mut Self| &mut this.session_previews.bar,
+                scroll: |this: &Self| this.session_previews.scroll.clone(),
+            },
+            "session-ports-scrollbar",
+            theme,
+            cx,
+        );
         Some(
             div()
                 .id("session-ports")
                 .debug_selector(|| "session-ports".into())
+                .relative()
                 .w(px(SESSION_CARD_WIDTH))
+                .max_h(px(max_height))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
-                .gap(px(popover::MENU_GAP))
-                .p(px(popover::CARD_INSET))
                 .rounded(px(popover::CARD_RADIUS))
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
                 .bg(popover::surface_bg(theme))
                 .when(floating && !theme.is_frost(), |card| card.shadow_lg())
-                .children(rows)
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.session_previews.bar.set_list_hovered(*hovered) {
+                        cx.notify();
+                    }
+                }))
+                .child(body)
+                .children(scrollbar)
                 .into_any_element(),
         )
     }
