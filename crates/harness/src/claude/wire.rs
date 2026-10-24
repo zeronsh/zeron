@@ -102,6 +102,14 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started` (2.1.296+): whether the CLI backgrounded the agent. The
+    /// spawn input's `run_in_background` is not reliable (absent on a
+    /// background spawn in 2.1.296), so this is the CLI's own answer.
+    #[serde(default)]
+    pub is_backgrounded: Option<bool>,
+    /// `task_started` (AGENT tasks): the prompt the child was started with.
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// `background_tasks_changed`: every background task the session holds
     /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
