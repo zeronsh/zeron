@@ -66,6 +66,30 @@ pub fn loopback(url: &url::Url) -> bool {
     }
 }
 
+const LOCAL_FILE_ADDRESS: &str = "Local files can't be opened in the Browser. Open them from Files or from a file link in the chat.";
+
+/// A filesystem path or `file:` URL typed as an address. Left to the web
+/// parser, `/Users/me/page.html` loaded `https://users/me/page.html`,
+/// `\\server\share\page.html` `https://server/share/page.html` and `~`
+/// `https://~/` (#962).
+fn local_file_address(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    (text.starts_with('/') && !text.starts_with("//"))
+        || text.starts_with('\\')
+        || text == "~"
+        || text.starts_with("~/")
+        || text.starts_with("./")
+        || text.starts_with("../")
+        || drive
+        || text
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+}
+
 pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     let text = input.trim();
     if text.is_empty() {
@@ -73,6 +97,9 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     }
     if text.chars().any(|c| c.is_control()) {
         return Err("This address contains invalid characters.");
+    }
+    if local_file_address(text) {
+        return Err(LOCAL_FILE_ADDRESS);
     }
     // A bare host:port looks like a URI scheme to a URL parser. Only accept
     // that ambiguity when the suffix is an actual numeric port.
@@ -199,6 +226,24 @@ mod tests {
         }
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
+    }
+    #[test]
+    fn local_paths_say_where_files_open_instead_of_loading_a_host() {
+        for input in [
+            "/Users/me/Documents/Codex/mockup.html",
+            " /tmp/report.html ",
+            "~",
+            "~/Documents/mockup.html",
+            "./mockup.html",
+            "../mockup.html",
+            "file:///Users/me/mockup.html",
+            "FILE:/Users/me/mockup.html",
+            r"C:\Users\me\mockup.html",
+            "c:/Users/me/mockup.html",
+            r"\\server\share\mockup.html",
+        ] {
+            assert_eq!(normalize_address(input), Err(LOCAL_FILE_ADDRESS), "{input}");
+        }
     }
     #[test]
     fn frames_load_web_content_but_never_leave_the_page() {
