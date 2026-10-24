@@ -98,7 +98,9 @@ impl Shell {
             && self.right_pane_open(cx)
             && self.navigation_focus.in_right(window, cx)
         {
-            let rows = self.right_surface_rows(cx);
+            // A split cycles within the focused pane.
+            let pane = self.right_split(cx).map(|layout| layout.focused());
+            let rows = self.right_pane_rows(pane, cx);
             if rows.len() <= 1 {
                 return;
             }
@@ -463,6 +465,14 @@ impl Shell {
                 // second row; expand stays in this band (user request).
                 let show_pane_controls =
                     widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
+                // Where the pane's content starts, relative to the strip
+                // area below (right-aligned in the reveal, past its 8px pad):
+                // split panes line their strips up over their columns.
+                let strips_origin = (self.viewport_width
+                    - self.files_visible_width(cx)
+                    - self.right_content_width(self.right_target(cx)))
+                    - (self.viewport_width - right_pad - widths.files_controls - content_width
+                        + 8.0);
                 // The toggle is the fixed right-edge anchor, like the left
                 // sidebar control. Only the tabs + expand section reveals to
                 // its left; including the toggle in this animated width
@@ -499,7 +509,12 @@ impl Shell {
                                                 .min_w_0()
                                                 .h_full()
                                                 .overflow_hidden()
-                                                .child(self.render_right_tab_strip(cx)),
+                                                .child(
+                                                    self.render_right_titlebar_strips(
+                                                        strips_origin,
+                                                        cx,
+                                                    ),
+                                                ),
                                         )
                                         .child(header_icon_button(
                                             "expand-changes",

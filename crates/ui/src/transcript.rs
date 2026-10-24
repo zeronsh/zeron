@@ -218,10 +218,10 @@ fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming:
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
 /// Teleport when farther than this many viewports from the end; glide the rest.
 pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
-/// A freshly-sent prompt rests this far below the transcript viewport's top.
-/// The titlebar overlays the full-height list, so its height is part of the
-/// inset; the extra 10px matches the first row's breathing room.
-pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// A freshly-sent prompt rests this far below the chrome overlaying the
+/// transcript viewport's top (`Transcript::top_chrome`); it matches the
+/// first row's breathing room.
+const OWN_SEND_TOP_GAP_PX: f32 = 10.0;
 /// Epsilon of extra height under the reservation. The runway ends AT the
 /// app's bottom — this is not scroll room (24px of it read as a janky
 /// overshoot-and-fight zone, user report) — it exists only to keep the held
@@ -3384,6 +3384,10 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
+    /// Height of the chrome overlaying the transcript's top: the titlebar,
+    /// unless the shell hosts this view below other chrome (a lower split
+    /// pane, whose own tab strip sits above it in flow).
+    top_chrome: f32,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -3711,6 +3715,7 @@ impl Transcript {
             selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
+            top_chrome: Theme::TITLEBAR_HEIGHT,
             rail_hover: None,
             hovered_entry: None,
             copied_code: None,
@@ -3783,6 +3788,25 @@ impl Transcript {
             }
             cx.notify();
         }
+    }
+
+    pub fn set_top_chrome(&mut self, height: f32, cx: &mut Context<Self>) {
+        if (self.top_chrome - height).abs() > 0.5 {
+            self.top_chrome = height;
+            if !self.rows.is_empty() {
+                self.list.remeasure_items(0..1);
+                self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
+            }
+            if self.own_turn.is_some() {
+                self.own_turn_kick = true;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Where a reader's eye rests below the top chrome.
+    pub(crate) fn own_send_top_inset(&self) -> f32 {
+        self.top_chrome + OWN_SEND_TOP_GAP_PX
     }
 
     pub(crate) fn rail_hover(&self) -> Option<usize> {
@@ -3995,7 +4019,7 @@ impl Transcript {
                     let at_hold = this.own_turn_anchor_ix().is_some_and(|ix| {
                         this.list.bounds_for_item(ix).is_some_and(|bounds| {
                             f32::from(bounds.top() - this.list.viewport_bounds().top())
-                                >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
+                                >= this.own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
                         })
                     });
                     if !released_own_turn && at_hold && Self::should_restick(distance, previous) {
@@ -4274,11 +4298,11 @@ impl Transcript {
     /// carries the titlebar chrome inside its own box (the first row's
     /// top gap), so the hold adds nothing — adding the inset on top parked
     /// a new chat's first prompt a double-chrome ~66px low (user report).
-    fn own_send_inset(anchor_ix: usize) -> f32 {
+    fn own_send_inset(&self, anchor_ix: usize) -> f32 {
         if anchor_ix == 0 {
             0.0
         } else {
-            OWN_SEND_TOP_INSET_PX
+            self.own_send_top_inset()
         }
     }
 
@@ -4343,7 +4367,7 @@ impl Transcript {
             });
             self.list.set_tail_reservation(Some((
                 ix,
-                px(Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - expansion),
+                px(self.own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - expansion),
             )));
         } else if self.own_turn.is_none() {
             self.list.set_tail_reservation(None);
@@ -4390,7 +4414,7 @@ impl Transcript {
             cx.notify();
             return;
         }
-        let inset = Self::own_send_inset(anchor_ix);
+        let inset = self.own_send_inset(anchor_ix);
         if self.is_glued() && self.own_turn.as_ref().is_some_and(|anchor| anchor.held) {
             self.list.scroll_by(px(-viewport_height));
         }
@@ -7370,7 +7394,7 @@ impl Transcript {
                 .map(SharedString::from)
         };
         // The viewport spans the full window (under the titlebar): the first
-        // row's gap adds the titlebar's height so a top-scrolled transcript
+        // row's gap adds the top chrome's height so a top-scrolled transcript
         // rests below the chrome it fades under. The right pane already pads
         // for the titlebar — an override instance's first row keeps only the
         // ordinary turn gap, or the content sits double-chrome low.
@@ -7378,7 +7402,7 @@ impl Transcript {
             if self.doc_override.is_some() {
                 Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                self.top_chrome + Theme::SPACE_LG + OWN_SEND_TOP_GAP_PX
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -14397,7 +14421,7 @@ mod tests {
                         .bounds_for_item(anchor)
                         .unwrap()
                         .top();
-                    assert!(previous > px(Transcript::own_send_inset(anchor) + 40.0));
+                    assert!(previous > px(transcript.read(cx).own_send_inset(anchor) + 40.0));
                     for _ in 0..80 {
                         tick(&transcript, window, cx);
                         let top = transcript
@@ -14408,7 +14432,7 @@ mod tests {
                             .top();
                         assert!(top <= previous + px(0.5), "repeat send reversed");
                         assert!(
-                            top >= px(Transcript::own_send_inset(anchor) - 2.5),
+                            top >= px(transcript.read(cx).own_send_inset(anchor) - 2.5),
                             "repeat send overshot"
                         );
                         assert!(previous - top < px(150.0), "repeat send jumped");
@@ -15050,7 +15074,7 @@ mod tests {
                 draw(window, cx);
                 let start_top = transcript.read(cx).list.bounds_for_item(11).unwrap().top();
                 assert!(
-                    start_top > px(Transcript::own_send_inset(11) + 100.0),
+                    start_top > px(transcript.read(cx).own_send_inset(11) + 100.0),
                     "installing the runway must preserve the start of the glide"
                 );
                 let mut previous_top = start_top;
@@ -15071,8 +15095,7 @@ mod tests {
                         "the glide must not reverse"
                     );
                     previous_top = bounds.top();
-                    let target =
-                        this.list.viewport_bounds().top() + px(Transcript::own_send_inset(11));
+                    let target = this.list.viewport_bounds().top() + px(this.own_send_inset(11));
                     assert!(
                         bounds.top() >= target - px(0.5),
                         "send overshot: {:?} < {:?}",
@@ -15084,7 +15107,7 @@ mod tests {
                 let bounds = this.list.bounds_for_item(11).unwrap();
                 assert!(
                     (f32::from(bounds.top() - this.list.viewport_bounds().top())
-                        - Transcript::own_send_inset(11))
+                        - this.own_send_inset(11))
                     .abs()
                         <= 1.0
                 );
