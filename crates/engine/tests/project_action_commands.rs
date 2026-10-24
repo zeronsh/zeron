@@ -74,3 +74,42 @@ async fn manual_and_setup_actions_preserve_long_multiline_commands() {
         }
     }
 }
+
+/// Everything an action (any engine terminal) starts carries the terminal's
+/// origin, and the terminal's chat is remembered after it closes, so preview
+/// discovery still lists a server it left running.
+#[tokio::test]
+async fn actions_mark_what_they_start_with_their_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ProjectActionsStore::open(root.path()).unwrap();
+    let terminals = Terminals::new();
+    let snapshot = store
+        .upsert(
+            "space",
+            root.path(),
+            None,
+            ProjectActionDraft {
+                name: "Dev server".into(),
+                command: "printf '%s' \"$ZERON_ORIGIN\" > origin".into(),
+                icon: ProjectActionIcon::Test,
+                run_on_worktree_create: false,
+            },
+        )
+        .unwrap();
+    let action = snapshot.actions.last().unwrap();
+    let run = launch_project_action(&terminals, action, root.path(), root.path(), 80, 24).unwrap();
+    terminals.associate_chat(&run.terminal.id, "chat").unwrap();
+    let expected = zeron_proto::terminal_origin(&run.terminal.id);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while std::fs::read_to_string(root.path().join("origin")).ok() != Some(expected.clone()) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the action sees its terminal's origin");
+    terminals.close(&run.terminal.id).unwrap();
+    assert_eq!(
+        terminals.chats().get(&run.terminal.id).map(String::as_str),
+        Some("chat")
+    );
+}

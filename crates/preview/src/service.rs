@@ -9,7 +9,7 @@ use crate::{
 };
 use futures::{StreamExt, stream};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -106,7 +106,86 @@ struct Inner {
 /// Each handler sees the authenticated peer that opened the stream and
 /// decides itself whether to serve it.
 type StreamServices = Arc<Mutex<Vec<(String, Arc<dyn Connector>)>>>;
-pub type Projects = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
+
+/// What discovery serves, re-read every scan.
+#[derive(Clone, Default)]
+pub struct Scope {
+    /// Every chat this device hosts, with its checkout. A listener counts only
+    /// when one of these chats' agents or terminals started it; it is listed
+    /// under the deepest checkout containing its working directory, else under
+    /// the checkout of the chat that started it.
+    pub chats: Vec<(String, PathBuf)>,
+    /// Terminal id → chat, for the engine's terminals (project actions run in
+    /// one), including ones since closed.
+    pub terminals: HashMap<String, String>,
+    /// Ports agent CLIs serve their own protocol on (`opencode serve`).
+    pub reserved_ports: HashSet<u16>,
+}
+pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
+
+/// This scan's candidates (`None` when the process table could not be read),
+/// each with the checkout it is listed under.
+fn candidates(
+    scope: Scope,
+    origins: &mut discovery::Origins,
+) -> Option<Vec<(PathBuf, discovery::Listener)>> {
+    let Scope {
+        chats,
+        terminals,
+        reserved_ports,
+    } = scope;
+    let mut canonical = HashMap::new();
+    let chats: HashMap<String, PathBuf> = chats
+        .into_iter()
+        .filter_map(|(chat, cwd)| {
+            let cwd = canonical
+                .entry(cwd.clone())
+                .or_insert_with(|| cwd.canonicalize().ok())
+                .clone()?;
+            Some((chat, cwd))
+        })
+        .collect();
+    let mut roots: Vec<PathBuf> = chats
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if roots.is_empty() {
+        return Some(Vec::new());
+    }
+    roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    let listeners = discovery::listeners(origins)?;
+    Some(
+        listeners
+            .into_iter()
+            .filter(|l| {
+                l.zeron_owned
+                    && l.address.port() != zeron_proto::PREVIEW_PROXY_PORT
+                    && !reserved_ports.contains(&l.address.port())
+                    && l.pid != std::process::id()
+                    && !l.is_authentication_command()
+            })
+            .filter_map(|mut listener| {
+                // A chat this device no longer hosts (or another engine's,
+                // inherited by a nested one) owns nothing here.
+                let chat = match listener.origin.as_deref()?.split_once(':')? {
+                    ("chat", chat) => chat.to_owned(),
+                    ("terminal", terminal) => terminals.get(terminal)?.clone(),
+                    _ => return None,
+                };
+                let chat_root = chats.get(&chat)?;
+                listener.chat_id = Some(chat);
+                let root = roots
+                    .iter()
+                    .find(|root| listener.belongs_to(root))
+                    .unwrap_or(chat_root)
+                    .clone();
+                Some((root, listener))
+            })
+            .collect(),
+    )
+}
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
         Ok(Self(Arc::new(Inner {
@@ -251,41 +330,37 @@ impl PreviewService {
         let stop = self.0.stop.clone();
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
+            let mut origins = discovery::Origins::default();
             loop {
                 let memory = &mut memory;
+                let origins = &mut origins;
                 let scan = async {
                     let projects = projects.clone();
-                    let candidates = tokio::task::spawn_blocking(move || {
-                        let mut roots: Vec<_> = projects()
-                            .into_iter()
-                            .collect::<std::collections::BTreeSet<_>>()
-                            .into_iter()
-                            .filter_map(|p| p.canonicalize().ok())
-                            .collect::<std::collections::BTreeSet<_>>()
-                            .into_iter()
-                            .collect();
-                        if roots.is_empty() {
-                            return Vec::new();
-                        }
-                        roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-                        discovery::listeners()
-                            .into_iter()
-                            .filter(|l| {
-                                l.address.port() != zeron_proto::PREVIEW_PROXY_PORT
-                                    && l.pid != std::process::id()
-                                    && !l.is_authentication_command()
-                            })
-                            .filter_map(|listener| {
-                                roots
-                                    .iter()
-                                    .find(|root| listener.belongs_to(root))
-                                    .cloned()
-                                    .map(|root| (root, listener))
-                            })
-                            .collect::<Vec<_>>()
+                    let taken = std::mem::take(origins);
+                    let scanned = tokio::task::spawn_blocking(move || {
+                        let mut origins = taken;
+                        (candidates(projects(), &mut origins), origins)
                     })
-                    .await
-                    .unwrap_or_default();
+                    .await;
+                    let candidates = match scanned {
+                        Ok((Some(candidates), kept)) => {
+                            *origins = kept;
+                            candidates
+                        }
+                        // A failed enumeration says nothing about what runs:
+                        // keep the services already listed.
+                        Ok((None, kept)) => {
+                            *origins = kept;
+                            tracing::debug!(
+                                "preview scan could not read processes; keeping the last result"
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "preview scan failed; keeping the last result");
+                            return;
+                        }
+                    };
                     let (mut servers, probe) = memory.plan(candidates, Instant::now());
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
@@ -386,7 +461,9 @@ mod tests {
             args: vec!["node".into()],
             started_at: 1_000,
             address: ([127, 0, 0, 1], port).into(),
-            zeron_owned: false,
+            zeron_owned: true,
+            origin: Some("chat:chat".into()),
+            chat_id: Some("chat".into()),
         }
     }
     #[test]

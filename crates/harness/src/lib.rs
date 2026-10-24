@@ -297,6 +297,7 @@ pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
+pub mod agent_ports;
 pub mod cursor;
 pub(crate) mod executable;
 pub mod install;

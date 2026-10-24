@@ -133,7 +133,13 @@ impl LiveTerminal {
 struct TerminalsInner {
     sessions: Mutex<HashMap<String, Arc<Mutex<LiveTerminal>>>>,
     activity_tx: watch::Sender<Vec<(String, TerminalActivity)>>,
+    /// Each terminal's chat, kept past the terminal's close: a server it
+    /// backgrounded outlives it and still belongs to that chat's previews.
+    chats: Mutex<VecDeque<(String, String)>>,
 }
+
+/// Terminals whose chat [`Terminals::chats`] still remembers.
+const REMEMBERED_TERMINAL_CHATS: usize = 4096;
 
 impl TerminalsInner {
     /// Called without a LiveTerminal lock; the graph's lock order is always
@@ -240,6 +246,7 @@ impl Terminals {
             inner: Arc::new(TerminalsInner {
                 sessions: Mutex::new(HashMap::new()),
                 activity_tx,
+                chats: Mutex::new(VecDeque::new()),
             }),
         };
         tokio::spawn(reaper_task(Arc::downgrade(&terminals.inner)));
@@ -277,8 +284,23 @@ impl Terminals {
     pub fn associate_chat(&self, terminal_id: &str, chat_id: &str) -> Result<(), EngineError> {
         let session = self.session(terminal_id)?;
         lock(&session).chat_id = Some(chat_id.to_owned());
+        {
+            let mut chats = lock(&self.inner.chats);
+            chats.retain(|(terminal, _)| terminal != terminal_id);
+            chats.push_back((terminal_id.to_owned(), chat_id.to_owned()));
+            while chats.len() > REMEMBERED_TERMINAL_CHATS {
+                chats.pop_front();
+            }
+        }
         self.inner.publish_activity();
         Ok(())
+    }
+
+    /// Terminal id → chat for every terminal opened for a chat, open or
+    /// since closed (the newest [`REMEMBERED_TERMINAL_CHATS`]). Everything a
+    /// terminal starts carries its id (see [`zeron_proto::ORIGIN_ENV`]).
+    pub fn chats(&self) -> HashMap<String, String> {
+        lock(&self.inner.chats).iter().cloned().collect()
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
@@ -361,6 +383,15 @@ impl Terminals {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| shell.clone());
 
+        // Named before the shell starts, so everything it runs carries it.
+        let id = new_id();
+        let mut environment = environment.clone();
+        environment.insert(
+            zeron_proto::ORIGIN_ENV.to_owned(),
+            zeron_proto::terminal_origin(&id),
+        );
+        let environment = &environment;
+
         #[cfg(windows)]
         let (initial_script, bootstrap) = (None, command.map(|command| format!("{command}\r")));
         #[cfg(not(windows))]
@@ -419,7 +450,6 @@ impl Terminals {
             .take_writer()
             .map_err(|e| EngineError::Other(format!("pty writer: {e}")))?;
 
-        let id = new_id();
         let session = Arc::new(Mutex::new(LiveTerminal {
             chat_id: None,
             seen_at: None,
