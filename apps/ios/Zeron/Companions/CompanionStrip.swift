@@ -119,7 +119,7 @@ final class CompanionChip: UIControl {
         if spinning { glyph.kind = .spinner }
         icon.isHidden = spinning || symbol == nil
         if let symbol {
-            icon.image = UIImage(named: symbol)?.withRenderingMode(.alwaysTemplate)
+            icon.image = Self.asset(symbol)
                 ?? UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
         }
         if case let .dot(color)? = kind {
@@ -135,5 +135,19 @@ final class CompanionChip: UIControl {
 
     override var isHighlighted: Bool {
         didSet { alpha = isHighlighted ? 0.7 : 1 }
+    }
+
+    /// A `tool-*` asset at the icon's size. The SVGs declare `1em` and load
+    /// at about a point square, which a centered image view drew as a speck.
+    private static var assets: [String: UIImage] = [:]
+    private static func asset(_ name: String) -> UIImage? {
+        if let cached = assets[name] { return cached }
+        guard let image = UIImage(named: name) else { return nil }
+        let side: CGFloat = 15
+        let sized = UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
+            image.draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+        }.withRenderingMode(.alwaysTemplate)
+        assets[name] = sized
+        return sized
     }
 }

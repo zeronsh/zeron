@@ -546,6 +546,12 @@ final class TerminalCanvas: UIView {
         )
     }
 
+    /// The scalar `TerminalGlyphs` paints for `ch`, if it does.
+    private static func drawn(_ ch: Character) -> Unicode.Scalar? {
+        guard ch.unicodeScalars.count == 1, let scalar = ch.unicodeScalars.first, TerminalGlyphs.draws(scalar) else { return nil }
+        return scalar
+    }
+
     override func draw(_ rect: CGRect) {
         guard let frame = frameModel, let ctx = UIGraphicsGetCurrentContext() else { return }
         let m = metrics
@@ -568,6 +574,25 @@ final class TerminalCanvas: UIView {
                 if run.selected {
                     ctx.setFillColor(selection.cgColor)
                     ctx.fill(CGRect(x: x, y: y, width: w, height: m.lineHeight))
+                }
+            }
+        }
+        // Box drawing, blocks and the bullet: painted into their cells.
+        let scale = traitCollection.displayScale
+        let xHeight = CTFontGetXHeight(m.regular)
+        for (r, line) in rows {
+            let y = inset.top + CGFloat(r) * m.lineHeight + dy
+            guard y < rect.maxY, y + m.lineHeight > rect.minY else { continue }
+            for run in line.runs where !run.text.allSatisfy(\.isASCII) {
+                let color = run.fg == 0 ? fg : Self.color(run.fg)
+                let span = (run.wide ? 2 : 1) * m.cellWidth
+                var x = inset.left + CGFloat(run.col) * m.cellWidth
+                for ch in run.text {
+                    if let scalar = Self.drawn(ch) {
+                        let cell = CGRect(x: x, y: y, width: span, height: m.lineHeight)
+                        TerminalGlyphs.draw(scalar, in: cell, baseline: y + m.ascent, xHeight: xHeight, color: color, ctx: ctx, scale: scale)
+                    }
+                    x += span
                 }
             }
         }
@@ -600,7 +625,15 @@ final class TerminalCanvas: UIView {
                     var col = x
                     for ch in run.text {
                         let span = (run.wide ? 2 : 1) * m.cellWidth
-                        let line = CTLineCreateWithAttributedString(NSAttributedString(string: String(ch), attributes: attrs))
+                        if Self.drawn(ch) != nil {
+                            col += span
+                            continue
+                        }
+                        // A one-cell symbol that also has an emoji form (`⏵`,
+                        // `☐`): ask for the text glyph, not the color emoji.
+                        let emojiCapable = ch.unicodeScalars.count == 1 && ch.unicodeScalars.first!.properties.isEmoji
+                        let glyph = !run.wide && emojiCapable ? "\(ch)\u{FE0E}" : String(ch)
+                        let line = CTLineCreateWithAttributedString(NSAttributedString(string: glyph, attributes: attrs))
                         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
                         ctx.textPosition = CGPoint(x: col + max(0, (span - width) / 2), y: baseline)
                         CTLineDraw(line, ctx)
