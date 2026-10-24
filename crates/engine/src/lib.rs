@@ -89,6 +89,7 @@ pub use workspace_host::{
     DEFAULT_ORG_ID, DEFAULT_USER_ID, WORKSPACE_DOC_ID, WorkspaceHost, WorkspaceHostConfig,
 };
 pub use workspace_search::WorkspaceSearch;
+pub use zeron_preview::Scope as PreviewScope;
 
 pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 
@@ -995,14 +996,17 @@ impl Engine {
         }
         let preview_workspace = core.workspace.clone();
         let preview_device = core.device_id.clone();
-        let projects = Arc::new(move || {
-            preview_workspace
+        let preview_terminals = core.terminals.clone();
+        let projects = Arc::new(move || zeron_preview::Scope {
+            chats: preview_workspace
                 .read_chats()
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|chat| chat.device_id == preview_device)
-                .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
-                .collect()
+                .filter_map(|chat| Some((chat.id, std::path::PathBuf::from(chat.cwd?))))
+                .collect(),
+            terminals: preview_terminals.chats(),
+            reserved_ports: zeron_harness::agent_ports::reserved(),
         });
         let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
             edge_url: config.edge_url.clone(),

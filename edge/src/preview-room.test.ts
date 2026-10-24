@@ -4,7 +4,8 @@ const service = { id: "service", projectId: "project", projectName: "app", proje
 describe("preview coordinator admission", () => {
   it("accepts bounded service metadata and strips extra fields", () => {
     expect(previewCatalog([{ ...service, body: "not application traffic" }], "device")).toEqual([service]);
-    for (const change of [{ deviceId: "spoofed" }, { hostname: "example.com" }, { hostname: "x.y.localhost.evil.test" }, { port: 0 }, { pid: -1 }, { cwd: "x".repeat(4097) }]) expect(previewCatalog([{ ...service, ...change }], "device")).toBeUndefined();
+    expect(previewCatalog([{ ...service, chatId: "chat" }], "device")).toEqual([{ ...service, chatId: "chat" }]);
+    for (const change of [{ deviceId: "spoofed" }, { hostname: "example.com" }, { hostname: "x.y.localhost.evil.test" }, { port: 0 }, { pid: -1 }, { cwd: "x".repeat(4097) }, { chatId: 7 }, { chatId: "x".repeat(129) }]) expect(previewCatalog([{ ...service, ...change }], "device")).toBeUndefined();
     expect(previewCatalog([service, service], "device")).toBeUndefined();
     expect(previewCatalog(Array(257).fill(service), "device")).toBeUndefined();
   });

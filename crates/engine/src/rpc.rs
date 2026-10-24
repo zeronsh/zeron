@@ -3096,11 +3096,16 @@ impl RpcService for EngineRpc {
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .map(|s| s.to_string_lossy().into_owned());
+                        // Servers in this checkout, and any this chat's agent
+                        // or terminals started elsewhere. Only Zeron-started
+                        // ones: an older peer advertises every listener.
                         snapshot.services.retain(|service| {
                             service.device_id == device
-                                && cwd.as_ref().is_some_and(|cwd| {
-                                    cwd == std::path::Path::new(&service.project_cwd)
-                                })
+                                && service.zeron_owned
+                                && (service.chat_id.as_deref() == Some(chat_id.as_str())
+                                    || cwd.as_ref().is_some_and(|cwd| {
+                                        cwd == std::path::Path::new(&service.project_cwd)
+                                    }))
                         });
                         let value = serde_json::to_value(snapshot).ok()?;
                         Some((value, (changes, chats, false, workspace, catalog, chat_id)))

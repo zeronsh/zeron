@@ -174,6 +174,8 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
                 started_at: 1,
                 address: ([127, 0, 0, 1], backend_port).into(),
                 zeron_owned: true,
+                origin: Some("chat:chat".into()),
+                chat_id: Some("chat".into()),
             },
         )])
         .unwrap();

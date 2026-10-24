@@ -3533,6 +3533,12 @@ async fn drive_run(
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }
+                // Everything the agent starts inherits its chat, which is how
+                // preview discovery tells its dev servers from the user's own.
+                wire_request.env.insert(
+                    zeron_proto::ORIGIN_ENV.into(),
+                    zeron_proto::chat_origin(&chat_id),
+                );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner

@@ -1,6 +1,7 @@
 //! The session card: where this chat runs (device, project, branch) and the
-//! project's run actions, with the lanes card (its side chats and subagents,
-//! see `session_lanes`) stacked under it, both behind one toggle.
+//! project's run actions, with the ports card (the servers its agents and
+//! terminals started) and the lanes card (its side chats and subagents, see
+//! `session_lanes`) stacked under it, all behind one toggle.
 //! While the column has room, the card shows at its right on its own (until
 //! the user hides it), the transcript and composer shifting left as needed
 //! to clear it. Once clearing it would narrow the transcript, the card hides,
@@ -52,6 +53,16 @@ impl SessionDiffs {
     }
 }
 
+/// The selected chat's running servers, for the ports card: the same
+/// `WatchPreviews` stream the browser's start page lists, kept without it.
+#[derive(Default)]
+pub(super) struct SessionPreviews {
+    snapshot: zeron_proto::PreviewSnapshot,
+    /// The chat the running watch follows.
+    chat: Option<String>,
+    _watch: Option<Task<()>>,
+}
+
 /// A non-interactive card row: icon slot, label, optional trailing detail.
 fn info_row(theme: &Theme, glyph: AnyElement, label: SharedString) -> gpui::Div {
     div()
@@ -84,8 +95,8 @@ impl Shell {
                 return;
             };
             let device = chat.device_id.clone();
-            let target = (state.local_device_id.as_deref() != Some(device.as_str()))
-                .then_some(device);
+            let target =
+                (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device);
             (target, state.engine().cloned())
         };
         if self.session_diffs.target.as_ref() == Some(&target) {
@@ -134,6 +145,63 @@ impl Shell {
                             return;
                         }
                     }
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        }));
+    }
+
+    /// Watch the selected chat's running servers (idempotent per chat); it
+    /// retries every 2s while the stream fails or ends, listing nothing
+    /// meanwhile rather than servers that may have stopped.
+    fn ensure_session_previews(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if self.session_previews.chat.as_deref() == Some(chat_id) {
+            return;
+        }
+        // Engine still booting: the next render retries.
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.session_previews = SessionPreviews {
+            chat: Some(chat_id.to_owned()),
+            ..Default::default()
+        };
+        let chat_id = chat_id.to_owned();
+        self.session_previews._watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                if let Ok(mut rx) = engine
+                    .client()
+                    .subscribe(
+                        methods::WATCH_PREVIEWS,
+                        serde_json::json!({ "chatId": chat_id }),
+                    )
+                    .await
+                {
+                    while let Some(value) = rx.recv().await {
+                        let Ok(snapshot) =
+                            serde_json::from_value::<zeron_proto::PreviewSnapshot>(value)
+                        else {
+                            continue;
+                        };
+                        let alive = this.update(cx, |this, cx| {
+                            if this.session_previews.snapshot != snapshot {
+                                this.session_previews.snapshot = snapshot;
+                                cx.notify();
+                            }
+                        });
+                        if alive.is_err() {
+                            return;
+                        }
+                    }
+                }
+                let alive = this.update(cx, |this, cx| {
+                    if !this.session_previews.snapshot.services.is_empty() {
+                        this.session_previews.snapshot.services.clear();
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
                 }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
@@ -255,6 +323,7 @@ impl Shell {
         if reveal <= 0.001 {
             // Nothing shows the totals: stop streaming every checkout's patch.
             self.session_diffs = SessionDiffs::default();
+            self.session_previews = SessionPreviews::default();
             return None;
         }
         let theme = Theme::of(cx).for_popup();
@@ -359,7 +428,9 @@ impl Shell {
                         .rounded(px(5.0))
                         .cursor_pointer()
                         .hover(|style| style.bg(crate::theme::ink(0.08)))
-                        .tooltip(crate::settings::widgets::text_tooltip("Uncommitted changes"))
+                        .tooltip(crate::settings::widgets::text_tooltip(
+                            "Uncommitted changes",
+                        ))
                         .on_click(cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_session_info_overlay(cx);
@@ -393,7 +464,10 @@ impl Shell {
             .children(branch_row)
             .children(actions);
 
-        // The session card keeps its height; only the lanes under it give.
+        // ── The ports its agents and terminals serve.
+        let ports = self.render_session_ports(&chat.id, !docked, &theme, cx);
+
+        // The session and ports cards keep their height; only the lanes give.
         let card = div()
             .w(px(SESSION_CARD_WIDTH))
             .flex_shrink_0()
@@ -441,7 +515,104 @@ impl Shell {
                     )
                 })
                 .child(frosted(card.into_any_element()))
+                .children(ports.map(frosted))
                 .child(frosted(lanes))
+                .into_any_element(),
+        )
+    }
+
+    /// The ports card: a row per server this chat can preview (one a Zeron
+    /// agent or terminal started in its checkout, or one this chat's agent or
+    /// terminals started anywhere), opening it in a browser tab. `None` while
+    /// nothing runs; `floating` over the transcript, it casts the popover's
+    /// shadow.
+    fn render_session_ports(
+        &mut self,
+        chat_id: &str,
+        floating: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.ensure_session_previews(chat_id, cx);
+        let snapshot = &self.session_previews.snapshot;
+        if snapshot.services.is_empty() {
+            return None;
+        }
+        let note = |text: SharedString| {
+            div()
+                .px(px(9.0))
+                .py(px(5.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(18.0))
+                .text_color(theme.text_muted)
+                .child(text)
+                .into_any_element()
+        };
+        let mut rows: Vec<AnyElement> =
+            vec![popover::menu_heading(theme, "Ports").into_any_element()];
+        let available = snapshot.error.is_none();
+        for service in &snapshot.services {
+            let url = service.url(snapshot.proxy_port);
+            let row_id = SharedString::from(format!("session-info-preview-{}", service.id));
+            let port = SharedString::from(format!(":{}", service.port));
+            let detail = SharedString::from(if snapshot.remote {
+                format!("{} · {url}", service.device_name)
+            } else {
+                url.clone()
+            });
+            rows.push(
+                popover::picker_row(theme, false, false, row_id.clone())
+                    .id(row_id)
+                    .tooltip(crate::settings::widgets::text_tooltip(detail))
+                    .when(!available, |row| row.opacity(0.5).cursor_default())
+                    .when(available, |row| {
+                        row.on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_session_info_overlay(cx);
+                            this.browser_context.register_preview(&url);
+                            this.set_surfaces_open(true, cx);
+                            this.add_browser_surface(Some(url.clone()), window, cx);
+                        }))
+                    })
+                    .child(popover::picker_icon_slot(row_glyph(icons::GLOBE, theme)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(service.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(port),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // Listed but unreachable: why.
+        if let Some(error) = &snapshot.error {
+            rows.push(note(error.clone().into()));
+        }
+        Some(
+            div()
+                .id("session-ports")
+                .debug_selector(|| "session-ports".into())
+                .w(px(SESSION_CARD_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap(px(popover::MENU_GAP))
+                .p(px(popover::CARD_INSET))
+                .rounded(px(popover::CARD_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .bg(popover::surface_bg(theme))
+                .when(floating && !theme.is_frost(), |card| card.shadow_lg())
+                .children(rows)
                 .into_any_element(),
         )
     }

@@ -11,4 +11,4 @@ pub mod signaling;
 pub mod viewer;
 
 pub mod service;
-pub use service::PreviewService;
+pub use service::{PreviewService, Scope};

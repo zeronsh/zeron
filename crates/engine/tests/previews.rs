@@ -19,6 +19,7 @@ fn service(device: &str, cwd: &std::path::Path, id: &str) -> PreviewService {
         cwd: cwd.to_string_lossy().into_owned(),
         started_at: 1,
         zeron_owned: true,
+        chat_id: None,
     }
 }
 #[tokio::test]
