@@ -376,6 +376,35 @@ case "$first" in
   cat >/dev/null
   ;;
 
+*scenario:stop-task*)
+  # Stopping one tool call is the `stop_task` control request naming the task
+  # `task_started` reported for it (live-verified 2.1.310): the CLI kills that
+  # task, the tool result reports it killed, and the turn goes on. The first
+  # command is stopped before its task is announced (a foreground command
+  # reports one a few seconds in); the second after.
+  [ "$initialized" = true ] || exit 7
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-stop-task"}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_cmd","name":"Bash","input":{"command":"python3 -c \"import time; time.sleep(45)\""}}]}}'
+  sleep 1
+  emit '{"type":"system","subtype":"task_started","task_id":"bjipwt7mp","tool_use_id":"toolu_cmd","task_type":"local_bash","is_backgrounded":false}'
+  read -r stop || exit 1
+  case "$stop" in *'"subtype":"stop_task"'*) ;; *) exit 8 ;; esac
+  case "$stop" in *'"task_id":"bjipwt7mp"'*) ;; *) exit 8 ;; esac
+  rid=$(printf '%s\n' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
+  emit '{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cmd","is_error":true,"content":"Exit code 137\n\n[killed]"}]}}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_cmd2","name":"Bash","input":{"command":"python3 -c \"import time; time.sleep(45)\""}}]}}'
+  emit '{"type":"system","subtype":"task_started","task_id":"b2","tool_use_id":"toolu_cmd2","task_type":"local_bash","is_backgrounded":false}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ready"}}}'
+  read -r stop2 || exit 1
+  case "$stop2" in *'"task_id":"b2"'*) ;; *) exit 9 ;; esac
+  rid=$(printf '%s\n' "$stop2" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
+  emit '{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cmd2","is_error":true,"content":"Exit code 137\n\n[killed]"}]}}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"carrying on"}}}'
+  emit '{"type":"result","subtype":"success","result":"done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-stop-task"}'
+  ;;
+
 *scenario:interrupt*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-int"}'
   # Wedge without reading stdin — forces the SIGTERM escalation path.

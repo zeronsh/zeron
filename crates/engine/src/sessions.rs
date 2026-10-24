@@ -161,6 +161,8 @@ struct RunHandle {
     /// stopping a turn when the driver [`Harness::stops_turn_in_place`].
     turn: TurnControl,
     stops_turn_in_place: bool,
+    /// The driver ends one running tool call on [`TurnControl::stop_tool`].
+    stops_tools: bool,
     /// The harness stream is open. Before that there is no runtime to keep:
     /// a stop tears the pending start down instead.
     started: Arc<std::sync::atomic::AtomicBool>,
@@ -1058,6 +1060,7 @@ impl SessionsEngine {
                 steer_tx,
                 interrupt_token,
                 stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
+                stops_tools: harness.stops_tools(),
                 turn: turn.clone(),
                 started: started.clone(),
                 cancel: cancel_tx,
@@ -1334,6 +1337,28 @@ impl SessionsEngine {
             .extend(message_ids);
     }
 
+    /// The provider session this chat resumes next, with the cwd it was
+    /// created under and the harness that owns it: what a native-history
+    /// edit rewrites.
+    pub fn provider_session(&self, chat_id: &str) -> Option<(HarnessId, String, String)> {
+        let session = self.inner.owned_session(chat_id)?;
+        Some((session.harness?, session.session_id, session.cwd))
+    }
+
+    /// Point the chat at another provider session of its harness (a native
+    /// history edit or its undo). The next run resumes it; a parked runtime
+    /// still holding the old one must be retired first.
+    pub fn repoint_provider_session(
+        &self,
+        chat_id: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: HarnessId,
+    ) {
+        self.inner
+            .remember_harness_session(chat_id, session_id, cwd, harness);
+    }
+
     /// The user's Stop: a hard boundary. The in-flight turn ends `aborted`
     /// and the runtime goes with it — background subagents, background
     /// shells, everything the agent runs. The next message resumes the
@@ -1408,6 +1433,28 @@ impl SessionsEngine {
         }
         tracing::warn!(chat = %chat_id, "turn stop did not settle; tearing the runtime down");
         self.terminate(chat_id).await
+    }
+
+    /// End one running tool call of the chat's live run — a command or a
+    /// subagent, named by its transcript part's id — leaving the turn
+    /// running. The driver acts on it asynchronously; the error says why
+    /// nothing was asked of it.
+    pub fn stop_tool(&self, chat_id: &str, tool_call_id: &str) -> Result<(), &'static str> {
+        let runs = lock(&self.inner.runs);
+        let live = runs
+            .get(chat_id)
+            .filter(|run| !run.retiring.load(std::sync::atomic::Ordering::Acquire));
+        let Some(run) = live else {
+            return Err("no running agent to stop it in");
+        };
+        if !run.stops_tools {
+            return Err("this agent cannot stop a single command or subagent");
+        }
+        if !run.started.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("the agent has not started yet");
+        }
+        run.turn.stop_tool(tool_call_id);
+        Ok(())
     }
 
     /// Tear the chat's live runtime down (protocol interrupt, then the

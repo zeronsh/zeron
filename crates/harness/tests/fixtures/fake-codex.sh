@@ -504,6 +504,43 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:stop-subagent*)
+  # Stopping one subagent: turn/interrupt on the CHILD thread with the turn
+  # id its own turn/started announced; the parent turn keeps running
+  # (live-verified, codex-cli 0.164.0).
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
+  emit '{"method":"turn/started","params":{"threadId":"child-1","turn":{"id":"ct-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-1","itemId":"cm1","delta":"child working"}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"turn/interrupt"' || exit 8
+  has "$intline" '"threadId":"child-1"' || exit 8
+  has "$intline" '"turnId":"ct-1"' || exit 8
+  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
+  emit '{"method":"turn/completed","params":{"threadId":"child-1","turn":{"id":"ct-1","status":"interrupted"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"parent carries on"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  cat >/dev/null
+  ;;
+
+*scenario:stop-command*)
+  # Stopping one command: the app-server has no request for it, so the
+  # command's process (in its own session, as Codex runs them) is signaled.
+  # The item then completes failed with 143 and the turn goes on (live-verified).
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  setsid sh -c 'sleep 45; echo done' >/dev/null 2>&1 &
+  command_pid=$!
+  sleep 0.3
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"cmd-1","command":"/bin/sh -lc '\''sleep 45; echo done'\''","status":"inProgress"}}}'
+  wait "$command_pid"
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"cmd-1","status":"failed","exitCode":143}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"carrying on"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  cat >/dev/null
+  ;;
+
 *scenario:stop-in-place*)
   # A turn stop: turn/interrupt ends the turn, the app-server stays up, and
   # the next prompt is a turn/start on the same thread.

@@ -162,8 +162,31 @@ name (default: the local engine's device).
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
+| `read_agent_memory` | `GetNativeHistory {chatId, targetDeviceId}` (the chat's device) |
+| `edit_agent_memory` | `ApplyNativeEdits {chatId, revision, edits, targetDeviceId}` |
+| `undo_agent_memory_edit` | `UndoNativeEdit {chatId, targetDeviceId}`            |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
+
+`read_agent_memory`, `edit_agent_memory` and `undo_agent_memory_edit` are the
+experimental transcript editing feature: they read and rewrite what a chat's
+agent itself remembers (Claude Code's session file, Codex's thread), not Zeron's
+transcript, and always run on the device that hosts the chat. The read returns
+`revision`, `harness`, `compacted`, `canUndo` and `items`: `{id, role, turn,
+kind, text?, editable, removable, sealed?}`. `kind` is `text`, `reasoning`,
+`toolCall` (`tool`, `summary`), `toolResult` (`summary`, `isError`) or
+`compactionSummary`. Editable text is always returned whole; reasoning carries
+`sealed: "signed" | "encrypted"` (text only when readable), and long reasoning,
+summaries and tool output are cut with `truncated: true`. `edit_agent_memory`
+takes the `revision` from that read and `edits` of `{op: "replace", id, text}`
+or `{op: "remove", id}`; only text items can be replaced, reasoning can only be
+removed, and files are never touched. It returns the new `revision`, what
+changed, and `canUndo`; item ids belong to the revision they were read at, so
+read again before editing more. The agent must be idle: an agent editing its
+own chat is mid-turn, so these tools are for other chats (a worker or side
+chat), and the engine's refusals ("Stop the agent before editing", "The
+conversation changed since you started editing") come back as tool errors.
+`undo_agent_memory_edit` points the chat back at the version before the last edit.
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop

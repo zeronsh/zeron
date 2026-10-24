@@ -2274,6 +2274,18 @@ struct ImageMenu {
     active: Option<usize>,
 }
 
+/// The menu a right-click on a prompt or reply opens.
+struct MessageMenu {
+    entry_id: SharedString,
+    /// Where the message's content starts on screen, so an editor opened
+    /// from here can keep it in place.
+    content_top: f32,
+    /// "Edit transcript" is offered (experiment on, agent supports it).
+    editable: bool,
+    position: Point<Pixels>,
+    active: Option<usize>,
+}
+
 /// Spawn chips never expand, so they never preview images either.
 fn chip_has_images(tool: &ToolItem) -> bool {
     !tool.images.is_empty() && !is_spawn_link(tool)
@@ -3246,6 +3258,9 @@ pub struct Transcript {
     /// Entrance state follows stable groups through completion so fast calls
     /// finish revealing. Replay rows have no entrance timestamps.
     tool_group_reveals: HashMap<SharedString, ToolGroupReveal>,
+    /// [`AppState::tool_stops_revision`] last painted: a stop button flips to
+    /// "Stopping…" without the transcript itself changing.
+    tool_stops_seen: u64,
     last_replay_baseline: Option<Arc<zeron_doc::TranscriptBaseline>>,
     /// Parsed historical prefixes, used to seed text before a coalesced live
     /// suffix is painted. The wire watermark contains lengths, not text.
@@ -3426,6 +3441,11 @@ pub struct Transcript {
     image_menu: crate::popover::Popup<ImageMenu>,
     image_menu_focus: gpui::FocusHandle,
     image_copy: Option<Task<()>>,
+    /// Right-click menu over a prompt or reply (Copy message / Edit transcript).
+    message_menu: crate::popover::Popup<MessageMenu>,
+    message_menu_focus: gpui::FocusHandle,
+    /// A row to land at a window y once it is laid out: (row, content top).
+    pending_align: Option<(usize, f32)>,
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
@@ -3472,6 +3492,9 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// "Edit transcript" from a message's menu: open the editor with this
+    /// entry's content at `content_top` (window y), where it is now.
+    EditTranscript { entry_id: String, content_top: f32 },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3664,6 +3687,7 @@ impl Transcript {
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
             tool_group_reveals: HashMap::new(),
+            tool_stops_seen: 0,
             last_replay_baseline: None,
             historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
@@ -3729,6 +3753,9 @@ impl Transcript {
             image_menu: Default::default(),
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
+            message_menu: Default::default(),
+            message_menu_focus: cx.focus_handle(),
+            pending_align: None,
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
             attachment_retries: HashMap::new(),
@@ -4743,6 +4770,11 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        let stops = self.state.read(cx).tool_stops_revision();
+        if self.tool_stops_seen != stops {
+            self.tool_stops_seen = stops;
+            cx.notify();
+        }
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -6171,6 +6203,219 @@ impl Transcript {
         });
         window.focus(&self.image_menu_focus, cx);
         cx.notify();
+    }
+
+    /// A prompt or reply's right-click menu. Its content top is taken from
+    /// the entry's first row when laid out, else the clicked row's.
+    fn open_message_menu(
+        &mut self,
+        entry_id: SharedString,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first = self.rows.iter().position(|row| row.entry_id == entry_id);
+        let content_top = first
+            .and_then(|ix| Some((ix, self.list.bounds_for_item(ix)?)))
+            .map(|(ix, bounds)| {
+                let gap = if ix == 0 {
+                    Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                } else {
+                    top_gap_for(self.rows.get(ix - 1), &self.rows[ix])
+                };
+                f32::from(bounds.top()) + gap
+            })
+            .unwrap_or(f32::from(position.y));
+        let editable = crate::settings::experimental_transcript_editing(cx)
+            && self
+                .chat_harness(cx)
+                .is_some_and(crate::transcript_edit::supports);
+        self.message_menu.open(MessageMenu {
+            entry_id,
+            content_top,
+            editable,
+            position,
+            active: None,
+        });
+        window.focus(&self.message_menu_focus, cx);
+        cx.notify();
+    }
+
+    fn chat_harness(&self, cx: &gpui::App) -> Option<zeron_proto::HarnessId> {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row())
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness)
+    }
+
+    fn close_message_menu(&mut self, cx: &mut Context<Self>) {
+        if self.message_menu.begin_close() {
+            crate::popover::reap_popup(cx, |this: &mut Self| &mut this.message_menu);
+            cx.notify();
+        }
+    }
+
+    fn message_menu_rows(menu: &MessageMenu) -> usize {
+        if menu.editable { 2 } else { 1 }
+    }
+
+    fn message_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        use crate::popover::MenuKey;
+        let Some(menu) = self.message_menu.open_mut() else {
+            return;
+        };
+        let rows = Self::message_menu_rows(menu);
+        match crate::popover::classify_key(
+            &event.keystroke.key,
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+        ) {
+            MenuKey::Escape => self.close_message_menu(cx),
+            MenuKey::Up => menu.active = crate::popover::menu_step(menu.active, rows, -1),
+            MenuKey::Down => menu.active = crate::popover::menu_step(menu.active, rows, 1),
+            MenuKey::Enter => {
+                if let Some(action) = menu.active {
+                    self.dispatch_message_menu(action, cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn dispatch_message_menu(&mut self, action: usize, cx: &mut Context<Self>) {
+        let Some(menu) = self.message_menu.as_open() else {
+            return;
+        };
+        let (entry_id, content_top) = (menu.entry_id.clone(), menu.content_top);
+        self.close_message_menu(cx);
+        match action {
+            0 => {
+                if let Some(text) = self.entry_text(&entry_id, cx) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            1 => cx.emit(TranscriptEvent::EditTranscript {
+                entry_id: entry_id.to_string(),
+                content_top,
+            }),
+            _ => {}
+        }
+    }
+
+    /// A message's own words: a prompt's text, or a reply's text parts.
+    fn entry_text(&self, entry_id: &str, cx: &gpui::App) -> Option<String> {
+        let entry = self
+            .state
+            .read(cx)
+            .transcript
+            .iter()
+            .find(|entry| entry.id == entry_id)?;
+        let text = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.trim()),
+                _ => None,
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn render_message_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.message_menu.get()?;
+        let theme = Theme::of(cx).for_popup();
+        let mut card = crate::popover::popover_card(&theme)
+            .id("transcript-message-menu-card")
+            .track_focus(&self.message_menu_focus)
+            .role(gpui::Role::Menu)
+            .w(px(190.0))
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(|this, event, _, cx| this.message_menu_key(event, cx)))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_message_menu(cx)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let rows = [
+            ("Copy message", crate::icons::COPY),
+            ("Edit transcript", crate::icons::PEN),
+        ];
+        for (index, (label, icon)) in rows
+            .into_iter()
+            .take(Self::message_menu_rows(menu))
+            .enumerate()
+        {
+            let id = SharedString::from(format!("transcript-message-menu-{index}"));
+            card = card.child(
+                crate::popover::menu_row(&theme, menu.active == Some(index), id.clone())
+                    .id(id.clone())
+                    .debug_selector(move || id.to_string())
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.dispatch_message_menu(index, cx)),
+                    )
+                    .child(
+                        crate::icons::icon(icon)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(div().flex_1().child(label))
+                    .when(index == 1, |row| {
+                        row.child(crate::settings::widgets::badge(&theme, "Beta"))
+                    }),
+            );
+        }
+        Some(crate::popover::menu_at(
+            "transcript-message-menu",
+            menu.position,
+            card.into_any_element(),
+            self.message_menu.closing_since(),
+        ))
+    }
+
+    /// Scroll so `entry_id`'s content starts at window y `content_top`: the
+    /// way back from the transcript editor to the same place on screen.
+    pub(crate) fn align_entry(&mut self, entry_id: &str, content_top: f32, cx: &mut Context<Self>) {
+        let Some(ix) = self.rows.iter().position(|row| row.entry_id == entry_id) else {
+            return;
+        };
+        self.begin_scroll_navigation();
+        if self.list.bounds_for_item(ix).is_none() {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+        self.pending_align = Some((ix, content_top));
+        cx.notify();
+    }
+
+    /// Finish [`Self::align_entry`] once its row is laid out.
+    fn apply_pending_align(&mut self, window: &mut Window) {
+        let Some((ix, content_top)) = self.pending_align else {
+            return;
+        };
+        let Some(bounds) = self.list.bounds_for_item(ix) else {
+            window.request_animation_frame();
+            return;
+        };
+        let gap = if ix == 0 {
+            Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+        } else {
+            top_gap_for(self.rows.get(ix - 1), &self.rows[ix])
+        };
+        let delta = f32::from(bounds.top()) + gap - content_top;
+        if delta.abs() > 0.5 {
+            self.list.scroll_by(px(delta));
+            window.request_animation_frame();
+        }
+        self.pending_align = None;
     }
 
     fn close_image_menu(&mut self, cx: &mut Context<Self>) {
@@ -7749,8 +7994,26 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        // Prompts and replies of the conversation itself (not a subagent's
+        // read-only transcript) open the message menu on right-click.
+        let message_row = self.doc_override.is_none()
+            && match &row.kind {
+                RowKind::User { text, .. } => !text.is_empty(),
+                RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. } => true,
+                _ => false,
+            };
+        let menu_entry = row.entry_id.clone();
         let outer = div()
             .id(row.id.clone())
+            .when(message_row, |el| {
+                el.on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_message_menu(menu_entry.clone(), event.position, window, cx);
+                    }),
+                )
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -8020,6 +8283,49 @@ impl Transcript {
             None => None,
         };
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
+    }
+
+    /// The stop button a chip offers while its call is running: a command
+    /// (Claude Code and Codex end just that process) or a subagent spawn.
+    /// Never on a read-only subagent view, or for another harness — their
+    /// only stop is the turn's.
+    fn chip_stop(
+        &self,
+        tool: &ToolItem,
+        id: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<ChipStop> {
+        if self.doc_override.is_some() || tool.kind != ToolItemKind::Call {
+            return None;
+        }
+        let tooltip = if is_agent_tool(tool) {
+            if tool.subagent_ref.is_none()
+                || !matches!(tool.subagent_status, Some(SubagentStatus::Running))
+            {
+                return None;
+            }
+            "Stop this subagent"
+        } else if matches!(tool.call, ToolCall::Exec { .. }) && !tool.resolved {
+            "Stop this command"
+        } else {
+            return None;
+        };
+        let chat_id = self.chat_id.clone()?;
+        let state = self.state.read(cx);
+        if !crate::tool_stop::supports(state.chat_harness(&chat_id)) {
+            return None;
+        }
+        let pending = state.tool_stop_pending(&tool.part_id);
+        let state = self.state.clone();
+        let part_id = tool.part_id.clone();
+        Some(ChipStop {
+            id,
+            tooltip,
+            pending,
+            on_stop: Box::new(move |_, _, cx| {
+                crate::tool_stop::request(&state, &chat_id, &part_id, cx)
+            }),
+        })
     }
 
     fn render_tool_group(
@@ -8488,6 +8794,7 @@ impl Transcript {
                         tool.subagent_status,
                         Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
                     );
+                    let stop = self.chip_stop(tool, format!("{row_id}#stop{ix}").into(), cx);
                     return subagent_chip(
                         tool,
                         SharedString::from(format!("{row_id}#s{ix}")),
@@ -8499,6 +8806,7 @@ impl Transcript {
                                 frozen,
                             });
                         }),
+                        stop,
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -8507,6 +8815,7 @@ impl Transcript {
                 }
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
+                let stop = self.chip_stop(tool, format!("{row_id}#stop{ix}").into(), cx);
                 if detail.is_none() && invocation.is_none() && !chip_has_images(tool) {
                     return reveal_tool_row(
                         tool_chip(
@@ -8517,6 +8826,7 @@ impl Transcript {
                             content_reveal,
                             connector_reveal,
                             continuation_reveal,
+                            stop,
                             file_opener.as_ref(),
                             theme,
                             cx.entity_id(),
@@ -8578,6 +8888,7 @@ impl Transcript {
                             .child(chip_header(
                                 tool,
                                 open,
+                                stop,
                                 file_opener.as_ref(),
                                 theme,
                                 cx.entity_id(),
@@ -9653,6 +9964,15 @@ enum ChipTrail {
     OpenArrow,
 }
 
+/// A running command's or subagent's stop button, as its chip header draws
+/// it (see [`crate::tool_stop`]).
+struct ChipStop {
+    id: SharedString,
+    tooltip: &'static str,
+    pending: bool,
+    on_stop: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>,
+}
+
 /// Opens a tool chip's file in the files panel through the transcript's
 /// workspace-link handler.
 #[derive(Clone)]
@@ -9691,6 +10011,7 @@ impl ToolFileOpener {
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
+    stop: Option<ChipStop>,
     file_opener: Option<&ToolFileOpener>,
     theme: &Theme,
     view: gpui::EntityId,
@@ -9932,6 +10253,27 @@ fn chip_header_row(
                 cx,
             )))
         })
+        .when_some(stop, |row, stop| {
+            // Stop this one call, on hover like the chevron beside it; once
+            // asked it stays up, dimmed, until the call settles.
+            let ChipStop {
+                id,
+                tooltip,
+                pending,
+                on_stop,
+            } = stop;
+            row.child(
+                div()
+                    .flex_none()
+                    .when(!pending, |slot| {
+                        slot.opacity(0.0)
+                            .group_hover("tool-header", |style| style.opacity(1.0))
+                    })
+                    .child(crate::tool_stop::stop_button(
+                        id, tooltip, pending, theme, on_stop,
+                    )),
+            )
+        })
         .when_some(trail, |row, trail| {
             // Trailing tile matching the group header's: a chevron for the
             // output/diff accordion, or the open-arrow for spawn chips.
@@ -9977,6 +10319,7 @@ fn chip_header_row(
 fn chip_header(
     tool: &ToolItem,
     open: bool,
+    stop: Option<ChipStop>,
     file_opener: Option<&ToolFileOpener>,
     theme: &Theme,
     view: gpui::EntityId,
@@ -9985,6 +10328,7 @@ fn chip_header(
     chip_header_row(
         tool,
         Some(ChipTrail::Chevron { open }),
+        stop,
         file_opener,
         theme,
         view,
@@ -10181,6 +10525,7 @@ fn tool_chip(
     content_reveal: f32,
     connector_reveal: f32,
     continuation_reveal: f32,
+    stop: Option<ChipStop>,
     file_opener: Option<&ToolFileOpener>,
     theme: &Theme,
     view: gpui::EntityId,
@@ -10229,7 +10574,15 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, file_opener, theme, view, cx)),
+                .child(chip_header_row(
+                    tool,
+                    None,
+                    stop,
+                    file_opener,
+                    theme,
+                    view,
+                    cx,
+                )),
         )
         .into_any_element()
 }
@@ -10243,6 +10596,7 @@ fn subagent_chip(
     tool: &ToolItem,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    stop: Option<ChipStop>,
     rail: bool,
     theme: &Theme,
     view: gpui::EntityId,
@@ -10285,6 +10639,7 @@ fn subagent_chip(
                 .child(chip_header_row(
                     tool,
                     Some(ChipTrail::OpenArrow),
+                    stop,
                     None,
                     theme,
                     view,
@@ -10363,6 +10718,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending_align(window);
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -10610,7 +10966,9 @@ impl Render for Transcript {
             ))
             .child(content)
             .child(rail);
-        let root = root.children(self.render_image_menu(cx));
+        let root = root
+            .children(self.render_image_menu(cx))
+            .children(self.render_message_menu(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10657,6 +11015,68 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    /// A message's right-click menu offers "Edit transcript" only with the
+    /// experiment on and an agent that supports it, and choosing it hands
+    /// the shell the message and where it sits.
+    #[gpui::test]
+    fn message_menu_offers_edit_where_the_agent_supports_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.experimental_transcript_editing = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let chat = |harness: &str| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": "chat", "deviceId": "local", "archived": false,
+                "createdAt": "2026-10-01T00:00:00Z",
+                "config": {"harness": harness, "model": null, "reasoning": null,
+                           "sandbox": "workspace-write"},
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("chat".into());
+            state.chats = vec![chat("claude-code")];
+            state
+        });
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        let events: Rc<RefCell<Vec<(String, f32)>>> = Rc::default();
+        let recorded = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&transcript, move |_, event, _| {
+                if let TranscriptEvent::EditTranscript {
+                    entry_id,
+                    content_top,
+                } = event
+                {
+                    recorded.borrow_mut().push((entry_id.clone(), *content_top));
+                }
+            })
+            .detach();
+        });
+        let at = Point::new(px(40.0), px(300.0));
+        transcript.update_in(cx, |transcript, window, cx| {
+            transcript.open_message_menu("reply".into(), at, window, cx);
+            assert!(transcript.message_menu.get().unwrap().editable);
+            transcript.dispatch_message_menu(1, cx);
+        });
+        cx.run_until_parked();
+        // Unlaid-out rows fall back to the pointer's height.
+        assert_eq!(*events.borrow(), vec![("reply".to_string(), 300.0)]);
+        // An agent whose history can't be edited gets only Copy.
+        state.update(cx, |state, _| state.chats = vec![chat("cursor")]);
+        transcript.update_in(cx, |transcript, window, cx| {
+            transcript.open_message_menu("reply".into(), at, window, cx);
+            let menu = transcript.message_menu.get().unwrap();
+            assert!(!menu.editable);
+            assert_eq!(Transcript::message_menu_rows(menu), 1);
+        });
     }
 
     #[gpui::test]
@@ -16094,6 +16514,7 @@ mod tests {
                         .child(chip_header(
                             &self.tool,
                             false,
+                            None,
                             Some(&self.opener),
                             &theme,
                             cx.entity_id(),
@@ -16146,6 +16567,231 @@ mod tests {
             window.debug_bounds("tool-file-badge").is_none(),
             "paths the link handler cannot open keep an inert badge"
         );
+    }
+
+    /// The host side of the stop: records the commands queued to it.
+    struct QueuedCommands {
+        calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for QueuedCommands {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params));
+            zeron_rpc::RpcReply::value(&serde_json::json!({}))
+        }
+    }
+
+    /// One tool group, drawn through the transcript's own renderer.
+    struct StopFixture {
+        transcript: Entity<Transcript>,
+        tools: Arc<Vec<ToolItem>>,
+    }
+
+    impl Render for StopFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let tools = self.tools.clone();
+            div()
+                .w(px(600.0))
+                .child(self.transcript.update(cx, |this, cx| {
+                    this.render_tool_group(
+                        &"g".into(),
+                        &tools,
+                        &"Ran commands".into(),
+                        true,
+                        None,
+                        false,
+                        &theme,
+                        cx,
+                    )
+                }))
+        }
+    }
+
+    fn stop_tool_item(id: &str, call: ToolCall, resolved: bool) -> ToolItem {
+        ToolItem {
+            part_id: id.into(),
+            images: Default::default(),
+            invocation: call_block(&call).map(Arc::new),
+            call,
+            is_error: false,
+            resolved,
+            detail: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            kind: ToolItemKind::Call,
+        }
+    }
+
+    fn chat_on(id: &str, harness: HarnessId) -> zeron_proto::Chat {
+        let mut chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "deviceId": "dev",
+            "archived": false,
+            "createdAt": chrono::Utc::now(),
+        }))
+        .unwrap();
+        chat.config = Some(zeron_proto::ChatConfig {
+            harness,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        });
+        chat
+    }
+
+    /// A running command, and a running subagent, offer a stop button on
+    /// Claude Code and Codex chats — and only while running, and only there.
+    /// Clicking it queues a `StopTool` for that chip's part to the host
+    /// without also opening the chip.
+    #[gpui::test]
+    fn running_commands_and_subagents_offer_a_stop_on_supported_harnesses(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::memory_client(Arc::new(QueuedCommands {
+                    calls: calls.clone(),
+                })),
+            ));
+            state.apply_chats(vec![
+                chat_on("claude", HarnessId::ClaudeCode),
+                chat_on("codex", HarnessId::Codex),
+                chat_on("other", HarnessId::Mock),
+            ]);
+        });
+        let spawn = |id: &str, status| {
+            let mut item = stop_tool_item(
+                id,
+                ToolCall::Unknown {
+                    name: "Agent: scout".into(),
+                    input: None,
+                },
+                true,
+            );
+            item.subagent_ref = Some(format!("doc-{id}").into());
+            item.subagent_status = Some(status);
+            item
+        };
+        let tools = Arc::new(vec![
+            // 0: a running command, expandable (its full invocation).
+            stop_tool_item(
+                "cmd-running",
+                ToolCall::Exec {
+                    command: "set -e\ncargo test".into(),
+                },
+                false,
+            ),
+            // 1: a finished command; 2: a running tool that is not a command.
+            stop_tool_item(
+                "cmd-done",
+                ToolCall::Exec {
+                    command: "ls".into(),
+                },
+                true,
+            ),
+            stop_tool_item(
+                "read-running",
+                ToolCall::ReadFile {
+                    path: "src/lib.rs".into(),
+                },
+                false,
+            ),
+            // 3: a running subagent; 4: a finished one.
+            spawn("agent-running", SubagentStatus::Running),
+            spawn("agent-done", SubagentStatus::Done),
+        ]);
+        let stop_ids = ["g#stop0", "g#stop1", "g#stop2", "g#stop3", "g#stop4"];
+
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let present = |chat: &str, cx: &mut gpui::TestAppContext| -> Vec<bool> {
+            transcript.update(cx, |this, _| this.chat_id = Some(chat.into()));
+            let (_fixture, window) = cx.add_window_view(|_, _| StopFixture {
+                transcript: transcript.clone(),
+                tools: tools.clone(),
+            });
+            window.update(|window, cx| window.draw(cx).clear());
+            stop_ids
+                .iter()
+                .map(|id| window.debug_bounds(id).is_some())
+                .collect()
+        };
+        for chat in ["claude", "codex"] {
+            assert_eq!(
+                present(chat, cx),
+                [true, false, false, true, false],
+                "{chat}: only the running command and the running subagent"
+            );
+        }
+        assert_eq!(
+            present("other", cx),
+            [false; 5],
+            "a harness without a native stop shows none"
+        );
+        assert_eq!(present("unknown", cx), [false; 5]);
+
+        // Click the running command's stop on a Claude Code chat.
+        transcript.update(cx, |this, _| this.chat_id = Some("claude".into()));
+        let (_fixture, window) = cx.add_window_view(|_, _| StopFixture {
+            transcript: transcript.clone(),
+            tools: tools.clone(),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        let button = window.debug_bounds("g#stop0").unwrap();
+        window.simulate_click(button.center(), gpui::Modifiers::default());
+        for _ in 0..200 {
+            window.run_until_parked();
+            if !calls.lock().unwrap().is_empty() {
+                break;
+            }
+            runtime.block_on(async {
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, zeron_rpc::methods::QUEUE_COMMAND);
+        assert_eq!(
+            calls[0].1,
+            crate::tool_stop::params("claude", "cmd-running")
+        );
+        transcript.read_with(window, |this, _| {
+            assert!(
+                this.tool_details.is_empty(),
+                "stopping the command must not open its chip"
+            );
+        });
+        // It reads as stopping until the tool settles.
+        assert!(state.read_with(window, |state, _| state.tool_stop_pending("cmd-running")));
+        assert!(!state.read_with(window, |state, _| state.tool_stop_pending("agent-running")));
     }
 
     #[test]

@@ -128,6 +128,22 @@ pub(crate) async fn descendants(root: u32) -> Vec<Tracked> {
         .collect()
 }
 
+/// [`descendants`] with each process's argument vector, for matching a
+/// process to the command that started it. Processes whose arguments cannot
+/// be read (gone already, or no reader for this platform) are left out.
+#[cfg(unix)]
+pub(crate) async fn descendants_with_argv(root: u32) -> Vec<(Tracked, Vec<String>)> {
+    let found = descendants(root).await;
+    tokio::task::spawn_blocking(move || {
+        found
+            .into_iter()
+            .filter_map(|tracked| Some((tracked, proc_table::argv(tracked.pid)?)))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// One process-table row; `start` identifies the process across pid reuse.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +279,89 @@ mod proc_table {
     #[cfg(target_os = "macos")]
     fn start_of(info: &libc::proc_bsdinfo) -> u64 {
         info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    }
+
+    /// The process's argument vector, exactly as it was started.
+    #[cfg(target_os = "linux")]
+    pub(super) fn argv(pid: i32) -> Option<Vec<String>> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        parse_cmdline(&raw)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn argv(pid: i32) -> Option<Vec<String>> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut size: libc::size_t = 0;
+        // SAFETY: a null buffer asks only for the size; `mib` is three ints.
+        let sized = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if sized != 0 || size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size];
+        // SAFETY: `size` is the buffer's true length; sysctl writes at most
+        // that many bytes and reports how many.
+        let read = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return None;
+        }
+        buf.truncate(size);
+        parse_procargs2(&buf)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn argv(_pid: i32) -> Option<Vec<String>> {
+        None
+    }
+
+    /// `/proc/<pid>/cmdline`: the arguments, each ended by a NUL.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn parse_cmdline(raw: &[u8]) -> Option<Vec<String>> {
+        if raw.is_empty() {
+            return None; // a kernel thread or a zombie
+        }
+        let raw = raw.strip_suffix(&[0]).unwrap_or(raw);
+        Some(
+            raw.split(|&b| b == 0)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect(),
+        )
+    }
+
+    /// macOS `KERN_PROCARGS2`: an `argc`, the executable path, NUL padding,
+    /// then `argc` NUL-ended arguments (the environment follows).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) fn parse_procargs2(raw: &[u8]) -> Option<Vec<String>> {
+        let argc = i32::from_ne_bytes(raw.get(..4)?.try_into().ok()?);
+        let mut rest = raw.get(4..)?;
+        let path_end = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[path_end..];
+        let args_start = rest.iter().position(|&b| b != 0)?;
+        rest = &rest[args_start..];
+        let mut args = Vec::new();
+        for _ in 0..argc.max(0) {
+            let end = rest.iter().position(|&b| b == 0)?;
+            args.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+            rest = &rest[end + 1..];
+        }
+        Some(args)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -467,6 +566,52 @@ mod tests {
         let stat = "4242 (evil) (name) S 17 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
         assert_eq!(proc_table::parse_stat(stat), Some((17, 987654)));
         assert_eq!(proc_table::parse_stat("4242 (truncated) S 17"), None);
+    }
+
+    #[test]
+    fn argument_vectors_keep_empty_and_spaced_arguments() {
+        assert_eq!(
+            proc_table::parse_cmdline(b"/usr/bin/bash\0-c\0sleep 60; echo done\0"),
+            Some(vec![
+                "/usr/bin/bash".to_owned(),
+                "-c".to_owned(),
+                "sleep 60; echo done".to_owned()
+            ])
+        );
+        assert_eq!(
+            proc_table::parse_cmdline(b"tool\0\0x\0"),
+            Some(vec!["tool".to_owned(), String::new(), "x".to_owned()])
+        );
+        assert_eq!(proc_table::parse_cmdline(b""), None);
+
+        // macOS: argc, the executable, padding, the arguments, the environment.
+        let mut raw = 3i32.to_ne_bytes().to_vec();
+        raw.extend_from_slice(b"/bin/bash\0\0\0bash\0-c\0echo hi\0HOME=/root\0");
+        assert_eq!(
+            proc_table::parse_procargs2(&raw),
+            Some(vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                "echo hi".to_owned()
+            ])
+        );
+        assert_eq!(proc_table::parse_procargs2(&raw[..6]), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn descendants_report_the_arguments_they_started_with() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let found = descendants_with_argv(std::process::id()).await;
+        let sleeper = found
+            .iter()
+            .find(|(tracked, _)| tracked.pid == child.id().unwrap() as i32)
+            .expect("the child is a descendant");
+        assert_eq!(sleeper.1, ["sleep", "30"]);
+        child.kill().await.unwrap();
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

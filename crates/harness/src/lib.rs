@@ -42,6 +42,11 @@ pub enum HarnessError {
     /// nothing connected for it). The message says where to sign in.
     #[error("{0}")]
     NotSignedIn(String),
+    /// A native-history read or edit the agent's stored session cannot take
+    /// (changed since listed, unsupported, nothing stored). The message is
+    /// written for the person editing.
+    #[error("{0}")]
+    History(String),
 }
 
 /// A steer prompt pushed into a live run; delivered at the harness's steering boundary.
@@ -77,10 +82,17 @@ impl SteerMessage {
 /// [`Self::stop_turn`] by ending only the in-flight turn with
 /// `Done { status: Interrupted }` and staying alive for the next prompt; the
 /// `interrupt` token remains the runtime teardown.
+///
+/// [`Self::stop_tool`] is narrower still: it ends one running tool call (a
+/// command, a subagent) and nothing else — the turn goes on, and the agent
+/// sees that call fail like a user's Ctrl+C on that one process. Only a
+/// driver that returns true from [`Harness::stops_tools`] answers it.
 #[derive(Clone, Default)]
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tool_stops: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    tool_stop_signal: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl TurnControl {
@@ -92,6 +104,39 @@ impl TurnControl {
     /// Driver: resolves once per [`Self::stop_turn`].
     pub async fn stop_requested(&self) {
         self.stop.notified().await;
+    }
+
+    /// Host: end the running tool call `tool_call_id` (the id its transcript
+    /// part carries), leaving the turn running.
+    pub fn stop_tool(&self, tool_call_id: impl Into<String>) {
+        self.tool_stops
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(tool_call_id.into());
+        self.tool_stop_signal.notify_one();
+    }
+
+    /// Driver: resolves with the next tool call the host asked to stop, once
+    /// per [`Self::stop_tool`].
+    pub async fn stop_tool_requested(&self) -> String {
+        loop {
+            let next = {
+                let mut queue = self
+                    .tool_stops
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let next = queue.pop_front();
+                // One stored permit stands for any number of pushes.
+                if next.is_some() && !queue.is_empty() {
+                    self.tool_stop_signal.notify_one();
+                }
+                next
+            };
+            match next {
+                Some(id) => return id,
+                None => self.tool_stop_signal.notified().await,
+            }
+        }
     }
 
     /// Driver: how many background tasks the runtime currently holds.
@@ -163,6 +208,18 @@ pub struct ModelContext {
     pub binary_version: Option<String>,
 }
 
+/// An agent session's stored conversation, as the transcript editor lists
+/// it: the model-visible history of the active branch, newest edit applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeHistoryRead {
+    /// Fingerprint of the model-visible history; edits name it and are
+    /// refused once the stored session moved past it.
+    pub revision: String,
+    pub items: Vec<zeron_proto::native_history::NativeHistoryItem>,
+    /// Earlier history was compacted into a summary.
+    pub compacted: bool,
+}
+
 #[async_trait]
 pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
@@ -201,6 +258,12 @@ pub trait Harness: Send + Sync {
     /// with its background work. Otherwise stopping a turn tears the runtime
     /// down through the `interrupt` token.
     fn stops_turn_in_place(&self) -> bool {
+        false
+    }
+    /// Whether this driver honors [`TurnControl::stop_tool`]: it ends one
+    /// running command or subagent while the turn, and the agent's view of
+    /// it, carry on.
+    fn stops_tools(&self) -> bool {
         false
     }
     /// Whether a live runtime started for `live` can take `next` as its
@@ -277,6 +340,42 @@ pub trait Harness: Send + Sync {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Err(HarnessError::Protocol("idle runtime unsupported".into()))
+    }
+
+    /// Whether this driver can list and rewrite the conversation its CLI
+    /// stores for a session (experimental transcript editing).
+    fn supports_native_history(&self) -> bool {
+        false
+    }
+
+    /// Read the stored conversation of `session_id` as the agent will see it
+    /// on resume. `env` is the run's environment (config dir overrides).
+    async fn read_native_history(
+        &self,
+        _session_id: &str,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<NativeHistoryRead, HarnessError> {
+        Err(HarnessError::History(
+            "This agent's history cannot be edited".into(),
+        ))
+    }
+
+    /// Write a NEW session holding `session_id`'s history with `edits`
+    /// applied and answer its id. The original is never touched. Refused
+    /// (`HarnessError::History`) when the stored session no longer matches
+    /// `revision`.
+    async fn write_edited_session(
+        &self,
+        _session_id: &str,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+        _revision: &str,
+        _edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        Err(HarnessError::History(
+            "This agent's history cannot be edited".into(),
+        ))
     }
 
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
@@ -812,5 +911,40 @@ mod stderr_tests {
         let snapshot = tail.snapshot().unwrap();
         assert!(snapshot.len() <= 1400);
         assert!(snapshot.ends_with("last stderr line"));
+    }
+}
+
+#[cfg(test)]
+mod turn_control_tests {
+    use super::TurnControl;
+
+    #[tokio::test]
+    async fn tool_stops_arrive_once_each_in_order() {
+        let turn = TurnControl::default();
+        turn.stop_tool("a");
+        turn.stop_tool("b");
+        turn.stop_tool("c");
+        assert_eq!(turn.stop_tool_requested().await, "a");
+        assert_eq!(turn.stop_tool_requested().await, "b");
+        assert_eq!(turn.stop_tool_requested().await, "c");
+        // Nothing left: the next wait is for a request that has not come.
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            turn.stop_tool_requested(),
+        )
+        .await;
+        assert!(idle.is_err());
+        // A request after the wait began wakes it, and a tool stop is not a
+        // turn stop.
+        let waiting = tokio::spawn({
+            let turn = turn.clone();
+            async move { turn.stop_tool_requested().await }
+        });
+        tokio::task::yield_now().await;
+        turn.stop_tool("late");
+        assert_eq!(waiting.await.unwrap(), "late");
+        let stopped =
+            tokio::time::timeout(std::time::Duration::from_millis(50), turn.stop_requested()).await;
+        assert!(stopped.is_err());
     }
 }

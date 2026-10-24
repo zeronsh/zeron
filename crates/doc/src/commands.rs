@@ -6,7 +6,8 @@
 //!    `cancelled` on its own still-pending entries.
 //! 3. Evaluation (`evaluate_command`, pure): processed-id dedupe → Skip; expired TTL → Expired;
 //!    a newer interrupt supersedes an older interrupt; user prompts never supersede each other; an interrupt whose
-//!    `based_on.turn_id` is already past → Superseded; otherwise Execute.
+//!    `based_on.turn_id` is already past → Superseded; otherwise Execute. A stop of one tool call is neither:
+//!    it is only ever skipped or expired.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,7 @@ pub enum SessionCommandKind {
     Steer,
     Interrupt,
     RespondInput,
+    StopTool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,14 @@ pub enum SessionCommandPayload {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
+    /// End one running tool call (a command, a subagent) and leave the turn
+    /// running. `tool_call_id` is the id of the transcript's tool part.
+    /// Neither a prompt nor an interrupt: no other command supersedes it, and
+    /// it supersedes none.
+    #[serde(rename_all = "camelCase")]
+    StopTool {
+        tool_call_id: String,
+    },
 }
 
 impl SessionCommandPayload {
@@ -63,6 +73,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::Steer { .. } => SessionCommandKind::Steer,
             SessionCommandPayload::Interrupt {} => SessionCommandKind::Interrupt,
             SessionCommandPayload::RespondInput { .. } => SessionCommandKind::RespondInput,
+            SessionCommandPayload::StopTool { .. } => SessionCommandKind::StopTool,
         }
     }
 }
@@ -310,6 +321,86 @@ mod tests {
         // …but if that turn is still the current one, execute.
         let cx2 = cx(&entries, &NEVER, &past, 2_000, Some("turn-1"));
         assert_eq!(evaluate_command(&e, &cx2), CommandDisposition::Execute);
+    }
+
+    #[test]
+    fn stopping_a_tool_is_not_an_interrupt_and_never_supersedes() {
+        let stop = |id: &str, tool: &str, at| {
+            entry(
+                id,
+                SessionCommandPayload::StopTool {
+                    tool_call_id: tool.into(),
+                },
+                at,
+            )
+        };
+        let mut aimed = stop("s1", "tool-a", 1_000);
+        // Even aimed at a turn that is over, it is the tool the user named.
+        aimed.based_on = Some(CommandBasedOn {
+            turn_id: Some("turn-1".into()),
+            frontier: None,
+        });
+        let entries = vec![
+            aimed.clone(),
+            stop("s2", "tool-b", 2_000),
+            entry("i1", SessionCommandPayload::Interrupt {}, 3_000),
+            steer("c1", 4_000),
+        ];
+        let past = |id: &str| id == "turn-1";
+        let context = cx(&entries, &NEVER, &past, 5_000, Some("turn-2"));
+        // A newer stop of another tool, an interrupt, and a steer all leave
+        // both stops standing.
+        for stop in &entries[..2] {
+            assert_eq!(
+                evaluate_command(stop, &context),
+                CommandDisposition::Execute
+            );
+        }
+        // And a stop does not supersede an older interrupt.
+        let entries = vec![
+            entry("i1", SessionCommandPayload::Interrupt {}, 1_000),
+            stop("s1", "tool-a", 2_000),
+        ];
+        let context = cx(&entries, &NEVER, &NEVER, 3_000, None);
+        assert_eq!(
+            evaluate_command(&entries[0], &context),
+            CommandDisposition::Execute
+        );
+        // Redelivery of one already handled is skipped; a stale one expires.
+        let handled = |id: &str| id == "s1";
+        let context = cx(&entries, &handled, &NEVER, 3_000, None);
+        assert_eq!(
+            evaluate_command(&entries[1], &context),
+            CommandDisposition::Skip
+        );
+        let context = cx(
+            &entries,
+            &NEVER,
+            &NEVER,
+            COMMAND_DEFAULT_TTL_MS + 3_000,
+            None,
+        );
+        assert_eq!(
+            evaluate_command(&entries[1], &context),
+            CommandDisposition::Expired
+        );
+    }
+
+    #[test]
+    fn stop_tool_serializes_with_its_tool_call_id() {
+        let payload = SessionCommandPayload::StopTool {
+            tool_call_id: "toolu_1".into(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "stopTool", "toolCallId": "toolu_1"})
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionCommandPayload>(json).unwrap(),
+            payload
+        );
+        assert_eq!(payload.kind(), SessionCommandKind::StopTool);
     }
 
     #[test]

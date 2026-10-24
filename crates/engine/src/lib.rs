@@ -24,6 +24,7 @@ mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
 pub mod commit_credit;
+mod native_history;
 pub mod credentials;
 pub mod deferred;
 pub mod desktop_notify;

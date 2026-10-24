@@ -42,6 +42,8 @@ struct Ledger {
     spawned_models: Mutex<Vec<Option<String>>>,
     /// Ends a turn whose prompt contains `wait`.
     release: tokio::sync::Notify,
+    /// Every tool call the host asked the process to stop.
+    tool_stops: Mutex<Vec<String>>,
 }
 
 /// One persistent agent process per `run()`. A prompt containing `hold`
@@ -91,6 +93,9 @@ impl Harness for ProcessHarness {
         true
     }
     fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    fn stops_tools(&self) -> bool {
         true
     }
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
@@ -164,6 +169,9 @@ impl Harness for ProcessHarness {
                         if !send(done(DoneStatus::Interrupted)).await {
                             return;
                         }
+                    }
+                    tool = turn.stop_tool_requested() => {
+                        ledger.tool_stops.lock().unwrap().push(tool);
                     }
                     steer = controls.steering.recv() => {
                         let Some(steer) = steer else { return };
@@ -1037,5 +1045,129 @@ async fn the_idle_reaper_spares_a_runtime_holding_background_work() {
         "the idle runtime to be reaped",
     )
     .await;
+    rig.core.sessions.shutdown().await;
+}
+
+/// Stopping one tool call reaches the live process as that call's id and
+/// nothing else: the turn runs on, the process lives, and a stop with no
+/// process to take it — or for a tool that already returned — is refused.
+#[tokio::test]
+async fn stopping_one_tool_leaves_the_turn_and_the_process_running() {
+    use zeron_doc::SessionCommandStatus;
+    let rig = rig();
+    let outcome = |id: &str| {
+        let handle = rig.core.doc_host.open(CHAT).unwrap();
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| (c.status, c.resolution))
+    };
+    let stop = |tool: &str| {
+        rig.core
+            .doc_host
+            .queue_command(
+                CHAT,
+                SessionCommandPayload::StopTool {
+                    tool_call_id: tool.into(),
+                },
+            )
+            .unwrap()
+    };
+
+    // Nothing is running yet.
+    let early = stop("tool-1");
+    wait_for(
+        || outcome(&early).is_some_and(|(status, _)| status != SessionCommandStatus::Pending),
+        "the early stop to be refused",
+    )
+    .await;
+    assert_eq!(
+        outcome(&early),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("no running agent to stop it in".to_string())
+        ))
+    );
+
+    rig.core
+        .sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mock,
+            request("hold: running a command"),
+            None,
+        )
+        .await
+        .unwrap();
+    wait_for(
+        || rig.ledger.prompts.lock().unwrap().len() == 1,
+        "the agent to be running the turn",
+    )
+    .await;
+    let applied = stop("tool-1");
+    wait_for(
+        || rig.ledger.tool_stops.lock().unwrap().len() == 1,
+        "the process to be asked to stop the tool",
+    )
+    .await;
+    assert_eq!(*rig.ledger.tool_stops.lock().unwrap(), ["tool-1"]);
+    wait_for(
+        || outcome(&applied).is_some_and(|(status, _)| status == SessionCommandStatus::Applied),
+        "the stop to be applied",
+    )
+    .await;
+    // The turn is still in flight and the process was not touched.
+    assert_eq!(status(&rig.core), Some(SessionStatus::Working));
+    assert_eq!(rig.ledger.kills.load(Ordering::SeqCst), 0);
+    assert_eq!(rig.ledger.spawns.load(Ordering::SeqCst), 1);
+
+    // A tool the transcript shows as returned is not stopped again.
+    let handle = rig.core.doc_host.open(CHAT).unwrap();
+    handle
+        .doc()
+        .push_message(&zeron_doc::SessionMessageEntry {
+            id: "a-tools".into(),
+            role: zeron_doc::MessageRole::Assistant,
+            parts: vec![zeron_doc::MessagePart::Tool {
+                id: "tool-done".into(),
+                call: zeron_proto::ToolCall::Exec {
+                    command: "ls".into(),
+                },
+                is_error: false,
+                resolved: true,
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    let finished = stop("tool-done");
+    wait_for(
+        || outcome(&finished).is_some_and(|(status, _)| status != SessionCommandStatus::Pending),
+        "the late stop to be refused",
+    )
+    .await;
+    assert_eq!(
+        outcome(&finished),
+        Some((
+            SessionCommandStatus::Rejected,
+            Some("that tool already finished".to_string())
+        ))
+    );
+    assert_eq!(rig.ledger.tool_stops.lock().unwrap().len(), 1);
     rig.core.sessions.shutdown().await;
 }

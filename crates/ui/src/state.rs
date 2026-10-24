@@ -518,8 +518,9 @@ impl EngineHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+    /// An engine reached over `client` alone: tests and visual fixtures.
+    #[doc(hidden)]
+    pub fn from_test_client(client: RpcClient) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -893,6 +894,14 @@ pub struct AppState {
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
+    /// Tool calls the user asked to stop (a command, a subagent) that have
+    /// not yet resolved: their stop buttons read "Stopping…" until the tool
+    /// returns or [`crate::tool_stop::STOP_PENDING`] passes. Shared so the
+    /// transcript chip and the lanes row of one subagent agree.
+    tool_stops: HashSet<String>,
+    /// Bumped whenever [`Self::tool_stops`] changes, for views that cache
+    /// their rows by transcript revision.
+    tool_stops_revision: u64,
     /// Last `CloudStatus` any surface fetched (Settings → Cloud, Devices,
     /// New project). Fetched on open and after actions — never polled — so
     /// device lists can say "Asleep" instead of "Offline" for Cloud.
@@ -1046,6 +1055,8 @@ impl AppState {
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
             harness_updates: Vec::new(),
+            tool_stops: HashSet::new(),
+            tool_stops_revision: 0,
             cloud_status: None,
             cloud_sessions: None,
             cloud_sessions_task: None,
@@ -1434,6 +1445,38 @@ impl AppState {
                     .as_deref()
                     .is_none_or(|local| chat.device_id == local)
             })
+    }
+
+    /// The harness the chat runs on, from its stamped config.
+    pub(crate) fn chat_harness(&self, chat_id: &str) -> Option<HarnessId> {
+        self.chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness)
+    }
+
+    /// A stop of `tool_call_id` was requested and has not settled.
+    pub(crate) fn tool_stop_pending(&self, tool_call_id: &str) -> bool {
+        self.tool_stops.contains(tool_call_id)
+    }
+
+    /// Mark a stop requested; false when one already is.
+    pub(crate) fn begin_tool_stop(&mut self, tool_call_id: &str) -> bool {
+        let added = self.tool_stops.insert(tool_call_id.to_owned());
+        self.tool_stops_revision += added as u64;
+        added
+    }
+
+    /// Settle a requested stop; false when none was pending.
+    pub(crate) fn end_tool_stop(&mut self, tool_call_id: &str) -> bool {
+        let removed = self.tool_stops.remove(tool_call_id);
+        self.tool_stops_revision += removed as u64;
+        removed
+    }
+
+    pub(crate) fn tool_stops_revision(&self) -> u64 {
+        self.tool_stops_revision
     }
 
     /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so

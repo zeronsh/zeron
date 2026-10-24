@@ -736,6 +736,7 @@ pub struct EngineRpc {
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
     engine_info: EngineInfo,
+    native_history: crate::native_history::NativeHistoryService,
 }
 
 impl EngineRpc {
@@ -770,6 +771,13 @@ impl EngineRpc {
             },
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
+        let native_history = crate::native_history::NativeHistoryService::new(
+            sessions.clone(),
+            doc_host.clone(),
+            workspace.clone(),
+            registry.clone(),
+            repos.data_dir(),
+        );
         Self {
             voice: sessions.voice_manager(),
             sessions,
@@ -795,6 +803,7 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             engine_info,
+            native_history,
         }
     }
 
@@ -2027,6 +2036,9 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::GET_NATIVE_HISTORY
+            | methods::APPLY_NATIVE_EDITS
+            | methods::UNDO_NATIVE_EDIT
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -2668,6 +2680,33 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
+            }
+            methods::GET_NATIVE_HISTORY => {
+                let p: ChatParams = parse_params(params)?;
+                let history = self
+                    .native_history
+                    .get(&p.chat_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&history)
+            }
+            methods::APPLY_NATIVE_EDITS => {
+                let p: zeron_proto::native_history::ApplyNativeEditsParams = parse_params(params)?;
+                let history = self
+                    .native_history
+                    .apply(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&history)
+            }
+            methods::UNDO_NATIVE_EDIT => {
+                let p: ChatParams = parse_params(params)?;
+                let history = self
+                    .native_history
+                    .undo(&p.chat_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&history)
             }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]

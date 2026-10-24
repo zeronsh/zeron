@@ -53,9 +53,11 @@
 
 pub(crate) mod catalog;
 mod elicitation;
+mod history;
 mod normalize;
 pub mod npm_repair;
 pub mod realtime;
+mod stop;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -631,6 +633,11 @@ impl Harness for CodexHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// A command is ended by signaling its process (see [`stop`]); a
+    /// subagent by interrupting its thread's turn and ending its commands.
+    fn stops_tools(&self) -> bool {
+        cfg!(unix)
+    }
     /// What the app-server launch and its turns read: the sandbox is forced
     /// to full access, and `serviceTier` is the only model option used.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
@@ -706,6 +713,31 @@ impl Harness for CodexHarness {
                 input_hint: Some("optional instructions".into()),
             },
         ])
+    }
+
+    fn supports_native_history(&self) -> bool {
+        true
+    }
+
+    async fn read_native_history(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::NativeHistoryRead, HarnessError> {
+        self.read_history(session_id, cwd, env).await
+    }
+
+    async fn write_edited_session(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        env: &std::collections::BTreeMap<String, String>,
+        revision: &str,
+        edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        self.write_history(session_id, cwd, env, revision, edits)
+            .await
     }
 
     async fn run(
@@ -796,7 +828,7 @@ impl CodexHarness {
             client,
             incoming,
             stderr_tail,
-        } = spawn_app_server(&exe, &request)?;
+        } = spawn_app_server(&exe, &request.cwd, &request.env)?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
@@ -828,22 +860,26 @@ struct AppServer {
     stderr_tail: crate::StderrTail,
 }
 
-fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, HarnessError> {
+fn spawn_app_server(
+    exe: &Path,
+    cwd: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<AppServer, HarnessError> {
     let mut cmd = Command::new(exe);
     cmd.arg("app-server");
     crate::compose_child_path(&mut cmd, exe);
     // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
     // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
-    crate::apply_run_env(&mut cmd, &request.env);
-    if !request.cwd.is_empty() {
-        cmd.current_dir(&request.cwd);
+    crate::apply_run_env(&mut cmd, env);
+    if !cwd.is_empty() {
+        cmd.current_dir(cwd);
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
-        let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
+        let cwd = (!cwd.is_empty()).then(|| Path::new(cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
     let stdin = child
@@ -1390,7 +1426,7 @@ async fn run_session(session: Session) {
                 }
             }
             attempt += 1;
-            match spawn_app_server(&executable, &request) {
+            match spawn_app_server(&executable, &request.cwd, &request.env) {
                 Ok(next) => {
                     child = next.child;
                     client = next.client;
@@ -1670,6 +1706,9 @@ async fn run_session(session: Session) {
     // later (live, 0.159.3). The host's idle reaper must not retire the
     // app-server — and the process with it — while it runs.
     let mut open_commands: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    // Every command and turn the app-server is running, for stopping one
+    // command or one subagent (see [`stop`]).
+    let mut running = stop::Running::default();
     // An interrupted turn's foreground command is killed WITHOUT an
     // `item/completed`: once its process has had a moment to go, drop the
     // turn's commands whose process is gone (background ones live on).
@@ -1697,6 +1736,7 @@ async fn run_session(session: Session) {
         tokio::select! {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                running.observe(&method, &params);
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
                 // (a child's turn/completed would settle the PARENT turn).
@@ -2216,6 +2256,50 @@ async fn run_session(session: Session) {
                             break 'main;
                         }
                     }
+                }
+            },
+
+            // End one command, or one subagent's work; the turn goes on and
+            // the agent sees the command fail.
+            tool = turn.stop_tool_requested(), if !interrupted => {
+                let Some(app_server) = child.id() else { continue };
+                if let Some(command) = running.command(&tool) {
+                    let command = command.to_owned();
+                    tokio::spawn(async move {
+                        if let Err(why) = stop::kill_command(app_server, &command).await {
+                            tracing::warn!(target: "zeron_harness::codex", "command not stopped: {why}");
+                        }
+                    });
+                } else if let Some(child_thread) = children.child_of(&tool) {
+                    // A subagent is its thread's turn, and the commands that
+                    // turn started keep running when it is interrupted.
+                    let child_thread = child_thread.to_owned();
+                    let child_turn = running.turn(&child_thread).map(str::to_owned);
+                    let commands = running.commands_of(&child_thread);
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        if let Some(turn_id) = child_turn
+                            && let Err(e) = client
+                                .request(
+                                    "turn/interrupt",
+                                    json!({ "threadId": child_thread, "turnId": turn_id }),
+                                )
+                                .await
+                        {
+                            tracing::warn!(target: "zeron_harness::codex", "subagent turn/interrupt failed: {e}");
+                        }
+                        for command in commands {
+                            if let Err(why) = stop::kill_command(app_server, &command).await {
+                                tracing::warn!(target: "zeron_harness::codex", "subagent command not stopped: {why}");
+                            }
+                        }
+                    });
+                } else {
+                    tracing::debug!(
+                        target: "zeron_harness::codex",
+                        tool = %tool,
+                        "tool stop for a call that is not running"
+                    );
                 }
             },
 

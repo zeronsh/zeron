@@ -73,6 +73,14 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
+    /// Experimental transcript editing, on the chat's host only.
+    /// `GetNativeHistory {chatId}` → `NativeHistory`: what the agent's own
+    /// session holds. `ApplyNativeEdits {chatId, revision, edits}` writes
+    /// an edited copy, points the chat at it and answers the new history;
+    /// `UndoNativeEdit {chatId}` points it back at the copy before.
+    pub const GET_NATIVE_HISTORY: &str = "GetNativeHistory";
+    pub const APPLY_NATIVE_EDITS: &str = "ApplyNativeEdits";
+    pub const UNDO_NATIVE_EDIT: &str = "UndoNativeEdit";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

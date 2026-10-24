@@ -129,6 +129,14 @@ impl Subagents {
         events
     }
 
+    /// The child thread the spawn call `spawn` started, once it is bound.
+    pub(super) fn child_of(&self, spawn: &str) -> Option<&str> {
+        self.spawns
+            .iter()
+            .find(|(_, owner)| owner.as_str() == spawn)
+            .map(|(child, _)| child.as_str())
+    }
+
     /// Call only for a spawn. Emit its parent chip BEFORE the returned events,
     /// so even a child that finished before registration binds to a real chip.
     pub(super) fn bind(&mut self, child: &str, spawn: &str) -> Vec<AgentEvent> {
@@ -202,6 +210,16 @@ mod tests {
             children.route("beta", vec![text("b")]),
             vec![tag("spawn-beta", text("b"))]
         );
+    }
+
+    #[test]
+    fn a_spawn_call_names_its_child_thread() {
+        let mut children = Subagents::new("root".into());
+        children.bind("alpha", "spawn-alpha");
+        children.bind("beta", "spawn-beta");
+        assert_eq!(children.child_of("spawn-beta"), Some("beta"));
+        assert_eq!(children.child_of("spawn-alpha"), Some("alpha"));
+        assert_eq!(children.child_of("spawn-gamma"), None);
     }
 
     #[test]

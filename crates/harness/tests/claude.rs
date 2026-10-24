@@ -1364,6 +1364,47 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
 }
 
 // ---------------------------------------------------------------------------
+// Stopping one tool call
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_tool_stop_kills_that_task_and_the_turn_goes_on() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert!(harness().stops_tools());
+    let mut stream = harness()
+        .run(request("scenario:stop-task"), controls)
+        .await
+        .expect("run starts");
+    let mut results = Vec::new();
+    let done = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = stream.next().await {
+            match event.expect("event") {
+                // Asked while the command is a second short of its task_started.
+                AgentEvent::ToolCall { id, .. } if id == "toolu_cmd" => turn.stop_tool(id),
+                AgentEvent::TextDelta { text } if text == "ready" => turn.stop_tool("toolu_cmd2"),
+                AgentEvent::ToolResult { id, is_error, .. } => results.push((id, is_error)),
+                AgentEvent::Done { status, .. } => return status,
+                _ => {}
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("both stops were sent");
+    assert_eq!(done, DoneStatus::Completed, "the turn is not stopped");
+    assert_eq!(
+        results,
+        [
+            ("toolu_cmd".to_owned(), true),
+            ("toolu_cmd2".to_owned(), true)
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stopping a turn in place
 // ---------------------------------------------------------------------------
 

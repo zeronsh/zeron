@@ -544,6 +544,111 @@ async fn open_commands_report_background_work_and_killed_ones_do_not() {
 }
 
 #[tokio::test]
+async fn stopping_a_subagent_interrupts_only_its_own_turn() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert_eq!(harness().stops_tools(), cfg!(unix));
+    let mut stream = harness()
+        .run(request("scenario:stop-subagent"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("event");
+            // The spawn chip's id is the stop target.
+            if matches!(
+                &event,
+                AgentEvent::Subagent { event, .. }
+                    if matches!(&**event, AgentEvent::TextDelta { text } if text == "child working")
+            ) {
+                turn.stop_tool("call_alpha");
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("the run finished");
+    // The fake exits 8 on a wrong request, ending the stream without a parent
+    // Done; here the parent carried on and completed.
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "parent carries on".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == "call_alpha"
+                && matches!(&**event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+    )));
+}
+
+/// The command's process is signaled: it ends, its item completes failed, and
+/// the turn goes on.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stopping_a_command_signals_its_process_and_the_turn_goes_on() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let started = std::time::Instant::now();
+    let mut stream = harness()
+        .run(request("scenario:stop-command"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("event");
+            if let AgentEvent::ToolCall { id, .. } = &event {
+                turn.stop_tool(id.clone());
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("the run finished");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the 45s command was cut short"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::ToolResult { id, is_error: true, .. } if id == "cmd-1")
+        )
+    );
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "carrying on".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn rejected_steer_falls_back_to_a_follow_up_turn() {
     let (controls, steer, _token) = controls("Yes");
     steer

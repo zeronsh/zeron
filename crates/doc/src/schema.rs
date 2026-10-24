@@ -850,6 +850,97 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Replace the text of the one `kind` part (`text`, or `reasoning`) of a
+    /// `role` entry that holds `old`, in place, so the edit syncs like any
+    /// other write. `new` of `None` drops a part whose body is exactly
+    /// `old`. Answers `false` — changing nothing — unless exactly one part
+    /// matches exactly once: an edit mirrored from the agent's own history
+    /// never guesses between look-alikes.
+    pub fn rewrite_unique_part_text(
+        &self,
+        role: MessageRole,
+        kind: &str,
+        old: &str,
+        new: Option<&str>,
+    ) -> Result<bool, DocError> {
+        if old.is_empty() {
+            return Ok(false);
+        }
+        let role_name = match role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+        };
+        let is_string = |value: Option<loro::ValueOrContainer>, expected: &str| {
+            matches!(
+                value,
+                Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == expected
+            )
+        };
+        // (parts list, index, the body container, byte offset of the match)
+        let mut found: Vec<(LoroList, usize, LoroText, usize)> = Vec::new();
+        let messages = self.doc.get_list("messages");
+        for i in 0..messages.len() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            if !is_string(entry.get("role"), role_name) {
+                continue;
+            }
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                if !is_string(part.get("kind"), kind) {
+                    continue;
+                }
+                let Some(loro::ValueOrContainer::Container(loro::Container::Text(body))) = part
+                    .get(if kind == "reasoning" {
+                        "reasoning"
+                    } else {
+                        "text"
+                    })
+                else {
+                    continue;
+                };
+                let body_text = body.to_string();
+                let mut at = body_text.match_indices(old);
+                let Some((offset, _)) = at.next() else {
+                    continue;
+                };
+                // The same text twice in one part is as ambiguous as in two.
+                let exact = new.is_none();
+                if at.next().is_some() || (exact && body_text != old) {
+                    return Ok(false);
+                }
+                found.push((parts.clone(), j, body, offset));
+            }
+        }
+        let [(parts, index, body, offset)] = found.as_slice() else {
+            return Ok(false);
+        };
+        match new {
+            Some(new) => {
+                let text = body.to_string();
+                let start = text[..*offset].chars().count();
+                body.delete(start, old.chars().count())?;
+                body.insert(start, new)?;
+            }
+            None => parts.delete(*index, 1)?,
+        }
+        self.doc.commit();
+        Ok(true)
+    }
+
     /// Update a subagent SPAWN CHIP (a tool part) in place, wherever it
     /// lives: `resolved`-style stamping for the eager-done world, where the
     /// chip's entry is usually already finished by the time the background
@@ -2322,6 +2413,46 @@ mod tests {
     }
 
     #[test]
+    fn stop_tool_commands_round_trip_beside_other_commands() {
+        use crate::commands::{SessionCommandPayload, SessionCommandStatus};
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let entry = |id: &str, payload| SessionCommandEntry {
+            id: id.into(),
+            payload,
+            issued_by: "dev-b".into(),
+            issued_at: 10,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        let stop = |tool: &str| SessionCommandPayload::StopTool {
+            tool_call_id: tool.into(),
+        };
+        doc.queue_command(&entry("s1", stop("toolu_a"))).unwrap();
+        doc.queue_command(&entry("i1", SessionCommandPayload::Interrupt {}))
+            .unwrap();
+        doc.queue_command(&entry("s2", stop("toolu_b"))).unwrap();
+        doc.set_command_status("s1", SessionCommandStatus::Rejected, Some("not running"))
+            .unwrap();
+        let commands = doc.read_commands().unwrap();
+        let stops: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.payload, SessionCommandPayload::StopTool { .. }))
+            .map(|c| (c.id.as_str(), c.status, c.resolution.as_deref()))
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                ("s1", SessionCommandStatus::Rejected, Some("not running")),
+                ("s2", SessionCommandStatus::Pending, None),
+            ]
+        );
+        assert_eq!(commands[1].payload, SessionCommandPayload::Interrupt {});
+        assert_eq!(commands[2].payload, stop("toolu_b"));
+    }
+
+    #[test]
     fn tail_materializes_last_n_joined() {
         let doc = SessionDoc::init("chat-1").unwrap();
         for i in 0..5 {
@@ -2333,6 +2464,124 @@ mod tests {
         assert_eq!(tail.messages.len(), 2);
         assert_eq!(tail.messages[1].id, "m4");
         assert_eq!(tail.chat_id, "chat-1");
+    }
+
+    fn assistant_entry(id: &str, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts,
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_unique_part_text_is_rewritten_in_place() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        doc.push_message(&user_entry(
+            "u1",
+            "What is the capital of France? Be brief.",
+        ))
+        .unwrap();
+        doc.push_message(&assistant_entry(
+            "a1",
+            vec![
+                MessagePart::Reasoning {
+                    id: "r1".into(),
+                    text: "Simple geography.".into(),
+                },
+                MessagePart::Text {
+                    id: "t1".into(),
+                    text: "Paris, of course.".into(),
+                },
+            ],
+        ))
+        .unwrap();
+
+        // Only the substring changes; the rest of the part stays.
+        assert!(
+            doc.rewrite_unique_part_text(
+                MessageRole::User,
+                "text",
+                "France",
+                Some("Spain, you know")
+            )
+            .unwrap()
+        );
+        assert!(
+            doc.rewrite_unique_part_text(MessageRole::Assistant, "text", "Paris", Some("Madrid"))
+                .unwrap()
+        );
+        // The role gates the match.
+        assert!(
+            !doc.rewrite_unique_part_text(MessageRole::User, "text", "Madrid", Some("x"))
+                .unwrap()
+        );
+        // A reasoning part goes only when its text is exactly the old text.
+        assert!(
+            !doc.rewrite_unique_part_text(MessageRole::Assistant, "reasoning", "Simple", None)
+                .unwrap()
+        );
+        assert!(
+            doc.rewrite_unique_part_text(
+                MessageRole::Assistant,
+                "reasoning",
+                "Simple geography.",
+                None
+            )
+            .unwrap()
+        );
+
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(
+            entries[0].parts,
+            vec![MessagePart::Text {
+                id: "t0".into(),
+                text: "What is the capital of Spain, you know? Be brief.".into()
+            }]
+        );
+        assert_eq!(
+            entries[1].parts,
+            vec![MessagePart::Text {
+                id: "t1".into(),
+                text: "Madrid, of course.".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn ambiguous_part_text_is_left_alone() {
+        let doc = SessionDoc::init("chat-1").unwrap();
+        doc.push_message(&user_entry("u1", "continue")).unwrap();
+        doc.push_message(&user_entry("u2", "continue")).unwrap();
+        doc.push_message(&user_entry("u3", "echo echo")).unwrap();
+        assert!(
+            !doc.rewrite_unique_part_text(MessageRole::User, "text", "continue", Some("go on"))
+                .unwrap()
+        );
+        assert!(
+            !doc.rewrite_unique_part_text(MessageRole::User, "text", "echo", Some("x"))
+                .unwrap()
+        );
+        assert!(
+            !doc.rewrite_unique_part_text(MessageRole::User, "text", "absent", Some("x"))
+                .unwrap()
+        );
+        let texts: Vec<_> = doc
+            .read_entries()
+            .unwrap()
+            .into_iter()
+            .flat_map(|e| e.parts)
+            .map(|p| match p {
+                MessagePart::Text { text, .. } => text,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["continue", "continue", "echo echo"]);
     }
 
     /// 2026-08-10 incident: entries/parts missing strict fields must salvage

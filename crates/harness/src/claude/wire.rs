@@ -98,6 +98,9 @@ pub(crate) struct SystemFrame {
     /// (`SendMessage`'s `to:` address), used to retain spawn identity.
     #[serde(default, alias = "taskId")]
     pub task_id: Option<String>,
+    /// `task_updated`: the fields that changed (`status`, `end_time`, …).
+    #[serde(default)]
+    pub patch: Option<Value>,
     /// `task_started`: present only for AGENT tasks (a subagent spawning),
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
@@ -605,6 +608,18 @@ pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+/// Stop one running task (a foreground command, a subagent) by the id its
+/// `task_started` frame reported. The CLI kills just that task: the tool call
+/// reports it killed and the turn goes on.
+pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "stop_task", "task_id": task_id },
+    })
+    .to_string()
+}
+
 /// Success reply to a CLI control request (`can_use_tool` allow/deny payloads).
 pub(crate) fn control_response_line(request_id: &str, response: Value) -> String {
     json!({
@@ -650,6 +665,16 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_task_names_the_task_to_kill() {
+        let line: serde_json::Value =
+            serde_json::from_str(&stop_task_request_line("r1", "bjipwt7mp")).unwrap();
+        assert_eq!(line["type"], "control_request");
+        assert_eq!(line["request_id"], "r1");
+        assert_eq!(line["request"]["subtype"], "stop_task");
+        assert_eq!(line["request"]["task_id"], "bjipwt7mp");
+    }
 
     #[test]
     fn steer_priority_follows_tool_state() {

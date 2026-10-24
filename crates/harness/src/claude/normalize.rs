@@ -4,7 +4,7 @@
 use serde_json::Value;
 use zeron_proto::{AgentEvent, DoneStatus, HarnessId, TodoItem, TodoStatus, ToolCall};
 
-use super::wire::{ContentBlock, Frame, ResultFrame};
+use super::wire::{ContentBlock, Frame, ResultFrame, SystemFrame};
 
 /// Human-readable text for the CLI's assistant-level error codes. These arrive
 /// as a terse `error` field on an `assistant` frame — usually with NO text
@@ -304,6 +304,10 @@ pub(crate) struct Normalizer {
     /// which then opened as an empty, never-created subagent doc (user
     /// report 2026-08-20).
     agent_spawn_tools: std::collections::HashSet<String>,
+    /// Running tasks by the tool call that started them (`task_started`'s
+    /// `tool_use_id` → `task_id`): the id `stop_task` takes. Every task type
+    /// is here, commands included; a task's entries go when it ends.
+    task_by_tool: std::collections::HashMap<String, String>,
     /// Rotates at each assistant-frame close and at each steer; SessionStarted
     /// carries the first value so folds can attribute deltas from the start.
     assistant_message_id: String,
@@ -325,6 +329,7 @@ impl Normalizer {
             agent_tasks: std::collections::HashMap::new(),
             agent_tool_spawns: std::collections::HashMap::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
+            task_by_tool: std::collections::HashMap::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
             turn_error_shown: false,
@@ -471,6 +476,73 @@ impl Normalizer {
         (norm, transcript)
     }
 
+    /// The task `stop_task` would end for the running tool call `tool_use_id`
+    /// — `None` before its `task_started` arrives (a command reports one a
+    /// few seconds in) or once it has ended.
+    pub fn task_for_tool(&self, tool_use_id: &str) -> Option<&str> {
+        self.task_by_tool.get(tool_use_id).map(String::as_str)
+    }
+
+    /// A tool call returned. A subagent's task outlives its spawn call's
+    /// result (the spawn resolves eagerly); any other task ended with it.
+    pub fn tool_finished(&mut self, tool_use_id: &str) {
+        if !self.agent_spawn_tools.contains(tool_use_id) {
+            self.task_by_tool.remove(tool_use_id);
+        }
+    }
+
+    /// Keep [`Self::task_for_tool`] current from the task lifecycle frames.
+    fn track_task(&mut self, f: &SystemFrame) {
+        let task = f.task_id.as_deref().filter(|t| !t.is_empty());
+        let tool = f.tool_use_id.as_deref().filter(|t| !t.is_empty());
+        match f.subtype.as_str() {
+            "task_started" => {
+                if let (Some(task), Some(tool)) = (task, tool) {
+                    self.task_by_tool.insert(tool.to_owned(), task.to_owned());
+                    // A resumed agent task starts under a later tool call; its
+                    // spawn chip is still the one the user stops.
+                    if let Some(spawn) = self.agent_tasks.get(task) {
+                        self.task_by_tool.insert(spawn.clone(), task.to_owned());
+                    }
+                }
+            }
+            "task_notification" | "task_updated" => {
+                let status = f.status.as_deref().or_else(|| {
+                    f.patch
+                        .as_ref()
+                        .and_then(|patch| patch.get("status"))
+                        .and_then(Value::as_str)
+                });
+                let ended = matches!(
+                    status,
+                    Some(
+                        "completed"
+                            | "complete"
+                            | "succeeded"
+                            | "success"
+                            | "failed"
+                            | "errored"
+                            | "error"
+                            | "killed"
+                            | "cancelled"
+                            | "canceled"
+                            | "stopped"
+                            | "interrupted"
+                    )
+                );
+                if ended {
+                    if let Some(task) = task {
+                        self.task_by_tool.retain(|_, running| running != task);
+                    }
+                    if let Some(tool) = tool {
+                        self.task_by_tool.remove(tool);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Rotate the assistant message id for a steer boundary; returns
     /// (previous, next) for the `Steered` event.
     pub fn rotate_for_steer(&mut self) -> (String, String) {
@@ -483,6 +555,7 @@ impl Normalizer {
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
         match frame {
             Frame::System(f) => {
+                self.track_task(&f);
                 // A background subagent's completion arrives as an UNTAGGED
                 // `task_notification` carrying the spawning tool's id — the
                 // wire's only terminal signal for it (live-verified 2.1.228:
@@ -1548,6 +1621,85 @@ mod tests {
         let (missing, transcript) = Normalizer::for_resume(root.path(), "missing").await;
         assert!(missing.agent_tasks.is_empty());
         assert_eq!(transcript, Transcript::Unknown);
+    }
+
+    fn feed(norm: &mut Normalizer, raw: &str) {
+        norm.normalize(crate::claude::wire::parse_frame(raw).unwrap(), false);
+    }
+
+    #[test]
+    fn task_started_maps_every_tool_call_to_the_task_that_stops_it() {
+        let mut norm = Normalizer::new();
+        // A foreground command reports its task a few seconds in; a subagent
+        // spawn reports an agent task under the spawn call's id.
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_started","task_id":"bjipwt7mp","tool_use_id":"toolu_cmd","task_type":"local_bash","is_backgrounded":false}"#,
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","task_type":"local_agent","subagent_type":"general-purpose"}"#,
+        );
+        assert_eq!(norm.task_for_tool("toolu_cmd"), Some("bjipwt7mp"));
+        assert_eq!(norm.task_for_tool("toolu_spawn"), Some("a1"));
+        assert_eq!(norm.task_for_tool("toolu_other"), None);
+        // The command's result ends its task; the spawn call's result does
+        // not end the agent, which keeps running behind it.
+        norm.tool_finished("toolu_cmd");
+        norm.tool_finished("toolu_spawn");
+        assert_eq!(norm.task_for_tool("toolu_cmd"), None);
+        assert_eq!(norm.task_for_tool("toolu_spawn"), Some("a1"));
+    }
+
+    #[test]
+    fn a_task_that_ends_can_no_longer_be_stopped() {
+        let mut norm = Normalizer::new();
+        for (task, tool) in [("t1", "toolu_a"), ("t2", "toolu_b"), ("t3", "toolu_c")] {
+            feed(
+                &mut norm,
+                &format!(
+                    r#"{{"type":"system","subtype":"task_started","task_id":"{task}","tool_use_id":"{tool}","task_type":"local_bash"}}"#
+                ),
+            );
+        }
+        // A running status changes nothing; a terminal one, from either
+        // frame shape, drops the task.
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"status":"running"}}"#,
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"status":"killed","end_time":1}}"#,
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_notification","task_id":"t2","tool_use_id":"toolu_b","status":"completed"}"#,
+        );
+        assert_eq!(norm.task_for_tool("toolu_a"), None);
+        assert_eq!(norm.task_for_tool("toolu_b"), None);
+        assert_eq!(norm.task_for_tool("toolu_c"), Some("t3"));
+    }
+
+    #[test]
+    fn a_resumed_agent_task_is_still_stopped_by_its_spawn_chip() {
+        let mut norm = Normalizer::new();
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
+        );
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_spawn","status":"completed"}"#,
+        );
+        assert_eq!(norm.task_for_tool("toolu_spawn"), None);
+        // SendMessage wakes the same agent under a later call.
+        feed(
+            &mut norm,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
+        );
+        assert_eq!(norm.task_for_tool("toolu_send"), Some("a1"));
+        assert_eq!(norm.task_for_tool("toolu_spawn"), Some("a1"));
     }
 
     #[tokio::test]

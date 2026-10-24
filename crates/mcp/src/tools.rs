@@ -14,6 +14,10 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
+use zeron_proto::native_history::{
+    ApplyNativeEditsParams, NativeEdit, NativeHistory, NativeHistoryItem, NativeItemKind,
+    ReasoningSeal,
+};
 use zeron_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
@@ -189,6 +193,36 @@ fn catalog() -> Vec<ToolDef> {
                     }
                 }
             })),
+        },
+        ToolDef {
+            name: "read_agent_memory",
+            description: "Read what a chat's agent itself remembers: the conversation its own CLI stored (Claude Code's session, Codex's thread), which is what it reads on its next turn and can differ from the transcript read_chat shows. Items carry id, role, turn (index of the user prompt they answer), kind (text, reasoning, toolCall, toolResult, compactionSummary), editable and removable. Editable text comes back in full; reasoning is sealed (sealed: signed or encrypted, text only when readable) and long reasoning, summaries and tool output are shortened (truncated: true). Pass the returned revision to edit_agent_memory. compacted means the agent summarized earlier history and only what follows is listed; canUndo means undo_agent_memory_edit has a version to go back to.",
+            input_schema: chat_key_schema(json!({})),
+        },
+        ToolDef {
+            name: "edit_agent_memory",
+            description: "Rewrite what ANOTHER chat's agent remembers, such as a worker or side chat: its next turn reads the edited history instead of the original. The agent must be idle, so you cannot edit your own chat (you are mid-turn) and a running chat is refused with \"Stop the agent before editing\". revision must come from read_agent_memory; it is refused if the conversation changed since. edits are applied together: {op: \"replace\", id, text} swaps the text of an editable text item (user or assistant), {op: \"remove\", id} drops an item the read marked removable. Only text items can be replaced; reasoning can only be removed (it is signed or encrypted) and tool calls and results only when removable. Files and the repo are not changed, only what the agent remembers. The earlier version is kept (undo_agent_memory_edit). Returns the new revision; item ids belong to the revision they were read at, so read_agent_memory again before editing more.",
+            input_schema: chat_key_schema(json!({
+                "revision": { "type": "string", "description": "The revision from read_agent_memory." },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": { "type": "string", "enum": ["replace", "remove"] },
+                            "id": { "type": "string", "description": "Item id from read_agent_memory." },
+                            "text": { "type": "string", "description": "The new text. Required for replace." }
+                        },
+                        "required": ["op", "id"]
+                    }
+                }
+            })),
+        },
+        ToolDef {
+            name: "undo_agent_memory_edit",
+            description: "Undo the last edit_agent_memory on a chat: its agent goes back to the conversation it remembered before that edit. The agent must be idle. Returns the restored revision and whether another edit can still be undone.",
+            input_schema: chat_key_schema(json!({})),
         },
         ToolDef {
             name: "archive_chat",
@@ -531,6 +565,13 @@ struct CreateChatArgs {
 }
 
 #[derive(Deserialize)]
+struct EditMemoryArgs {
+    chat: String,
+    revision: String,
+    edits: Vec<NativeEdit>,
+}
+
+#[derive(Deserialize)]
 struct ReadChatArgs {
     chat: String,
     limit: Option<usize>,
@@ -654,6 +695,67 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
     })
 }
 
+/// Longest read-only text, reasoning or tool output shown whole. Editable
+/// text is never shortened: an edit made from a clipped read would lose the rest.
+const MEMORY_CLIP: usize = 600;
+const MEMORY_SUMMARY_CLIP: usize = 240;
+
+/// `text` for `out`, cut at `max` characters (with `truncated: true`) unless `max` is `None`.
+fn put_clipped(out: &mut Value, key: &str, text: &str, max: Option<usize>) {
+    match max.filter(|max| text.chars().count() > *max) {
+        Some(max) => {
+            out[key] = json!(format!("{}…", text.chars().take(max).collect::<String>()));
+            out["truncated"] = json!(true);
+        }
+        None => out[key] = json!(text),
+    }
+}
+
+/// One item of an agent's stored history, compact for a model to read.
+fn memory_item(item: &NativeHistoryItem) -> Value {
+    let mut out = json!({
+        "id": item.id,
+        "role": item.role,
+        "turn": item.turn,
+        "editable": item.editable,
+        "removable": item.removable,
+    });
+    let clip_unless_editable = |max| (!item.editable).then_some(max);
+    match &item.kind {
+        NativeItemKind::Text { text } => {
+            out["kind"] = json!("text");
+            put_clipped(&mut out, "text", text, clip_unless_editable(MEMORY_CLIP));
+        }
+        NativeItemKind::Reasoning { text, seal } => {
+            out["kind"] = json!("reasoning");
+            out["sealed"] = json!(match seal {
+                ReasoningSeal::Signed => "signed",
+                ReasoningSeal::Encrypted => "encrypted",
+            });
+            if let Some(text) = text {
+                put_clipped(&mut out, "text", text, Some(MEMORY_CLIP));
+            }
+        }
+        NativeItemKind::ToolCall { name, summary } => {
+            out["kind"] = json!("toolCall");
+            out["tool"] = json!(name);
+            put_clipped(&mut out, "summary", summary, Some(MEMORY_SUMMARY_CLIP));
+        }
+        NativeItemKind::ToolResult { summary, is_error } => {
+            out["kind"] = json!("toolResult");
+            if *is_error {
+                out["isError"] = json!(true);
+            }
+            put_clipped(&mut out, "summary", summary, Some(MEMORY_SUMMARY_CLIP));
+        }
+        NativeItemKind::CompactionSummary { text } => {
+            out["kind"] = json!("compactionSummary");
+            put_clipped(&mut out, "text", text, clip_unless_editable(MEMORY_CLIP));
+        }
+    }
+    out
+}
+
 fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
     messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
@@ -699,6 +801,9 @@ impl Tools {
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
+            "read_agent_memory" => self.read_agent_memory(parse(args)?).await,
+            "edit_agent_memory" => self.edit_agent_memory(parse(args)?).await,
+            "undo_agent_memory_edit" => self.undo_agent_memory_edit(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -1251,6 +1356,104 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
+    async fn read_agent_memory(&self, args: ChatArgs) -> anyhow::Result<Value> {
+        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let history = self
+            .native_history(zeron_rpc::methods::GET_NATIVE_HISTORY, &chat, json!({}))
+            .await?;
+        Ok(json!({
+            "chatId": chat.id,
+            "title": chat.title,
+            "harness": history.harness,
+            "revision": history.revision,
+            "compacted": history.compacted,
+            "canUndo": history.can_undo,
+            "total": history.items.len(),
+            "items": history.items.iter().map(memory_item).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// The calling chat is mid-turn, so the engine would refuse anyway;
+    /// say why in words a model can act on.
+    fn refuse_own_memory(&self, chat: &Chat) -> anyhow::Result<()> {
+        if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
+            anyhow::bail!(
+                "refusing to edit your own chat's memory ({}): it is running this turn; \
+                 edit another chat, or ask the user to edit this one in the app",
+                short(&chat.id)
+            );
+        }
+        Ok(())
+    }
+
+    async fn edit_agent_memory(&self, args: EditMemoryArgs) -> anyhow::Result<Value> {
+        if args.edits.is_empty() {
+            anyhow::bail!("edits is empty");
+        }
+        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.refuse_own_memory(&chat)?;
+        let changes: Vec<String> = args
+            .edits
+            .iter()
+            .map(|edit| match edit {
+                NativeEdit::Replace { id, text } => {
+                    format!("replaced {id} ({} chars)", text.chars().count())
+                }
+                NativeEdit::Remove { id } => format!("removed {id}"),
+            })
+            .collect();
+        let params = serde_json::to_value(ApplyNativeEditsParams {
+            chat_id: chat.id.clone(),
+            revision: args.revision,
+            edits: args.edits,
+        })?;
+        let history = self
+            .native_history(zeron_rpc::methods::APPLY_NATIVE_EDITS, &chat, params)
+            .await?;
+        Ok(json!({
+            "chatId": chat.id,
+            "title": chat.title,
+            "revision": history.revision,
+            "applied": changes.len(),
+            "changes": changes,
+            "items": history.items.len(),
+            "compacted": history.compacted,
+            "canUndo": history.can_undo,
+            "note": "Item ids belong to the revision they were read at: call read_agent_memory again before editing more.",
+        }))
+    }
+
+    async fn undo_agent_memory_edit(&self, args: ChatArgs) -> anyhow::Result<Value> {
+        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.refuse_own_memory(&chat)?;
+        let history = self
+            .native_history(zeron_rpc::methods::UNDO_NATIVE_EDIT, &chat, json!({}))
+            .await?;
+        Ok(json!({
+            "chatId": chat.id,
+            "title": chat.title,
+            "revision": history.revision,
+            "items": history.items.len(),
+            "compacted": history.compacted,
+            "canUndo": history.can_undo,
+        }))
+    }
+
+    /// One of the native-history calls, run by the device that hosts the chat.
+    async fn native_history(
+        &self,
+        method: &str,
+        chat: &Chat,
+        extra: Value,
+    ) -> anyhow::Result<NativeHistory> {
+        let mut params = json!({ "chatId": chat.id, "targetDeviceId": chat.device_id });
+        if let (Some(params), Value::Object(extra)) = (params.as_object_mut(), extra) {
+            params.extend(extra);
+        }
+        let value = self.zeron.call(method, params).await?;
+        serde_json::from_value(value).with_context(|| format!("{method}: unexpected shape"))
+    }
+
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let archived = args.archived.unwrap_or(true);
@@ -1611,6 +1814,32 @@ mod tests {
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// Fails the native-history writes the way the engine refuses an edit.
+        native_error: Option<&'static str>,
+        native_calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    /// An agent's stored history: a user prompt, readable and sealed
+    /// reasoning, a tool call and its output, and a reply.
+    fn native_history(revision: &str, can_undo: bool) -> Value {
+        json!({
+            "chatId": "chat-alpha-1", "harness": "claude-code", "sessionId": "s1",
+            "revision": revision, "compacted": false, "canUndo": can_undo,
+            "items": [
+                { "id": "u:0", "role": "user", "turn": 0, "editable": true, "removable": true,
+                  "kind": { "kind": "text", "text": "x".repeat(2000) } },
+                { "id": "a:1", "role": "assistant", "turn": 0, "editable": false, "removable": true,
+                  "kind": { "kind": "reasoning", "seal": "signed", "text": "y".repeat(2000) } },
+                { "id": "a:2", "role": "assistant", "turn": 0, "editable": false, "removable": true,
+                  "kind": { "kind": "reasoning", "seal": "encrypted" } },
+                { "id": "a:3", "role": "assistant", "turn": 0, "editable": false, "removable": false,
+                  "kind": { "kind": "toolCall", "name": "Bash", "summary": "ls" } },
+                { "id": "u:4", "role": "user", "turn": 0, "editable": false, "removable": false,
+                  "kind": { "kind": "toolResult", "summary": "z".repeat(2000), "isError": true } },
+                { "id": "a:5", "role": "assistant", "turn": 0, "editable": true, "removable": true,
+                  "kind": { "kind": "text", "text": "done" } },
+            ],
+        })
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1715,6 +1944,24 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                methods::GET_NATIVE_HISTORY
+                | methods::APPLY_NATIVE_EDITS
+                | methods::UNDO_NATIVE_EDIT => {
+                    self.native_calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    match (method, self.native_error) {
+                        (methods::GET_NATIVE_HISTORY, _) => {
+                            RpcReply::Value(native_history("r1", false))
+                        }
+                        (_, Some(error)) => return Err(RpcError::Failed(error.into())),
+                        (methods::APPLY_NATIVE_EDITS, None) => {
+                            RpcReply::Value(native_history("r2", true))
+                        }
+                        _ => RpcReply::Value(native_history("r1", false)),
+                    }
+                }
                 methods::PUBLISH_VISUAL => {
                     self.writes
                         .lock()
@@ -1846,6 +2093,229 @@ mod tests {
         assert_eq!(read["returned"], 1);
         assert_eq!(read["olderRemaining"], 1);
         assert_eq!(read["messages"][0]["id"], "a1");
+    }
+
+    #[tokio::test]
+    async fn read_agent_memory_lists_the_agents_own_history() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let read = tools
+            .call("read_agent_memory", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(read["chatId"], "chat-alpha-1");
+        assert_eq!(read["harness"], "claude-code");
+        assert_eq!(read["revision"], "r1");
+        assert_eq!(read["compacted"], false);
+        assert_eq!(read["canUndo"], false);
+        assert_eq!(read["total"], 6);
+        let items = read["items"].as_array().unwrap();
+
+        // Editable text is whole: an edit made from a clipped read would lose the rest.
+        assert_eq!(items[0]["id"], "u:0");
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["kind"], "text");
+        assert_eq!(items[0]["editable"], true);
+        assert_eq!(items[0]["text"].as_str().unwrap().len(), 2000);
+        assert!(items[0].get("truncated").is_none());
+        assert_eq!(items[5]["text"], "done");
+
+        // Reasoning is sealed; readable text is shortened and says so.
+        assert_eq!(items[1]["kind"], "reasoning");
+        assert_eq!(items[1]["sealed"], "signed");
+        assert_eq!(items[1]["truncated"], true);
+        assert!(items[1]["text"].as_str().unwrap().chars().count() < 700);
+        assert_eq!(items[1]["editable"], false);
+        assert_eq!(items[1]["removable"], true);
+        assert_eq!(items[2]["sealed"], "encrypted");
+        assert!(items[2].get("text").is_none());
+
+        // Tool calls and results are a kind and a short summary.
+        assert_eq!(items[3]["kind"], "toolCall");
+        assert_eq!(items[3]["tool"], "Bash");
+        assert_eq!(items[3]["summary"], "ls");
+        assert_eq!(items[4]["kind"], "toolResult");
+        assert_eq!(items[4]["isError"], true);
+        assert_eq!(items[4]["truncated"], true);
+        assert!(items[4]["summary"].as_str().unwrap().chars().count() < 300);
+        assert!(items[3].get("sealed").is_none());
+
+        let calls = world.native_calls.lock().unwrap();
+        assert_eq!(calls[0].0, methods::GET_NATIVE_HISTORY);
+        assert_eq!(calls[0].1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn a_chat_cannot_edit_its_own_memory() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        for (tool, args) in [
+            (
+                "edit_agent_memory",
+                json!({ "chat": "alpha", "revision": "r1",
+                        "edits": [{ "op": "remove", "id": "a:1" }] }),
+            ),
+            ("undo_agent_memory_edit", json!({ "chat": "alpha" })),
+        ] {
+            let err = tools.call(tool, args).await.unwrap_err().to_string();
+            assert!(err.contains("your own chat"), "{tool}: {err}");
+        }
+        assert!(world.native_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn edit_agent_memory_sends_the_revision_and_edits() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let edited = tools
+            .call(
+                "edit_agent_memory",
+                json!({
+                    "chat": "alpha", "revision": "r1",
+                    "edits": [
+                        { "op": "replace", "id": "u:0", "text": "shorter" },
+                        { "op": "remove", "id": "a:1" },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["revision"], "r2");
+        assert_eq!(edited["applied"], 2);
+        assert_eq!(
+            edited["changes"],
+            json!(["replaced u:0 (7 chars)", "removed a:1"])
+        );
+        assert_eq!(edited["items"], 6);
+        assert_eq!(edited["canUndo"], true);
+
+        let calls = world.native_calls.lock().unwrap();
+        let (method, params) = calls.last().unwrap();
+        assert_eq!(method, methods::APPLY_NATIVE_EDITS);
+        assert_eq!(params["chatId"], "chat-alpha-1");
+        assert_eq!(params["revision"], "r1");
+        assert_eq!(
+            params["edits"],
+            json!([
+                { "op": "replace", "id": "u:0", "text": "shorter" },
+                { "op": "remove", "id": "a:1" },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_agent_memory_rejects_bad_edits_before_the_engine() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        for args in [
+            json!({ "chat": "alpha", "revision": "r1", "edits": [] }),
+            json!({ "chat": "alpha", "revision": "r1", "edits": [{ "op": "replace", "id": "u:0" }] }),
+            json!({ "chat": "alpha", "revision": "r1", "edits": [{ "op": "insert", "id": "u:0" }] }),
+            json!({ "chat": "alpha", "edits": [{ "op": "remove", "id": "u:0" }] }),
+        ] {
+            assert!(
+                tools.call("edit_agent_memory", args).await.is_err(),
+                "should be refused"
+            );
+        }
+        assert!(world.native_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_memory_errors_come_back_as_tool_errors() {
+        let world = Arc::new(World {
+            native_error: Some("Stop the agent before editing"),
+            ..Default::default()
+        });
+        let tools = tools(world, Origin::default());
+        let err = tools
+            .call(
+                "edit_agent_memory",
+                json!({
+                    "chat": "alpha", "revision": "r1",
+                    "edits": [{ "op": "remove", "id": "a:1" }],
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Stop the agent before editing"), "{err}");
+        let err = tools
+            .call("undo_agent_memory_edit", json!({ "chat": "alpha" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Stop the agent before editing"), "{err}");
+        let err = tools
+            .call("read_agent_memory", json!({ "chat": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn undo_agent_memory_edit_restores_the_earlier_revision() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let undone = tools
+            .call("undo_agent_memory_edit", json!({ "chat": "chat-alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(undone["chatId"], "chat-alpha-1");
+        assert_eq!(undone["revision"], "r1");
+        assert_eq!(undone["canUndo"], false);
+        let calls = world.native_calls.lock().unwrap();
+        assert_eq!(calls[0].0, methods::UNDO_NATIVE_EDIT);
+        assert_eq!(calls[0].1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn agent_memory_calls_go_to_the_chats_device() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        tools
+            .call("read_agent_memory", json!({ "chat": "Beta" }))
+            .await
+            .unwrap();
+        tools
+            .call(
+                "edit_agent_memory",
+                json!({
+                    "chat": "beta", "revision": "r1",
+                    "edits": [{ "op": "remove", "id": "a:1" }],
+                }),
+            )
+            .await
+            .unwrap();
+        tools
+            .call("undo_agent_memory_edit", json!({ "chat": "chat-beta" }))
+            .await
+            .unwrap();
+        tools
+            .call("read_agent_memory", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        let calls = world.native_calls.lock().unwrap();
+        let routed: Vec<_> = calls
+            .iter()
+            .map(|(method, params)| (method.as_str(), params["targetDeviceId"].as_str()))
+            .collect();
+        assert_eq!(
+            routed,
+            [
+                (methods::GET_NATIVE_HISTORY, Some("dev-remote")),
+                (methods::APPLY_NATIVE_EDITS, Some("dev-remote")),
+                (methods::UNDO_NATIVE_EDIT, Some("dev-remote")),
+                (methods::GET_NATIVE_HISTORY, Some("dev-local")),
+            ]
+        );
     }
 
     #[tokio::test]

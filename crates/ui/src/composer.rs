@@ -1551,6 +1551,9 @@ enum EditKind {
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
 pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
+/// Long-form text fields (the transcript editor): Enter is a newline and
+/// nothing submits; the owning view saves on its own shortcut.
+pub(crate) const TEXT_EDITOR_CONTEXT: &str = "TextEditor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageEnterBindingAction {
@@ -1795,9 +1798,12 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         palette_bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, palette));
         palette_bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, palette));
     }
+    let mut text_editor_bindings = input_bindings(TEXT_EDITOR_CONTEXT);
+    text_editor_bindings.push(KeyBinding::new("enter", Newline, Some(TEXT_EDITOR_CONTEXT)));
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
     cx.bind_keys(message_bindings);
+    cx.bind_keys(text_editor_bindings);
 }
 
 /// Events the composer wrapper listens for.

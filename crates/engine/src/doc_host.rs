@@ -5716,6 +5716,37 @@ impl DocHost {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
+            SessionCommandPayload::StopTool { tool_call_id } => {
+                // A tool that has already returned has nothing to stop; say
+                // so rather than leave the user waiting on a no-op.
+                let finished = handle.doc.read_entries().is_ok_and(|entries| {
+                    entries
+                        .iter()
+                        .flat_map(|entry| &entry.parts)
+                        .find_map(|part| match part {
+                            MessagePart::Tool {
+                                id,
+                                resolved,
+                                subagent_status,
+                                ..
+                            } if id == tool_call_id => {
+                                Some(*resolved && *subagent_status != Some(SubagentStatus::Running))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(false)
+                });
+                if finished {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("that tool already finished".into()),
+                    ));
+                }
+                match sessions.stop_tool(chat_id, tool_call_id) {
+                    Ok(()) => Ok((SessionCommandStatus::Applied, None)),
+                    Err(why) => Ok((SessionCommandStatus::Rejected, Some(why.into()))),
+                }
+            }
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
