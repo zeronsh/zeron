@@ -12703,6 +12703,42 @@ mod tests {
         });
     }
 
+    /// The target the sidebar's "No project" `+` leaves: a project-less new
+    /// chat names its host outright, so it lands in that device's group.
+    #[gpui::test]
+    fn projectless_new_chat_is_created_on_the_picked_device(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.local_device_id = Some("local".into());
+            state.select_space(None, cx);
+            state.select_device("remote".into(), cx);
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("hello", cx));
+            composer.on_submit(cx);
+        });
+        cx.run_until_parked();
+        let create = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|frame| serde_json::from_str::<zeron_rpc::ClientFrame>(&frame).unwrap())
+            .find(|frame| frame.params["op"] == "createChat")
+            .expect("the send creates the chat");
+        assert_eq!(create.params["deviceId"], "remote");
+        assert!(create.params.get("spaceId").is_none());
+    }
+
     /// Out of credits, a send that would run on Cloud is held at the button:
     /// Cloud can't start or wake its machine. Other chats are untouched.
     #[gpui::test]
