@@ -9,6 +9,7 @@ use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
 use crate::icons;
 use crate::popover;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::theme::Theme;
 
@@ -194,7 +195,8 @@ impl Render for NotificationsPage {
                         accent,
                         NotificationPreference::Sound,
                         cx,
-                    )),
+                    ))
+                    .search_anchor(SettingId::SessionSounds),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -222,7 +224,8 @@ impl Render for NotificationsPage {
                                 cx,
                             )
                         }),
-                    ),
+                    )
+                    .search_anchor(SettingId::TaskCompletedSound),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -245,7 +248,8 @@ impl Render for NotificationsPage {
                         .when(sound, |el| {
                             interactive_switch(el, accent, NotificationPreference::InputSound, cx)
                         }),
-                    ),
+                    )
+                    .search_anchor(SettingId::InputRequiredSound),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -273,7 +277,8 @@ impl Render for NotificationsPage {
                                 cx,
                             )
                         }),
-                    ),
+                    )
+                    .search_anchor(SettingId::ErrorSound),
             );
         let desktop_card = widgets::section_card(&theme)
             .mt_0()
@@ -297,7 +302,8 @@ impl Render for NotificationsPage {
                         accent,
                         NotificationPreference::Desktop,
                         cx,
-                    )),
+                    ))
+                    .search_anchor(SettingId::DesktopNotifications),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -331,7 +337,8 @@ impl Render for NotificationsPage {
                         .when(desktop, |el| {
                             interactive_switch(el, accent, NotificationPreference::AgentUpdates, cx)
                         }),
-                    ),
+                    )
+                    .search_anchor(SettingId::AgentUpdates),
             )
             .child(
                 // Sub-option of the banner row: dimmed + inert while banners
@@ -361,7 +368,8 @@ impl Render for NotificationsPage {
                                 cx,
                             )
                         }),
-                    ),
+                    )
+                    .search_anchor(SettingId::BackgroundOnly),
             );
 
         let scrollbar = popover::rail(self, "notifications-page-scrollbar", &theme, cx);
@@ -391,6 +399,7 @@ impl Render for NotificationsPage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
     }
 }

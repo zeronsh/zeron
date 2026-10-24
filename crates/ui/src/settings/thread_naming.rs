@@ -7,6 +7,7 @@ use zeron_rpc::methods;
 
 use crate::pickers::{Pickers, TitleModelPicked};
 use crate::popover::Loadable;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -156,7 +157,8 @@ impl Render for ThreadNamingCard {
                                 vec![div().child(description).into_any_element()],
                             )),
                     )
-                    .child(control),
+                    .child(control)
+                    .search_anchor(SettingId::ThreadNaming),
             )
     }
 }

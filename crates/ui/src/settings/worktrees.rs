@@ -5,6 +5,7 @@ use gpui::{AnyElement, Context, Entity, Render, Task, Window, div, prelude::*, p
 use zeron_proto::{FolderListing, WorktreeSettings, WorktreeSettingsStatus};
 use zeron_rpc::methods;
 
+use super::search::{SearchAnchor, SettingId};
 use super::widgets;
 use crate::icons;
 use crate::popover::Loadable;
@@ -243,6 +244,7 @@ impl WorktreeSettingsCard {
                     })
                     .when(!interactive, |el| el.opacity(0.5)),
             )
+            .search_anchor(SettingId::CommitCredit)
             .into_any_element()
     }
 
@@ -730,7 +732,8 @@ impl Render for WorktreeSettingsCard {
                             .child(widgets::row_title(&theme, "Custom worktree location"))
                             .child(widgets::meta_line(&theme, meta)),
                     )
-                    .child(controls),
+                    .child(controls)
+                    .search_anchor(SettingId::WorktreeLocation),
             )
             .when(self.browsing || error.is_some(), |card| card.child(detail))
             .child(self.render_credit_row(&theme, cx));

@@ -1,6 +1,10 @@
 use crate::{
     popover,
-    settings::{self, widgets},
+    settings::{
+        self,
+        search::{SearchAnchor, SettingId},
+        widgets,
+    },
     theme::Theme,
 };
 use gpui::{App, Context, Entity, Global, Task, Window, div, prelude::*, px};
@@ -406,6 +410,7 @@ impl Render for VoiceCard {
                         )),
                 )
                 .child(control)
+                .search_anchor(SettingId::CodexVoiceDevice)
         };
         let conversation_card = widgets::section_card(&theme).child(host_row).child(
             widgets::card_row(&theme, true)
@@ -421,7 +426,8 @@ impl Render for VoiceCard {
                             vec!["Applies to your next voice session".into_any_element()],
                         )),
                 )
-                .child(voice_control),
+                .child(voice_control)
+                .search_anchor(SettingId::CodexVoiceStyle),
         );
         let enabled = settings::current(cx).dictation_enabled;
         let downloading = self.cancel.is_some();
@@ -495,7 +501,8 @@ impl Render for VoiceCard {
                     }))
                     .children(progress),
             )
-            .child(switch);
+            .child(switch)
+            .search_anchor(SettingId::Dictation);
         let microphone_row = (enabled && self.ready).then(|| {
             self.refresh_inputs(cx);
             let saved = settings::current(cx).dictation_input.clone();
@@ -528,6 +535,7 @@ impl Render for VoiceCard {
                         .child(widgets::row_title(&theme, "Microphone")),
                 )
                 .child(control)
+                .search_anchor(SettingId::Microphone)
         });
         // Always visible, so ⌘D can be rebound (and freed) before the model
         // is downloaded.
@@ -557,6 +565,7 @@ impl Render for VoiceCard {
                         )),
                 )
                 .child(field)
+                .search_anchor(settings::ShortcutId::ToggleDictation)
         };
         let model_card = (self.cache_present && !downloading).then(|| {
             let remove_weak = cx.entity().downgrade();
@@ -595,7 +604,8 @@ impl Render for VoiceCard {
                             .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
                                 remove_weak.update(cx, |this, cx| this.remove(cx)).ok();
                             }),
-                    ),
+                    )
+                    .search_anchor(SettingId::SpeechModel),
             )
         });
         crate::toast::take_error(&mut self.error, cx);
@@ -634,6 +644,7 @@ impl Render for VoiceCard {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
     }
 }

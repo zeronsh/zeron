@@ -2,6 +2,7 @@
 
 use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
 
+use super::search::{SearchAnchor, SettingId};
 use super::widgets;
 use crate::popover;
 use crate::theme::Theme;
@@ -141,7 +142,8 @@ impl Render for FilesSettingsPage {
                                 cx.emit(FilesSettingsEvent::AutosaveChanged(this.autosave_enabled));
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .search_anchor(SettingId::Autosave),
             )
             .when(autosave_enabled, |card| {
                 card.child(
@@ -154,7 +156,8 @@ impl Render for FilesSettingsPage {
                                 .flex_col()
                                 .child(widgets::row_title(&theme, "Autosave delay")),
                         )
-                        .child(delay_control),
+                        .child(delay_control)
+                        .search_anchor(SettingId::AutosaveDelay),
                 )
             })
             .child(
@@ -185,7 +188,8 @@ impl Render for FilesSettingsPage {
                                 cx.emit(FilesSettingsEvent::WordWrapChanged(this.word_wrap));
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .search_anchor(SettingId::WordWrap),
             )
             .child(
                 widgets::card_row(&theme, false)
@@ -217,7 +221,8 @@ impl Render for FilesSettingsPage {
                                 ));
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .search_anchor(SettingId::ShowAllFiles),
             );
 
         let scrollbar = popover::rail(self, "files-settings-page-scrollbar", &theme, cx);
@@ -244,6 +249,7 @@ impl Render for FilesSettingsPage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
     }
 }
