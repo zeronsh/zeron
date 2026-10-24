@@ -8276,6 +8276,12 @@ impl Transcript {
             .zip(tools.iter())
             .map(
                 |(((((detail, invocation), affordance), open), fold), tool)| {
+                    // A spawn link is always `subagent_chip`'s full card row,
+                    // even under a compact fold: budgeting it at the tree
+                    // row's height clipped the last cards off the fold.
+                    if is_spawn_link(tool) {
+                        return CHIP_HEIGHT;
+                    }
                     let target = if *open {
                         base_row_height
                             + invocation.as_deref().map_or(0.0, detail_height)
@@ -10279,6 +10285,7 @@ fn subagent_chip(
         })
         .child(
             div()
+                .debug_selector(|| id.to_string())
                 .id(id)
                 .when(rail, |el| el.ml(px(12.0)))
                 .h(px(CHIP_CARD_HEIGHT))
@@ -13345,6 +13352,114 @@ mod tests {
         };
         assert!(!tool_group_collapses(tools));
         assert!(is_agent_call(&tools[0].call));
+    }
+
+    #[gpui::test]
+    fn compact_spawn_fold_fits_every_card(cx: &mut gpui::TestAppContext) {
+        // User report: compact mode, four subagents launched in one turn, the
+        // work fold open — the "Called 4 tools" fold cut the fourth card off,
+        // and a fold body never scrolls to reveal it.
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        struct SpawnFold {
+            transcript: Entity<Transcript>,
+            row: Row,
+        }
+        impl Render for SpawnFold {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let RowKind::ToolGroup {
+                    tools,
+                    summary,
+                    auto_open,
+                    worked_secs,
+                    compact_shell,
+                } = &self.row.kind
+                else {
+                    unreachable!()
+                };
+                let group = self.transcript.update(cx, |this, cx| {
+                    this.render_tool_group(
+                        &self.row.id,
+                        tools,
+                        summary,
+                        *auto_open,
+                        *worked_secs,
+                        *compact_shell,
+                        &Theme::dark(),
+                        cx,
+                    )
+                });
+                div()
+                    .w(px(700.0))
+                    .child(div().debug_selector(|| "spawn-fold".into()).child(group))
+            }
+        }
+        // Each card used to come up 6px short, so the clip grew with the
+        // count: check one card, the reported four, and well past it.
+        for count in [1, 4, 5, 12] {
+            let mut parts = vec![
+                reasoning_part("r0", "planning the search"),
+                text_part("t0", "Launching searches in parallel."),
+            ];
+            parts.extend((1..=count).map(|i| agent_part(&format!("s{i}"), &format!("Search {i}"))));
+            let entry = assistant("m-spawn", MessageStatus::Streaming, parts);
+            // The open work fold mounts the compact-off rows; the spawn group
+            // is one of them, and compact mode wraps it in its own fold.
+            let row = rows_for_entry(&entry, false, true, &mut parse)
+                .into_iter()
+                .find(|row| {
+                    row.compact_fold.is_some()
+                        && matches!(&row.kind, RowKind::ToolGroup { tools, .. }
+                            if tools.len() == count && tools.iter().all(is_spawn_link))
+                })
+                .expect("the work fold mounts the spawn group");
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            transcript.update(cx, |this, _| this.compact_mode = true);
+            let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+            cx.update(|cx| {
+                let opened = opened.clone();
+                cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                    if let TranscriptEvent::OpenSubagent { doc_id, .. } = event {
+                        opened.borrow_mut().push(doc_id.clone());
+                    }
+                })
+                .detach();
+            });
+            let row_id = row.id.clone();
+            let (_fixture, window) = cx.add_window_view(|_, _| SpawnFold {
+                transcript: transcript.clone(),
+                row,
+            });
+            window.update(|window, cx| window.draw(cx).clear());
+            // The fold's body is its last child, so the fold's bottom edge is
+            // where the body clips.
+            let fold = window.debug_bounds("spawn-fold").expect("the fold painted");
+            let cards: Vec<Bounds<Pixels>> = (0..count)
+                .map(|ix| {
+                    let selector: &'static str =
+                        Box::leak(format!("{row_id}#s{ix}").into_boxed_str());
+                    window
+                        .debug_bounds(selector)
+                        .unwrap_or_else(|| panic!("spawn card {ix} painted"))
+                })
+                .collect();
+            for (ix, card) in cards.iter().enumerate() {
+                assert!(
+                    card.bottom() <= fold.bottom(),
+                    "{count} spawns: card {ix} ends at {:?}, but the fold clips at {:?}",
+                    card.bottom(),
+                    fold.bottom(),
+                );
+            }
+            // Visible means reachable: the last card still opens its subagent.
+            window.simulate_click(cards[count - 1].center(), gpui::Modifiers::default());
+            assert_eq!(opened.borrow().as_slice(), [format!("chat--sub--s{count}")]);
+        }
     }
 
     #[test]
@@ -16496,6 +16611,12 @@ mod tests {
 impl Transcript {
     pub fn fixture_appshots_start(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    /// Click a fold's header: a compact work fold mounts its body rows.
+    pub fn fixture_toggle_fold(&mut self, row_id: &str, cx: &mut Context<Self>) {
+        self.toggle_fold(row_id.to_owned().into(), 0.0, false, cx);
         cx.notify();
     }
 

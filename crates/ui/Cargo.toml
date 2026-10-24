@@ -49,6 +49,10 @@ name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "subagent-fold-fixture"
+required-features = ["appshots-fixture", "resource-profile"]
+
+[[example]]
 name = "pull-request-fixture"
 required-features = ["pull-request-fixture"]
 
