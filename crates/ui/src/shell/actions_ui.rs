@@ -39,8 +39,12 @@ impl Shell {
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(chat_id.clone(), title, cx)
         });
-        let attached = panel.update(cx, |panel, cx| {
-            panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
+        let session = panel
+            .read(cx)
+            .session_for_tab(&chat_id, tab)
+            .expect("reserved setup terminal");
+        let attached = session.update(cx, |model, cx| {
+            model.attach_reserved_session(run.terminal, target_device_id, cx)
         });
         if !attached {
             self.show_notice(crate::toast::ToastKind::Error, "Setup action started, but its terminal could not be attached", cx);
@@ -445,7 +449,11 @@ impl Shell {
             &context.target_device_id,
         );
         let key = context.key.clone();
-        let chat_id = context.chat_id.clone();
+        let session = panel
+            .read(cx)
+            .session_for_tab(&context.chat_id, tab)
+            .expect("reserved action terminal")
+            .downgrade();
         let target = context.target_device_id.clone();
         let action_id = action.id.clone();
         cx.spawn(async move |this, cx| {
@@ -456,15 +464,11 @@ impl Shell {
             match result {
                 Ok(run) => {
                     let terminal_id = run.terminal.id.clone();
-                    let attached = panel.update(cx, |panel, cx| {
-                        panel.attach_reserved_session(
-                            &chat_id,
-                            tab,
-                            run.terminal,
-                            target.clone(),
-                            cx,
-                        )
-                    });
+                    let attached = session
+                        .update(cx, |model, cx| {
+                            model.attach_reserved_session(run.terminal, target.clone(), cx)
+                        })
+                        .unwrap_or(false);
                     if !attached {
                         let _ = engine
                             .client()
@@ -489,9 +493,7 @@ impl Shell {
                 }
                 Err(err) => {
                     let message = err.to_string();
-                    panel.update(cx, |panel, cx| {
-                        panel.fail_reserved_tab(&chat_id, tab, &message, cx)
-                    });
+                    let _ = session.update(cx, |model, cx| model.fail_reserved_tab(&message, cx));
                     this.update(cx, |shell, cx| {
                         shell.project_actions.mark_unavailable(&key, message);
                         cx.notify();
