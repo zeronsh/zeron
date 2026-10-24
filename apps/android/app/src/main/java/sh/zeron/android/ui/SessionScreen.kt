@@ -316,7 +316,6 @@ fun SessionScreen(
                             ),
                             listOfNotNull(row?.let { MenuAction("Delete", ZIcons.Delete, destructive = true) { confirmDelete = true } }),
                         ),
-                        header = listOf(composer.title, subtitle).filter { it.isNotEmpty() }.joinToString("\n"),
                     )
                 }
             }
