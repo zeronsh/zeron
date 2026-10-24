@@ -1,0 +1,70 @@
+package sh.zeron.android
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import sh.zeron.android.core.LaunchOptions
+import sh.zeron.android.ui.ZeronRoot
+
+/**
+ * Launch extras mirror the iOS launch arguments, e.g.
+ * `adb shell am start -n sh.zeron.android/.MainActivity --ez demo true --es route chat:chat-veil`
+ * (`--es wallpaper <path>` sets the wallpaper from a file the app can read).
+ */
+class MainActivity : ComponentActivity() {
+    private val model get() = (application as ZeronApplication).model
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        val extras = intent.extras
+        model.boot(
+            LaunchOptions(
+                demo = extras?.getBoolean("demo") == true,
+                fast = extras?.getBoolean("fast") == true,
+                longReply = extras?.getBoolean("longreply") == true,
+                big = extras?.getBoolean("big") == true,
+                huge = extras?.getBoolean("huge") == true,
+                noProjects = extras?.getBoolean("noprojects") == true,
+                signedOut = extras?.getBoolean("signedout") == true,
+                route = extras?.getString("route"),
+                companion = extras?.getString("companion"),
+                terminalDemo = extras?.getBoolean("terminal-demo") == true,
+                cloud = extras?.getBoolean("cloud") == true,
+                wallpaper = extras?.getString("wallpaper"),
+                wallpaperEffect = extras?.getString("wallpaper-effect"),
+                voicePreview = extras?.getBoolean("voice-preview") == true,
+                voiceStage = extras?.getBoolean("voice-stage") == true,
+                remoteVoice = extras?.getBoolean("remote-voice") == true,
+                voiceSelfTest = extras?.getBoolean("voice-selftest") == true,
+            ),
+        )
+        handleCallback(intent)
+        setContent { ZeronRoot(model) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleCallback(intent)
+    }
+
+    private fun handleCallback(intent: Intent?) {
+        // The call notification (or `zeron://voice`) returns to the stage.
+        if (sh.zeron.android.voice.VoiceController.opensStage(intent)) {
+            if (model.voice.live) model.voice.requestStage()
+            return
+        }
+        val data = intent?.data ?: return
+        if (data.scheme != "zeron") return
+        if (data.host == "callback") model.handleCallback(data.toString()) else model.browser.links.tryEmit(data)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.browser.resumes.tryEmit(Unit)
+    }
+}
