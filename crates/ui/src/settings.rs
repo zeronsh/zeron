@@ -7,6 +7,8 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1485,6 +1487,11 @@ pub struct KeymapConfig {
     /// fixed-length array would let one malformed entry reset every unrelated
     /// setting. [`Self::healed`] restores the length instead.
     pub jump_session: Vec<String>,
+    /// Whether custom combos are stored in US keys, as every map this version
+    /// writes is. Older maps kept them as the recording layout typed them;
+    /// [`Self::adopt_layout_neutral`] converts those once. Absent means older.
+    #[serde(default)]
+    pub layout_neutral: bool,
 }
 
 /// Stable key for device-local preferences that belong to one workspace
@@ -1547,6 +1554,7 @@ impl Default for KeymapConfig {
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
+            layout_neutral: true,
         }
     }
 }
@@ -1617,6 +1625,39 @@ impl KeymapConfig {
         while self.jump_session.len() < JUMP_SLOTS {
             self.jump_session
                 .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+        }
+    }
+
+    /// Convert an older map's custom combos, kept as the recording layout
+    /// typed them (AZERTY "mod-&" for its ⌘1 key), to the US keys stored now
+    /// ("mod-1"), taking the active layout as the one that recorded them.
+    /// Defaults are US keys already. A custom chord keeps its key: a default
+    /// that now lands on it yields and arrives unbound, as a default added
+    /// after the file was written does in [`UiSettings::load`]. Runs once.
+    pub fn adopt_layout_neutral(&mut self, equivalents: &KeyEquivalents) {
+        if std::mem::replace(&mut self.layout_neutral, true) {
+            return;
+        }
+        let mut converted = Vec::new();
+        for id in ShortcutId::ALL {
+            let combo = self.get(id);
+            if combo.is_empty() || combo == id.default_combo() {
+                continue;
+            }
+            if let Some(us) = canonical_combo(combo, equivalents).filter(|us| us != combo) {
+                self.set(id, us.clone());
+                converted.push((id, us));
+            }
+        }
+        for id in ShortcutId::ALL {
+            let combo = self.get(id);
+            if combo == id.default_combo()
+                && converted
+                    .iter()
+                    .any(|(owner, us)| *owner != id && us == combo)
+            {
+                self.set(id, String::new());
+            }
         }
     }
 
@@ -1752,9 +1793,156 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
         .join("-")
 }
 
-/// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S").
+/// Where the active keyboard layout puts shortcut keys: the US key a combo
+/// is written with → the key that layout types in its place. This is
+/// Apple's own relocation — an AZERTY Mac reaches ⌘1 as ⌘&, ⌘/ as ⌘: and
+/// ⌘[ as ⌘^ — which gpui ships as `get_key_equivalents` but applies only to
+/// bindings loaded with it. Empty on US layouts and off macOS.
+pub type KeyEquivalents = HashMap<char, char>;
+
+/// The active layout's [`KeyEquivalents`].
+pub fn key_equivalents(cx: &App) -> KeyEquivalents {
+    gpui::PlatformKeyboardMapper::get_key_equivalents(cx.keyboard_mapper().as_ref())
+        .map(|table| table.iter().map(|(&us, &here)| (us, here)).collect())
+        .unwrap_or_default()
+}
+
+thread_local! {
+    /// The table the keymap was last bound against, so displayed combos
+    /// name the key to press ([`display_combo`], [`badge_combo`]).
+    static BOUND_KEY_EQUIVALENTS: RefCell<KeyEquivalents> = RefCell::default();
+}
+
+/// Called by `shell::apply_keymap` with the table it just bound against.
+pub(crate) fn set_bound_key_equivalents(equivalents: KeyEquivalents) {
+    BOUND_KEY_EQUIVALENTS.set(equivalents);
+}
+
+/// The key `equivalents` puts in place of the US `key` — gpui's
+/// `MacKeyboardMapper::map_key_equivalent`, for Zeron's own strings. Named
+/// keys ("tab", "f5") and characters the layout keeps pass through.
+pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, str> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(us), None) => equivalents
+            .get(&us)
+            .map_or(Cow::Borrowed(key), |here| Cow::Owned(here.to_string())),
+        _ => Cow::Borrowed(key),
+    }
+}
+
+/// The US key a combo stores for a key this layout reported: the inverse of
+/// [`localize_key`], so a recorded chord keeps the spelling its default uses
+/// (AZERTY ⌘& records as "mod-1") and conflict checks on stored combos still
+/// see one chord per key. `None` when the layout relocates `key` itself and
+/// nothing lands on it — AZERTY's @ key — since no stored combo reaches it.
+/// Two US keys sharing one target (Icelandic ] and }) resolve to the lower.
+pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let mut chars = key.chars();
+    let (Some(here), None) = (chars.next(), chars.next()) else {
+        return Some(key.to_string());
+    };
+    if let Some(us) = equivalents
+        .iter()
+        .filter(|&(_, &target)| target == here)
+        .map(|(&us, _)| us)
+        .min()
+    {
+        return Some(us.to_string());
+    }
+    (!equivalents.contains_key(&here)).then(|| key.to_string())
+}
+
+/// Split a combo into its modifier prefix and key: ("mod-shift-", "/").
+fn split_combo(combo: &str) -> (&str, &str) {
+    // "-" is a key too: "mod--" is Mod+Minus.
+    let key_start = if combo.ends_with('-') {
+        combo.len() - 1
+    } else {
+        combo.rfind('-').map_or(0, |ix| ix + 1)
+    };
+    combo.split_at(key_start)
+}
+
+/// `combo` with its key localized ("mod-/" → "mod-:" on AZERTY), in either
+/// the stored ("mod-…") or the bindable ("cmd-…") spelling.
+pub fn localize_combo(combo: &str, equivalents: &KeyEquivalents) -> String {
+    let (modifiers, key) = split_combo(combo);
+    format!("{modifiers}{}", localize_key(key, equivalents))
+}
+
+/// The inverse of [`localize_combo`] (see [`canonical_key`]).
+pub fn canonical_combo(combo: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let (modifiers, key) = split_combo(combo);
+    canonical_key(key, equivalents).map(|key| format!("{modifiers}{key}"))
+}
+
+/// macOS French (AZERTY), as gpui_macos `keyboard.rs` lists it for
+/// `com.apple.keylayout.French` — the test platform has no layout table.
+#[cfg(test)]
+pub(crate) fn azerty_key_equivalents() -> KeyEquivalents {
+    [
+        ('!', '1'),
+        ('"', '%'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('&', '7'),
+        ('(', '9'),
+        (')', '0'),
+        ('*', '8'),
+        ('.', ';'),
+        ('/', ':'),
+        ('0', 'à'),
+        ('1', '&'),
+        ('2', 'é'),
+        ('3', '"'),
+        ('4', '\''),
+        ('5', '('),
+        ('6', '§'),
+        ('7', 'è'),
+        ('8', '!'),
+        ('9', 'ç'),
+        (':', '°'),
+        (';', ')'),
+        ('<', '.'),
+        ('>', '/'),
+        ('@', '2'),
+        ('[', '^'),
+        ('\'', 'ù'),
+        ('\\', '`'),
+        (']', '$'),
+        ('^', '6'),
+        ('`', '<'),
+        ('{', '¨'),
+        ('|', '£'),
+        ('}', '*'),
+        ('~', '>'),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// `combo` as the bound layout types it: what the user has to press.
+fn bound_combo(combo: &str) -> String {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| localize_combo(combo, equivalents))
+}
+
+/// [`bound_combo`] for a bare key, for hints that spell their own modifiers.
+pub fn bound_key(key: &str) -> String {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| localize_key(key, equivalents).into_owned())
+}
+
+/// The stored (US-key) spelling of a chord read outside gpui's keymap, by
+/// the table the keymap is bound to (see [`canonical_combo`]).
+pub fn bound_canonical_combo(combo: &str) -> Option<String> {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| canonical_combo(combo, equivalents))
+}
+
+/// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S"),
+/// naming the key the active layout types for it.
 pub fn display_combo(combo: &str) -> String {
-    display_combo_on(cfg!(target_os = "macos"), combo)
+    display_combo_on(cfg!(target_os = "macos"), &bound_combo(combo))
 }
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
@@ -1781,8 +1969,9 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
 /// the modifiers as their key glyphs in canonical ⌃⌥⇧⌘ order and drops the
 /// separators ("⌘1", "⇧⌘A") — the form the model picker's ⌘N chips already
 /// use — while other platforms keep the textual [`display_combo`] ("Ctrl+1").
+/// Like [`display_combo`], the key is the one the active layout types.
 pub fn badge_combo(combo: &str) -> String {
-    badge_combo_on(cfg!(target_os = "macos"), combo)
+    badge_combo_on(cfg!(target_os = "macos"), &bound_combo(combo))
 }
 
 /// [`badge_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
@@ -4203,6 +4392,109 @@ mod tests {
         // Elsewhere the textual form stands.
         assert_eq!(badge_combo_on(false, "mod-2"), "Ctrl+2");
         assert_eq!(badge_combo_on(false, "mod-shift-a"), "Ctrl+Shift+A");
+    }
+
+    #[test]
+    fn azerty_localizes_shortcuts_where_appkit_puts_them() {
+        let azerty = azerty_key_equivalents();
+        // The relocations an AZERTY Mac's own menus apply to these shortcuts.
+        for (us, here) in [
+            ("mod-1", "mod-&"),
+            ("mod-2", "mod-é"),
+            ("mod-/", "mod-:"),
+            ("mod-[", "mod-^"),
+            ("mod-]", "mod-$"),
+        ] {
+            assert_eq!(localize_combo(us, &azerty), here);
+        }
+        // Letters, named keys and keys AZERTY keeps in place stay put.
+        for combo in [
+            "mod-b",
+            "mod-shift-a",
+            "ctrl-tab",
+            "mod-enter",
+            "f5",
+            "mod-,",
+            "mod--",
+        ] {
+            assert_eq!(localize_combo(combo, &azerty), combo);
+        }
+        // So does every key on a US layout, and the bindable spelling
+        // localizes like the stored one.
+        assert_eq!(localize_combo("mod-1", &KeyEquivalents::default()), "mod-1");
+        assert_eq!(localize_combo("cmd-shift-/", &azerty), "cmd-shift-:");
+    }
+
+    #[test]
+    fn canonical_keys_invert_localization_on_every_reachable_key() {
+        let azerty = azerty_key_equivalents();
+        for here in azerty.values().copied().chain("abz,-=+?".chars()) {
+            let here = here.to_string();
+            let us = canonical_key(&here, &azerty).unwrap_or_else(|| panic!("{here} unreachable"));
+            assert_eq!(localize_key(&us, &azerty), here.as_str(), "{here} via {us}");
+        }
+        assert_eq!(canonical_key("tab", &azerty).as_deref(), Some("tab"));
+        assert_eq!(
+            canonical_combo("mod-alt-&", &azerty).as_deref(),
+            Some("mod-alt-1")
+        );
+        // AZERTY relocates @ and nothing lands on that key.
+        assert_eq!(canonical_key("@", &azerty), None);
+        // Two US keys sharing one target (Icelandic ] and }) take the lower.
+        let icelandic: KeyEquivalents = [(']', '´'), ('}', '´')].into_iter().collect();
+        assert_eq!(canonical_key("´", &icelandic).as_deref(), Some("]"));
+    }
+
+    #[test]
+    fn displayed_combos_name_the_key_the_bound_layout_types() {
+        let mac = cfg!(target_os = "macos");
+        set_bound_key_equivalents(azerty_key_equivalents());
+        assert_eq!(display_combo("mod-/"), display_combo_on(mac, "mod-:"));
+        assert_eq!(badge_combo("mod-1"), badge_combo_on(mac, "mod-&"));
+        assert_eq!(badge_combo("mod-b"), badge_combo_on(mac, "mod-b"));
+        set_bound_key_equivalents(KeyEquivalents::default());
+        assert_eq!(badge_combo("mod-1"), badge_combo_on(mac, "mod-1"));
+    }
+
+    #[test]
+    fn older_keymaps_adopt_us_keys_once() {
+        let azerty = azerty_key_equivalents();
+        // Recorded on AZERTY before combos were stored in US keys: ⌘& for
+        // Jump to session 1, and ⌘é — where Jump to session 2 now binds —
+        // for New session.
+        let mut keymap = KeymapConfig {
+            new_session: "mod-é".into(),
+            layout_neutral: false,
+            ..KeymapConfig::default()
+        };
+        keymap.set(ShortcutId::JumpSession(0), "mod-&".into());
+        keymap.adopt_layout_neutral(&azerty);
+        assert!(keymap.layout_neutral);
+        assert_eq!(keymap.get(ShortcutId::JumpSession(0)), "mod-1");
+        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-2");
+        // The custom chord keeps its key; the default landing on it yields.
+        assert_eq!(keymap.get(ShortcutId::JumpSession(1)), "");
+        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
+        // Converted maps already store US keys: later passes change nothing.
+        keymap.set(ShortcutId::NewSession, "mod-&".into());
+        keymap.adopt_layout_neutral(&azerty);
+        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-&");
+    }
+
+    #[test]
+    fn keymaps_written_before_us_keys_load_as_older() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"newSession": "mod-é"}}"#,
+        )
+        .unwrap();
+        assert!(!UiSettings::load(dir.path()).keymap.layout_neutral);
+        // Fresh maps are US keys, and say so once saved.
+        let fresh = UiSettings::default();
+        assert!(fresh.keymap.layout_neutral);
+        fresh.save(dir.path()).unwrap();
+        assert!(UiSettings::load(dir.path()).keymap.layout_neutral);
     }
 
     #[test]

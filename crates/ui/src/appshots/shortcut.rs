@@ -143,13 +143,23 @@ pub(super) fn enabled_changed() {
     update(|_| {});
 }
 
-pub fn set_shortcut(combo: &str) {
+/// The hotkey `combo` registers. Stored combos are US keys and validate as
+/// such; the key then moves to the one the layout prints for it (AZERTY's ⌘1
+/// key prints &), since that is how its keycode is looked up. An unusable
+/// combo registers the default.
+fn registered(combo: &str, equivalents: &crate::settings::KeyEquivalents) -> Shortcut {
+    let mut shortcut = Shortcut::parse(combo).unwrap_or_else(|_| {
+        Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo()).unwrap()
+    });
+    shortcut.key = crate::settings::localize_key(&shortcut.key, equivalents).into_owned();
+    shortcut
+}
+
+pub fn set_shortcut(combo: &str, equivalents: &crate::settings::KeyEquivalents) {
     if !super::is_desktop() {
         return;
     }
-    let shortcut = Shortcut::parse(combo).unwrap_or_else(|_| {
-        Shortcut::parse(crate::settings::ShortcutId::CaptureAppshot.default_combo()).unwrap()
-    });
+    let shortcut = registered(combo, equivalents);
     if preferences().lock().unwrap().shortcut == shortcut {
         return;
     }
@@ -178,6 +188,16 @@ mod tests {
         for combo in ["ctrl-alt-space", "mod-shift-k", "alt-f12", "ctrl-pageup"] {
             assert!(Shortcut::parse(combo).is_ok(), "{combo}");
         }
+    }
+    #[test]
+    fn hotkeys_validate_us_keys_and_register_printed_ones() {
+        let azerty = crate::settings::azerty_key_equivalents();
+        // AZERTY prints its ⌘1 key as &, which validation alone refuses.
+        assert!(Shortcut::parse("ctrl-alt-&").is_err());
+        assert_eq!(registered("ctrl-alt-1", &azerty).key, "&");
+        assert_eq!(registered("ctrl-alt-a", &azerty).key, "a");
+        assert_eq!(registered("ctrl-alt-space", &azerty).key, "space");
+        assert_eq!(registered("ctrl-alt-1", &Default::default()).key, "1");
     }
     #[test]
     fn portal_uses_xkb_key_names_and_selected_modifiers() {

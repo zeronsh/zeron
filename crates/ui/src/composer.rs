@@ -2916,8 +2916,13 @@ impl ComposerInput {
             cx.propagate();
             return;
         }
-        // Mirror `apply_keymap`, which binds the default for an unparseable combo.
-        let parse = |combo: &str| Keystroke::parse(&crate::settings::platform_combo(combo)).ok();
+        // Mirror `apply_keymap`, which binds the default for an unparseable
+        // combo, on the key the active layout types for it.
+        let equivalents = crate::settings::key_equivalents(cx);
+        let parse = |combo: &str| {
+            let combo = crate::settings::platform_combo(combo);
+            Keystroke::parse(&crate::settings::localize_combo(&combo, &equivalents)).ok()
+        };
         let keystroke = parse(&crate::settings::current(cx).keymap.toggle_dictation)
             .or_else(|| parse(crate::settings::ShortcutId::ToggleDictation.default_combo()));
         let blur = cx.on_blur(&self.focus_handle, window, |input, _, cx| {
