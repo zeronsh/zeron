@@ -414,21 +414,64 @@ pub enum SavePolicy {
     Immediate,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PullRequestDestination {
     #[default]
     Native,
+    /// A Browser tab beside the conversation. Without one on screen, the
+    /// pull request opens in the default browser.
+    Browser,
     External,
 }
 
 impl PullRequestDestination {
-    pub const ALL: [Self; 2] = [Self::Native, Self::External];
+    pub const ALL: [Self; 3] = [Self::Native, Self::Browser, Self::External];
+
+    /// The name stored in the settings file.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Browser => "browser",
+            Self::External => "external",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Native => "Pull request view",
+            Self::Browser => "In-app browser",
             Self::External => "Default browser",
         }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Native => {
+                "Inspect them in Zeron, beside the conversation or the Pull requests board."
+            }
+            Self::Browser => {
+                "Open them in a Browser tab beside the conversation, or in the default browser when none is shown."
+            }
+            Self::External => "Open them in the default browser.",
+        }
+    }
+}
+
+impl Serialize for PullRequestDestination {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+/// A destination this build doesn't know (written by a newer one) reads as
+/// the default rather than failing the whole settings file.
+impl<'de> Deserialize<'de> for PullRequestDestination {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::ALL
+            .into_iter()
+            .find(|destination| stored == destination.key())
+            .unwrap_or_default())
     }
 }
 
@@ -1150,12 +1193,15 @@ pub struct UiSettings {
     pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
+    /// Off, pull request links leave Zeron too; on, they open where
+    /// [`Self::pull_request_destination`] says.
     pub open_web_links_in_zeron: bool,
     /// Compact transcript: a turn's working steps (thinking, tool calls, and
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
-    /// Destination shared by PR badges and the pull-request board.
+    /// Destination shared by PR badges, the pull-request board, and pull
+    /// request links in messages while [`Self::open_web_links_in_zeron`] is on.
     pub pull_request_destination: PullRequestDestination,
     /// Last explicitly selected PR scope, restored when no project is selected.
     pub last_pull_request_repository: Option<String>,
@@ -2249,15 +2295,44 @@ mod tests {
             existing.pull_request_destination,
             PullRequestDestination::Native
         );
-        for destination in PullRequestDestination::ALL {
+        for (destination, stored) in PullRequestDestination::ALL
+            .into_iter()
+            .zip(["native", "browser", "external"])
+        {
             let settings = UiSettings {
                 pull_request_destination: destination,
                 ..existing.clone()
             };
-            let loaded: UiSettings =
-                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            let text = serde_json::to_string(&settings).unwrap();
+            assert!(
+                text.contains(&format!(r#""pullRequestDestination":"{stored}""#)),
+                "{text}"
+            );
+            let loaded: UiSettings = serde_json::from_str(&text).unwrap();
             assert_eq!(loaded.pull_request_destination, destination);
             assert_eq!(loaded.sidebar_width, 300.0);
+        }
+        // Unknown names and malformed values read as the native view without
+        // defaulting the rest of the file.
+        let dir = tempfile::tempdir().unwrap();
+        for raw in [
+            r#""sidePanel""#,
+            "42",
+            "null",
+            r#"{"destination":"external"}"#,
+        ] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(r#"{{"sidebarWidth": 300, "pullRequestDestination": {raw}}}"#),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(
+                loaded.pull_request_destination,
+                PullRequestDestination::Native,
+                "{raw}"
+            );
+            assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
     }
 

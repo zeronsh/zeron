@@ -53,6 +53,10 @@ name = "pull-request-fixture"
 required-features = ["pull-request-fixture"]
 
 [[example]]
+name = "pull-request-destination-fixture"
+required-features = ["pull-request-fixture", "browser-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 

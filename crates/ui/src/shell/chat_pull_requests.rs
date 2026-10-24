@@ -1,6 +1,6 @@
 //! Pull requests opened from a chat — a transcript link or a sidebar badge —
 //! as tabs in the focused session's right pane, so several can sit beside
-//! one conversation.
+//! one conversation: Zeron's own view, or a Browser tab when Settings asks.
 
 use super::*;
 use crate::pull_request_detail::PullRequestDetailPage;
@@ -74,6 +74,23 @@ impl Shell {
         self.set_surfaces_open(true, cx);
         self.set_right_active(surface, cx);
         cx.notify();
+    }
+
+    /// Open `url` in a new Browser tab in the focused session's pane. Browser
+    /// tabs belong to a session, so without one on screen (the board, the
+    /// new-session canvas) the pull request opens in the default browser.
+    pub(super) fn browse_chat_pull_request(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chat_pull_requests_available() {
+            cx.open_url(&url);
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        self.add_browser_surface(Some(url), window, cx);
     }
 
     /// The device a chat's pull request is read from: the one named, else

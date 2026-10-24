@@ -25,6 +25,11 @@ use zeron_rpc::methods;
 #[action(namespace = shell, no_json)]
 pub struct OpenPullRequest(pub String, pub Option<String>);
 
+/// Open a pull request's page in a Browser tab beside the conversation.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct OpenPullRequestInBrowser(pub String);
+
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct ClosePullRequest;
@@ -100,25 +105,23 @@ pub(crate) fn pull_request_link(url: &str) -> Option<String> {
     ))
 }
 
-/// Whether pull requests open in Zeron's own view, per Settings.
-pub(crate) fn opens_natively(cx: &App) -> bool {
-    settings::current(cx).pull_request_destination != PullRequestDestination::External
-}
-
 pub fn open(url: &str, window: &mut Window, cx: &mut App) {
     open_on_device(url, None, window, cx);
 }
 
+/// Open `url` where Settings sends pull requests.
 pub fn open_on_device(url: &str, device: Option<String>, window: &mut Window, cx: &mut App) {
     // The native view reads github.com through `gh`; pull requests on other
-    // hosts open in the browser.
+    // hosts open in the default browser.
     let on_github = url::Url::parse(url).is_ok_and(|url| url.host_str() == Some("github.com"));
-    if !on_github
-        || settings::current(cx).pull_request_destination == PullRequestDestination::External
-    {
-        cx.open_url(url);
-    } else {
-        window.dispatch_action(Box::new(OpenPullRequest(url.to_owned(), device)), cx);
+    match settings::current(cx).pull_request_destination {
+        PullRequestDestination::Native if on_github => {
+            window.dispatch_action(Box::new(OpenPullRequest(url.to_owned(), device)), cx);
+        }
+        PullRequestDestination::Browser => {
+            window.dispatch_action(Box::new(OpenPullRequestInBrowser(url.to_owned())), cx);
+        }
+        PullRequestDestination::Native | PullRequestDestination::External => cx.open_url(url),
     }
 }
 
@@ -3355,6 +3358,55 @@ mod tests {
         ] {
             assert_eq!(pull_request_link(link), None, "{link}");
         }
+    }
+
+    /// Badges and board rows open a pull request where Settings sends it:
+    /// Zeron's view (github.com only), a Browser tab, or the default browser.
+    #[gpui::test]
+    fn pull_requests_open_where_settings_send_them(cx: &mut gpui::TestAppContext) {
+        let _settings = fixture::settings(cx, settings::UiSettings::default());
+        let native = Rc::new(RefCell::new(Vec::new()));
+        let browser = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let (native, browser) = (native.clone(), browser.clone());
+            cx.on_action(move |action: &OpenPullRequest, _| {
+                native
+                    .borrow_mut()
+                    .push((action.0.clone(), action.1.clone()));
+            })
+            .on_action(move |action: &OpenPullRequestInBrowser, _| {
+                browser.borrow_mut().push(action.0.clone());
+            });
+        });
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        let open =
+            |cx: &mut gpui::VisualTestContext, destination: PullRequestDestination, url: &str| {
+                cx.update(|window, cx| {
+                    settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.pull_request_destination = destination;
+                    });
+                    open_on_device(url, Some("remote".into()), window, cx);
+                });
+            };
+        let github = "https://github.com/a/b/pull/1";
+        let elsewhere = "https://git.example.com/a/b/pull/2";
+        open(cx, PullRequestDestination::Native, github);
+        assert_eq!(
+            *native.borrow(),
+            [(github.to_owned(), Some("remote".to_owned()))]
+        );
+        assert_eq!(cx.opened_url(), None);
+        // The view reads github.com only; other hosts go to the browser.
+        open(cx, PullRequestDestination::Native, elsewhere);
+        assert_eq!(cx.opened_url().as_deref(), Some(elsewhere));
+        // A Browser tab can show any host.
+        open(cx, PullRequestDestination::Browser, github);
+        open(cx, PullRequestDestination::Browser, elsewhere);
+        assert_eq!(*browser.borrow(), [github, elsewhere]);
+        open(cx, PullRequestDestination::External, github);
+        assert_eq!(cx.opened_url().as_deref(), Some(github));
+        assert_eq!(native.borrow().len(), 1);
+        assert_eq!(browser.borrow().len(), 2);
     }
 
     #[gpui::test]

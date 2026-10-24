@@ -84,6 +84,8 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod pull_request_destination_tests;
 mod pull_request_pane;
 mod session_hover_card;
 mod session_info;
@@ -3920,6 +3922,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> crate::markdown::render::LinkOutcome {
         use crate::markdown::render::{LinkAction, LinkOutcome};
+        use crate::settings::PullRequestDestination;
         let Some(source) = activation.source_session.clone() else {
             return LinkOutcome::Rejected;
         };
@@ -3944,31 +3947,37 @@ impl Shell {
                 LinkOutcome::Rejected
             };
         }
-        // A pull request link opens Zeron's own view in this session's pane,
-        // unless Settings sends pull requests to the browser.
-        if matches!(
-            activation.action,
-            LinkAction::Primary | LinkAction::Internal
-        ) && crate::pull_request_detail::opens_natively(cx)
-            && self.chat_pull_requests_available()
-            && let Some(url) = activation
-                .target
-                .navigation
-                .as_deref()
-                .ok()
-                .and_then(crate::pull_request_detail::pull_request_link)
-        {
-            let target = self.chat_pull_request_device(None, cx);
-            self.open_chat_pull_request(url, target, window, cx);
-            return LinkOutcome::Internal;
-        }
+        let settings = crate::settings::current(cx);
+        let pull_request = activation
+            .target
+            .navigation
+            .as_deref()
+            .ok()
+            .and_then(crate::pull_request_detail::pull_request_link);
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
-            resolved.action = if crate::settings::current(cx).open_web_links_in_zeron {
+            // "Open links in Zeron" decides whether a click stays in Zeron;
+            // a pull request leaves too when Settings sends pull requests to
+            // the default browser.
+            resolved.action = if settings.open_web_links_in_zeron
+                && !(pull_request.is_some()
+                    && settings.pull_request_destination == PullRequestDestination::External)
+            {
                 LinkAction::Internal
             } else {
                 LinkAction::External
             };
+        }
+        // A pull request that stays opens Zeron's own view in this session's
+        // pane when Settings asks for it, else a Browser tab like any link.
+        if resolved.action == LinkAction::Internal
+            && settings.pull_request_destination == PullRequestDestination::Native
+            && self.chat_pull_requests_available()
+            && let Some(url) = pull_request
+        {
+            let target = self.chat_pull_request_device(None, cx);
+            self.open_chat_pull_request(url, target, window, cx);
+            return LinkOutcome::Internal;
         }
         let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
         if outcome == LinkOutcome::Internal {
@@ -13821,6 +13830,14 @@ impl Render for Shell {
                 },
             ))
             .on_action(cx.listener(
+                |this,
+                 action: &crate::pull_request_detail::OpenPullRequestInBrowser,
+                 window,
+                 cx| {
+                    this.browse_chat_pull_request(action.0.clone(), window, cx);
+                },
+            ))
+            .on_action(cx.listener(
                 |this, _: &crate::pull_request_detail::ClosePullRequest, _, cx| {
                     if let Some(ix) = this.pull_request_pane.active_index() {
                         this.close_pull_request_tab(ix, cx);
@@ -17740,6 +17757,103 @@ mod exit_regressions {
             .unwrap();
         cx.run_until_parked();
         assert!(weak.upgrade().is_none());
+    }
+
+    /// "In-app browser" opens pull requests in a Browser tab beside the
+    /// conversation, from a link or a badge, and in the default browser off a
+    /// session. "Default browser" keeps a clicked link out of Zeron while the
+    /// explicit "Open in Zeron" still opens a Browser tab.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn pull_requests_open_in_browser_tabs_when_settings_ask(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let mut initial = settings::UiSettings::default();
+        initial.pull_request_destination = settings::PullRequestDestination::Browser;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(initial, dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "first-session".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                let mut link = LinkActivation {
+                    target: LinkTarget::new("#1", "https://github.com/a/b/pull/1/files"),
+                    action: LinkAction::Primary,
+                    source_session: Some("first-session".into()),
+                };
+                let shown = |shell: &Shell, cx: &App| {
+                    let RightSurface::Browser(id) = shell.resolved_right_active(cx) else {
+                        panic!("a Browser tab is active");
+                    };
+                    shell.browsers[&id].read(cx).page.url.clone()
+                };
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert!(shell.right_pane_open(cx));
+                assert_eq!(
+                    shown(shell, cx).as_deref(),
+                    Some("https://github.com/a/b/pull/1/files")
+                );
+                assert!(shell.chat_pull_requests.is_empty());
+                // A badge: the same Browser tab, beside the conversation.
+                shell.browse_chat_pull_request("https://github.com/c/d/pull/2".into(), window, cx);
+                assert_eq!(
+                    shown(shell, cx).as_deref(),
+                    Some("https://github.com/c/d/pull/2")
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                // "Default browser": a click leaves Zeron, links stay in
+                // Zeron otherwise, and "Open in Zeron" opens a Browser tab.
+                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.pull_request_destination = settings::PullRequestDestination::External;
+                });
+                assert!(settings::current(cx).open_web_links_in_zeron);
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::External("https://github.com/a/b/pull/1/files".into())
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                link.action = LinkAction::Internal;
+                assert_eq!(
+                    shell.activate_session_link(&link, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                assert!(shell.chat_pull_requests.is_empty());
+                // Off a session, a badge falls back to the default browser.
+                shell.enter_pull_requests_route(cx);
+                shell.browse_chat_pull_request("https://github.com/e/f/pull/3".into(), window, cx);
+                assert_eq!(shell.browsers.len(), 3);
+            })
+            .unwrap();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/e/f/pull/3")
+        );
     }
 
     /// Encoded destinations open the decoded path, and an absolute

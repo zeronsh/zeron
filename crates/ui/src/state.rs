@@ -7666,9 +7666,10 @@ impl AppState {
     }
 }
 
-#[cfg(feature = "project-palette-fixture")]
+#[cfg(any(test, feature = "project-palette-fixture"))]
 impl AppState {
-    /// Seed provider metadata for the isolated native sidebar review fixture.
+    /// Seed provider metadata for the isolated native sidebar review fixture
+    /// and for tests that click a sidebar badge.
     pub fn fixture_sidebar_change_request(
         &mut self,
         snapshot: zeron_proto::CheckoutChangeRequestStatus,
