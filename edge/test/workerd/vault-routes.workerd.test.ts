@@ -56,6 +56,10 @@ describe("/vault routes → VAULT service binding", () => {
       body: { five_hour: { utilization: 10 } }
     });
     expect((await lastCall("accountUsage")).args).toEqual([caller, "claude", "a1"]);
+    expect((await call("PUT", "/vault/org1/accounts/claude/auto-switch", bearer, { threshold: 90 })).status).toBe(200);
+    expect((await lastCall("setAutoSwitch")).args).toEqual([caller, "claude", 90]);
+    expect((await call("PUT", "/vault/org1/accounts/codex/auto-switch", bearer, { threshold: null })).status).toBe(200);
+    expect((await lastCall("setAutoSwitch")).args).toEqual([caller, "codex", null]);
   });
 
   it("validates shapes before calling the vault", async () => {
@@ -76,6 +80,8 @@ describe("/vault routes → VAULT service binding", () => {
     await bad("GET", "/vault/org1/accounts/bogus");
     await bad("POST", "/vault/org1/accounts/codex/active", { slot: "bad id!" });
     await bad("POST", "/vault/org1/accounts/codex/active", {});
+    await bad("PUT", "/vault/org1/accounts/claude/auto-switch", { threshold: "90" });
+    await bad("PUT", "/vault/org1/accounts/claude/auto-switch", {});
     await bad("DELETE", "/vault/org1/accounts/codex/bad%20id");
     await bad("PUT", "/vault/org1/credentials/codex", { material: { key: "x".repeat(70_000) }, authorizedDevices: [] });
     expect((await call("GET", "/vault/other-org", bearer)).status).toBe(403);

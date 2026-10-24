@@ -63,6 +63,9 @@ export interface VaultConnectionView {
   readonly accounts?: number;
   /** Whether one of them is active (grants come from it). */
   readonly hasActive?: boolean;
+  /** Claude and Codex: the percent of a plan window at which grants move to
+   * the connected account with the most room. Absent = off. */
+  readonly autoSwitch?: number;
 }
 
 /** Non-secret identity of an uploaded login, from the uploader's own sign-in
@@ -285,4 +288,12 @@ export interface VaultRpc {
   /** Plan usage of one Claude or Codex login, read by the vault (users only;
    * `not_found` for providers without a usage view). */
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>>;
+  /** Claude or Codex: switch accounts automatically once the active one
+   * reaches `threshold` percent (1–100) of its 5-hour or weekly window;
+   * `null` = off, the default. Users only. */
+  setAutoSwitch(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    threshold: number | null
+  ): Promise<VaultResult<VaultStatusView>>;
 }

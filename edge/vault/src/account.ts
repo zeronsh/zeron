@@ -25,6 +25,14 @@
  * other adds one; either way it becomes active. Forgetting the active account
  * leaves none active until the user picks one.
  *
+ * Auto-switch (off unless the user sets a threshold; the policy is
+ * `autoswitch.ts`): before a Claude or Codex grant, an active account at the
+ * threshold hands over to the connected account with the most room, one that
+ * serves every device the active one does. The engine picks the switch up on
+ * its next run, which re-asks for any grant older than 30 s. Nothing polls:
+ * usage is read on `usage`'s path only when a grant needs it, one check at a
+ * time, and kept in memory; a grant waits on a check `SWITCH_WAIT_MS` at most.
+ *
  * Failure semantics (design "Grants"): `reconnect` from the adapter marks the
  * account `needs_reconnect` and stops grants from it; `transient` keeps the
  * current generation, serves the still-valid token if there is one, and
@@ -47,6 +55,7 @@ import type {
   VaultResult,
   VaultUsageView
 } from "./api";
+import { pickAccount, readAgainAt, retryReadAt, SWITCH_WAIT_MS, type Candidate } from "./autoswitch";
 import { keyId, loadKeyring, openJson, recordAad, seal, sealJson, VaultUnavailable, type Keyring } from "./crypto";
 import type { AuditEntry } from "./devices";
 import { randomId, utf8 } from "./encoding";
@@ -58,7 +67,7 @@ import { fetchGithubLogin, parseGithubToken, pollDeviceFlow, startDeviceFlow } f
 import { appJwt, findInstallation, installUrl, mintInstallationToken, repoAccess } from "./providers/github-app";
 import { filterRepos, listGithubBranches, listGithubRepos } from "./providers/github-repos";
 import type { FetchFn, GrantMaterial, ProviderAdapter } from "./providers/types";
-import { fetchUsage, hasUsage } from "./providers/usage";
+import { fetchUsage, hasUsage, planUsed, type UsageOutcome } from "./providers/usage";
 import { fail, ok, type VaultFailure } from "./result";
 
 /** A refresh attempted this recently is not retried while the current token
@@ -131,6 +140,10 @@ export interface CanaryResult {
 /** Account stored but unreadable (corruption, AAD mismatch, rotated KEK). */
 class RecordUnreadable extends Error {}
 
+/** An account's last usage reading, for auto-switch: its fullest window in
+ * percent (undefined when the read failed) and when to read it again. */
+type Reading = { readonly percent: number | undefined; readonly staleAt: number };
+
 const parseDevices = (json: string): string[] => {
   try {
     const value: unknown = JSON.parse(json);
@@ -196,6 +209,9 @@ export class VaultAccount extends DurableObject<Env> {
   /** One refresh in flight per account (by slot). */
   private readonly refreshing = new Map<string, Promise<RefreshDone>>();
   private readonly polls = new Map<string, Promise<VaultResult<GithubDevicePoll>>>();
+  /** Auto-switch state, in memory: an eviction costs one read, nothing more. */
+  private readonly readings = new Map<string, Reading>();
+  private switching: Promise<void> | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -294,6 +310,7 @@ export class VaultAccount extends DurableObject<Env> {
     if (rows.length === 0) return ok(null);
     const active = this.activeRow();
     const shown = active ?? rows.reduce((latest, row) => (row.updated_at > latest.updated_at ? row : latest));
+    const autoSwitch = this.switchThreshold();
     return ok({
       provider,
       status: statusOf(shown, Date.now()),
@@ -301,7 +318,8 @@ export class VaultAccount extends DurableObject<Env> {
       ...(shown.account ? { account: shown.account } : {}),
       updatedAt: Math.max(...rows.map((row) => row.updated_at)),
       accounts: rows.length,
-      hasActive: active !== undefined
+      hasActive: active !== undefined,
+      ...(autoSwitch > 0 ? { autoSwitch } : {})
     });
   }
 
@@ -353,6 +371,17 @@ export class VaultAccount extends DurableObject<Env> {
     return ok(this.accountViews());
   }
 
+  /** Turn auto-switch on at `threshold` percent of a plan window, or off
+   * with `null`. The caller has checked the range and the provider. */
+  setAutoSwitch(userId: string, provider: VaultProviderId, threshold: number | null): VaultResult<null> {
+    const owner = this.claim(userId, provider);
+    if (owner) return owner;
+    if (this.rows().length === 0) return fail("not_found", `no ${provider} credential`);
+    if (threshold === null) this.deleteMeta("auto_switch");
+    else this.setMeta("auto_switch", String(threshold));
+    return ok(null);
+  }
+
   /** Delete one account. The active one leaves none active. Idempotent. */
   forget(
     userId: string,
@@ -398,6 +427,7 @@ export class VaultAccount extends DurableObject<Env> {
     const owner = this.claim(userId, provider);
     if (owner) return Promise.resolve(owner);
     return this.guard(async () => {
+      await this.autoSwitch();
       const active = this.activeRow();
       if (!active) {
         return fail("not_found", this.rows().length > 0 ? `no ${provider} account is active` : `no ${provider} credential`);
@@ -425,6 +455,7 @@ export class VaultAccount extends DurableObject<Env> {
       const usable = await this.usableMaterial(slot, () => undefined);
       if (!usable.ok) return usable;
       const outcome = await fetchUsage(provider, usable.value.material, this.fetchFn);
+      this.remember(slot, outcome);
       switch (outcome.kind) {
         case "ok":
           return ok({ body: outcome.body, fetchedAt: Date.now() });
@@ -566,6 +597,86 @@ export class VaultAccount extends DurableObject<Env> {
   }
 
   // ── internals ────────────────────────────────────────────────────────────
+
+  /** The auto-switch check a grant runs first. Concurrent grants share one
+   * check, and wait for it `SWITCH_WAIT_MS` at most: a slower one carries on
+   * under `waitUntil` and serves the next grant. Its failure is logged,
+   * never the grant's. */
+  private autoSwitch(): Promise<void> {
+    const threshold = this.switchThreshold();
+    if (threshold === 0 || !hasUsage(this.provider)) return Promise.resolve();
+    if (!this.switching) {
+      this.switching = this.switchOnce(threshold)
+        .catch((error: unknown) => {
+          console.error(JSON.stringify({ event: "vault.auto_switch.error", provider: this.provider, message: errorMessage(error) }));
+        })
+        .finally(() => {
+          this.switching = undefined;
+        });
+      this.ctx.waitUntil(this.switching);
+    }
+    const check = this.switching;
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, SWITCH_WAIT_MS);
+      void check.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  private async switchOnce(threshold: number): Promise<void> {
+    // None active is the user's choice.
+    const active = this.activeRow();
+    if (!active) return;
+    const now = Date.now();
+    // A switch must not cut off a device the active account serves.
+    const devices = parseDevices(active.authorized_devices);
+    const eligible = (row: AccountRow): boolean =>
+      statusOf(row, now) === "connected" && devices.every((device) => parseDevices(row.authorized_devices).includes(device));
+    const others = this.rows().filter((row) => row.slot !== active.slot && eligible(row));
+    if (others.length === 0) return;
+    const percent = await this.readPercent(active.slot);
+    if (percent === undefined || percent < threshold) return;
+    const candidates = await Promise.all(
+      others.map(async ({ slot }): Promise<Candidate> => ({ slot, percent: await this.readPercent(slot) }))
+    );
+    const best = pickAccount(percent, candidates);
+    // The user's own switch, sign-in or forget during the reads wins.
+    const target = best && this.row(best.slot);
+    if (!best || !target || !eligible(target) || this.getMeta("active") !== active.slot) return;
+    this.setMeta("active", best.slot);
+    const detail = `${best.slot} at ${Math.round(best.percent)}%, from ${active.slot} at ${Math.round(percent)}%`;
+    console.log(JSON.stringify({ event: "vault.auto_switch", provider: this.provider, detail }));
+    await this.audit({ event: "auto_activate", provider: this.provider, detail });
+  }
+
+  /** An account's fullest usage window in percent, read on `usage`'s path
+   * unless its last reading is still fresh; undefined when unknown. */
+  private async readPercent(slot: string): Promise<number | undefined> {
+    const kept = this.readings.get(slot);
+    if (kept && Date.now() < kept.staleAt) return kept.percent;
+    const usable = await this.usableMaterial(slot, () => undefined);
+    return this.remember(slot, usable.ok ? await fetchUsage(this.provider, usable.value.material, this.fetchFn) : undefined);
+  }
+
+  /** Keep what a usage read said for auto-switch; `undefined` = it couldn't
+   * be made. A reply without any window is unknown, never empty: some plans
+   * report their limits elsewhere. */
+  private remember(slot: string, outcome: UsageOutcome | undefined): number | undefined {
+    const now = Date.now();
+    const plan = outcome?.kind === "ok" ? planUsed(outcome.body) : undefined;
+    const staleAt = plan
+      ? readAgainAt(plan, this.switchThreshold() || 100, now)
+      : retryReadAt(now, outcome?.kind === "failed" ? outcome.retryAfterMs : undefined);
+    this.readings.set(slot, { percent: plan?.percent, staleAt });
+    return plan?.percent;
+  }
+
+  /** The auto-switch threshold the user set, in percent of a window; 0 = off. */
+  private switchThreshold(): number {
+    return Number(this.getMeta("auto_switch") ?? 0);
+  }
 
   private async canaryOne(row: AccountRow, at: number): Promise<{ ok: boolean; status: string }> {
     try {

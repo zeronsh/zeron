@@ -141,7 +141,8 @@ export const handleVaultRoute = async (
   }
 
   // /vault/{orgId}/accounts/{provider}[/{slot}[/usage]] — a provider's
-  // stored logins: list, pick the active one, forget one, read one's usage.
+  // stored logins: list, pick the active one or let the vault pick it near a
+  // plan limit (auto-switch), forget one, read one's usage.
   if (rest[0] === "accounts" && rest.length >= 2) {
     const provider = rest[1];
     if (!isProvider(provider)) return bad("Unknown provider.");
@@ -157,6 +158,13 @@ export const handleVaultRoute = async (
       const slot = b.slot;
       if (slot !== null && (typeof slot !== "string" || !ID_RE.test(slot))) return bad("Expected {slot: id | null}.");
       return list(() => vault.activateAccount(caller, provider, slot));
+    }
+    if (rest.length === 3 && rest[2] === "auto-switch" && method === "PUT") {
+      const b = await body();
+      if (b instanceof Response) return b;
+      const threshold = b.threshold;
+      if (threshold !== null && typeof threshold !== "number") return bad("Expected {threshold: number | null}.");
+      return call(() => vault.setAutoSwitch(caller, provider, threshold));
     }
     const slot = rest[2];
     if (slot === undefined || !ID_RE.test(slot)) return bad("Bad account id.");

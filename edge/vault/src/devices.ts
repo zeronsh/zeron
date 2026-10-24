@@ -42,6 +42,8 @@ export type AuditEvent =
   | "authorize"
   | "disconnect"
   | "activate"
+  | "auto_activate"
+  | "auto_switch"
   | "forget"
   | "grant"
   | "grant_denied"

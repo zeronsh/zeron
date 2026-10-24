@@ -113,6 +113,10 @@ export class VaultApi extends WorkerEntrypoint<Env> implements VaultRpc {
   accountUsage(caller: VaultCaller, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
     return this.vault().accountUsage(caller, provider, slot);
   }
+
+  setAutoSwitch(caller: VaultCaller, provider: VaultProviderId, threshold: number | null): Promise<VaultResult<VaultStatusView>> {
+    return this.vault().setAutoSwitch(caller, provider, threshold);
+  }
 }
 
 export default {

@@ -38,6 +38,7 @@ import type { AuditEntry } from "./devices";
 import type { Env } from "./env";
 import { accountStub, devicesStub } from "./names";
 import { installUrl, isRepoFullName } from "./providers/github-app";
+import { hasUsage } from "./providers/usage";
 import { fail, ok, type VaultFailure } from "./result";
 import { isCaller, isFlowId, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
 
@@ -279,6 +280,28 @@ export class Vault implements VaultRpc {
       const disabled = await this.userDisabled(userId);
       if (disabled) return disabled;
       return accountStub(this.env, userId, provider).usage(userId, provider, slot);
+    });
+  }
+
+  /** Switch Claude or Codex accounts automatically at `threshold` percent
+   * of a plan window; `null` = off. Users only. */
+  setAutoSwitch(
+    caller: VaultCaller,
+    provider: VaultProviderId,
+    threshold: number | null
+  ): Promise<VaultResult<VaultStatusView>> {
+    return this.run(caller, {}, async (userId) => {
+      if (!isProvider(provider)) return fail("bad_request", "unknown provider");
+      if (!hasUsage(provider)) return fail("bad_request", `${provider} has no plan usage to switch on`);
+      if (threshold !== null && !(Number.isInteger(threshold) && threshold >= 1 && threshold <= 100)) {
+        return fail("bad_request", "threshold must be a whole percent from 1 to 100, or null");
+      }
+      const disabled = await this.userDisabled(userId);
+      if (disabled) return disabled;
+      const result = await accountStub(this.env, userId, provider).setAutoSwitch(userId, provider, threshold);
+      if (!result.ok) return result;
+      await this.audit(userId, { event: "auto_switch", orgId: caller.orgId, provider, detail: threshold === null ? "off" : `${threshold}%` });
+      return this.view(userId);
     });
   }
 

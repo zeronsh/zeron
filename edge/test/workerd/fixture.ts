@@ -92,6 +92,9 @@ export class VaultStub extends WorkerEntrypoint {
   accountUsage(caller: Caller, provider: string, slot: string) {
     return this.answer("accountUsage", [caller, provider, slot], { body: { five_hour: { utilization: 10 } }, fetchedAt: 1 });
   }
+  setAutoSwitch(caller: Caller, provider: string, threshold: number | null) {
+    return this.answer("setAutoSwitch", [caller, provider, threshold], STATUS);
+  }
   calls() { return vaultCalls; }
 }
 

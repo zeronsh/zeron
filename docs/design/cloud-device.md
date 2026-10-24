@@ -340,6 +340,18 @@ the provider's usage endpoint (Claude `api.anthropic.com/api/oauth/usage`, Codex
 `chatgpt.com/backend-api/wham/usage`) and returns the body for the engine to parse; a 401/403
 there never marks the account.
 
+**Auto-switch** (Claude and Codex, off unless the user sets a threshold): before a grant, if the
+active account is at or past the threshold of its 5-hour or weekly window, the connected account
+with the most room becomes active. It needs at least 5 more points of room, and must serve every
+device the active one does. The engine picks the switch up on its next turn, as with a manual
+one. Usage is read through the same endpoints and only when a grant needs it, and a reading is
+reused for at least 3 minutes. That caps it at 20 reads an hour per account, against an
+Anthropic budget of roughly 28–30 that the desktop's meters share. A 429's `Retry-After` is
+honored. One check runs at a time per account object, a grant waits on it 2 s at most (the
+engine's grant timeout is 15 s), and the rest finishes under `waitUntil`. An account whose usage
+couldn't be read is never switched to or from. The policy is `edge/vault/src/autoswitch.ts`;
+switches are audited as `auto_activate`.
+
 ### Encryption
 
 Records are AES-256-GCM encrypted under a KEK held as a secret on the vault Worker
@@ -439,6 +451,7 @@ The standard GitHub App model: sessions act as the App, never as the user.
 | `DELETE /vault/{orgId}/credentials/{provider}` | Disconnect (wipe every account) |
 | `GET /vault/{orgId}/accounts/{provider}` | `{accounts}`: slot, status, active, kind, identity fields, devices |
 | `POST /vault/{orgId}/accounts/{provider}/active` | `{slot \| null}` → pick the active account (null: none) |
+| `PUT /vault/{orgId}/accounts/{provider}/auto-switch` | `{threshold: 1–100 \| null}` → auto-switch at that percent of a plan window (null: off) |
 | `DELETE /vault/{orgId}/accounts/{provider}/{slot}` | Forget one account |
 | `GET /vault/{orgId}/accounts/{provider}/{slot}/usage` | `{body, fetchedAt}`: the provider's usage reply |
 | `POST /vault/{orgId}/devices/enroll` | Enroll the caller's device key (laptops) |
