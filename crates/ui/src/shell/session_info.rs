@@ -32,8 +32,10 @@ pub(super) fn session_card_reserve(main: f32, transcript: f32) -> Option<f32> {
     (main - reserve - 2.0 * TRANSCRIPT_GUTTER >= transcript - 0.5).then_some(reserve)
 }
 
-/// The checkouts' working-tree diffs, for the branch row's `+N −M`: the
-/// Changes pane's `WatchCheckoutDiffs` stream, kept without the pane.
+/// The branch's diff over its base, for the branch row's `+N −M`: the
+/// Changes pane's *Branch changes* scope, kept without the pane. The
+/// `WatchCheckoutDiffs` stream only says when to re-capture: its checksum
+/// moves with the working tree and HEAD.
 #[derive(Default)]
 pub(super) struct SessionDiffs {
     diffs: Vec<zeron_proto::CheckoutDiff>,
@@ -41,13 +43,29 @@ pub(super) struct SessionDiffs {
     /// a remote chat's host (diffs are produced where the checkout lives).
     target: Option<Option<String>>,
     _watch: Option<Task<()>>,
+    /// The comparison base per `device:cwd`, from `ListBranches`.
+    base: Option<(String, String)>,
+    /// `chat|cwd` the totals belong to, and those totals.
+    branch: Option<(String, (u32, u32))>,
+    /// `chat|cwd|checksum` last fetched (or in flight).
+    fetched: Option<String>,
+    _fetch: Option<Task<()>>,
 }
 
 impl SessionDiffs {
-    /// The chat's uncommitted line totals; `None` while clean or unknown.
+    /// The working-tree diff's checksum for `chat`: a branch capture is
+    /// stale once it moves.
+    fn checksum(&self, chat: &zeron_proto::Chat) -> Option<String> {
+        crate::changes::resolve_diff(&self.diffs, chat).map(|diff| diff.checksum.clone())
+    }
+
+    /// The branch's line totals over its base; `None` while clean or unknown.
     fn totals(&self, chat: &zeron_proto::Chat) -> Option<(u32, u32)> {
-        crate::changes::resolve_diff(&self.diffs, chat)
-            .map(|diff| (diff.additions, diff.deletions))
+        let context = format!("{}|{}", chat.id, chat.cwd.as_deref()?);
+        self.branch
+            .as_ref()
+            .filter(|(key, _)| *key == context)
+            .map(|&(_, totals)| totals)
             .filter(|&(adds, dels)| adds + dels > 0)
     }
 }
@@ -116,16 +134,17 @@ impl Shell {
                 {
                     while let Some(value) = rx.recv().await {
                         let alive = this.update(cx, |this, cx| {
-                            // Repaint only when the open chat's totals move.
+                            // Re-render (and so re-capture) only when the open
+                            // chat's checkout moves.
                             let chat = this.state.read(cx).selected_chat_row().cloned();
-                            let totals = |diffs: &SessionDiffs| {
-                                chat.as_ref().and_then(|chat| diffs.totals(chat))
+                            let checksum = |diffs: &SessionDiffs| {
+                                chat.as_ref().and_then(|chat| diffs.checksum(chat))
                             };
-                            let before = totals(&this.session_diffs);
+                            let before = checksum(&this.session_diffs);
                             if crate::changes::apply_diff_frame(
                                 &mut this.session_diffs.diffs,
                                 value,
-                            ) && totals(&this.session_diffs) != before
+                            ) && checksum(&this.session_diffs) != before
                             {
                                 cx.notify();
                             }
@@ -137,6 +156,94 @@ impl Shell {
                 }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
+        }));
+    }
+
+    /// Capture `chat`'s branch diff over its base (idempotent per chat, cwd
+    /// and working-tree checksum). The base is the repo's default branch, as
+    /// the Changes pane presets it; the last totals stay while a re-capture
+    /// runs.
+    fn ensure_branch_totals(&mut self, chat: &zeron_proto::Chat, cx: &mut Context<Self>) {
+        let Some(cwd) = chat.cwd.clone() else {
+            return;
+        };
+        // Until the watch reports the checkout, there is nothing to refresh on.
+        let Some(checksum) = self.session_diffs.checksum(chat) else {
+            return;
+        };
+        let context = format!("{}|{cwd}", chat.id);
+        let key = format!("{context}|{checksum}");
+        if self.session_diffs.fetched.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.session_diffs.target.clone().flatten();
+        let repo = format!("{}:{cwd}", target.as_deref().unwrap_or("local"));
+        let known_base = self
+            .session_diffs
+            .base
+            .as_ref()
+            .filter(|(at, _)| *at == repo)
+            .map(|(_, base)| base.clone());
+        let current = chat.branch.clone();
+        self.session_diffs.fetched = Some(key.clone());
+        self.session_diffs._fetch = Some(cx.spawn(async move |this, cx| {
+            let with_target = |mut params: serde_json::Map<String, serde_json::Value>| {
+                if let Some(target) = &target {
+                    params.insert(
+                        "targetDeviceId".into(),
+                        serde_json::Value::String(target.clone()),
+                    );
+                }
+                serde_json::Value::Object(params)
+            };
+            let base = match known_base {
+                Some(base) => Some(base),
+                None => {
+                    let mut params = serde_json::Map::new();
+                    params.insert("repoPath".into(), serde_json::Value::String(cwd.clone()));
+                    engine
+                        .client()
+                        .call(methods::LIST_BRANCHES, with_target(params))
+                        .await
+                        .ok()
+                        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+                        .and_then(|branches| {
+                            crate::changes::default_base_ref(&branches, current.as_deref())
+                        })
+                }
+            };
+            let diff = match &base {
+                Some(base) => {
+                    let mut params = serde_json::Map::new();
+                    params.insert("cwd".into(), serde_json::Value::String(cwd.clone()));
+                    params.insert("mode".into(), "branch".into());
+                    params.insert("baseRef".into(), serde_json::Value::String(base.clone()));
+                    engine
+                        .client()
+                        .call(methods::GET_CHECKOUT_DIFF, with_target(params))
+                        .await
+                        .ok()
+                        .and_then(|value| {
+                            serde_json::from_value::<zeron_proto::CheckoutDiff>(value).ok()
+                        })
+                }
+                None => None,
+            };
+            this.update(cx, |this, cx| {
+                let diffs = &mut this.session_diffs;
+                if diffs.fetched.as_deref() != Some(key.as_str()) {
+                    return; // superseded by a chat switch or a newer checksum
+                }
+                if let Some(base) = base {
+                    diffs.base = Some((repo, base));
+                }
+                diffs.branch = diff.map(|diff| (context, (diff.additions, diff.deletions)));
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
@@ -332,12 +439,13 @@ impl Shell {
                 .into_any_element(),
         };
         self.ensure_session_diffs(cx);
+        self.ensure_branch_totals(&chat, cx);
         let totals = self.session_diffs.totals(&chat);
         let branch_row = branch.map(|branch| {
             info_row(&theme, row_glyph(icons::GIT_BRANCH, &theme), branch.clone())
                 .id("session-info-branch")
                 .tooltip(crate::settings::widgets::text_tooltip(branch))
-                // What the checkout holds uncommitted; it opens the diff.
+                // What the branch adds over its base; it opens that diff.
                 .children(totals.map(|(adds, dels)| {
                     let stat = |text: String, color: gpui::Hsla| {
                         div()
@@ -359,11 +467,11 @@ impl Shell {
                         .rounded(px(5.0))
                         .cursor_pointer()
                         .hover(|style| style.bg(crate::theme::ink(0.08)))
-                        .tooltip(crate::settings::widgets::text_tooltip("Uncommitted changes"))
+                        .tooltip(crate::settings::widgets::text_tooltip("Branch changes"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_session_info_overlay(cx);
-                            this.add_diff_surface(window, cx);
+                            this.add_branch_diff_surface(window, cx);
                         }))
                         .child(stat(format!("+{adds}"), crate::changes::add_color(&theme)))
                         .child(stat(format!("−{dels}"), crate::changes::del_color(&theme)))

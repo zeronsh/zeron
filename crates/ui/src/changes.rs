@@ -1803,6 +1803,14 @@ impl Changes {
         changes
     }
 
+    /// A Diff tab that opens on *Branch changes* (the scope menu still
+    /// switches it).
+    pub fn for_branch(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.scope = DiffScope::Branch;
+        changes
+    }
+
     /// A dedicated History surface. It shares the commit-opening event path
     /// with diffs, but is never offered as an item in a Diff tab's scope menu.
     pub fn for_history(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
