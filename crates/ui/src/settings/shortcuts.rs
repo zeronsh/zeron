@@ -13,6 +13,7 @@ use crate::popover::{self, ScrollRailHost};
 
 #[path = "appshots.rs"]
 mod appshots_page;
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::settings::{
     ComposerSendBehavior, KeymapConfig, PullRequestDestination, SavePolicy, ShortcutId,
@@ -152,6 +153,12 @@ impl ShortcutsPage {
                 self.appshot_capabilities = crate::appshots::capabilities();
             }
         }
+    }
+
+    /// Leave the keyboard where it is as Appshots opens: a settings-search
+    /// pick keeps it in the search field, for the next pick.
+    pub fn keep_focus(&mut self) {
+        self.appshots_focus_pending = false;
     }
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
@@ -696,7 +703,7 @@ const GROUP_ORDER: [&str; 9] = [
 ];
 
 /// The section a shortcut's row renders under.
-fn group(id: ShortcutId) -> &'static str {
+pub(super) fn group(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::RandomWallpaper => "Appearance",
         ShortcutId::CaptureAppshot => "Appshots",
@@ -773,7 +780,8 @@ impl Render for ShortcutsPage {
                     .min_w(px(160.0))
                     .child(widgets::row_title(&theme, "Send messages with")),
             )
-            .child(send_behavior_control);
+            .child(send_behavior_control)
+            .search_anchor(SettingId::SendMessagesWith);
         let compact_mode_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -806,7 +814,8 @@ impl Render for ShortcutsPage {
                         crate::settings::set_transcript_compact_mode(!compact_mode, cx);
                         cx.notify();
                     })),
-            );
+            )
+            .search_anchor(SettingId::CompactMode);
         let compact_model_picker = crate::settings::compact_model_picker(cx);
         let compact_model_picker_row = widgets::card_row(&theme, false)
             .child(
@@ -845,7 +854,8 @@ impl Render for ShortcutsPage {
                         cx.refresh_windows();
                         cx.notify();
                     })),
-            );
+            )
+            .search_anchor(SettingId::CompactModelPicker);
         let escape_behavior_row = widgets::card_row(&theme, false)
             .child(
                 div()
@@ -882,7 +892,8 @@ impl Render for ShortcutsPage {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);
                 })),
-            );
+            )
+            .search_anchor(SettingId::EscapeStopsAgent);
         if self.general_page {
             let pull_request_destination = crate::settings::current(cx).pull_request_destination;
             let pull_request_destination_control = widgets::select(
@@ -923,7 +934,8 @@ impl Render for ShortcutsPage {
                             ],
                         )),
                 )
-                .child(pull_request_destination_control);
+                .child(pull_request_destination_control)
+                .search_anchor(SettingId::PullRequestDestination);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -963,6 +975,7 @@ impl Render for ShortcutsPage {
                     )
                     .fade_overflow_y(&self.scroll.scroll),
                 )
+                .child(widgets::page_reveal(&self.scroll.scroll))
                 .children(scrollbar)
                 .into_any_element();
         }
@@ -981,7 +994,10 @@ impl Render for ShortcutsPage {
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
                 let ix = ShortcutId::ALL.iter().position(|&a| a == id).unwrap_or(0);
-                card = card.child(self.render_row(id, ix, gx, recording, &theme, cx));
+                card = card.child(
+                    self.render_row(id, ix, gx, recording, &theme, cx)
+                        .search_anchor(id),
+                );
             }
             groups.push(widgets::section(&theme, name, card).into_any_element());
         }
@@ -1092,6 +1108,7 @@ impl Render for ShortcutsPage {
                             ,
                     )).fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .into_any_element()
     }

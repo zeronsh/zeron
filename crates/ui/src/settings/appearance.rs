@@ -23,6 +23,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::motion::ReduceMotion;
 use crate::popover::{self, Popup};
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
 use crate::theme_library;
@@ -156,6 +157,15 @@ impl FontKind {
             Self::Ui => "Interface font",
             Self::Terminal => "Terminal font",
             Self::Code => "Code & diff font",
+        }
+    }
+
+    /// The row's key in the settings search.
+    fn setting(self) -> SettingId {
+        match self {
+            Self::Ui => SettingId::InterfaceFont,
+            Self::Terminal => SettingId::TerminalFont,
+            Self::Code => SettingId::CodeFont,
         }
     }
 
@@ -465,6 +475,7 @@ impl AppearancePage {
                             cx.notify();
                         })),
                 )
+                .search_anchor(SettingId::RenderMath)
                 .into_any_element(),
             widgets::card_row(theme, false)
                 .child(
@@ -478,6 +489,7 @@ impl AppearancePage {
                         )),
                 )
                 .child(font_control)
+                .search_anchor(SettingId::MathFont)
                 .into_any_element(),
             widgets::card_row(theme, false)
                 .child(
@@ -495,6 +507,7 @@ impl AppearancePage {
                         )),
                 )
                 .child(size_control)
+                .search_anchor(SettingId::MathSize)
                 .into_any_element(),
         ]
     }
@@ -660,6 +673,7 @@ impl AppearancePage {
                             .child("1,200 px"),
                     ),
             )
+            .search_anchor(SettingId::ConversationWidth)
             .into_any_element()
     }
 
@@ -3465,6 +3479,7 @@ impl AppearancePage {
                         .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
+                .search_anchor(SettingId::ThemeLibrary)
                 .into_any_element(),
         ];
         if !imported.is_empty() {
@@ -3559,10 +3574,10 @@ impl Render for AppearancePage {
             .into_iter()
             .enumerate()
         {
-            let label = if appearance_kind.is_light() {
-                "Light theme"
+            let (label, setting) = if appearance_kind.is_light() {
+                ("Light theme", SettingId::LightTheme)
             } else {
-                "Dark theme"
+                ("Dark theme", SettingId::DarkTheme)
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
@@ -3574,6 +3589,7 @@ impl Render for AppearancePage {
                             .child(widgets::row_title(&theme, label)),
                     )
                     .child(selector)
+                    .search_anchor(setting)
                     .into_any_element(),
             );
         }
@@ -3641,6 +3657,7 @@ impl Render for AppearancePage {
                         .gap(px(8.0))
                         .children(accent_controls),
                 )
+                .search_anchor(SettingId::AccentColor)
                 .into_any_element(),
         );
         let match_wallpaper = crate::settings::current(cx).wallpaper_theme_colors;
@@ -3663,6 +3680,7 @@ impl Render for AppearancePage {
                         crate::settings::wallpaper_colors::set_enabled(!match_wallpaper, cx);
                         cx.notify();
                     })))
+                .search_anchor(SettingId::WallpaperColors)
                 .into_any_element(),
         );
         let color_rows = settings_rows;
@@ -3687,6 +3705,7 @@ impl Render for AppearancePage {
                         )),
                 )
                 .child(surface_control)
+                .search_anchor(SettingId::Glass)
                 .into_any_element(),
         );
         let background_available = current_background
@@ -3814,6 +3833,7 @@ impl Render for AppearancePage {
                             )
                         }),
                 )
+                .search_anchor(SettingId::NewThreadBackground)
                 .into_any_element(),
         );
         let wallpaper_settings = crate::settings::current(cx);
@@ -3866,6 +3886,7 @@ impl Render for AppearancePage {
                             )
                         }),
                 )
+                .search_anchor(SettingId::WallpaperFolder)
                 .into_any_element(),
         );
         if background_available {
@@ -3911,6 +3932,7 @@ impl Render for AppearancePage {
                             )),
                     )
                     .child(effect_control)
+                    .search_anchor(SettingId::BackgroundEffect)
                     .into_any_element(),
             );
         }
@@ -3957,6 +3979,7 @@ impl Render for AppearancePage {
                         )),
                 )
                 .child(reduce_motion_control)
+                .search_anchor(SettingId::ReduceMotion)
                 .into_any_element(),
             widgets::card_row(&theme, false)
                 .child(
@@ -3997,6 +4020,7 @@ impl Render for AppearancePage {
                         cx.notify();
                     })),
                 )
+                .search_anchor(SettingId::PauseAnimations)
                 .into_any_element(),
         ];
         let library_rows = self.render_theme_library_rows(&theme, cx);
@@ -4072,7 +4096,8 @@ impl Render for AppearancePage {
                             .gap(px(8.0))
                             .child(picker)
                             .child(size_control),
-                    ),
+                    )
+                    .search_anchor(kind.setting()),
             );
         }
         font_rows = font_rows
@@ -4158,7 +4183,10 @@ impl Render for AppearancePage {
                                     widgets::section(
                                         &theme,
                                         "Color scheme",
-                                        widgets::option_card_row().children(cards),
+                                        widgets::option_card_row()
+                                            .children(cards)
+                                            .search_anchor(SettingId::ColorScheme)
+                                            .block(),
                                     )
                                     .mt(px(24.0))
                                     .gap(px(12.0)),
@@ -4197,6 +4225,7 @@ impl Render for AppearancePage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .children(modal)
     }
