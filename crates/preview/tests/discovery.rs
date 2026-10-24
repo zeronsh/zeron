@@ -28,6 +28,12 @@ fn scope(chats: &[(&str, &Path)]) -> Scope {
         ..Default::default()
     }
 }
+/// Ids no other test shares: test runners (nextest) run each test in its own
+/// process, concurrently, so a server one test starts is visible to every
+/// other test's discovery, and a shared chat id would claim it there.
+fn unique(name: &str) -> String {
+    format!("{name}-{}", uuid::Uuid::new_v4())
+}
 /// A server started by `chat`'s agent; `None` is one the user started.
 fn launch(cwd: &Path, http: bool, chat: Option<&str>) -> Child {
     launch_from(cwd, http, chat.map(chat_origin))
@@ -75,21 +81,23 @@ async fn wait(service: &PreviewService, expected_pid: Option<u32>) {
 #[tokio::test]
 async fn only_agent_started_http_processes_are_exposed_and_removals_are_live() {
     let _serial = SERIAL.lock().await;
+    let (chat_a, chat_b) = (unique("chat-a"), unique("chat-b"));
+    let (foreign, stray) = (unique("another-engines-chat"), unique("terminal"));
     let temp = tempfile::tempdir().unwrap();
     let a = temp.path().join("app");
     let b = temp.path().join("unrelated");
     std::fs::create_dir(&a).unwrap();
     std::fs::create_dir(&b).unwrap();
-    let local = launch(&a, true, Some("chat-a"));
-    let other = launch(&b, true, Some("chat-b"));
-    let _non_http = launch(&a, false, Some("chat-a"));
+    let local = launch(&a, true, Some(chat_a.as_str()));
+    let other = launch(&b, true, Some(chat_b.as_str()));
+    let _non_http = launch(&a, false, Some(chat_a.as_str()));
     // The user's own server in the same project, and one whose marker names
     // a chat this device does not host.
     let _users = launch(&a, true, None);
-    let _foreign = launch(&a, true, Some("another-engines-chat"));
+    let _foreign = launch(&a, true, Some(foreign.as_str()));
     // A terminal this device opened for no chat it hosts.
-    let _stray_terminal = launch_from(&a, true, Some(terminal_origin("unknown")));
-    let roots = Arc::new(Mutex::new(scope(&[("chat-a", &a)])));
+    let _stray_terminal = launch_from(&a, true, Some(terminal_origin(&stray)));
+    let roots = Arc::new(Mutex::new(scope(&[(chat_a.as_str(), &a)])));
     let projects = roots.clone();
     let service = PreviewService::new(
         temp.path().join("names.json"),
@@ -118,10 +126,10 @@ async fn only_agent_started_http_processes_are_exposed_and_removals_are_live() {
     wait(&service, Some(local.0.id())).await;
     let found = &service.catalog().snapshot().services[0];
     assert!(found.zeron_owned);
-    assert_eq!(found.chat_id.as_deref(), Some("chat-a"));
+    assert_eq!(found.chat_id.as_deref(), Some(chat_a.as_str()));
     assert_eq!(std::path::Path::new(&found.cwd), a.canonicalize().unwrap());
     assert!(found.started_at > 0);
-    *roots.lock().unwrap() = scope(&[("chat-b", &b)]);
+    *roots.lock().unwrap() = scope(&[(chat_b.as_str(), &b)]);
     wait(&service, Some(other.0.id())).await;
     drop(other);
     wait(&service, None).await;
@@ -142,6 +150,7 @@ async fn only_agent_started_http_processes_are_exposed_and_removals_are_live() {
 #[tokio::test]
 async fn a_discovered_server_is_probed_once_not_every_cycle() {
     let _serial = SERIAL.lock().await;
+    let chat = unique("chat");
     let temp = tempfile::tempdir().unwrap();
     let app = temp.path().join("app");
     std::fs::create_dir(&app).unwrap();
@@ -159,7 +168,7 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
     let server = Child(
         std::process::Command::new("python3")
             .args(["-c", &script])
-            .env(ORIGIN_ENV, chat_origin("chat"))
+            .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
@@ -172,7 +181,7 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
         "Laptop".into(),
     )
     .unwrap();
-    let roots = scope(&[("chat", &app)]);
+    let roots = scope(&[(chat.as_str(), &app)]);
     service.start(Arc::new(move || roots.clone()), None).await;
     wait(&service, Some(server.0.id())).await;
     // Several scan cycles (2s cadence) pass while the server stays discovered.
@@ -199,6 +208,7 @@ async fn authentication_callbacks_receive_no_discovery_connections() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let _serial = SERIAL.lock().await;
+    let chat = unique("chat");
     let temp = tempfile::tempdir().unwrap();
     let app = temp.path().join("app");
     std::fs::create_dir(&app).unwrap();
@@ -238,7 +248,7 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
                 "--domain",
                 "https://app.infisical.com",
             ])
-            .env(ORIGIN_ENV, chat_origin("chat"))
+            .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())
@@ -258,14 +268,14 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
     })
     .await
     .expect("callback did not start");
-    let server = launch(&app, true, Some("chat"));
+    let server = launch(&app, true, Some(chat.as_str()));
     let service = PreviewService::new(
         temp.path().join("names.json"),
         "local".into(),
         "Laptop".into(),
     )
     .unwrap();
-    let roots = scope(&[("chat", &app)]);
+    let roots = scope(&[(chat.as_str(), &app)]);
     service.start(Arc::new(move || roots.clone()), None).await;
     wait(&service, Some(server.0.id())).await;
     // Discovery actually runs, including multiple cycles after the ordinary
@@ -315,6 +325,8 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
 #[tokio::test]
 async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed() {
     let _serial = SERIAL.lock().await;
+    let chat = unique("chat");
+    let terminal = unique("terminal");
     let temp = tempfile::tempdir().unwrap();
     let app = temp.path().join("app");
     let elsewhere = temp.path().join("elsewhere");
@@ -337,7 +349,7 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
             "-c",
             &format!("( {python} -c \"{HTTP_SERVER}\" >/dev/null 2>&1 & echo $! > {pidfile:?} ) &"),
         ])
-        .env(ORIGIN_ENV, chat_origin("chat"))
+        .env(ORIGIN_ENV, chat_origin(&chat))
         .current_dir(&app)
         .status()
         .unwrap();
@@ -366,24 +378,24 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
     let _scrubbed = Child(
         std::process::Command::new("sh")
             .args(["-c", &format!("env -i {python} -c \"{HTTP_SERVER}\"; true")])
-            .env(ORIGIN_ENV, chat_origin("chat"))
+            .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap(),
     );
-    let outside = launch(&elsewhere, true, Some("chat"));
+    let outside = launch(&elsewhere, true, Some(chat.as_str()));
     // From a terminal (or the project action running in one), which may
     // have closed since: its chat is remembered.
-    let from_terminal = launch_from(&app, true, Some(terminal_origin("terminal-1")));
+    let from_terminal = launch_from(&app, true, Some(terminal_origin(&terminal)));
     let service = PreviewService::new(
         temp.path().join("names.json"),
         "local".into(),
         "Laptop".into(),
     )
     .unwrap();
-    let mut roots = scope(&[("chat", &app)]);
-    roots.terminals.insert("terminal-1".into(), "chat".into());
+    let mut roots = scope(&[(chat.as_str(), &app)]);
+    roots.terminals.insert(terminal.clone(), chat.clone());
     service.start(Arc::new(move || roots.clone()), None).await;
     let app = app.canonicalize().unwrap();
     let services = tokio::time::timeout(Duration::from_secs(12), async {
@@ -401,7 +413,7 @@ async fn backgrounded_scrubbed_terminal_and_out_of_tree_servers_stay_attributed(
     assert!(services.iter().any(|s| s.pid == outside.0.id()));
     assert!(services.iter().any(|s| s.pid == from_terminal.0.id()));
     for service in &services {
-        assert_eq!(service.chat_id.as_deref(), Some("chat"));
+        assert_eq!(service.chat_id.as_deref(), Some(chat.as_str()));
         assert_eq!(PathBuf::from(&service.project_cwd), app);
     }
     service.shutdown().await;
