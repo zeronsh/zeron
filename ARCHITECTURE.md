@@ -221,8 +221,10 @@ feature spec `docs/research/feature-inventory.md` §1.
   images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
   is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
-- **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
-  engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
+- **Terminal**: Ghostty's libghostty-vt on the desktop (`ghostty-vt`, built with Zig 0.16, MIT) and
+  `alacritty_terminal` in the mobile core (`zeron-term`), + `portable-pty` on the engine side;
+  custom gpui grid element (glyphs pinned to their cells' columns, ligatures on, Ghostty's sprite
+  glyphs); tabs w/ drag-reorder (150ms sliding transforms), height
   drag 160px–55vh, 80ms resize debounce, 1MB replay, detach ≠ close. No artificial latency: keys
   are written the moment they land (one write in flight per tab keeps them ordered) and output
   after a quiet spell is sent the moment it is read (only floods are paced, 4ms). Typed text goes

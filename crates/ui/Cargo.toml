@@ -9,6 +9,7 @@ publish.workspace = true
 voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support"]
+terminal-fixture = ["gpui_platform/test-support"]
 
 # Native captures explicitly present the freshly drawn scene, including when
 # a nested Wayland compositor has stopped requesting idle frames.
@@ -59,6 +60,10 @@ name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
 [[example]]
+name = "terminal-fixture"
+required-features = ["terminal-fixture"]
+
+[[example]]
 name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
@@ -96,9 +101,10 @@ pulldown-cmark.workspace = true
 zeron-markdown.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 html5ever = "0.39"
-alacritty_terminal.workspace = true
-zeron-term.workspace = true
+zeron-term = { workspace = true, features = ["ghostty"] }
+ghostty-vt.workspace = true
 base64 = "0.22"
+tiny-skia = "0.11"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = "0.46"
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }

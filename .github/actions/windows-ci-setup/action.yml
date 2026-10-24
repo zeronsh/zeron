@@ -17,6 +17,11 @@ runs:
     - name: Rust toolchain
       shell: pwsh
       run: rustup show active-toolchain || rustup toolchain install
+    # libghostty-vt (the terminal emulator) builds from Ghostty's source with Zig 0.16.
+    - name: Zig 0.16
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      with:
+        version: 0.16.0
     - name: Locate Windows SDK shader compiler
       shell: pwsh
       run: |
@@ -52,3 +57,6 @@ runs:
         # opt-level 0, so keep them out of the cache. Each job gets its own
         # cache (rust-cache keys on the job id by default).
         cache-workspace-crates: false
+    - name: Ghostty source for libghostty-vt
+      shell: pwsh
+      run: ./scripts/ci/ghostty-source.ps1
