@@ -3505,6 +3505,334 @@ public func FfiConverterTypeLayoutListener_lower(_ value: LayoutListener) -> UIn
 
 
 /**
+ * Receives the notes at once, then on every change, local or remote.
+ * Called on a client thread: hop to the main thread before touching UI.
+ */
+public protocol NotesListener: AnyObject, Sendable {
+    
+    func onNotes(notes: NotesSnapshot) 
+    
+}
+/**
+ * Receives the notes at once, then on every change, local or remote.
+ * Called on a client thread: hop to the main thread before touching UI.
+ */
+open class NotesListenerImpl: NotesListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_noteslistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_noteslistener(handle, $0) }
+    }
+
+    
+
+    
+open func onNotes(notes: NotesSnapshot)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_noteslistener_on_notes(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNotesSnapshot_lower(notes),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceNotesListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceNotesListener = UniffiVTableCallbackInterfaceNotesListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeNotesListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface NotesListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeNotesListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface NotesListener: handle missing in uniffiClone")
+            }
+        },
+        onNotes: { (
+            uniffiHandle: UInt64,
+            notes: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeNotesListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onNotes(
+                     notes: try FfiConverterTypeNotesSnapshot_lift(notes)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceNotesListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceNotesListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitNotesListener() {
+    uniffi_zeron_mobile_fn_init_callback_vtable_noteslistener(UniffiCallbackInterfaceNotesListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotesListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<NotesListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = NotesListener
+
+    public static func lift(_ handle: UInt64) throws -> NotesListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return NotesListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: NotesListener) -> UInt64 {
+         if let rustImpl = value as? NotesListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotesListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NotesListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesListener_lift(_ handle: UInt64) throws -> NotesListener {
+    return try FfiConverterTypeNotesListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesListener_lower(_ value: NotesListener) -> UInt64 {
+    return FfiConverterTypeNotesListener.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A live notes subscription. Stops on `cancel()` or when released.
+ */
+public protocol NotesSubscriptionProtocol: AnyObject, Sendable {
+    
+    func cancel() 
+    
+}
+/**
+ * A live notes subscription. Stops on `cancel()` or when released.
+ */
+open class NotesSubscription: NotesSubscriptionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_zeron_mobile_fn_clone_notessubscription(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_zeron_mobile_fn_free_notessubscription(handle, $0) }
+    }
+
+    
+
+    
+open func cancel()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_notessubscription_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotesSubscription: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NotesSubscription
+
+    public static func lift(_ handle: UInt64) throws -> NotesSubscription {
+        return NotesSubscription(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NotesSubscription) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotesSubscription {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NotesSubscription, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesSubscription_lift(_ handle: UInt64) throws -> NotesSubscription {
+    return try FfiConverterTypeNotesSubscription.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesSubscription_lower(_ value: NotesSubscription) -> UInt64 {
+    return FfiConverterTypeNotesSubscription.lower(value)
+}
+
+
+
+
+
+
+/**
  * One animated orb. Calls are cheap and safe from any thread; drive
  * [`OrbRenderer::next_frame`] from the display link.
  */
@@ -3967,6 +4295,19 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
      */
     func subagents()  -> [SubagentRow]
     
+    /**
+     * The session's notes as last published.
+     */
+    func notes()  -> NotesSnapshot
+    
+    /**
+     * Compare-and-set the notes against `base_hash`. Works offline: an
+     * applied write is durable at once and syncs when the room is reachable.
+     */
+    func setNotes(baseHash: String, text: String) throws  -> NotesWrite
+    
+    func watchNotes(listener: NotesListener)  -> NotesSubscription
+    
     func beginQueuedEdit(id: String, instanceId: String) async  -> QueueEditStart
     
     func chatId()  -> String
@@ -4107,6 +4448,43 @@ open func subagents() -> [SubagentRow]  {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_sessionhandle_subagents(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The session's notes as last published.
+     */
+open func notes() -> NotesSnapshot  {
+    return try!  FfiConverterTypeNotesSnapshot_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_notes(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Compare-and-set the notes against `base_hash`. Works offline: an
+     * applied write is durable at once and syncs when the room is reachable.
+     */
+open func setNotes(baseHash: String, text: String)throws  -> NotesWrite  {
+    return try  FfiConverterTypeNotesWrite_lift(try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_set_notes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(baseHash),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+    
+open func watchNotes(listener: NotesListener) -> NotesSubscription  {
+    return try!  FfiConverterTypeNotesSubscription_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_watch_notes(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNotesListener_lower(listener),uniffiCallStatus
     )
 })
 }
@@ -10192,6 +10570,68 @@ public func FfiConverterTypeLiveStatus_lower(_ value: LiveStatus) -> RustBuffer 
 }
 
 
+/**
+ * One styled range, in UTF-16 code units. Apply in order: later styles
+ * refine earlier ones (a heading's size, then its bold).
+ */
+public struct LiveStyle: Equatable, Hashable {
+    public var location: UInt64
+    public var length: UInt64
+    public var kind: LiveStyleKind
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(location: UInt64, length: UInt64, kind: LiveStyleKind) {
+        self.location = location
+        self.length = length
+        self.kind = kind
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension LiveStyle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLiveStyle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LiveStyle {
+        return
+            try LiveStyle(
+                location: FfiConverterUInt64.read(from: &buf), 
+                length: FfiConverterUInt64.read(from: &buf), 
+                kind: FfiConverterTypeLiveStyleKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: LiveStyle, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.location, into: &buf)
+        FfiConverterUInt64.write(value.length, into: &buf)
+        FfiConverterTypeLiveStyleKind.write(value.kind, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLiveStyle_lift(_ buf: RustBuffer) throws -> LiveStyle {
+    return try FfiConverterTypeLiveStyle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLiveStyle_lower(_ value: LiveStyle) -> RustBuffer {
+    return FfiConverterTypeLiveStyle.lower(value)
+}
+
+
 public struct LoginOptionInfo: Equatable, Hashable {
     /**
      * The engine's `provider` (`None`: the agent's only login).
@@ -10539,6 +10979,73 @@ public func FfiConverterTypeNewSession_lift(_ buf: RustBuffer) throws -> NewSess
 #endif
 public func FfiConverterTypeNewSession_lower(_ value: NewSession) -> RustBuffer {
     return FfiConverterTypeNewSession.lower(value)
+}
+
+
+/**
+ * The notes text as one viewport last saw it; `hash` is the base of the
+ * next `set_notes`. `epoch` and `seq` order the states: see
+ * `notes_supersedes`.
+ */
+public struct NotesSnapshot: Equatable, Hashable {
+    public var text: String
+    public var hash: String
+    public var epoch: UInt64
+    public var seq: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(text: String, hash: String, epoch: UInt64, seq: UInt64) {
+        self.text = text
+        self.hash = hash
+        self.epoch = epoch
+        self.seq = seq
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NotesSnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotesSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotesSnapshot {
+        return
+            try NotesSnapshot(
+                text: FfiConverterString.read(from: &buf), 
+                hash: FfiConverterString.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                seq: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NotesSnapshot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterString.write(value.hash, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesSnapshot_lift(_ buf: RustBuffer) throws -> NotesSnapshot {
+    return try FfiConverterTypeNotesSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesSnapshot_lower(_ value: NotesSnapshot) -> RustBuffer {
+    return FfiConverterTypeNotesSnapshot.lower(value)
 }
 
 
@@ -13082,6 +13589,68 @@ public func FfiConverterTypeTerminalSelection_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeTerminalSelection_lower(_ value: TerminalSelection) -> RustBuffer {
     return FfiConverterTypeTerminalSelection.lower(value)
+}
+
+
+/**
+ * One contiguous replacement in UTF-16 code units: `length` units at
+ * `location` become `text`.
+ */
+public struct TextReplacement: Equatable, Hashable {
+    public var location: UInt64
+    public var length: UInt64
+    public var text: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(location: UInt64, length: UInt64, text: String) {
+        self.location = location
+        self.length = length
+        self.text = text
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextReplacement: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextReplacement: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextReplacement {
+        return
+            try TextReplacement(
+                location: FfiConverterUInt64.read(from: &buf), 
+                length: FfiConverterUInt64.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextReplacement, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.location, into: &buf)
+        FfiConverterUInt64.write(value.length, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextReplacement_lift(_ buf: RustBuffer) throws -> TextReplacement {
+    return try FfiConverterTypeTextReplacement.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextReplacement_lower(_ value: TextReplacement) -> RustBuffer {
+    return FfiConverterTypeTextReplacement.lower(value)
 }
 
 
@@ -16271,6 +16840,119 @@ public func FfiConverterTypeFadeEdge_lower(_ value: FadeEdge) -> RustBuffer {
 
 
 /**
+ * How a live preview paints one range of the notes.
+ */
+
+public enum LiveStyleKind: Equatable, Hashable {
+    
+    /**
+     * A Markdown marker off the caret's line: takes no room.
+     */
+    case hidden
+    /**
+     * A list bullet or task box marker, drawn quietly.
+     */
+    case marker
+    case heading(level: UInt8
+    )
+    case strong
+    case emphasis
+    case code
+    case strikethrough
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension LiveStyleKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLiveStyleKind: FfiConverterRustBuffer {
+    typealias SwiftType = LiveStyleKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LiveStyleKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .hidden
+        
+        case 2: return .marker
+        
+        case 3: return .heading(level: try FfiConverterUInt8.read(from: &buf)
+        )
+        
+        case 4: return .strong
+        
+        case 5: return .emphasis
+        
+        case 6: return .code
+        
+        case 7: return .strikethrough
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: LiveStyleKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .hidden:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .marker:
+            writeInt(&buf, Int32(2))
+        
+        
+        case let .heading(level):
+            writeInt(&buf, Int32(3))
+            FfiConverterUInt8.write(level, into: &buf)
+            
+        
+        case .strong:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .emphasis:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .code:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .strikethrough:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLiveStyleKind_lift(_ buf: RustBuffer) throws -> LiveStyleKind {
+    return try FfiConverterTypeLiveStyleKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLiveStyleKind_lower(_ value: LiveStyleKind) -> RustBuffer {
+    return FfiConverterTypeLiveStyleKind.lower(value)
+}
+
+
+
+/**
  * The face formulas are laid out in (STIX Two for what it lacks). Every
  * face paints from the [`math_font_data`] table, so switching never
  * re-registers fonts.
@@ -16383,6 +17065,103 @@ public func FfiConverterTypeMathFace_lift(_ buf: RustBuffer) throws -> MathFace 
 #endif
 public func FfiConverterTypeMathFace_lower(_ value: MathFace) -> RustBuffer {
     return FfiConverterTypeMathFace.lower(value)
+}
+
+
+
+/**
+ * What a `set_notes` did.
+ */
+
+public enum NotesWrite: Equatable, Hashable {
+    
+    /**
+     * The notes now read as written; `hash`, `epoch` and `seq` are the new
+     * base.
+     */
+    case applied(hash: String, epoch: UInt64, seq: UInt64
+    )
+    /**
+     * They changed since the base: rebase onto `current` and retry.
+     */
+    case conflict(current: NotesSnapshot
+    )
+    /**
+     * The write would grow them past `limit` bytes; nothing was written.
+     */
+    case tooLarge(limit: UInt64
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NotesWrite: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotesWrite: FfiConverterRustBuffer {
+    typealias SwiftType = NotesWrite
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotesWrite {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .applied(hash: try FfiConverterString.read(from: &buf), epoch: try FfiConverterUInt64.read(from: &buf), seq: try FfiConverterUInt64.read(from: &buf)
+        )
+        
+        case 2: return .conflict(current: try FfiConverterTypeNotesSnapshot.read(from: &buf)
+        )
+        
+        case 3: return .tooLarge(limit: try FfiConverterUInt64.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NotesWrite, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .applied(hash,epoch,seq):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(hash, into: &buf)
+            FfiConverterUInt64.write(epoch, into: &buf)
+            FfiConverterUInt64.write(seq, into: &buf)
+            
+        
+        case let .conflict(current):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeNotesSnapshot.write(current, into: &buf)
+            
+        
+        case let .tooLarge(limit):
+            writeInt(&buf, Int32(3))
+            FfiConverterUInt64.write(limit, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesWrite_lift(_ buf: RustBuffer) throws -> NotesWrite {
+    return try FfiConverterTypeNotesWrite.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotesWrite_lower(_ value: NotesWrite) -> RustBuffer {
+    return FfiConverterTypeNotesWrite.lower(value)
 }
 
 
@@ -19933,6 +20712,30 @@ fileprivate struct FfiConverterOptionTypeTerminalSelection: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTextReplacement: FfiConverterRustBuffer {
+    typealias SwiftType = TextReplacement?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTextReplacement.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTextReplacement.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWorktreeSpec: FfiConverterRustBuffer {
     typealias SwiftType = WorktreeSpec?
 
@@ -20593,6 +21396,31 @@ fileprivate struct FfiConverterSequenceTypeLinkHit: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeLinkHit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeLiveStyle: FfiConverterRustBuffer {
+    typealias SwiftType = [LiveStyle]
+
+    public static func write(_ value: [LiveStyle], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLiveStyle.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LiveStyle] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LiveStyle]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeLiveStyle.read(from: &buf))
         }
         return seq
     }
@@ -21611,6 +22439,75 @@ public func workosAuthorizeUrl(state: String) -> String  {
 })
 }
 /**
+ * The live-preview styling of `text` with the given selection (UTF-16),
+ * read by the same rules as the desktop editor: Markdown markers hide
+ * except on the lines the selection touches.
+ */
+public func markdownLiveStyles(text: String, selectionLocation: UInt64, selectionLength: UInt64) -> [LiveStyle]  {
+    return try!  FfiConverterSequenceTypeLiveStyle.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_markdown_live_styles(
+        FfiConverterString.lower(text),
+        FfiConverterUInt64.lower(selectionLocation),
+        FfiConverterUInt64.lower(selectionLength),uniffiCallStatus
+    )
+})
+}
+/**
+ * The base hash of `text`, for writes from a viewport that only has text.
+ */
+public func notesHash(text: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_notes_hash(
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+})
+}
+/**
+ * Merge the local edit (`base` → `local`) with a remote one (`base` →
+ * `remote`). Both edits survive; see `zeron_doc::rebase_notes`.
+ */
+public func notesRebase(base: String, local: String, remote: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_notes_rebase(
+        FfiConverterString.lower(base),
+        FfiConverterString.lower(local),
+        FfiConverterString.lower(remote),uniffiCallStatus
+    )
+})
+}
+/**
+ * Whether `snapshot` is a state after `base`. A watch can report a write of
+ * this screen's back after a newer one: such a report is stale and must be
+ * dropped. Anything newer is a real change, even if its text is one this
+ * screen wrote before.
+ */
+public func notesSupersedes(snapshot: NotesSnapshot, base: NotesSnapshot) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_notes_supersedes(
+        FfiConverterTypeNotesSnapshot_lower(snapshot),
+        FfiConverterTypeNotesSnapshot_lower(base),uniffiCallStatus
+    )
+})
+}
+/**
+ * The single replacement turning `old` into `new` (`None` when equal). Apply
+ * it to the text storage in place so the caret and scroll position survive a
+ * remote change.
+ */
+public func notesTextReplacement(old: String, new: String) -> TextReplacement?  {
+    return try!  FfiConverterOptionTypeTextReplacement.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_func_notes_text_replacement(
+        FfiConverterString.lower(old),
+        FfiConverterString.lower(new),uniffiCallStatus
+    )
+})
+}
+/**
  * [`AgentLoginRules`] for `harness` (`claude-code`, `codex`, …).
  */
 public func agentLoginRules(harness: String) -> AgentLoginRules  {
@@ -21803,6 +22700,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_workos_authorize_url() != 35994) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_markdown_live_styles() != 54797) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_notes_hash() != 27287) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_notes_rebase() != 13163) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_notes_supersedes() != 26785) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_func_notes_text_replacement() != 21316) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_func_agent_login_rules() != 18451) {
@@ -22135,7 +23047,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_uploadprogress_on_progress() != 40458) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_noteslistener_on_notes() != 16725) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_notessubscription_cancel() != 3876) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_subagents() != 16247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_notes() != 22818) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_set_notes() != 37114) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_watch_notes() != 9766) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_begin_queued_edit() != 9014) {
@@ -22429,6 +23356,7 @@ private let initializationResult: InitializationResult = {
 
     uniffiCallbackInitClientListener()
     uniffiCallbackInitLayoutListener()
+    uniffiCallbackInitNotesListener()
     uniffiCallbackInitPlatformMeasurer()
     uniffiCallbackInitTerminalListener()
     uniffiCallbackInitUploadProgress()

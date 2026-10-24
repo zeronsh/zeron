@@ -882,3 +882,55 @@ async fn orphaned_history_steer_still_owes_the_history() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test]
+async fn fork_copies_the_source_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(Arc::new(Mutex::new(Vec::new())))));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.workspace
+        .create_chat(
+            "main",
+            None,
+            Some(&core.device_id),
+            None,
+            Some("/tmp".into()),
+        )
+        .unwrap();
+    let source = core.doc_host.open("main").unwrap();
+    for entry in [
+        message("u1", MessageRole::User, "hi", MessageStatus::Complete),
+        message(
+            "a1",
+            MessageRole::Assistant,
+            "hello",
+            MessageStatus::Complete,
+        ),
+    ] {
+        source.doc().push_message(&entry).unwrap();
+    }
+    source
+        .doc()
+        .set_notes_text("# Plan\n- [ ] keep notes on forks\n")
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "side", "sourceChatId": "main", "targetDeviceId": core.device_id }),
+        )
+        .await
+        .unwrap();
+    let target = core.doc_host.open("side").unwrap();
+    assert_eq!(
+        target.doc().notes_text(),
+        "# Plan\n- [ ] keep notes on forks\n"
+    );
+    // The copy is independent: editing the fork leaves the source alone.
+    target.doc().set_notes_text("fork only").unwrap();
+    assert_eq!(
+        source.doc().notes_text(),
+        "# Plan\n- [ ] keep notes on forks\n"
+    );
+}

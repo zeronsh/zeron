@@ -2788,6 +2788,14 @@ impl RpcService for EngineRpc {
                         })
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                 }
+                // The fork takes the source's notes with it. A retried fork
+                // that already has notes keeps its own.
+                if target.doc().notes_text().is_empty() {
+                    target
+                        .doc()
+                        .set_notes_text(&source_doc.doc().notes_text())
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
                 self.doc_host.persist_fork(&target).map_err(failed)?;
                 self.workspace.import_chat_row(&chat).map_err(failed)?;
                 RpcReply::value(&chat)
@@ -2857,6 +2865,40 @@ impl RpcService for EngineRpc {
                     })
                     .boxed(),
                 ))
+            }
+            methods::WATCH_SESSION_NOTES => {
+                let p: ChatParams = parse_params(params)?;
+                let handle = self
+                    .doc_host
+                    .open(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let rx = handle.watch_notes();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold((rx, true), |(mut rx, first)| async move {
+                        if !first {
+                            rx.changed().await.ok()?;
+                        }
+                        let snapshot = rx.borrow_and_update().clone();
+                        let value = serde_json::to_value(snapshot).ok()?;
+                        Some((value, (rx, false)))
+                    })
+                    .boxed(),
+                ))
+            }
+            methods::SET_SESSION_NOTES => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct SetSessionNotesParams {
+                    chat_id: String,
+                    base_hash: String,
+                    text: String,
+                }
+                let p: SetSessionNotesParams = parse_params(params)?;
+                let outcome = self
+                    .doc_host
+                    .set_session_notes(&p.chat_id, &p.base_hash, &p.text)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&outcome)
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;

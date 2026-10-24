@@ -13,10 +13,12 @@
 
 mod cloud;
 pub(crate) mod companions;
+mod notes;
 mod providers;
 pub use providers::UsageWindowInfo;
 mod session;
 mod voice;
+pub use notes::*;
 pub use voice::*;
 mod types;
 

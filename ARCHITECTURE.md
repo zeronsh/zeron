@@ -125,7 +125,8 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
    (append-only per-device entries; host-only outcomes; dedupe/TTL/supersede evaluation).
    Continuation splitting at 256KB, render-only tool parts (full inputs stay in the host's local
    run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
-   `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
+   `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64). A root `notes` LoroText holds the
+   user's per-session Markdown notes, written by any device (`docs/session-notes.md`).
 
 2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId, repositoryId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC, plus a repository identity (the trunk's root commit, so renames, transfers and remote spellings don't split a repository; a shallow or empty history falls back to the normalized origin remote, then a device-scoped common-git-dir hash) that groups clones and worktrees of one repository in the sidebar's project mode. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 

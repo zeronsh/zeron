@@ -30,9 +30,9 @@ use tokio_util::task::TaskTracker;
 
 use zeron_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
-    MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
-    evaluate_command, join_continuation_entries,
+    MessagePart, MessageRole, MessageStatus, NotesSnapshot, NotesWrite, QueueDeliveryGate,
+    QueuedMessage, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionDoc,
+    SessionMessageEntry, SubagentStatus, evaluate_command, join_continuation_entries,
 };
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
@@ -572,6 +572,9 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// Session notes watch (WatchSessionNotes). Refreshed only while watched:
+    /// reading the text is cheap, but there is no reason to do it unseen.
+    notes_tx: watch::Sender<NotesSnapshot>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -650,8 +653,22 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    /// What the doc subscription has counted so far (see [`DocChanges`]).
+    #[cfg(test)]
+    changes: watch::Receiver<DocChanges>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+/// Running counts of the event batches a handle's doc has emitted, local
+/// commits and remote imports alike. `transcript` leaves out batches that
+/// only touched the notes: the user typing in the scratchpad, here or on
+/// another device, has nothing to republish, drain or dispatch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DocChanges {
+    any: u64,
+    transcript: u64,
+    notes: u64,
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -756,9 +773,15 @@ impl ChatDocHandle {
     /// Live views and agents retain their documents and resist idle retirement.
     /// At capacity their transports can yield without dropping these leases.
     fn sync_protected(&self) -> bool {
+        self.viewed() || self.writers.load(Ordering::Acquire) > 0
+    }
+
+    /// Something on screen is watching this chat: its transcript, its queue
+    /// or its notes.
+    fn viewed(&self) -> bool {
         self.messages_tx.receiver_count() > 0
             || self.queue_tx.receiver_count() > 0
-            || self.writers.load(Ordering::Acquire) > 0
+            || self.notes_tx.receiver_count() > 0
     }
 
     pub fn chat_id(&self) -> &str {
@@ -833,6 +856,29 @@ impl ChatDocHandle {
         let rx = self.queue_tx.subscribe();
         self.publish_queue();
         rx
+    }
+
+    /// Notes watch — the session's scratchpad, re-sent whenever it changes.
+    pub fn watch_notes(&self) -> watch::Receiver<NotesSnapshot> {
+        self.touch();
+        let rx = self.notes_tx.subscribe();
+        self.publish_notes();
+        rx
+    }
+
+    fn publish_notes(&self) {
+        if self.notes_tx.receiver_count() == 0 {
+            return;
+        }
+        let snapshot = self.doc.notes_snapshot();
+        self.notes_tx.send_if_modified(|slot| {
+            if *slot == snapshot {
+                false
+            } else {
+                *slot = snapshot;
+                true
+            }
+        });
     }
 
     /// Where a newly steered row goes: after the rows already steered, ahead
@@ -1718,7 +1764,7 @@ impl DocHost {
         });
         let changed_persistence = persistence.clone();
 
-        let (changed_tx, changed_rx) = watch::channel(0u64);
+        let (changed_tx, changed_rx) = watch::channel(DocChanges::default());
         let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
         let transcript_history = Arc::new(Mutex::new(
             crate::transcript_history::TranscriptHistory::default(),
@@ -1740,7 +1786,16 @@ impl DocHost {
             if let Some(persistence) = &changed_persistence {
                 persistence.dirty(false);
             }
-            changed_tx.send_modify(|v| *v = v.wrapping_add(1));
+            let touch = zeron_doc::NotesTouch::of(&diff);
+            changed_tx.send_modify(|changes| {
+                changes.any = changes.any.wrapping_add(1);
+                if touch.other || !touch.notes {
+                    changes.transcript = changes.transcript.wrapping_add(1);
+                }
+                if touch.notes {
+                    changes.notes = changes.notes.wrapping_add(1);
+                }
+            });
         }));
         // The mirror starts dirty and empty; watch_messages materializes it
         // once on attach instead of maintaining an unwatched transcript.
@@ -1752,6 +1807,7 @@ impl DocHost {
         // appended after the handle exists retain the normal automatic drain.
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
+        let (notes_tx, _) = watch::channel(NotesSnapshot::default());
 
         let handle = Arc::new(ChatDocHandle {
             chat_id: chat_id.to_string(),
@@ -1761,6 +1817,7 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            notes_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
@@ -1790,6 +1847,8 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            #[cfg(test)]
+            changes: changed_rx.clone(),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -3251,7 +3310,7 @@ impl DocHost {
         if handle.publication_failed.load(Ordering::Acquire) {
             return true;
         }
-        if handle.messages_tx.receiver_count() > 0 || handle.queue_tx.receiver_count() > 0 {
+        if handle.viewed() {
             return true;
         }
         // The handle itself holds one doc ref; more means a live writer.
@@ -3504,7 +3563,7 @@ impl DocHost {
         let mut waiting = 0usize;
         let mut oldest = 0i64;
         for h in handles.values() {
-            if h.messages_tx.receiver_count() > 0 || h.queue_tx.receiver_count() > 0 {
+            if h.viewed() {
                 reasons["views"] = (reasons["views"].as_u64().unwrap() + 1).into();
             }
             if h.writers.load(Ordering::Acquire) > 0 {
@@ -3687,6 +3746,23 @@ impl DocHost {
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
         Ok(id)
+    }
+
+    /// Compare-and-set the chat's notes (see `zeron_doc::notes`). Any device
+    /// writes them on its own replica, so they stay editable while the host
+    /// is offline and the write is never forwarded. Editing notes is not
+    /// activity in the chat: unlike a queued send it neither unarchives the
+    /// chat nor nudges the host.
+    pub fn set_session_notes(
+        &self,
+        chat_id: &str,
+        base_hash: &str,
+        text: &str,
+    ) -> Result<NotesWrite, EngineError> {
+        let handle = self.open(chat_id)?;
+        let outcome = handle.doc.write_notes(base_hash, text)?;
+        handle.publish_notes();
+        Ok(outcome)
     }
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
@@ -6570,7 +6646,11 @@ mod queued_message_prompt_tests {
 /// Per-chat background task: reacts to doc changes (local commits and remote imports)
 /// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
 /// Holds only a weak handle so a dropped host tears the task down.
-async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
+async fn chat_task(
+    host: DocHost,
+    weak: Weak<ChatDocHandle>,
+    mut changed_rx: watch::Receiver<DocChanges>,
+) {
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
     // for interrupt/question controls so that wait cannot block recovery.
     let control_host = host.clone();
@@ -6578,16 +6658,26 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
     let mut control_changes = changed_rx.clone();
     host.spawn_worker(async move {
         loop {
+            // Read before draining: a change landing mid-drain runs another pass.
+            let seen = control_changes.borrow_and_update().transcript;
             let Some(handle) = control_weak.upgrade() else {
                 break;
             };
             control_host.drain_command_kind(&handle, true).await;
             drop(handle);
-            if control_changes.changed().await.is_err() {
+            if control_changes
+                .wait_for(|changes| changes.transcript != seen)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
     });
+    // From the channel's start, not from now: batches that landed before this
+    // task first ran still owe the transcript a pass.
+    let mut transcript_seen = DocChanges::default().transcript;
+    let mut notes_seen = DocChanges::default().notes;
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
     {
@@ -6604,13 +6694,22 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                     break; // doc handle (and its change sender) is gone
                 }
                 let Some(handle) = weak.upgrade() else { break };
-                let publishing = handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    publishing.publish_messages_if_watched();
-                    publishing.publish_queue();
-                }).await;
-                host.drain_commands(&handle).await;
-                host.drain_queue(&handle).await;
+                let changes = *changed_rx.borrow_and_update();
+                if changes.notes != notes_seen {
+                    notes_seen = changes.notes;
+                    handle.publish_notes();
+                }
+                if changes.transcript != transcript_seen {
+                    transcript_seen = changes.transcript;
+                    let publishing = handle.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        publishing.publish_messages_if_watched();
+                        publishing.publish_queue();
+                    }).await;
+                    host.drain_commands(&handle).await;
+                    host.drain_queue(&handle).await;
+                }
+                // Notes-only batches still have to reach disk.
                 if save_deadline.is_none() {
                     save_deadline = Some(
                         tokio::time::Instant::now()
@@ -6637,6 +6736,33 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
 #[cfg(test)]
 mod publication_eviction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn notes_only_changes_skip_the_transcript_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open_local("notes").unwrap();
+        let before = *handle.changes.borrow();
+        handle.doc().set_notes_text("scratch").unwrap();
+        let after = *handle.changes.borrow();
+        assert_eq!(after.any, before.any + 1);
+        assert_eq!(after.transcript, before.transcript);
+        handle
+            .doc()
+            .push_queued(&QueuedMessage::new("q1", "later", "host"))
+            .unwrap();
+        let queued = *handle.changes.borrow();
+        assert_eq!(queued.any, after.any + 1);
+        assert_eq!(queued.transcript, after.transcript + 1);
+    }
 
     #[tokio::test]
     async fn wakeup_handoff_waits_for_snapshot_persistence() {

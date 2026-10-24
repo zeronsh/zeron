@@ -77,6 +77,9 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
             commands_copied += 1;
         }
     }
+    // The user's notes cross the epoch whole: other devices discard their
+    // old doc when they adopt this one, so anything left behind is gone.
+    thin.set_notes_text(&source.notes_text())?;
     thin.doc().commit();
 
     Ok(ThinRebuild {
@@ -285,5 +288,14 @@ mod tests {
             first.doc.read_entries().unwrap(),
             second.doc.read_entries().unwrap()
         );
+    }
+
+    #[test]
+    fn rebuild_carries_the_notes() {
+        let source = SessionDoc::init("chat-n").unwrap();
+        source.push_message(&fat_entry("m1")).unwrap();
+        source.set_notes_text("## Scratch\nkeep me\n").unwrap();
+        let rebuilt = rebuild_thin_doc(&source).unwrap();
+        assert_eq!(rebuilt.doc.notes_text(), "## Scratch\nkeep me\n");
     }
 }

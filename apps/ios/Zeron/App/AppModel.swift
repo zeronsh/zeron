@@ -560,6 +560,13 @@ final class AppModel {
 
     // MARK: Sessions
 
+    /// A main chat's session, for its notes. Side chats have none; fixture
+    /// sessions have no core to keep them in.
+    func notesHandle(_ chatId: String) -> SessionHandle? {
+        guard let client, row(chatId)?.parentChatId == nil else { return nil }
+        return try? client.openSession(chatId: chatId)
+    }
+
     func sessionSource(_ chatId: String) -> SessionSource? {
         guard let client else { return nil }
         do {

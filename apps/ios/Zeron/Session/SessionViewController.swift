@@ -795,6 +795,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
+            let notes = self.app.notesHandle(self.chatId).map { handle in
+                UIAction(title: "Notes", image: UIImage(systemName: "note.text")) { _ in
+                    self.navigationController?.pushViewController(NotesViewController(handle: handle), animated: true)
+                }
+            }
             let isSide = self.parentId != nil
             let companions = UIMenu(options: .displayInline, children: [
                 UIAction(title: "New Side Chat", image: UIImage(systemName: "bubble.left.and.text.bubble.right")) { _ in
@@ -804,12 +809,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Fork Into Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.fork() },
                 UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal() },
             ])
-            done([
+            let items: [UIMenuElement?] = [
                 companions,
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
+                notes,
                 UIAction(title: "Archive", image: UIImage(systemName: "archivebox")) { _ in
                     self.app.archive(self.chatId)
                     self.leave()
@@ -817,7 +823,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
                     self.confirmDelete(app: self.app, self.chatId) { self.leave() }
                 },
-            ])
+            ]
+            done(items.compactMap { $0 })
         }])
     }
 

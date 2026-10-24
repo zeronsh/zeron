@@ -606,3 +606,43 @@ fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut Te
         });
     });
 }
+
+#[gpui::test]
+fn session_notes_open_once_per_main_chat(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            // Opening twice activates the one tab.
+            shell.open_session_notes(window, cx);
+            shell.open_session_notes(window, cx);
+            let notes: Vec<RightSurface> = shell.right_tabs["parent"]
+                .iter()
+                .copied()
+                .filter(|surface| matches!(surface, RightSurface::Notes(_)))
+                .collect();
+            assert_eq!(notes.len(), 1);
+            assert!(shell.right_pane_open(cx));
+            assert_eq!(shell.resolved_right_active(cx), notes[0]);
+            let RightSurface::Notes(id) = notes[0] else {
+                unreachable!()
+            };
+            assert_eq!(shell.notes_surfaces[&id].read(cx).chat_id(), "parent");
+            // Closing the tab drops its surface.
+            shell.close_right_surface(notes[0], window, cx);
+            assert!(!shell.notes_surfaces.contains_key(&id));
+            // Side chats have no notes of their own.
+            shell.state.update(cx, |state, _| {
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "side", "title": "side", "deviceId": "local",
+                        "archived": false, "createdAt": Utc::now(),
+                        "parentChatId": "parent",
+                    }))
+                    .unwrap(),
+                );
+                state.selected_chat = Some("side".into());
+            });
+            assert_eq!(shell.notes_chat(cx), None);
+        });
+    });
+}
