@@ -588,6 +588,20 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     assert_eq!(spinners(&frame_for(SubagentStatus::Done)), 0, "finished subagent is quiet");
     let failed = frame_for(SubagentStatus::Failed);
     assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
+    // The whole card opens the child's transcript, by its doc.
+    let done = frame_for(SubagentStatus::Done);
+    let display = done.display(0).unwrap();
+    let card = display.widgets.iter().find_map(|w| match &w.kind {
+        display::WidgetKind::Subagent { doc_id, title, running, .. } => Some((doc_id.clone(), title.clone(), *running, w.w)),
+        _ => None,
+    });
+    let (doc, title, running, width) = card.expect("the card is a tap target");
+    assert_eq!(doc.as_deref(), Some("sub-1"));
+    assert_eq!(title, "scan the repo");
+    assert!(!running);
+    assert!(width > 300.0, "it spans the card");
+    // Finished and openable: a chevron where the spinner was.
+    assert!(display.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "chevron.right")));
 }
 
 #[test]

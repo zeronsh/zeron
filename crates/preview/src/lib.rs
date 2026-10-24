@@ -8,6 +8,7 @@ pub mod mux;
 pub mod peer;
 pub mod proxy;
 pub mod signaling;
+pub mod viewer;
 
 pub mod service;
 pub use service::PreviewService;

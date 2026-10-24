@@ -452,7 +452,9 @@ async fn dial(url: &str, token: Option<&str>) -> Result<RpcClient, DialError> {
     }
     let (ws, _) = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async_with_config(request, Some(crate::ws::config()), false),
+        // Nagle off: terminal keystrokes are tiny frames that must not wait
+        // for the previous one's ACK.
+        tokio_tungstenite::connect_async_with_config(request, Some(crate::ws::config()), true),
     )
     .await
     .map_err(|_| DialError::Other(RpcError::Transport(format!("timed out dialing {url}"))))?

@@ -270,6 +270,9 @@ pub enum WidgetKind {
     /// A button the app acts on: `action` names what (`sign-in`), `label`
     /// is its title (an error card's "Log in").
     Action { action: String, label: String },
+    /// A subagent spawn's card: opens the child's transcript (`doc_id`;
+    /// `None` while the host hasn't bound one yet).
+    Subagent { doc_id: Option<String>, title: String, running: bool, failed: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

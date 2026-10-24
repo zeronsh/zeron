@@ -99,7 +99,13 @@ struct Inner {
     /// Sign-in callbacks this device forwards to the device running them.
     callback_tunnels: CallbackTunnels,
     peers: std::sync::OnceLock<Peers>,
+    /// Engine-provided stream services peers may open, by id prefix.
+    streams: StreamServices,
 }
+/// Stream services beyond previews (terminals), keyed by service id prefix.
+/// Each handler sees the authenticated peer that opened the stream and
+/// decides itself whether to serve it.
+type StreamServices = Arc<Mutex<Vec<(String, Arc<dyn Connector>)>>>;
 pub type Projects = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
@@ -111,7 +117,47 @@ impl PreviewService {
             callback_routes: CallbackRoutes::default(),
             callback_tunnels: CallbackTunnels::default(),
             peers: std::sync::OnceLock::new(),
+            streams: StreamServices::default(),
         })))
+    }
+    /// Serve stream ids starting with `prefix` from `handler` — to peers and
+    /// to this device alike. Registering a prefix again replaces its handler.
+    pub fn serve_streams(&self, prefix: &str, handler: Arc<dyn Connector>) {
+        let mut streams = self.0.streams.lock().unwrap();
+        streams.retain(|(existing, _)| existing != prefix);
+        streams.push((prefix.to_owned(), handler));
+    }
+    /// The open direct connection to `device`, if there is one right now.
+    pub async fn peer_ready(&self, device: &str) -> bool {
+        match self.0.peers.get() {
+            Some(peers) => peers.ready(device).await.is_some(),
+            None => false,
+        }
+    }
+    /// Start pairing with `device` in the background, so a stream opened
+    /// shortly after finds the direct connection already up.
+    pub fn warm_peer(&self, device: &str) {
+        let Some(peers) = self.0.peers.get().cloned() else {
+            return;
+        };
+        let device = device.to_owned();
+        tokio::spawn(async move {
+            if let Err(error) = peers.connect(&device).await {
+                tracing::debug!(%error, "direct connection warm-up failed");
+            }
+        });
+    }
+    /// Open stream `service` on `device` directly, pairing first if needed
+    /// (bounded: pairing gives up after 30s).
+    pub async fn open_peer_stream(
+        &self,
+        device: &str,
+        service: &str,
+    ) -> anyhow::Result<mux::Stream> {
+        let peers = self.0.peers.get().cloned().ok_or_else(|| {
+            anyhow::anyhow!("Direct connections to other devices aren't available")
+        })?;
+        peers.open(device, service, false).await
     }
     pub fn catalog(&self) -> &Catalog {
         &self.0.catalog
@@ -160,6 +206,7 @@ impl PreviewService {
         let connector = Arc::new(LocalConnector(
             self.0.catalog.clone(),
             self.0.callback_routes.clone(),
+            self.0.streams.clone(),
         ));
         let local = mux::local(connector.clone(), self.0.stop.child_token());
         let (peers, output) = Peers::new(
@@ -287,13 +334,23 @@ impl PreviewService {
         }
     }
 }
-struct LocalConnector(Catalog, CallbackRoutes);
+struct LocalConnector(Catalog, CallbackRoutes, StreamServices);
 #[async_trait::async_trait]
 impl Connector for LocalConnector {
     async fn connect(&self, id: &str) -> anyhow::Result<BoxIo> {
         self.connect_from(None, id).await
     }
     async fn connect_from(&self, peer: Option<&str>, id: &str) -> anyhow::Result<BoxIo> {
+        let handler = self
+            .2
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(prefix, _)| id.starts_with(prefix.as_str()))
+            .map(|(_, handler)| handler.clone());
+        if let Some(handler) = handler {
+            return handler.connect_from(peer, id).await;
+        }
         // A sign-in callback: only the registered port, only for the device
         // that started the login, only while it runs.
         if let Some(port) = self.1.target(peer, id) {

@@ -10,12 +10,13 @@
 //! Data path per tab: `OpenTerminal` → `SubscribeTerminal` stream; Data frames
 //! (base64) feed the [`Emulator`]; query responses write back; the stream
 //! reconnects with exponential backoff resuming from `afterSeq`; Exit appends
-//! the "[process exited N]" line and stops. Keyboard bytes coalesce for 12 ms
-//! before `WriteTerminal`; viewport-driven resizes debounce 80 ms before
-//! `ResizeTerminal` (the emulator resizes immediately).
+//! the "[process exited N]" line and stops. Keyboard bytes go to
+//! `WriteTerminal` the moment they land, one write in flight per tab (keys
+//! typed meanwhile ride the next); viewport-driven resizes debounce 80 ms
+//! before `ResizeTerminal` (the emulator resizes immediately).
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use gpui::{
@@ -33,16 +34,29 @@ use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
 use crate::state::{AppState, CANVAS_PANEL_PREFIX, EngineHandle};
 use crate::theme::Theme;
 
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
+use super::emulator::{
+    CellSnapshot, CursorShape, CursorSnapshot, Emulator, GridPoint, MouseTracking, SelectionType,
+    Side,
+};
+use super::predict::Predictor;
 use super::view::{
-    COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TerminalElement,
-    cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
+    InputQueue, KeyRoute, MOUSE_LEFT, MOUSE_MIDDLE, MOUSE_MOTION, MOUSE_NONE, MOUSE_RIGHT,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD,
+    TerminalElement, cell_at, focus_report, mouse_report, paste_bytes, route_key,
+    terminal_panel_bg, wheel_arrows,
 };
 
 /// Fixed tab width — drag-reorder math stays analytic.
 pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
+/// Cursor blink half-period; a keystroke holds the cursor solid this long.
+const BLINK_MS: u64 = 500;
+/// The blink rests (cursor solid) after this long without typing, so an
+/// idle focused terminal stops scheduling frames; the next key resumes it.
+const BLINK_IDLE: Duration = Duration::from_secs(15);
+/// The copy flash's fade.
+const COPY_FLASH: Duration = Duration::from_millis(320);
 
 actions!(terminal, [ToggleTerminal]);
 
@@ -175,7 +189,18 @@ fn encode_base64(bytes: &[u8]) -> String {
 /// A grid snapshot handed to the paint element.
 pub struct GridSnapshot {
     pub lines: Vec<Vec<CellSnapshot>>,
+    /// The history row a partial scroll reveals above `lines`.
+    pub line_above: Option<Vec<CellSnapshot>>,
+    /// Rows the grid is shifted down by (0..1) for pixel-smooth scrolling.
+    pub scroll_frac: f32,
     pub cursor: Option<CursorSnapshot>,
+    pub cursor_shape: CursorShape,
+    /// False during a blinking cursor's off phase.
+    pub cursor_on: bool,
+    /// Input-method composition in progress, drawn at the cursor.
+    pub marked_text: Option<String>,
+    /// 1 at the moment of a copy, easing to 0.
+    pub copy_flash: f32,
 }
 
 /// Where the grid landed this frame, in window coordinates.
@@ -262,12 +287,25 @@ struct TerminalTab {
     terminal_id: Option<String>,
     target_device_id: Option<String>,
     emulator: Emulator,
-    /// Fractional wheel movement in rows, retained across trackpad events.
+    /// How far past `display_offset` the view sits, in rows (0..1): history
+    /// scrolls by the pixel, so a trackpad glides instead of stepping.
     scroll_remainder: f32,
+    /// Fractional wheel rows owed to a program (reports / arrow keys).
+    wheel_remainder: f32,
     exited: Option<i32>,
     last_seq: u64,
-    coalescer: InputCoalescer,
-    flush_task: Option<Task<()>>,
+    input: InputQueue,
+    /// Local echo for a terminal on another device.
+    predictor: Predictor,
+    /// Withdraws stale predictions when the host stays silent.
+    predict_task: Option<Task<()>>,
+    /// Shows a synchronized update the program never closed.
+    sync_task: Option<Task<()>>,
+    /// Input-method composition in progress.
+    marked_text: Option<String>,
+    /// The host answers terminal queries itself; this emulator's answers
+    /// would arrive second (and late, across a network) and read as input.
+    host_replies: bool,
     resize_task: Option<Task<()>>,
     /// Open + subscribe/reconnect lifecycle; dropping it cancels the stream.
     _run: Option<Task<()>>,
@@ -358,6 +396,21 @@ pub struct TerminalPanel {
     /// than a permanently painted rail beside the panel: the terminal owns
     /// the cursor.
     bar: MenuScrollbarState,
+    /// Blink phase of the cursor (true = drawn).
+    blink_on: bool,
+    /// Ticks the blink while a focused, blinking cursor is on screen; any
+    /// keystroke restarts it so the cursor holds solid while typing.
+    blink_task: Option<Task<()>>,
+    /// Render's verdict on whether the cursor should blink right now.
+    blink_wanted: bool,
+    /// Focus as of the last render, for focus reports.
+    was_focused: bool,
+    /// When the selection was last copied (drives the flash).
+    copied_at: Option<Instant>,
+    /// The button a program is being told is held, and the last cell
+    /// reported, while mouse reporting owns the pointer.
+    report_button: Option<u8>,
+    report_cell: Option<(usize, usize)>,
     _observe: Subscription,
 }
 
@@ -382,6 +435,13 @@ impl TerminalPanel {
             selection_scroll_task: None,
             rail_tab_key: None,
             bar: MenuScrollbarState::default(),
+            blink_on: true,
+            blink_task: None,
+            blink_wanted: false,
+            was_focused: false,
+            copied_at: None,
+            report_button: None,
+            report_cell: None,
             _observe: observe,
         }
     }
@@ -493,10 +553,15 @@ impl TerminalPanel {
             target_device_id: None,
             emulator: Emulator::new(80, 24),
             scroll_remainder: 0.0,
+            wheel_remainder: 0.0,
             exited: None,
             last_seq: 0,
-            coalescer: InputCoalescer::default(),
-            flush_task: None,
+            input: InputQueue::default(),
+            predictor: Predictor::default(),
+            predict_task: None,
+            sync_task: None,
+            marked_text: None,
+            host_replies: false,
             resize_task: None,
             _run: None,
         });
@@ -697,6 +762,8 @@ impl TerminalPanel {
                 })
                 .unwrap_or((80, 24));
 
+            // A PTY someone else opened has whatever size they gave it.
+            let opened_elsewhere = existing_session.is_some();
             let session = match existing_session {
                 Some(session) => session,
                 None => {
@@ -734,16 +801,42 @@ impl TerminalPanel {
             let terminal_id = session.id.clone();
             let attached = this
                 .update(cx, |panel, cx| {
-                    if let Some(tab) = panel.tab_mut(&chat, key) {
-                        tab.terminal_id = Some(terminal_id.clone());
-                        tab.target_device_id = target.clone();
-                        cx.notify();
-                        true
-                    } else {
-                        false
-                    }
+                    let tab = panel.tab_mut(&chat, key)?;
+                    tab.terminal_id = Some(terminal_id.clone());
+                    tab.target_device_id = target.clone();
+                    tab.host_replies = session.host_replies;
+                    let size = (tab.emulator.cols() as u16, tab.emulator.rows() as u16);
+                    // Keys typed while the PTY was still opening.
+                    panel.pump_input(&chat, key, cx);
+                    cx.notify();
+                    Some(size)
                 })
-                .unwrap_or(false);
+                .ok()
+                .flatten();
+            // The grid may have been measured (or resized) while the open was
+            // in flight — a remote open easily outlasts the resize debounce,
+            // which has no terminal to address yet and gives up. Tell the PTY
+            // the size actually on screen, or the shell wraps at the wrong
+            // column (zsh's `%` end-of-line marker is the first casualty).
+            if let Some((now_cols, now_rows)) = attached
+                && (opened_elsewhere || (now_cols, now_rows) != (cols, rows))
+            {
+                let _ = engine
+                    .client()
+                    .call(
+                        methods::RESIZE_TERMINAL,
+                        with_target(
+                            serde_json::json!({
+                                "terminalId": terminal_id,
+                                "cols": now_cols,
+                                "rows": now_rows,
+                            }),
+                            &target,
+                        ),
+                    )
+                    .await;
+            }
+            let attached = attached.is_some();
             if !attached {
                 // Tab was closed before the open completed — release the PTY.
                 let _ = engine
@@ -761,19 +854,25 @@ impl TerminalPanel {
 
             let mut attempt: u32 = 0;
             loop {
-                let Ok(after_seq) = this.update(cx, |panel, _| {
-                    panel.tab_mut(&chat, key).map(|t| t.last_seq)
+                let Ok(resume) = this.update(cx, |panel, _| {
+                    panel
+                        .tab_mut(&chat, key)
+                        .map(|t| (t.last_seq, t.host_replies))
                 }) else {
                     return; // entity released
                 };
-                let Some(after_seq) = after_seq else { return }; // tab closed
+                let Some((after_seq, host_replies)) = resume else { return }; // tab closed
 
                 let subscribed = engine
                     .client()
                     .subscribe(
                         methods::SUBSCRIBE_TERMINAL,
                         with_target(
-                            serde_json::json!({ "terminalId": terminal_id, "afterSeq": after_seq }),
+                            serde_json::json!({
+                                "terminalId": terminal_id,
+                                "afterSeq": after_seq,
+                                "hostReplies": host_replies,
+                            }),
                             &target,
                         ),
                     )
@@ -800,7 +899,7 @@ impl TerminalPanel {
                     };
                     attempt = 0;
                     let outcome = this.update(cx, |panel, cx| {
-                        panel.apply_stream_event(&chat, key, &engine, event, cx)
+                        panel.apply_stream_event(&chat, key, event, cx)
                     });
                     match outcome {
                         Ok(StreamDisposition::Continue) => {}
@@ -830,37 +929,30 @@ impl TerminalPanel {
         &mut self,
         chat: &str,
         key: u64,
-        engine: &EngineHandle,
         event: TerminalEvent,
         cx: &mut Context<Self>,
     ) -> StreamDisposition {
         let Some(tab) = self.tab_mut(chat, key) else {
             return StreamDisposition::Stop;
         };
-        let target = tab.target_device_id.clone();
         match event {
             TerminalEvent::Data { seq, data } => {
                 tab.last_seq = seq;
                 let responses = tab.emulator.feed(&decode_base64(&data));
-                if !responses.is_empty()
-                    && let Some(id) = tab.terminal_id.clone()
-                {
-                    // Query responses (DSR etc.) go straight back, no coalescing.
-                    let engine = engine.clone();
-                    let data = encode_base64(&responses);
-                    cx.spawn(async move |_, _| {
-                        let _ = engine
-                            .client()
-                            .call(
-                                methods::WRITE_TERMINAL,
-                                with_target(
-                                    serde_json::json!({ "terminalId": id, "data": data }),
-                                    &target,
-                                ),
-                            )
-                            .await;
-                    })
-                    .detach();
+                if tab.emulator.alt_screen() {
+                    tab.predictor.reset();
+                }
+                tab.predictor.output(&tab.emulator, Instant::now());
+                let sync_deadline = tab.emulator.sync_deadline();
+                if !responses.is_empty() && !tab.host_replies {
+                    // Query responses (DSR etc.) share the key queue, so they
+                    // reach the PTY in order with what was typed. Hosts that
+                    // answer queries themselves get none from here.
+                    tab.input.push(&responses);
+                    self.pump_input(chat, key, cx);
+                }
+                if let Some(deadline) = sync_deadline {
+                    self.schedule_sync_flush(chat, key, deadline, cx);
                 }
                 cx.notify();
                 StreamDisposition::Continue
@@ -868,6 +960,8 @@ impl TerminalPanel {
             TerminalEvent::Exit { seq, exit_code, .. } => {
                 tab.last_seq = seq;
                 tab.exited = Some(exit_code);
+                tab.predictor.reset();
+                tab.marked_text = None;
                 tab.emulator.feed(&exit_message(exit_code));
                 cx.notify();
                 StreamDisposition::Stop
@@ -877,7 +971,8 @@ impl TerminalPanel {
 
     // ---- input ----
 
-    /// Queue keyboard bytes on the active tab (12 ms coalescing window).
+    /// Send keyboard bytes from the active tab now (or right after the write
+    /// already in flight).
     fn queue_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
         let Some(tabs) = self.chats.get_mut(&chat) else {
@@ -891,44 +986,53 @@ impl TerminalPanel {
             return;
         }
         // A keypress while scrolled back snaps to the live bottom (xterm).
-        if tab.emulator.display_offset() > 0 {
+        if tab.emulator.display_offset() > 0 || tab.scroll_remainder != 0.0 {
             tab.emulator.scroll_to_bottom();
+            tab.scroll_remainder = 0.0;
         }
         let key = tab.key;
-        if tab.coalescer.push(bytes) {
-            tab.flush_task = Some(Self::schedule_flush(chat, key, cx));
-        }
+        tab.input.push(bytes);
+        self.pump_input(&chat, key, cx);
+        self.restart_blink(cx);
     }
 
-    fn schedule_flush(chat: String, key: u64, cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(COALESCE_MS))
-                .await;
-            let _ = this.update(cx, |panel, cx| panel.flush_input(chat, key, cx));
-        })
+    /// Send bytes the PROGRAM asked for (focus, pointer and wheel reports):
+    /// in order with typing, but without a keystroke's side effects — the
+    /// view stays where the user scrolled it and the cursor keeps blinking.
+    fn send_report(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        let Some(key) = self.with_active_tab(cx, |tab| {
+            tab.input.push(bytes);
+            tab.key
+        }) else {
+            return;
+        };
+        self.pump_input(&chat, key, cx);
     }
 
-    fn flush_input(&mut self, chat: String, key: u64, cx: &mut Context<Self>) {
+    /// Start the tab's next `WriteTerminal` unless one is in flight; its
+    /// completion pumps again, so a burst drains as fast as the engine acks.
+    fn pump_input(&mut self, chat: &str, key: u64, cx: &mut Context<Self>) {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let Some(tab) = self.tab_mut(&chat, key) else {
+        let Some(tab) = self.tab_mut(chat, key) else {
+            return;
+        };
+        // OpenTerminal still in flight: the attach pumps once it lands.
+        let Some(id) = tab.terminal_id.clone() else {
+            return;
+        };
+        let Some(bytes) = tab.input.start() else {
             return;
         };
         let target = tab.target_device_id.clone();
-        if tab.coalescer.is_empty() {
-            return;
+        if target.is_some() {
+            tab.predictor.sent(Instant::now());
         }
-        let Some(id) = tab.terminal_id.clone() else {
-            // OpenTerminal still in flight — keep the buffer, retry shortly.
-            if tab.exited.is_none() {
-                tab.flush_task = Some(Self::schedule_flush(chat, key, cx));
-            }
-            return;
-        };
-        let data = encode_base64(&tab.coalescer.take());
-        cx.spawn(async move |_, _| {
+        let data = encode_base64(&bytes);
+        let chat = chat.to_string();
+        cx.spawn(async move |this, cx| {
             let _ = engine
                 .client()
                 .call(
@@ -939,6 +1043,12 @@ impl TerminalPanel {
                     ),
                 )
                 .await;
+            let _ = this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tab_mut(&chat, key) {
+                    tab.input.finish();
+                }
+                panel.pump_input(&chat, key, cx);
+            });
         })
         .detach();
     }
@@ -952,6 +1062,7 @@ impl TerminalPanel {
             .map(|tab| tab.emulator.bracketed_paste_mode())
             .unwrap_or(false);
         let bytes = paste_bytes(&text, bracketed);
+        self.with_active_tab(cx, |tab| tab.predictor.interrupt());
         self.queue_input(&bytes, cx);
     }
 
@@ -978,9 +1089,196 @@ impl TerminalPanel {
             .active_tab(cx)
             .map(|tab| tab.emulator.app_cursor_mode())
             .unwrap_or(false);
-        if let Some(bytes) = keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, app_cursor) {
-            self.queue_input(&bytes, cx);
-            cx.stop_propagation();
+        match route_key(&ks.key, ks.key_char.as_deref(), mods, app_cursor) {
+            // A plain space is typing, not an interruption: the predictor
+            // keeps the run (and its trust) going across words.
+            KeyRoute::Bytes(bytes) if bytes == b" " => {
+                self.type_text(" ", cx);
+                cx.stop_propagation();
+            }
+            KeyRoute::Bytes(bytes) => {
+                self.with_active_tab(cx, |tab| {
+                    if bytes == [0x7f] {
+                        tab.predictor.backspace();
+                    } else {
+                        tab.predictor.interrupt();
+                    }
+                });
+                self.queue_input(&bytes, cx);
+                cx.stop_propagation();
+            }
+            // A held key repeats here rather than through the platform text
+            // input, which would offer its accent picker instead (holding `j`
+            // in an editor must move, not ask about `ĵ`).
+            KeyRoute::Text if event.is_held => {
+                if let Some(text) = ks.key_char.clone() {
+                    self.type_text(&text, cx);
+                    cx.stop_propagation();
+                }
+            }
+            // Platform text input delivers it (see the input handler below),
+            // after any input method has composed it.
+            KeyRoute::Text | KeyRoute::NotOurs => {}
+        }
+    }
+
+    /// Typed text from the keyboard or an input method.
+    fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.with_active_tab(cx, |tab| {
+            let predictable = tab.target_device_id.is_some()
+                && !tab.emulator.alt_screen()
+                && tab.emulator.display_offset() == 0
+                && tab.emulator.cursor().is_some();
+            if predictable {
+                let cursor = tab.emulator.live_cursor();
+                let cols = tab.emulator.cols();
+                tab.predictor.typed(text, cursor, cols, Instant::now());
+            } else {
+                tab.predictor.interrupt();
+            }
+        });
+        self.schedule_prediction_expiry(cx);
+        self.queue_input(text.as_bytes(), cx);
+    }
+
+    fn with_active_tab<R>(&mut self, cx: &App, f: impl FnOnce(&mut TerminalTab) -> R) -> Option<R> {
+        let chat = self.selected_chat(cx);
+        let tabs = self.chats.get_mut(&chat)?;
+        let active = tabs.active;
+        tabs.tabs.get_mut(active).map(f)
+    }
+
+    /// Withdraw the active tab's predictions if the host leaves them
+    /// unconfirmed past their deadline.
+    fn schedule_prediction_expiry(&mut self, cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        let Some(tabs) = self.chats.get_mut(&chat) else {
+            return;
+        };
+        let active = tabs.active;
+        let Some(tab) = tabs.tabs.get_mut(active) else {
+            return;
+        };
+        let Some(deadline) = tab.predictor.next_deadline() else {
+            return;
+        };
+        let key = tab.key;
+        tab.predict_task = Some(cx.spawn(async move |this, cx| {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            cx.background_executor()
+                .timer(wait + Duration::from_millis(1))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tab_mut(&chat, key)
+                    && tab.predictor.expire(Instant::now())
+                {
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Show a synchronized update at its deadline even if the program never
+    /// ends it (a crashed TUI must not freeze the screen).
+    fn schedule_sync_flush(
+        &mut self,
+        chat: &str,
+        key: u64,
+        deadline: std::time::Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tab_mut(chat, key) else {
+            return;
+        };
+        let chat = chat.to_string();
+        tab.sync_task = Some(cx.spawn(async move |this, cx| {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            cx.background_executor()
+                .timer(wait + Duration::from_millis(1))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                let Some(tab) = panel.tab_mut(&chat, key) else {
+                    return;
+                };
+                if tab
+                    .emulator
+                    .sync_deadline()
+                    .is_some_and(|due| due <= std::time::Instant::now())
+                {
+                    let responses = tab.emulator.finish_sync();
+                    if !responses.is_empty() && !tab.host_replies {
+                        tab.input.push(&responses);
+                        panel.pump_input(&chat, key, cx);
+                    }
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    // ---- cursor blink / focus ----
+
+    /// Hold the cursor solid and restart the blink clock.
+    fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink_on = true;
+        self.blink_task = None;
+        if self.blink_wanted {
+            self.blink_task = Some(Self::blink_loop(cx));
+        }
+    }
+
+    fn blink_loop(cx: &mut Context<Self>) -> Task<()> {
+        let started = Instant::now();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(BLINK_MS))
+                    .await;
+                let keep = this.update(cx, |panel, cx| {
+                    if !panel.blink_wanted || started.elapsed() >= BLINK_IDLE {
+                        if !panel.blink_on {
+                            panel.blink_on = true;
+                            cx.notify();
+                        }
+                        return false;
+                    }
+                    panel.blink_on = !panel.blink_on;
+                    cx.notify();
+                    true
+                });
+                if !matches!(keep, Ok(true)) {
+                    let _ = this.update(cx, |panel, _| panel.blink_task = None);
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Render-time bookkeeping for focus: report focus changes to programs
+    /// that asked (1004), and run the blink clock only while a focused,
+    /// blinking cursor is on screen in an active window — an idle or hidden
+    /// terminal schedules no frames.
+    fn sync_focus(&mut self, focused: bool, window_active: bool, cx: &mut Context<Self>) {
+        if focused != self.was_focused {
+            self.was_focused = focused;
+            let reporting = self
+                .active_tab(cx)
+                .is_some_and(|tab| tab.emulator.focus_reporting() && tab.exited.is_none());
+            if reporting {
+                self.send_report(focus_report(focused), cx);
+            }
+        }
+        let wanted = focused
+            && window_active
+            && self.active_tab(cx).is_some_and(|tab| {
+                tab.exited.is_none()
+                    && tab.emulator.cursor_style().1
+                    && tab.emulator.cursor().is_some()
+            });
+        if wanted != self.blink_wanted {
+            self.blink_wanted = wanted;
+            self.blink_on = true;
+            self.blink_task = wanted.then(|| Self::blink_loop(cx));
         }
     }
 
@@ -1010,6 +1308,8 @@ impl TerminalPanel {
             return;
         }
         tab.emulator.resize(cols, rows);
+        // The shell redraws for the new width; nothing predicted still holds.
+        tab.predictor.reset();
         let key = tab.key;
         let target = tab.target_device_id.clone();
         if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
@@ -1047,13 +1347,60 @@ impl TerminalPanel {
         // current frame, which already paints the resized grid.
     }
 
+    /// Rows are drawn `dy` lower than the measured grid (a partial scroll);
+    /// pointer mapping follows them.
+    pub fn shift_grid_origin(&mut self, dy: Pixels) {
+        if let Some(geometry) = self.geometry.as_mut() {
+            geometry.origin.y += dy;
+        }
+    }
+
     /// Snapshot for the paint element.
     pub fn active_grid_snapshot(&self, cx: &App) -> Option<GridSnapshot> {
         let tab = self.active_tab(cx)?;
+        let mut lines = tab.emulator.lines();
+        let mut cursor = tab.emulator.cursor();
+        if tab.emulator.display_offset() == 0 {
+            let (predicted, predicted_cursor) = tab.predictor.overlay();
+            for (row, col, ch) in predicted {
+                if let Some(cell) = lines.get_mut(row).and_then(|line| line.get_mut(col)) {
+                    cell.ch = ch;
+                    cell.predicted = true;
+                }
+            }
+            if predicted_cursor.is_some() && cursor.is_some() {
+                cursor = predicted_cursor;
+            }
+        }
+        let copy_flash = self.copied_at.map_or(0.0, |at| {
+            let t = at.elapsed().as_secs_f32() / COPY_FLASH.as_secs_f32();
+            let left = (1.0 - t).clamp(0.0, 1.0);
+            left * left
+        });
+        let scroll_frac = if tab.emulator.alt_screen()
+            || tab.emulator.display_offset() >= tab.emulator.history_lines()
+        {
+            0.0
+        } else {
+            tab.scroll_remainder.clamp(0.0, 1.0)
+        };
         Some(GridSnapshot {
-            lines: tab.emulator.lines(),
-            cursor: tab.emulator.cursor(),
+            lines,
+            line_above: (scroll_frac > 0.0)
+                .then(|| tab.emulator.line_above())
+                .flatten(),
+            scroll_frac,
+            cursor,
+            cursor_shape: tab.emulator.cursor_style().0,
+            cursor_on: self.blink_on || !self.blink_wanted,
+            marked_text: tab.marked_text.clone(),
+            copy_flash,
         })
+    }
+
+    /// Whether the copy flash still needs frames.
+    pub fn copy_flash_running(&self) -> bool {
+        self.copied_at.is_some_and(|at| at.elapsed() < COPY_FLASH)
     }
 
     // ---- selection ----
@@ -1097,6 +1444,10 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if self.report_mouse(MOUSE_LEFT, event.position, false, &event.modifiers, cx) {
+            self.report_button = Some(MOUSE_LEFT);
+            return;
+        }
         let Some((point, side)) = self.grid_point_at(event.position, cx) else {
             return;
         };
@@ -1160,6 +1511,20 @@ impl TerminalPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tracking = self.reporting(&event.modifiers, cx);
+        let report = match tracking {
+            Some(MouseTracking::Motion) => true,
+            Some(MouseTracking::Drag) => self.report_button.is_some(),
+            _ => false,
+        };
+        if report {
+            let button = self.report_button.unwrap_or(MOUSE_NONE) + MOUSE_MOTION;
+            self.report_mouse(button, event.position, false, &event.modifiers, cx);
+            return;
+        }
+        if tracking.is_some() && self.report_button.is_some() {
+            return; // a reported press owns this drag
+        }
         if !event.dragging() {
             return;
         }
@@ -1195,14 +1560,151 @@ impl TerminalPanel {
         self.schedule_selection_scroll(cx);
     }
 
-    fn on_mouse_up(
-        &mut self,
-        _event: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.selection_drag = None;
         self.selection_scroll_task = None;
+        if let Some(button) = self.report_button.take() {
+            // Release whatever the program was told is held, even if the
+            // modifiers changed mid-gesture.
+            self.send_mouse(button, event.position, true, &event.modifiers, cx);
+            self.report_cell = None;
+        }
+    }
+
+    /// Middle and right presses only ever mean something to a program that
+    /// asked for pointer reports.
+    fn on_other_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        let button = match event.button {
+            MouseButton::Middle => MOUSE_MIDDLE,
+            MouseButton::Right => MOUSE_RIGHT,
+            _ => return,
+        };
+        if self.report_mouse(button, event.position, false, &event.modifiers, cx) {
+            self.report_button = Some(button);
+            cx.stop_propagation();
+        }
+    }
+
+    /// The program's pointer reporting mode, unless Shift is held: Shift
+    /// always selects text, so a terminal running a mouse-aware program
+    /// still lets you copy from it.
+    fn reporting(&self, mods: &gpui::Modifiers, cx: &App) -> Option<MouseTracking> {
+        if mods.shift {
+            return None;
+        }
+        let tab = self.active_tab(cx)?;
+        if tab.exited.is_some() {
+            return None;
+        }
+        tab.emulator.mouse_tracking()
+    }
+
+    /// Report a pointer event if the program wants it; whether it was taken.
+    fn report_mouse(
+        &mut self,
+        button: u8,
+        position: gpui::Point<Pixels>,
+        release: bool,
+        mods: &gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.reporting(mods, cx).is_none() {
+            return false;
+        }
+        self.send_mouse(button, position, release, mods, cx);
+        true
+    }
+
+    fn send_mouse(
+        &mut self,
+        button: u8,
+        position: gpui::Point<Pixels>,
+        release: bool,
+        mods: &gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(geometry) = self.geometry else {
+            return;
+        };
+        let hit = cell_at(
+            f32::from(position.x - geometry.origin.x),
+            f32::from(position.y - geometry.origin.y),
+            geometry.cell_w,
+            geometry.line_h,
+            geometry.cols as usize,
+            geometry.rows as usize,
+        );
+        let motion = (MOUSE_MOTION..MOUSE_WHEEL_UP).contains(&button);
+        if motion && self.report_cell == Some((hit.row, hit.col)) {
+            return; // same cell: nothing new to tell
+        }
+        self.report_cell = Some((hit.row, hit.col));
+        let sgr = self
+            .active_tab(cx)
+            .is_some_and(|tab| tab.emulator.sgr_mouse());
+        if let Some(bytes) = mouse_report(button, hit.col, hit.row, release, mods, sgr) {
+            self.send_report(&bytes, cx);
+        }
+    }
+
+    /// Wheel movement in rows (positive = up): to the program as wheel
+    /// reports when it tracks the mouse, as arrow keys to a full-screen
+    /// program that doesn't (less, man), else through the scrollback — by
+    /// the pixel, clamped flush to the live bottom and the history top.
+    fn wheel(
+        &mut self,
+        rows: f32,
+        position: gpui::Point<Pixels>,
+        mods: &gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let reporting = self.reporting(mods, cx).is_some();
+        let Some(tab) = self.with_active_tab(cx, |tab| {
+            let arrows = tab.exited.is_none()
+                && tab.emulator.alt_screen()
+                && tab.emulator.alternate_scroll()
+                && !mods.shift;
+            if !(reporting || arrows) {
+                let history = tab.emulator.history_lines() as f32;
+                let target = (tab.emulator.display_offset() as f32 + tab.scroll_remainder + rows)
+                    .clamp(0.0, history);
+                let whole = target.floor();
+                tab.emulator.scroll_to_offset(whole as usize);
+                tab.scroll_remainder = target - whole;
+                return None;
+            }
+            tab.wheel_remainder += rows;
+            let step = tab.wheel_remainder.trunc() as i32;
+            tab.wheel_remainder -= step as f32;
+            Some((step, arrows, tab.emulator.app_cursor_mode()))
+        }) else {
+            return;
+        };
+        let Some((step, arrows, app_cursor)) = tab else {
+            cx.notify();
+            return;
+        };
+        if step == 0 {
+            return;
+        }
+        if reporting {
+            let button = if step > 0 {
+                MOUSE_WHEEL_UP
+            } else {
+                MOUSE_WHEEL_DOWN
+            };
+            for _ in 0..step.unsigned_abs() {
+                self.send_mouse(button, position, false, mods, cx);
+            }
+        } else if arrows {
+            self.send_report(&wheel_arrows(step, app_cursor), cx);
+        }
     }
 
     /// Copy the selection. Returns whether anything was copied, so the caller
@@ -1215,6 +1717,8 @@ impl TerminalPanel {
             return false;
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.copied_at = Some(Instant::now());
+        cx.notify();
         true
     }
 
@@ -1229,6 +1733,7 @@ impl TerminalPanel {
         let active = tabs.active;
         if let Some(tab) = tabs.tabs.get_mut(active) {
             tab.emulator.scroll(delta_lines);
+            tab.scroll_remainder = 0.0;
             cx.notify();
         }
     }
@@ -1337,6 +1842,7 @@ impl TerminalPanel {
             return false;
         };
         tab.emulator.scroll_to_offset(lines);
+        tab.scroll_remainder = 0.0;
         true
     }
 
@@ -1720,6 +2226,117 @@ impl ScrollRailHost for TerminalPanel {
     }
 }
 
+/// Typed text arrives here from the platform's text input, after any input
+/// method (CJK composition, dead keys, layout symbols) has done its work.
+/// Composition shows at the cursor until it commits.
+impl gpui::EntityInputHandler for TerminalPanel {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let marked = self.active_tab(cx)?.marked_text.clone()?;
+        let utf16: Vec<u16> = marked.encode_utf16().collect();
+        let range = range.start.min(utf16.len())..range.end.min(utf16.len());
+        *adjusted_range = Some(range.clone());
+        Some(String::from_utf16_lossy(&utf16[range]))
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::UTF16Selection> {
+        let end = self
+            .active_tab(cx)
+            .and_then(|tab| tab.marked_text.as_ref())
+            .map_or(0, |text| text.encode_utf16().count());
+        Some(gpui::UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        let text = self.active_tab(cx)?.marked_text.as_ref()?;
+        Some(0..text.encode_utf16().count())
+    }
+
+    /// The platform accepts the composition as typed (focus moving away
+    /// mid-composition, for one): it goes to the PTY rather than vanishing.
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let marked = self
+            .with_active_tab(cx, |tab| tab.marked_text.take())
+            .flatten();
+        if let Some(text) = marked.filter(|text| !text.is_empty()) {
+            self.type_text(&text, cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_active_tab(cx, |tab| tab.marked_text = None);
+        if !text.is_empty() {
+            self.type_text(text, cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let marked = (!new_text.is_empty()).then(|| new_text.to_string());
+        self.with_active_tab(cx, |tab| tab.marked_text = marked);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        _element_bounds: gpui::Bounds<Pixels>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        // The candidate window opens under the cursor cell.
+        let geometry = self.geometry?;
+        let cursor = self.active_tab(cx)?.emulator.cursor()?;
+        Some(gpui::Bounds::new(
+            gpui::point(
+                geometry.origin.x + px(geometry.cell_w * cursor.col as f32),
+                geometry.origin.y + px(geometry.line_h * cursor.row as f32),
+            ),
+            gpui::size(px(geometry.cell_w), px(geometry.line_h)),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 enum StreamDisposition {
     Continue,
     Stop,
@@ -1747,6 +2364,7 @@ impl Render for TerminalPanel {
             window.focus(&self.focus_handle, cx);
         }
         let focused = self.focus_handle.is_focused(window);
+        self.sync_focus(focused, window.is_window_active(), cx);
         let scrollbar = self.render_scrollbar(&theme, cx);
 
         // Embedded (right-pane surface host): the shell's surface tabs
@@ -1782,6 +2400,14 @@ impl Render for TerminalPanel {
                     // the user let go of.
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_other_mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_other_mouse_down))
+                    .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+                    // A reported press released outside the panel must still
+                    // tell the program the button went up.
+                    .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
                     .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                         let lines = match event.delta {
                             ScrollDelta::Lines(delta) => delta.y,
@@ -1796,20 +2422,13 @@ impl Render for TerminalPanel {
                                 f32::from(delta.y) / line_h
                             }
                         };
-                        let chat = this.selected_chat(cx);
-                        let Some(tabs) = this.chats.get_mut(&chat) else {
-                            return;
-                        };
-                        let Some(tab) = tabs.tabs.get_mut(tabs.active) else {
-                            return;
-                        };
+                        // A fresh gesture starts from where the view rests:
+                        // the partial row is on screen, so dropping it would
+                        // jump. Only the rows owed to a program start over.
                         if event.touch_phase == gpui::TouchPhase::Started {
-                            tab.scroll_remainder = 0.0;
+                            this.with_active_tab(cx, |tab| tab.wheel_remainder = 0.0);
                         }
-                        tab.scroll_remainder += lines;
-                        let step = tab.scroll_remainder.trunc() as i32;
-                        tab.scroll_remainder -= step as f32;
-                        this.scroll_active(step, cx);
+                        this.wheel(lines, event.position, &event.modifiers, cx);
                         cx.stop_propagation();
                     }))
                     .child(TerminalElement::new(cx.entity(), focused))
@@ -1822,6 +2441,103 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A focused panel with one live tab (no engine: writes stay queued, so
+    /// the test reads exactly what would reach the PTY).
+    fn focused_panel(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<TerminalPanel>, &mut gpui::VisualTestContext) {
+        use gpui::AppContext;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("chat".into());
+                state
+            });
+            let mut panel = TerminalPanel::new(state, cx);
+            let key = panel.reserve_tab_for_chat("chat".into(), "Shell", cx);
+            panel.tab_mut("chat", key).unwrap().emulator.feed(b"$ ");
+            panel.open = true;
+            panel
+        });
+        cx.update(|window, cx| {
+            let focus = panel.read(cx).focus_handle();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        (panel, cx)
+    }
+
+    fn sent(panel: &Entity<TerminalPanel>, cx: &mut gpui::VisualTestContext) -> Vec<u8> {
+        panel.read_with(cx, |panel, cx| {
+            panel.active_tab(cx).unwrap().input.pending().to_vec()
+        })
+    }
+
+    #[gpui::test]
+    fn typing_reaches_the_pty_through_text_input_in_order(cx: &mut gpui::TestAppContext) {
+        let (panel, cx) = focused_panel(cx);
+        cx.simulate_keystrokes("l s space - a enter");
+        assert_eq!(sent(&panel, cx), b"ls -a\r");
+        cx.simulate_keystrokes("ctrl-c alt-b");
+        assert_eq!(sent(&panel, cx), b"ls -a\r\x03\x1bb");
+    }
+
+    #[gpui::test]
+    fn a_mouse_aware_program_gets_reports_and_shift_still_selects(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+        let (panel, cx) = focused_panel(cx);
+        panel.update(cx, |panel, cx| {
+            panel.with_active_tab(cx, |tab| tab.emulator.feed(b"\x1b[?1000h\x1b[?1006h"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let geometry = panel.read_with(cx, |panel, _| panel.geometry.unwrap());
+        let at =
+            geometry.origin + gpui::point(px(geometry.cell_w * 2.5), px(geometry.line_h * 1.5));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        assert_eq!(sent(&panel, cx), b"\x1b[<0;3;2M\x1b[<0;3;2m");
+        // Shift: the press is ours (selection), not the program's.
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
+        assert_eq!(sent(&panel, cx), b"\x1b[<0;3;2M\x1b[<0;3;2m");
+    }
+
+    #[gpui::test]
+    fn focus_changes_are_reported_to_programs_that_ask(cx: &mut gpui::TestAppContext) {
+        let (panel, cx) = focused_panel(cx);
+        panel.update(cx, |panel, cx| {
+            panel.with_active_tab(cx, |tab| {
+                tab.emulator.feed(b"\x1b[?1004h");
+                for _ in 0..100 {
+                    tab.emulator.feed(b"history\r\n");
+                }
+                tab.emulator.scroll(20);
+            });
+        });
+        cx.update(|window, cx| {
+            window.blur();
+            window.draw(cx).clear();
+        });
+        assert!(sent(&panel, cx).ends_with(b"\x1b[O"));
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.active_tab(cx).unwrap().emulator.display_offset(),
+                20,
+                "a focus report must not snap the scrollback"
+            );
+        });
+        cx.update(|window, cx| {
+            let focus = panel.read(cx).focus_handle();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        assert!(sent(&panel, cx).ends_with(b"\x1b[O\x1b[I"));
+    }
 
     #[gpui::test]
     fn slow_trackpad_scroll_accumulates_per_terminal(cx: &mut gpui::TestAppContext) {
@@ -1887,16 +2603,24 @@ mod tests {
         panel.read_with(cx, |panel, cx| {
             assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 11);
         });
-        // A fresh gesture does not inherit the previous gesture's partial row.
+        // The partial row is on screen, so a fresh gesture continues from it.
         cx.simulate_event(ScrollWheelEvent {
             position: geometry.bounds.center(),
-            delta: ScrollDelta::Lines(point(0.0, 0.25)),
+            delta: ScrollDelta::Lines(point(0.0, 0.5)),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Started,
         });
         panel.update(cx, |panel, cx| {
-            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 11);
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 12);
             assert_eq!(panel.active_tab(cx).unwrap().scroll_remainder, 0.25);
+            // Scrolling past the live bottom rests flush with it.
+            for _ in 0..30 {
+                panel.wheel(-0.7, geometry.bounds.center(), &Modifiers::default(), cx);
+            }
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 0);
+            assert_eq!(panel.active_tab(cx).unwrap().scroll_remainder, 0.0);
+            panel.wheel(11.25, geometry.bounds.center(), &Modifiers::default(), cx);
+            assert_eq!(panel.active_tab(cx).unwrap().emulator.display_offset(), 11);
             panel.select_tab_by_key(1, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear());

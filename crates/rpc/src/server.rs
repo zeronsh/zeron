@@ -201,6 +201,9 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token:
         }
         Ok(resp)
     };
+    // Keystrokes and their echoes are tiny frames: Nagle would hold each one
+    // behind the peer's delayed ACK of the previous.
+    let _ = stream.set_nodelay(true);
     let ws = match tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         authorize,

@@ -240,6 +240,8 @@ final class FixtureSessionSource: SessionSource {
 }
 
 extension SessionSource {
+    /// Nothing was ever sent or queued here.
+    var isUnused: Bool { false }
     func modelPicker() -> UIViewController? { nil }
     func signInTarget() -> AgentAccountsViewController.Target? { nil }
 }

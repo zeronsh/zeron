@@ -23,7 +23,10 @@ concurrency:
 jobs:
   upload:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-latest
+    # Xcode 27.1 (the iOS 27.1 SDK): built with an older SDK the app runs in
+    # compatibility mode on iPhone Duo, without its vertical bars or layouts.
+    # macos-latest tops out at Xcode 26; the xcode-27 image (preview) has it.
+    runs-on: xcode-27
     # Cold Rust core build (release profile, thin LTO) + archive + processing.
     timeout-minutes: 90
     env:
@@ -134,8 +137,12 @@ jobs:
           key: ios-core
           cache-on-failure: true
 
+      # The image defaults to Xcode 27.0. Select 27.1 globally rather than via
+      # DEVELOPER_DIR: build-core.sh runs cargo under `env -i`.
       - name: Xcode version
-        run: xcodebuild -version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
 
       # No separate simulator build: a generic simulator destination also
       # builds x86_64, which the Rust core doesn't ship, and PR CI already

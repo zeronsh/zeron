@@ -64,6 +64,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         #endif
         showOnboardingIfNeeded()
+        #if DEBUG
+        TerminalProbe.runIfAsked(app: app, router: window.rootViewController as? AppRouter)
+        #endif
         if let router = window.rootViewController as? AppRouter, let i = args.firstIndex(of: "-route"), i + 1 < args.count {
             let route = args[i + 1]
             DispatchQueue.main.async {

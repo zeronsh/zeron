@@ -19,8 +19,7 @@
 //! - Query responses (DSR/DA/…) surface as `Event::PtyWrite` on the listener;
 //!   [`Emulator::feed`] returns them so the panel can write them back.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -29,7 +28,8 @@ use alacritty_terminal::selection::{Selection, SelectionRange};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb as AnsiRgb,
+    Color as AnsiColor, CursorShape as AnsiCursorShape, CursorStyle as AnsiCursorStyle, NamedColor,
+    Processor, Rgb as AnsiRgb,
 };
 
 /// Grid coordinates and selection granularity, re-exported so the panel and
@@ -131,6 +131,8 @@ pub struct CellSnapshot {
     pub wide_spacer: bool,
     /// Inside the active selection: the view paints a wash over this cell.
     pub selected: bool,
+    /// Typed locally and shown before the remote echo confirmed it.
+    pub predicted: bool,
 }
 
 impl CellSnapshot {
@@ -145,6 +147,26 @@ impl CellSnapshot {
     }
 }
 
+/// How the cursor paints (DECSCUSR), decoupled from the parser's types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Beam,
+    Underline,
+    HollowBlock,
+}
+
+/// Which pointer events the running program asked to receive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTracking {
+    /// Presses and releases (1000).
+    Click,
+    /// Plus motion while a button is held (1002).
+    Drag,
+    /// Plus all motion (1003).
+    Motion,
+}
+
 /// Cursor position in viewport coordinates (row 0 = top of the visible grid).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorSnapshot {
@@ -153,15 +175,19 @@ pub struct CursorSnapshot {
 }
 
 /// Captures `Term` callbacks. Interior-mutable because `EventListener::send_event`
-/// takes `&self`; single-threaded (the emulator lives inside a gpui entity).
+/// takes `&self`; `Send` so an emulator can live behind a mutex shared by a
+/// network task and a UI thread (the mobile core).
 #[derive(Default, Clone)]
 struct EventCapture {
-    events: Rc<RefCell<Vec<Event>>>,
+    events: Arc<Mutex<Vec<Event>>>,
 }
 
 impl EventListener for EventCapture {
     fn send_event(&self, event: Event) {
-        self.events.borrow_mut().push(event);
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event);
     }
 }
 
@@ -179,6 +205,12 @@ impl Emulator {
         let capture = EventCapture::default();
         let config = Config {
             scrolling_history: SCROLLBACK_LINES,
+            // A blinking block until the program asks otherwise (DECSCUSR);
+            // `CSI 0 q` returns here.
+            default_cursor_style: AnsiCursorStyle {
+                shape: AnsiCursorShape::Block,
+                blinking: true,
+            },
             ..Config::default()
         };
         let term = Term::new(config, &GridSize::new(cols, rows), capture.clone());
@@ -195,8 +227,31 @@ impl Emulator {
     /// terminal wants written back to the PTY (DSR/DA query responses etc.).
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, bytes);
+        self.drain_events()
+    }
+
+    /// When a synchronized update (DEC 2026) is holding output back, the
+    /// moment it must be shown anyway even if the program never ends it.
+    pub fn sync_deadline(&self) -> Option<std::time::Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Apply a synchronized update whose deadline passed. Returns any query
+    /// responses it produced, like [`Self::feed`].
+    pub fn finish_sync(&mut self) -> Vec<u8> {
+        self.parser.stop_sync(&mut self.term);
+        self.drain_events()
+    }
+
+    fn drain_events(&mut self) -> Vec<u8> {
         let mut responses = Vec::new();
-        for event in self.capture.events.borrow_mut().drain(..) {
+        for event in self
+            .capture
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
             match event {
                 Event::PtyWrite(text) => responses.extend_from_slice(text.as_bytes()),
                 Event::Title(title) => self.title = Some(title),
@@ -233,6 +288,70 @@ impl Emulator {
     /// Arrow keys should send SS3 (`ESC O A`) instead of CSI.
     pub fn app_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// The cursor's shape and whether it blinks, as the program set them.
+    pub fn cursor_style(&self) -> (CursorShape, bool) {
+        let style = self.term.cursor_style();
+        let shape = match style.shape {
+            AnsiCursorShape::Beam => CursorShape::Beam,
+            AnsiCursorShape::Underline => CursorShape::Underline,
+            AnsiCursorShape::HollowBlock => CursorShape::HollowBlock,
+            AnsiCursorShape::Block | AnsiCursorShape::Hidden => CursorShape::Block,
+        };
+        (shape, style.blinking)
+    }
+
+    /// Pointer reporting the program asked for, if any.
+    pub fn mouse_tracking(&self) -> Option<MouseTracking> {
+        let mode = self.term.mode();
+        if mode.contains(TermMode::MOUSE_MOTION) {
+            Some(MouseTracking::Motion)
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            Some(MouseTracking::Drag)
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            Some(MouseTracking::Click)
+        } else {
+            None
+        }
+    }
+
+    /// Mouse reports use the SGR encoding (1006) rather than the legacy one.
+    pub fn sgr_mouse(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// A full-screen program owns the alternate screen.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// The wheel should arrive as arrow keys on the alternate screen (1007).
+    pub fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
+    /// The program wants `CSI I` / `CSI O` on focus changes (1004).
+    pub fn focus_reporting(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
+    /// The character in a live (not scrolled-back) viewport cell.
+    pub fn live_char(&self, row: usize, col: usize) -> Option<char> {
+        if row >= self.rows() || col >= self.cols() {
+            return None;
+        }
+        Some(self.term.grid()[Line(row as i32)][Column(col)].c)
+    }
+
+    /// The cursor in live viewport coordinates, regardless of scrollback
+    /// or visibility.
+    pub fn live_cursor(&self) -> CursorSnapshot {
+        let point = self.term.grid().cursor.point;
+        CursorSnapshot {
+            row: point.line.0.max(0) as usize,
+            col: point.column.0,
+        }
     }
 
     /// Pastes should be wrapped in `ESC [200~` / `ESC [201~`.
@@ -327,7 +446,14 @@ impl Emulator {
 
     /// Snapshot one viewport row (0 = top) honoring the scrollback offset.
     pub fn line(&self, viewport_row: usize) -> Vec<CellSnapshot> {
-        self.line_inner(viewport_row, self.selection_range())
+        self.line_inner(viewport_row as i32, self.selection_range())
+    }
+
+    /// The history row just above the viewport, which a partial scroll
+    /// reveals; `None` at the top of the scrollback.
+    pub fn line_above(&self) -> Option<Vec<CellSnapshot>> {
+        (self.display_offset() < self.history_lines())
+            .then(|| self.line_inner(-1, self.selection_range()))
     }
 
     /// The shared body of [`Self::line`], taking the selection range as an
@@ -335,11 +461,11 @@ impl Emulator {
     /// per row — `to_range` re-walks the grid for semantic and line selections.
     fn line_inner(
         &self,
-        viewport_row: usize,
+        viewport_row: i32,
         selection: Option<SelectionRange>,
     ) -> Vec<CellSnapshot> {
         let offset = self.display_offset() as i32;
-        let line = Line(viewport_row as i32 - offset);
+        let line = Line(viewport_row - offset);
         let grid = self.term.grid();
         let row = &grid[line];
         (0..self.cols())
@@ -361,6 +487,7 @@ impl Emulator {
                         .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
                     selected: selection
                         .is_some_and(|range| range.contains(Point::new(line, Column(col)))),
+                    predicted: false,
                 }
             })
             .collect()
@@ -370,14 +497,14 @@ impl Emulator {
     pub fn lines(&self) -> Vec<Vec<CellSnapshot>> {
         let selection = self.selection_range();
         (0..self.rows())
-            .map(|r| self.line_inner(r, selection))
+            .map(|r| self.line_inner(r as i32, selection))
             .collect()
     }
 
     /// Cursor in viewport coordinates; `None` when hidden or scrolled out.
     pub fn cursor(&self) -> Option<CursorSnapshot> {
         let content = self.term.renderable_content();
-        if content.cursor.shape == CursorShape::Hidden {
+        if content.cursor.shape == AnsiCursorShape::Hidden {
             return None;
         }
         let Point { line, column } = content.cursor.point;
@@ -389,6 +516,56 @@ impl Emulator {
             row: row as usize,
             col: column.0,
         })
+    }
+
+    /// The selection's viewport bounds — `((row, col), (row, col))`, clamped
+    /// to what's on screen — for placing a touch edit menu beside it.
+    pub fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+        let range = self.selection_range()?;
+        let offset = self.display_offset() as i32;
+        let last = self.rows() as i32 - 1;
+        let row = |line: Line| (line.0 + offset).clamp(0, last) as usize;
+        Some((
+            (row(range.start.line), range.start.column.0),
+            (row(range.end.line), range.end.column.0),
+        ))
+    }
+
+    /// Plain text of the viewport (`all`: the whole scrollback and screen),
+    /// trailing spaces and blank edge lines dropped.
+    pub fn text(&self, all: bool) -> String {
+        let grid = self.term.grid();
+        let offset = self.display_offset() as i32;
+        let (top, bottom) = if all {
+            (-(self.history_lines() as i32), self.rows() as i32)
+        } else {
+            (-offset, self.rows() as i32 - offset)
+        };
+        let mut lines: Vec<String> = (top..bottom)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                let mut s: String = (0..self.cols())
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .map(|cell| if cell.c == '\0' { ' ' } else { cell.c })
+                    .collect();
+                s.truncate(s.trim_end().len());
+                s
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        let first = lines
+            .iter()
+            .position(|l| !l.is_empty())
+            .unwrap_or(lines.len());
+        lines.drain(..first);
+        lines.join("\n")
     }
 
     /// Test/diagnostic helper: a viewport row as trimmed text (wide-char
@@ -423,6 +600,45 @@ mod tests {
 
     fn emu(cols: u16, rows: u16) -> Emulator {
         Emulator::new(cols, rows)
+    }
+
+    #[test]
+    fn cursor_style_follows_decscusr_and_resets_to_a_blinking_block() {
+        let mut e = emu(10, 2);
+        assert_eq!(e.cursor_style(), (CursorShape::Block, true));
+        e.feed(b"\x1b[6 q");
+        assert_eq!(e.cursor_style(), (CursorShape::Beam, false));
+        e.feed(b"\x1b[3 q");
+        assert_eq!(e.cursor_style(), (CursorShape::Underline, true));
+        e.feed(b"\x1b[0 q");
+        assert_eq!(e.cursor_style(), (CursorShape::Block, true));
+    }
+
+    #[test]
+    fn input_modes_track_the_program() {
+        let mut e = emu(10, 2);
+        assert_eq!(e.mouse_tracking(), None);
+        e.feed(b"\x1b[?1000h\x1b[?1006h\x1b[?1049h\x1b[?1004h");
+        assert_eq!(e.mouse_tracking(), Some(MouseTracking::Click));
+        assert!(e.sgr_mouse() && e.alt_screen() && e.focus_reporting());
+        e.feed(b"\x1b[?1002h");
+        assert_eq!(e.mouse_tracking(), Some(MouseTracking::Drag));
+        e.feed(b"\x1b[?1000l\x1b[?1002l\x1b[?1049l");
+        assert_eq!(e.mouse_tracking(), None);
+        assert!(!e.alt_screen());
+    }
+
+    #[test]
+    fn a_synchronized_update_holds_output_until_it_ends_or_times_out() {
+        let mut e = emu(10, 2);
+        e.feed(b"\x1b[?2026hpartial");
+        assert_eq!(e.row_text(0), "", "held while the update is open");
+        assert!(e.sync_deadline().is_some());
+        e.finish_sync();
+        assert_eq!(e.row_text(0), "partial");
+        assert!(e.sync_deadline().is_none());
+        e.feed(b"\x1b[?2026h\r\x1b[Kwhole\x1b[?2026l");
+        assert_eq!(e.row_text(0), "whole", "a closed update lands at once");
     }
 
     #[test]
@@ -727,6 +943,19 @@ mod tests {
         e.start_selection(SelectionType::Simple, e.grid_point(0, 2), Side::Left);
         assert_eq!(e.selection_text(), None);
         assert!(!e.has_selection());
+    }
+
+    #[test]
+    fn text_covers_the_view_or_the_whole_scrollback() {
+        let mut e = emu(10, 3);
+        for i in 1..=6 {
+            e.feed(format!("line{i}\r\n").as_bytes());
+        }
+        e.scroll(2);
+        assert_eq!(e.text(false), "line3\nline4\nline5");
+        assert!(e.text(true).starts_with("line1\nline2"));
+        e.start_selection(SelectionType::Semantic, e.grid_point(0, 1), Side::Left);
+        assert_eq!(e.selection_bounds(), Some(((0, 0), (0, 4))));
     }
 
     #[test]

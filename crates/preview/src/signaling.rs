@@ -7,7 +7,7 @@ use crate::{
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PreviewService;
@@ -39,27 +39,59 @@ pub async fn run(
     config: Config,
     catalog: Catalog,
     peers: Peers,
-    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    outgoing: mpsc::Receiver<OutgoingSignal>,
     stop: CancellationToken,
 ) {
+    run_with_wake(
+        config,
+        catalog,
+        peers,
+        outgoing,
+        stop,
+        Arc::new(Notify::new()),
+    )
+    .await
+}
+
+/// [`run`], wakeable: a device whose network changed or that comes back
+/// from suspension (a phone) notifies `wake`. Waiting to reconnect, it
+/// redials at once; connected, it proves the socket with a ping and redials
+/// if nothing answers within [`WAKE_PROBE`] — rather than leaning on the
+/// 40s lease while the socket may be dead.
+pub async fn run_with_wake(
+    config: Config,
+    catalog: Catalog,
+    peers: Peers,
+    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    stop: CancellationToken,
+    wake: Arc<Notify>,
+) {
     loop {
-        let connected = connect(&config, &catalog, &peers, &mut outgoing);
+        let connected = connect(&config, &catalog, &peers, &mut outgoing, &wake);
         tokio::select! { _ = stop.cancelled() => break, result = connected => {
             if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
         } }
         catalog.clear_remote();
         peers.clear().await;
         while outgoing.try_recv().is_ok() {} // signaling from the old lease is stale
-        tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            _ = wake.notified() => {}
+        }
     }
     catalog.clear_remote();
     peers.clear().await;
 }
+
+/// How long a woken connection has to answer its probe.
+const WAKE_PROBE: Duration = Duration::from_millis(2500);
 async fn connect(
     config: &Config,
     catalog: &Catalog,
     peers: &Peers,
     outgoing: &mut mpsc::Receiver<OutgoingSignal>,
+    wake: &Notify,
 ) -> anyhow::Result<()> {
     let token = config.tokens.token().await?;
     let mut url = reqwest::Url::parse(&config.edge_url)?;
@@ -92,6 +124,8 @@ async fn connect(
         .await?;
     let mut ping = tokio::time::interval(Duration::from_secs(10));
     let mut last_message = tokio::time::Instant::now();
+    // A woken socket's probe: it must hear something by this deadline.
+    let mut probe: Option<tokio::time::Instant> = None;
     // SDP gathering must not block the socket heartbeat or other devices.
     let mut negotiations = tokio::task::JoinSet::new();
     loop {
@@ -99,6 +133,13 @@ async fn connect(
             _ = ping.tick() => {
                 anyhow::ensure!(last_message.elapsed() < Duration::from_secs(40), "preview coordinator lease expired");
                 write.send(Message::Text("ping".into())).await?;
+            }
+            _ = wake.notified() => {
+                write.send(Message::Text("ping".into())).await?;
+                probe = Some(tokio::time::Instant::now() + WAKE_PROBE);
+            }
+            _ = async { tokio::time::sleep_until(probe.unwrap_or_else(tokio::time::Instant::now)).await }, if probe.is_some() => {
+                anyhow::bail!("preview coordinator didn't answer after a wake");
             }
             _ = changes.changed() => {
                 let next = catalog.local_services();
@@ -111,6 +152,7 @@ async fn connect(
             message = read.next() => {
                 let message = message.ok_or_else(|| anyhow::anyhow!("preview coordinator closed"))??;
                 last_message = tokio::time::Instant::now();
+                probe = None;
                 match message {
                     Message::Text(text) if text == "pong" => {},
                     Message::Text(text) => {

@@ -57,6 +57,11 @@ final class CoreSessionSource: SessionSource {
         handle.setViewAttached(attached: false)
     }
 
+    var isUnused: Bool {
+        let t = handle.transcriptStatus()
+        return t.entryCount == 0 && t.pendingCount == 0 && handle.composer().queue.isEmpty
+    }
+
     func reattach() {
         handle.setViewAttached(attached: true)
     }
@@ -166,6 +171,7 @@ final class CoreSessionSource: SessionSource {
         do {
             if mode == .interrupt, chrome.running { try handle.interrupt() }
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
+            app?.forgetFreshSideChat(chatId)
             app?.noteDeliveryActivity()
             sendFailure = nil
             return true

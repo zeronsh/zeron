@@ -41,3 +41,4 @@ similar.workspace = true
 zeron-syntax.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 thiserror.workspace = true
+zeron-term.workspace = true

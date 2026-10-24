@@ -371,7 +371,28 @@ pub struct TranscriptView {
     shared: Arc<Shared>,
     /// Live session subscription (Rust→Rust; rows never cross FFI).
     watch: Mutex<Option<zeron_client::SnapshotWatch>>,
+    /// A subagent's transcript being followed instead.
+    subagent: Mutex<Option<crate::client_ffi::companions::SubagentFollow>>,
     visuals: Arc<crate::visual::VisualHub>,
+}
+
+/// Feeds a followed subagent's transcript to the layout worker.
+struct SubagentInput(Mutex<Sender<Msg>>);
+
+impl zeron_client::SubagentSink for SubagentInput {
+    fn transcript(&self, entries: Vec<Arc<SessionMessageEntry>>) {
+        let live = entries.last().is_some_and(|e| e.status == Some(MessageStatus::Streaming));
+        let input = TranscriptInput {
+            entries,
+            pending: Vec::new(),
+            working: live,
+            working_since_ms: None,
+            streaming: live,
+        };
+        let _ = self.0.lock().unwrap().send(Msg::Input(input));
+    }
+
+    fn unavailable(&self, _message: String) {}
 }
 
 #[uniffi::export]
@@ -402,6 +423,7 @@ impl TranscriptView {
             tx: Mutex::new(tx),
             shared,
             watch: Mutex::new(None),
+            subagent: Mutex::new(None),
             visuals,
         })
     }
@@ -449,6 +471,23 @@ impl TranscriptView {
         true
     }
 
+    /// Follow a subagent's transcript, read-only: `doc_id` (spawned in
+    /// `chat_id` — a chat, or a parent subagent's doc). `frozen`: it finished
+    /// (its uploaded copy first). Returns false when the chat is unknown.
+    pub fn attach_subagent(
+        &self,
+        client: Arc<crate::client_ffi::CoreClient>,
+        chat_id: String,
+        doc_id: String,
+        frozen: bool,
+    ) -> bool {
+        let sink = Arc::new(SubagentInput(Mutex::new(self.tx.lock().unwrap().clone())));
+        let follow = crate::client_ffi::companions::follow_subagent(&client, &chat_id, &doc_id, frozen, sink);
+        let attached = follow.is_some();
+        *self.subagent.lock().unwrap() = follow;
+        attached
+    }
+
     pub fn set_viewport(&self, width: f32, text_scale: f32) {
         self.send(Msg::Viewport {
             width,
@@ -484,6 +523,7 @@ impl TranscriptView {
 
     pub fn close(&self) {
         self.watch.lock().unwrap().take();
+        self.subagent.lock().unwrap().take();
         self.visuals.shutdown();
         self.send(Msg::Shutdown);
     }

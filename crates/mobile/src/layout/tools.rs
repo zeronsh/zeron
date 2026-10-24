@@ -54,6 +54,17 @@ pub(crate) struct ToolLine {
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    /// A subagent spawn's card: what opening it needs.
+    pub agent: Option<AgentLink>,
+}
+
+pub(crate) struct AgentLink {
+    /// The child's transcript doc; `None` until the host binds one (the
+    /// card can't open yet).
+    pub doc_id: Option<String>,
+    pub title: String,
+    /// The model the spawn named, as a faint trailing label.
+    pub model: Option<PText>,
 }
 
 pub(crate) struct ToolGroup {
@@ -134,6 +145,36 @@ fn tool_icon(call: &ToolCall) -> &'static str {
         ToolCall::Todo { .. } => "tool-checklist",
         ToolCall::Unknown { name, .. } if name == "Agent" || name.starts_with("Agent: ") || name.eq_ignore_ascii_case("wait for agents") => "tool-bot",
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => "tool-widget",
+    }
+}
+
+/// A spawn's model for its card: the catalog's label when the id is one
+/// (`claude-haiku-5` → "Haiku 5"), Claude's bare aliases capitalized.
+fn spawn_model_label(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    if matches!(lower.as_str(), "haiku" | "sonnet" | "opus" | "inherit") {
+        let mut c = lower.chars();
+        return c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    }
+    let harness = if lower.starts_with("claude") {
+        "claude-code"
+    } else if lower.starts_with("gpt") || lower.starts_with("codex") {
+        "codex"
+    } else {
+        ""
+    };
+    let label = zeron_client::catalog::model_label(harness, model);
+    match lower.strip_prefix("claude-") {
+        // An id the catalog doesn't know yet: `claude-haiku-5` → "Haiku 5".
+        Some(rest) if label == model => {
+            let mut words = rest.split('-');
+            let family = words.next().unwrap_or_default();
+            let version: Vec<&str> = words.take_while(|w| w.len() <= 2 && w.chars().all(|c| c.is_ascii_digit())).collect();
+            let mut c = family.chars();
+            let family = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+            if version.is_empty() { family } else { format!("{family} {}", version.join(".")) }
+        }
+        _ => label,
     }
 }
 
@@ -797,6 +838,7 @@ impl RowBuilder {
                 match part {
                     MessagePart::Tool { call, is_error, resolved, subagent_ref, subagent_status, .. } => {
                         let (label, detail) = zeron_proto::view::tool_chip_content(call);
+                        let agent_title = detail.clone();
                         // Subagent lifecycle is distinct from `resolved`: under
                         // eager-done the spawn call resolves while the subagent
                         // still runs (desktop transcript.rs `running`/`failed`).
@@ -818,6 +860,13 @@ impl RowBuilder {
                         let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
                         let open = !agents && self.detail_open.get(&dkey).copied().unwrap_or(false);
+                        let agent = agents.then(|| AgentLink {
+                            doc_id: subagent_ref.clone(),
+                            title: agent_title,
+                            model: call.subagent_model().map(|m| {
+                                prepare_plain(ctx, &spawn_model_label(m), st.label, st.lh, ColorRole::TextFaint, WhiteSpace::Pre)
+                            }),
+                        });
                         let mut body = Vec::new();
                         if open {
                             body.extend(lines_block(ctx, &st, &call_text(call), Some(CALL_WRAP_COLS)));
@@ -833,6 +882,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            agent,
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -860,6 +910,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            agent: None,
                         });
                     }
                     _ => {}
@@ -1087,7 +1138,8 @@ fn place_block(block: &DetailBlock, px: Px, bx: f32, by: f32, bw: f32, out: Opti
 }
 
 /// Subagent spawns: 38pt rows holding a bordered 30pt card — icon tile,
-/// "Agent", the description, a mini spinner while it runs.
+/// "Agent", the description, the model it was given, then a mini spinner
+/// while it runs or a chevron: the whole card opens the child's transcript.
 fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
     let row = d(px, AGENT_ROW);
     let h = row * t.lines.len() as f32;
@@ -1103,21 +1155,48 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
         let ty = card_y + (card_h - tile) / 2.0;
         o.fill(tx, ty, tile, tile, d(px, 5.0), ColorRole::AgentTile);
         let is = d(px, 12.0);
-        o.widget(WidgetKind::Icon { name: line.icon.clone(), color: ColorRole::TextSecondary }, (tx + (tile - is) / 2.0, ty + (tile - is) / 2.0, is, is), None);
+        let icon_color = if line.failed { ColorRole::Danger } else { ColorRole::TextSecondary };
+        o.widget(WidgetKind::Icon { name: line.icon.clone(), color: icon_color }, (tx + (tile - is) / 2.0, ty + (tile - is) / 2.0, is, is), None);
         let lx = tx + tile + d(px, 8.0);
         let lw = line.label.p.max_content_width();
         place_text(&line.label, lx, card_y + (card_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
-        let spin = if line.running { d(px, 14.0) + d(px, 8.0) } else { 0.0 };
+        let opens = line.agent.as_ref().is_some_and(|a| a.doc_id.is_some());
+        // The trailing glyph: spinner while it runs, else a chevron when it opens.
+        let glyph = if line.running || opens { d(px, 14.0) + d(px, 8.0) } else { 0.0 };
+        let mut right = x + cw - d(px, 8.0) - glyph;
+        if let Some(model) = line.agent.as_ref().and_then(|a| a.model.as_ref()) {
+            let mw = model.p.max_content_width();
+            // Only when the description still has room beside it.
+            if right - mw - d(px, 8.0) > lx + lw + d(px, 64.0) {
+                place_text(model, right - mw, card_y + (card_h - model.lh) / 2.0, mw + 1.0, Some(o));
+                right -= mw + d(px, 10.0);
+            }
+        }
         if let Some(detail) = &line.detail {
             let dx = lx + lw + d(px, 8.0);
-            let avail = x + cw - d(px, 8.0) - spin - dx;
+            let avail = right - dx;
             if avail > 1.0 {
                 place_text_lines(detail, dx, card_y + (card_h - detail.lh) / 2.0, avail, 1, px, o);
             }
         }
+        let s = d(px, 14.0);
+        let gx = x + cw - d(px, 8.0) - s;
         if line.running {
-            let s = d(px, 14.0);
-            o.widget(WidgetKind::Spinner, (x + cw - d(px, 8.0) - s, card_y + (card_h - s) / 2.0, s, s), None);
+            o.widget(WidgetKind::Spinner, (gx, card_y + (card_h - s) / 2.0, s, s), None);
+        } else if opens {
+            o.widget(WidgetKind::Icon { name: "chevron.right".into(), color: ColorRole::TextFaint }, (gx + d(px, 2.0), card_y + (card_h - s) / 2.0 + d(px, 1.0), s - d(px, 4.0), s - d(px, 4.0)), None);
+        }
+        if let Some(agent) = &line.agent {
+            o.widget(
+                WidgetKind::Subagent {
+                    doc_id: agent.doc_id.clone(),
+                    title: agent.title.clone(),
+                    running: line.running,
+                    failed: line.failed,
+                },
+                (x, card_y, cw, card_h),
+                None,
+            );
         }
     }
     h
@@ -1178,6 +1257,13 @@ mod tests {
         // Under budget: untouched.
         let (lines, more) = thought_lines(&parse_full("short thought"), MAX_LINES);
         assert!(!more && bytes(&lines) == "short thought".len());
+    }
+
+    #[test]
+    fn spawn_models_read_as_names() {
+        assert_eq!(spawn_model_label("haiku"), "Haiku");
+        assert_eq!(spawn_model_label("claude-haiku-9"), "Haiku 9");
+        assert_eq!(spawn_model_label("claude-sonnet-9-5-20991231"), "Sonnet 9.5");
     }
 
     #[test]

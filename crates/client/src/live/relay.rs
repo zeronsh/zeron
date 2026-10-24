@@ -158,6 +158,37 @@ impl Relay {
         unreachable!("the second attempt always returns")
     }
 
+    /// Open a host stream (terminal output, a subagent's transcript). The
+    /// subscription cancels host-side when dropped; a stale cached link is
+    /// dropped so the caller's retry dials fresh.
+    pub(crate) async fn subscribe(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<zeron_rpc::RpcSubscription> {
+        let client = self
+            .links
+            .client(device_id)
+            .await
+            .map_err(|e| map_rpc(device_id, method, e))?;
+        match tokio::time::timeout(CALL_TIMEOUT, client.subscribe_checked(method, params)).await {
+            Ok(Ok(subscription)) => Ok(subscription),
+            Ok(Err(err)) => {
+                if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
+                    self.links.invalidate(device_id);
+                }
+                Err(map_rpc(device_id, method, err))
+            }
+            Err(_) => {
+                self.links.invalidate(device_id);
+                Err(ClientError::HostUnavailable(format!(
+                    "{method} on {device_id} timed out"
+                )))
+            }
+        }
+    }
+
     /// Chunked upload (`UploadChunk` ×N with `seq`, then `UploadCommit`).
     /// Returns the durable host path. Idempotent per `upload_id`.
     pub(crate) async fn upload(

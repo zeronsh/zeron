@@ -223,7 +223,16 @@ feature spec `docs/research/feature-inventory.md` §1.
   toggle) as gpui popovers with `menu-in` scale/fade.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
-  drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
+  drag 160px–55vh, 80ms resize debounce, 1MB replay, detach ≠ close. No artificial latency: keys
+  are written the moment they land (one write in flight per tab keeps them ordered) and output
+  after a quiet spell is sent the moment it is read (only floods are paced, 4ms). Typed text goes
+  through the platform text input (IME, dead keys, layout symbols); mouse/focus reporting,
+  DECSCUSR cursors with a typing-aware blink, synchronized output, a contrast floor for program
+  colors. A terminal on another device streams over a direct WebRTC link
+  (`engine/src/terminals/link.rs`, `remote_terminals.rs`), falling back to the device-room relay
+  only when the devices can't reach each other and moving back mid-session without a gap (input
+  is numbered and acknowledged, so a path change neither drops nor repeats a keystroke); on
+  slow links the viewer predicts the echo of typed text (`ui/src/terminal/predict.rs`).
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
 - **Animation kit** (`zeron-ui::motion`): small helpers over gpui `Animation` reproducing the

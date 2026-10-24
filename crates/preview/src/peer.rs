@@ -17,7 +17,8 @@ use webrtc::{
     data_channel::{DataChannel, DataChannelEvent},
     peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
-        RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState, RTCSessionDescription,
+        RTCIceCandidateType, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
+        RTCPeerConnectionState, RTCSessionDescription, SettingEngine,
     },
 };
 
@@ -56,8 +57,16 @@ struct Inner {
     changed: Arc<Notify>,
     stop: CancellationToken,
     ice_servers: Vec<RTCIceServer>,
+    /// Local sockets ICE gathers host candidates from.
+    udp_addrs: Vec<String>,
 }
 const PAIR_INTERVAL: Duration = Duration::from_secs(10);
+/// Longest a description waits on STUN before going out with the
+/// candidates it has. Signaling is not trickled, so every pairing pays this
+/// on both sides when STUN doesn't answer (a network that blocks it): host
+/// candidates are ready at once, and a STUN answer that hasn't come in a
+/// second rarely comes at all.
+const GATHER_BUDGET: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct Peers(Arc<Inner>);
 impl Peers {
@@ -83,6 +92,7 @@ impl Peers {
                     ],
                     ..Default::default()
                 }],
+                udp_addrs: vec!["0.0.0.0:0".into()],
             })),
             receiver,
         )
@@ -99,6 +109,14 @@ impl Peers {
                 ..Default::default()
             }]
         };
+        Ok(())
+    }
+    /// Bind ICE to these local addresses (default: every interface). Tests
+    /// pair over loopback, which a host firewall doesn't filter. Must be
+    /// called before the handle is shared.
+    pub fn set_udp_addrs(&mut self, addrs: Vec<String>) -> anyhow::Result<()> {
+        let inner = Arc::get_mut(&mut self.0).context("preview peers already shared")?;
+        inner.udp_addrs = addrs;
         Ok(())
     }
     async fn send(&self, to: &str, signal: Signal) -> anyhow::Result<()> {
@@ -127,13 +145,14 @@ impl Peers {
         });
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
+                .with_setting_engine(setting_engine())
                 .with_configuration(
                     RTCConfigurationBuilder::new()
                         .with_ice_servers(self.0.ice_servers.clone())
                         .build(),
                 )
                 .with_handler(handler.clone())
-                .with_udp_addrs(vec!["0.0.0.0:0"])
+                .with_udp_addrs(self.0.udp_addrs.clone())
                 .with_data_channel_send_buffer_limit(256 * 1024)
                 .with_sctp_receive_buffer_size(512 * 1024)
                 .build()
@@ -161,11 +180,14 @@ impl Peers {
         };
         peer.pc.set_local_description(description).await?;
         tracing::debug!(offer, "gathering preview candidates");
-        // Include candidates gathered so far. A STUN probe on an unreachable
-        // interface/server may never report Complete; that must not discard
-        // usable host or server-reflexive candidates from the other probes.
+        // Include candidates gathered so far. Gathering counts as done at the
+        // first server-reflexive candidate (the address another network can
+        // reach; the other STUN servers would only repeat it) or when it
+        // completes. A STUN probe on an unreachable interface/server may
+        // never report Complete; that must not discard usable host or
+        // server-reflexive candidates from the other probes.
         let mut gathered = peer.gathered.clone();
-        match tokio::time::timeout(Duration::from_secs(3), gathered.wait_for(|done| *done)).await {
+        match tokio::time::timeout(GATHER_BUDGET, gathered.wait_for(|done| *done)).await {
             Ok(result) => {
                 result.context("preview candidate gathering stopped")?;
             }
@@ -303,6 +325,10 @@ impl Peers {
         service: &str,
         websocket: bool,
     ) -> anyhow::Result<Stream> {
+        self.connect(device).await?.open(service, websocket).await
+    }
+    /// The live connection to `device`, pairing first when there is none.
+    pub async fn connect(&self, device: &str) -> anyhow::Result<Mux> {
         let device = device.to_owned();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             // A failed or transport-dead peer is closed here; the loop below
@@ -313,8 +339,7 @@ impl Peers {
             if let Some(peer) = stale { peer.close().await; }
             loop {
                 let changed = self.0.changed.notified();
-                let mux = self.0.peers.lock().await.get(&device).and_then(|peer| peer.ready.borrow().clone());
-                if let Some(mux) = mux.filter(|m| !m.is_closed()) { return mux.open(service, websocket).await; }
+                if let Some(mux) = self.ready(&device).await { return Ok(mux); }
                 // Pairing is re-attempted while waiting, so one lost signal or
                 // a stalled attempt costs at most the pacing interval rather
                 // than the whole timeout.
@@ -326,6 +351,17 @@ impl Peers {
             self.remove(&device).await;
         }
         result.context("Could not connect directly to this device. Check that both devices are online and their networks allow WebRTC.")?
+    }
+    /// The open connection to `device`, without pairing.
+    pub async fn ready(&self, device: &str) -> Option<Mux> {
+        let mux = self
+            .0
+            .peers
+            .lock()
+            .await
+            .get(device)
+            .and_then(|peer| peer.ready.borrow().clone());
+        mux.filter(|m| !m.is_closed())
     }
     /// Starts (or asks the initiating device to start) a pairing attempt, at
     /// most once per pacing interval per device. `remove` resets the pacing.
@@ -372,6 +408,22 @@ impl Peers {
         self.0.changed.notify_waiters();
     }
 }
+/// ICE tuned for pairing fast — a person is waiting on it (a terminal
+/// screen, a preview page):
+/// - checks every 50ms (RFC 8445's Ta; the library's default is 200ms),
+///   up to 20 per pair, so a lossy path still gets ~1s of attempts;
+/// - a working server-reflexive or peer-reflexive pair (a phone on cellular,
+///   another network) is nominated after 100ms / 150ms instead of 500ms /
+///   1s. Those waits only let a better pair win, and a host pair on a shared
+///   network answers in a millisecond or two.
+fn setting_engine() -> SettingEngine {
+    let mut setting = SettingEngine::default();
+    setting.set_ice_connection_attempts(Some(Duration::from_millis(50)), Some(20));
+    setting.set_srflx_acceptance_min_wait(Some(Duration::from_millis(100)));
+    setting.set_prflx_acceptance_min_wait(Some(Duration::from_millis(150)));
+    setting
+}
+
 struct Handler {
     channel_claimed: AtomicBool,
     ready: watch::Sender<Option<Mux>>,
@@ -435,6 +487,11 @@ impl Handler {
 impl PeerConnectionEventHandler for Handler {
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
         if state == RTCIceGatheringState::Complete {
+            self.gathered.send_replace(true);
+        }
+    }
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        if event.candidate.typ == RTCIceCandidateType::Srflx {
             self.gathered.send_replace(true);
         }
     }
@@ -506,6 +563,10 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        // Loopback: a host firewall (macOS's blocks unsigned test binaries)
+        // never filters it.
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
         let servers = vec![RTCIceServer {
             urls: vec![format!("stun:{}", blackhole.local_addr().unwrap())],
             ..Default::default()
@@ -559,6 +620,10 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        // Loopback: a host firewall (macOS's blocks unsigned test binaries)
+        // never filters it.
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
         a.set_ice_servers(Vec::new()).unwrap();
         b.set_ice_servers(Vec::new()).unwrap();
         let peer_b = b.clone();
@@ -601,6 +666,10 @@ mod tests {
         let stop = CancellationToken::new();
         let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
         let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        // Loopback: a host firewall (macOS's blocks unsigned test binaries)
+        // never filters it.
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
         Arc::get_mut(&mut a.0).unwrap().ice_servers.clear();
         Arc::get_mut(&mut b.0).unwrap().ice_servers.clear();
         let peer_b = b.clone();
@@ -652,5 +721,131 @@ mod tests {
         b.clear().await;
         forward_a.abort();
         forward_b.abort();
+    }
+
+    /// The same round trip with the answering peer in another process
+    /// (signals relayed over the child's stdin/stdout), as phone and host are.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "benchmark"]
+    async fn bench_cross_process_round_trip() {
+        use tokio::io::AsyncBufReadExt;
+        let stop = CancellationToken::new();
+        let child_role = std::env::var("BENCH_CHILD").is_ok();
+        let me = if child_role { "a" } else { "b" };
+        let (mut peers, mut out) = Peers::new(me.into(), Arc::new(Echo), stop.clone());
+        peers.set_ice_servers(Vec::new()).unwrap();
+        let udp = std::env::var("BENCH_UDP").unwrap_or_else(|_| "127.0.0.1:0".into());
+        peers.set_udp_addrs(vec![udp]).unwrap();
+        if child_role {
+            let p = peers.clone();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(json) = line.strip_prefix("SIG ") {
+                        let _ = p.signal("b", serde_json::from_str(json).unwrap()).await;
+                    }
+                }
+                std::process::exit(0);
+            });
+            while let Some(m) = out.recv().await {
+                println!("SIG {}", serde_json::to_string(&m.signal).unwrap());
+            }
+            return;
+        }
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "peer::tests::bench_cross_process_round_trip",
+                "--nocapture",
+            ])
+            .env("BENCH_CHILD", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        tokio::spawn(async move {
+            while let Some(m) = out.recv().await {
+                let line = format!("SIG {}\n", serde_json::to_string(&m.signal).unwrap());
+                stdin.write_all(line.as_bytes()).await.unwrap();
+            }
+        });
+        let p = peers.clone();
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(json) = line.strip_prefix("SIG ") {
+                    let _ = p.signal("a", serde_json::from_str(json).unwrap()).await;
+                }
+            }
+        });
+        let mut stream = peers.open("a", "service", false).await.unwrap();
+        let mut byte = [0u8; 1];
+        for gap in [0u64, 120] {
+            let mut times = Vec::new();
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+                let t = std::time::Instant::now();
+                stream.write_all(b"x").await.unwrap();
+                stream.read_exact(&mut byte).await.unwrap();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "XRTT gap={gap}ms p50={:.2} p90={:.2} min={:.2} max={:.2}",
+                times[30], times[54], times[0], times[59]
+            );
+        }
+        stop.cancel();
+    }
+
+    /// Round trips of one small frame over a real pair (loopback): what the
+    /// DataChannel itself adds to every keystroke.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "benchmark"]
+    async fn bench_small_frame_round_trip() {
+        let stop = CancellationToken::new();
+        let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
+        let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_ice_servers(Vec::new()).unwrap();
+        b.set_ice_servers(Vec::new()).unwrap();
+        a.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        b.set_udp_addrs(vec!["127.0.0.1:0".into()]).unwrap();
+        let peer_b = b.clone();
+        tokio::spawn(async move {
+            while let Some(m) = a_out.recv().await {
+                let _ = peer_b.signal("a", m.signal).await;
+            }
+        });
+        let peer_a = a.clone();
+        tokio::spawn(async move {
+            while let Some(m) = b_out.recv().await {
+                let _ = peer_a.signal("b", m.signal).await;
+            }
+        });
+        let paired = std::time::Instant::now();
+        let mut stream = b.open("a", "service", false).await.unwrap();
+        eprintln!("PAIR+OPEN {:?}", paired.elapsed());
+        let mut byte = [0u8; 1];
+        // Back to back, then with a typist's pauses between keys.
+        for gap in [0u64, 120] {
+            let mut times = Vec::new();
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+                let t = std::time::Instant::now();
+                stream.write_all(b"x").await.unwrap();
+                stream.read_exact(&mut byte).await.unwrap();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "RTT gap={gap}ms p50={:.2} p90={:.2} min={:.2} max={:.2}",
+                times[30], times[54], times[0], times[59]
+            );
+        }
+        stop.cancel();
     }
 }

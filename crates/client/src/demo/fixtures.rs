@@ -219,6 +219,20 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            parent: Some("chat-veil"),
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 6 * MIN,
+            ..chat(
+                "chat-side-easing",
+                Some("space-zeron"),
+                MAC,
+                "Spring vs. power curve for the veil",
+                "Keep the curve; use the spring only for the follow scroll.",
+            )
+        },
+        DemoChat {
             archived: true,
             last_ago_ms: 3 * DAY,
             created_ago_ms: 4 * DAY,

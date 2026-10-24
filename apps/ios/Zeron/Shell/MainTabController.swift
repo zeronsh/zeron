@@ -188,7 +188,8 @@ final class MainTabController: UIViewController, AppRouter {
     /// when the window widens; nil when none is open. It comes back marked
     /// `relocating`, for the split to clear once it's placed.
     func releaseSession() -> SessionViewController? {
-        guard let session = nav.viewControllers.last(where: { $0 is SessionViewController }) as? SessionViewController else {
+        // The session itself, not a side chat pushed above it.
+        guard let session = nav.viewControllers.first(where: { ($0 as? SessionViewController)?.isCompanion == false }) as? SessionViewController else {
             return nil
         }
         session.relocating = true

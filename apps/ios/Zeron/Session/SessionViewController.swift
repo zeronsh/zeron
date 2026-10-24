@@ -13,6 +13,13 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private let questions = QuestionPanel()
     private let queue = QueuePanel()
     private let pill = StatusPill()
+    /// What's working alongside: subagents, side chats, terminals.
+    private let strip = CompanionStrip()
+    private var companionsItem: UIBarButtonItem!
+    private var companionTokens: [AnyObject] = []
+    /// Shown beside another session (the inspector holds a side chat): it
+    /// isn't the split's current session.
+    var isCompanion = false
     /// A Cloud chat out of credits says so once, above the composer.
     private let creditsNotice = CloudCreditsNotice()
     private let bottom = UIStackView()
@@ -46,6 +53,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         navigationItem.titleView = UIView()
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu(title: "", subtitle: ""))
         navigationItem.rightBarButtonItem?.accessibilityIdentifier = "session-menu"
+        companionsItem = UIBarButtonItem(image: UIImage(systemName: "square.stack.3d.up"), primaryAction: UIAction { [weak self] _ in
+            self?.showCompanions(section: nil)
+        })
+        companionsItem.accessibilityLabel = "Agents, side chats and terminals"
+        companionsItem.accessibilityIdentifier = "session-companions"
         // The session has its own composer, so the tab bar's voice control
         // steps aside with the accessory; the call stays a tap away up here.
         let voiceBar = VoiceBarItem(app: app, host: self)
@@ -56,9 +68,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         if #available(iOS 27.1, *) { voiceBar.item.axisBehavior = .verticalPreferred }
         #endif
         let menu = navigationItem.rightBarButtonItem!
+        let companions = companionsItem!
         let syncVoice = { [weak self, weak voiceBar] in
             guard let self, let voiceBar else { return }
-            let items = voiceBar.visible ? [menu, voiceBar.item] : [menu]
+            let items = voiceBar.visible ? [menu, companions, voiceBar.item] : [menu, companions]
             if self.navigationItem.rightBarButtonItems?.count != items.count {
                 self.navigationItem.setRightBarButtonItems(items, animated: self.view.window != nil)
             }
@@ -83,6 +96,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 sheet.prefersGrabberVisible = true
             }
             self.present(nav, animated: true)
+        }
+        list.onSubagent = { [weak self] doc, title, running in
+            guard let self else { return }
+            self.presentCompanion(SubagentViewController(app: self.app, parentId: self.chatId, docId: doc, title: title, running: running))
         }
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
@@ -160,8 +177,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         bottom.spacing = 8
         bottom.alignment = .fill
         bottom.translatesAutoresizingMaskIntoConstraints = false
-        let pillRow = UIStackView(arrangedSubviews: [pill, UIView()])
+        strip.onTap = { [weak self] section in self?.showCompanions(section: section) }
+        let pillRow = UIStackView(arrangedSubviews: [pill, UIView(), strip])
         pillRow.axis = .horizontal
+        pillRow.spacing = 6
+        pillRow.alignment = .center
         creditsNotice.onAddCredits = { [weak self] in
             guard let self else { return }
             CloudRoutes.openBilling(app: self.app, from: self)
@@ -213,7 +233,146 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         source.attach(engine)
         render(animated: false)
         app.markSeen(chatId)
+        Self.liveSessions[chatId] = WeakSession(self)
+        companionTokens = [
+            app.observeSession(chatId) { [weak self] in self?.scheduleCompanionSync() },
+            app.observe { [weak self] in self?.scheduleCompanionSync() },
+            app.terminals.observe { [weak self] chat in
+                guard let self, chat == self.chatId else { return }
+                self.scheduleCompanionSync()
+            },
+        ]
+        syncCompanions(animated: false)
     }
+
+    // MARK: Companions (subagents, side chats, terminals)
+
+    private final class WeakSession {
+        weak var session: SessionViewController?
+        init(_ session: SessionViewController) { self.session = session }
+    }
+
+    nonisolated(unsafe) private static var liveSessions: [String: WeakSession] = [:]
+
+    /// The session screen showing `chatId`, if one is open.
+    static func live(_ chatId: String) -> SessionViewController? {
+        liveSessions[chatId]?.session
+    }
+
+    /// Text into the composer (terminal output, say), after what's there.
+    func appendToComposer(_ text: String) {
+        let current = composer.text
+        composer.text = current.isEmpty ? text : current + (current.hasSuffix("\n") ? "" : "\n") + text
+        saveDraft()
+    }
+
+    private var parentId: String? { app.row(chatId)?.parentChatId }
+
+    private var companionSyncScheduled = false
+
+    /// Streaming fires a session change per frame; the chips settle at most
+    /// a few times a second (a subagent count doesn't need 120 Hz).
+    private func scheduleCompanionSync() {
+        guard !companionSyncScheduled else { return }
+        companionSyncScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.companionSyncScheduled = false
+            self.syncCompanions()
+        }
+    }
+
+    private func syncCompanions(animated: Bool = true) {
+        let agents = app.sessionSubagents(chatId)
+        let tabs = app.terminals.tabs(for: chatId)
+        // A side chat's own siblings live with its parent.
+        let sides = parentId == nil ? app.sideChats(of: chatId).count : 0
+        var state = CompanionStrip.State()
+        state.agents = agents.count
+        state.runningAgents = agents.filter { $0.state == .running }.count
+        state.sideChats = sides
+        state.terminals = tabs.count
+        state.liveTerminals = tabs.filter(\.isLive).count
+        let wasEmpty = strip.state.isEmpty
+        if state != strip.state {
+            strip.apply(state)
+            if wasEmpty != state.isEmpty { render(animated: animated) }
+        }
+        // Violet like the working glyphs: a running agent isn't an alert.
+        companionsItem.badge = state.runningAgents > 0 ? {
+            var badge = UIBarButtonItem.Badge.count(state.runningAgents)
+            badge.backgroundColor = Palette.accent
+            badge.foregroundColor = .white
+            return badge
+        }() : nil
+        if parentId != nil, navigationItem.subtitle == nil {
+            let parent = parentId.flatMap { app.row($0)?.title } ?? ""
+            navigationItem.titleView = nil
+            navigationItem.title = "Side chat"
+            navigationItem.subtitle = parent
+        }
+    }
+
+    /// A companion screen (subagent, terminal, side chat): beside the
+    /// session in the inspector where there's room, else on top of it.
+    func presentCompanion(_ vc: UIViewController) {
+        if !isCompanion, let split = splitViewController as? SplitRootController, !split.isCollapsed {
+            split.showCompanion(vc, for: chatId)
+        } else {
+            navigationController?.pushViewController(vc, animated: true)
+        }
+    }
+
+    func openSideChat(_ id: String) {
+        guard let vc = SessionViewController(app: app, chatId: id) else {
+            return Toast.show("Couldn't open the side chat", in: view.window)
+        }
+        // Beside or above its parent, never the split's current session.
+        vc.isCompanion = true
+        presentCompanion(vc)
+    }
+
+    /// The companions panel: the inspector beside the session, or a sheet.
+    func showCompanions(section: CompanionsViewController.Section?) {
+        if !isCompanion, let split = splitViewController as? SplitRootController, !split.isCollapsed {
+            split.toggleCompanions(for: chatId, section: section)
+            return
+        }
+        let hub = CompanionsViewController(app: app, chatId: chatId, inSheet: true)
+        hub.initialSection = section
+        let nav = UINavigationController(rootViewController: hub)
+        nav.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
+        nav.navigationBar.tintColor = Palette.text
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
+            sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+        }
+        hub.open = { [weak self, weak nav] vc in
+            nav?.dismiss(animated: true)
+            self?.navigationController?.pushViewController(vc, animated: true)
+        }
+        hub.openSideChat = { [weak self, weak nav] id in
+            nav?.dismiss(animated: true)
+            self?.openSideChat(id)
+        }
+        present(nav, animated: true)
+    }
+
+    func openTerminal() {
+        let tabs = app.terminals.tabs(for: chatId)
+        presentCompanion(TerminalViewController(app: app, chatId: chatId, tab: tabs.first(where: \.isLive)))
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(title: "Terminal", action: #selector(terminalCommand), input: "j", modifierFlags: .command),
+            UIKeyCommand(title: "Agents, Side Chats & Terminals", action: #selector(companionsCommand), input: "0", modifierFlags: [.command, .alternate]),
+        ]
+    }
+
+    @objc private func terminalCommand() { openTerminal() }
+    @objc private func companionsCommand() { showCompanions(section: nil) }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -284,19 +443,46 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     #if DEBUG
     private static var debugPickerShown = false
+    private static var debugCompanionShown = false
+
+    /// `-companions`, `-terminal`, `-subagent <tool id>`, `-side-chat <id>`.
+    private func debugOpenCompanion(_ args: [String]) {
+        func value(_ flag: String) -> String? {
+            args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        }
+        if args.contains("-companions") {
+            showCompanions(section: nil)
+        } else if args.contains("-terminal") {
+            let vc = TerminalViewController(app: app, chatId: chatId, tab: nil)
+            vc.script = args.contains("-terminal-demo") ? ["git log --oneline -5", "cargo test -p zeron-veil"] : []
+            presentCompanion(vc)
+        } else if let tool = value("-subagent"), let row = app.sessionSubagents(chatId).first(where: { $0.id == tool || $0.docId?.hasSuffix(tool) == true }), let doc = row.docId {
+            presentCompanion(SubagentViewController(app: app, parentId: chatId, docId: doc, title: row.title, running: row.state == .running))
+        } else if let side = value("-side-chat") {
+            openSideChat(side)
+        }
+    }
     #endif
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         hasAppeared = true
         landed = true
-        (splitViewController as? SplitRootController)?.sessionDidAppear(chatId)
+        if !isCompanion { (splitViewController as? SplitRootController)?.sessionDidAppear(chatId) }
         list.settleEdgeEffect()
         #if DEBUG
         // Screenshots: `-model-picker` opens the picker once.
         if ProcessInfo.processInfo.arguments.contains("-model-picker"), !Self.debugPickerShown, let picker = source.modelPicker() {
             Self.debugPickerShown = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.present(picker, animated: true) }
+        }
+        #endif
+        #if DEBUG
+        // Screenshots: open a companion once.
+        let args = ProcessInfo.processInfo.arguments
+        if !Self.debugCompanionShown, !isCompanion, parentId == nil {
+            Self.debugCompanionShown = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.debugOpenCompanion(args) }
         }
         #endif
         showTranscriptIfReady()
@@ -328,12 +514,33 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         // left one stack for another and stays live. UIKit may report the
         // move late or not at all, so ask where the page is, not how it left.
         if relocating || navigationController?.viewControllers.contains(self) == true { return }
-        if isMovingFromParent || navigationController == nil {
-            if mainShell != nil { (splitViewController as? SplitRootController)?.sessionDidClose(chatId) }
-            source.detach()
-            engine.close()
-            app.markSeen(chatId)
+        if isMovingFromParent || navigationController == nil { teardown() }
+    }
+
+    /// Taken off a stack while not on screen (a pop-to-root under a pushed
+    /// companion, the inspector reset for another chat): no disappear
+    /// callback comes, so this is where it ends.
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent == nil, !relocating { teardown() }
+    }
+
+    private var tornDown = false
+
+    /// The session closed for good: stop following it (once).
+    private func teardown() {
+        guard !tornDown else { return }
+        tornDown = true
+        if Self.liveSessions[chatId]?.session === self { Self.liveSessions[chatId] = nil }
+        // A side chat started here and left without a word: gone.
+        if app.freshSideChats.contains(chatId), source.isUnused, Drafts.load(chatId).isEmpty, app.row(chatId)?.preview == nil {
+            app.forgetFreshSideChat(chatId)
+            app.delete(chatId)
         }
+        if mainShell != nil, !isCompanion { (splitViewController as? SplitRootController)?.sessionDidClose(chatId) }
+        source.detach()
+        engine.close()
+        app.markSeen(chatId)
     }
 
     // MARK: Arrival from the new-session draft (DraftHandoffAnimator)
@@ -542,6 +749,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         composer.chipMenus = Dictionary(uniqueKeysWithValues: c.chips.map { chip in
             (chip.id, { [weak self] in self?.source.chipMenu(chip.id) })
         })
+        // One banner for both the row's animation and its contents (the
+        // Cloud reading may turn a "not delivered" into nothing).
+        let banner: SessionChrome.Banner = editingQueueId != nil ? .editing : cloudBanner(c.banner)
         let changes = {
             let asking = c.questions != nil
             self.questions.isHidden = !asking
@@ -549,15 +759,16 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             if let q = c.questions { self.questions.configure(q.items) }
             self.queue.isHidden = c.queue.isEmpty || asking
             self.queue.configure(c.queue)
-            let editing = self.editingQueueId != nil
-            let banner = editing ? .editing : self.cloudBanner(c.banner)
-            self.pill.superview?.isHidden = banner == .none
+            self.pill.isHidden = banner == .none
+            self.pill.superview?.isHidden = banner == .none && self.strip.state.isEmpty
             self.pill.banner = banner
             self.creditsNotice.isHidden = !self.cloudOutOfCredits
             self.bottom.layoutIfNeeded()
             self.view.layoutIfNeeded()
         }
-        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none)
+        let stripShown = !(pill.superview?.isHidden ?? true)
+        let stripWanted = banner != .none || !strip.state.isEmpty
+        let structural = (old.questions == nil) != (c.questions == nil) || old.queue.count != c.queue.count || (old.banner == .none) != (c.banner == .none) || stripShown != stripWanted
         // Panels materialize when their content appears; a first render (the
         // session reopened with a queue or an open question) shows them at
         // once — they used to stay dematerialized, so the queue "vanished"
@@ -584,7 +795,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
+            let isSide = self.parentId != nil
+            let companions = UIMenu(options: .displayInline, children: [
+                UIAction(title: "New Side Chat", image: UIImage(systemName: "bubble.left.and.text.bubble.right")) { _ in
+                    guard let root = isSide ? self.parentId : self.chatId, let id = self.app.createSideChat(parentId: root) else { return }
+                    self.openSideChat(id)
+                },
+                UIAction(title: "Fork Into Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.fork() },
+                UIAction(title: "Terminal", image: UIImage(systemName: "apple.terminal")) { _ in self.openTerminal() },
+            ])
             done([
+                companions,
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
@@ -600,9 +821,30 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }])
     }
 
+    private func fork() {
+        Toast.show("Forking…", in: view.window)
+        Task { @MainActor in
+            do {
+                let id = try await app.forkSideChat(sourceId: chatId)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                openSideChat(id)
+            } catch {
+                Toast.show(CompanionsViewController.forkError(error), in: view.window)
+            }
+        }
+    }
+
     /// Off this session once it's gone from the list. Beside the iPad
     /// sidebar there's nothing to pop back to.
     private func leave() {
+        if isCompanion {
+            if let nav = navigationController, nav.viewControllers.count > 1 {
+                nav.popViewController(animated: true)
+            } else {
+                (splitViewController as? SplitRootController)?.closeCompanion(self)
+            }
+            return
+        }
         if let split = splitViewController as? SplitRootController, !split.isCollapsed {
             split.showDraft(prompt: nil, focus: false)
         } else {
