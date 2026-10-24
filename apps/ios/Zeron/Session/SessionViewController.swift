@@ -887,11 +887,19 @@ extension UIViewController {
         return rest
     }
 
-    /// Beside the sidebar the composer rests on the safe area, level with
-    /// the sidebar's bottom toolbar; on its own (tab shell, sheet) 8pt up.
+    /// Beside the sidebar the composer rests centered on the sidebar's
+    /// bottom toolbar, as measured: where the system puts that toolbar
+    /// differs by device and OS (on the unfolded Duo its buttons sit ~10pt
+    /// below the safe area, on iPad on it), so a fixed gap left the two out
+    /// of line. Negative sinks the composer into the safe area, as the
+    /// toolbar is. On its own (tab shell, sheet, sidebar hidden) 8pt up.
     var composerRestGap: CGFloat {
-        guard mainShell == nil, let split = splitViewController, !split.isCollapsed else { return 8 }
-        return 0
+        guard mainShell == nil, let split = splitViewController as? SplitRootController,
+              let window = view.window, let middle = split.sidebarToolbarMidY(in: window)
+        else { return 8 }
+        let y = view.convert(CGPoint(x: 0, y: middle), from: window).y
+        let safeBottom = view.bounds.maxY - view.safeAreaInsets.bottom
+        return (safeBottom - y - ComposerBar.restHeight / 2).rounded()
     }
 }
 
