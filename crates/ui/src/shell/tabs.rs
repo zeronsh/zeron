@@ -524,10 +524,11 @@ impl Shell {
                 "Show files panel"
             };
             // The explorer slot sits over the explorer column and carries the
-            // two fixed right-edge anchors — the explorer toggle and,
-            // outermost, the pane toggle — which stay mounted at one position
-            // while the surface tabs reveal to their left. The explorer's own
-            // search and visibility controls live in its secondary header.
+            // two fixed right-edge anchors — the pane toggle and, outermost,
+            // the explorer toggle, in the order of the columns they open —
+            // which stay mounted at one position while the surface tabs
+            // reveal to their left. The explorer's own search and visibility
+            // controls live in its secondary header.
             Some(
                 controls
                     .child(
@@ -545,22 +546,6 @@ impl Shell {
                             // second one on the slot stacked on the same
                             // pixels and read lighter than the seam beneath
                             // it (user report).
-                            .child(
-                                header_icon_button(
-                                    "toggle-files-panel",
-                                    icons::FOLDER_TREE,
-                                    files_panel_label,
-                                    &theme,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.toggle_files_panel(window, cx)
-                                    }),
-                                )
-                                .role(gpui::Role::Button)
-                                .aria_label(files_panel_label)
-                                .when(self.files_panel_open(cx) && fit.files, |button| {
-                                    button.bg(crate::theme::wash(0.09))
-                                }),
-                            )
                             .child(header_icon_button_with(
                                 "toggle-changes",
                                 icons::sidebar_glyph(
@@ -576,7 +561,23 @@ impl Shell {
                                 ),
                                 ShortcutId::ToggleChanges.label(),
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                            )),
+                            ))
+                            .child(
+                                header_icon_button(
+                                    "toggle-files-panel",
+                                    icons::FOLDER_TREE,
+                                    files_panel_label,
+                                    &theme,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.toggle_files_panel(window, cx)
+                                    }),
+                                )
+                                .role(gpui::Role::Button)
+                                .aria_label(files_panel_label)
+                                .when(self.files_panel_open(cx) && fit.files, |button| {
+                                    button.bg(crate::theme::wash(0.09))
+                                }),
+                            ),
                     )
                     .into_any_element(),
             )
