@@ -24,6 +24,7 @@ use gpui::{
 
 use gpui_tokio::Tokio;
 use zeron_engine::InstanceLock;
+use zeron_proto::scripts::NoticeLevel;
 use zeron_proto::{AuthState, ChatConfig, HarnessId, WorkspaceScope};
 use zeron_rpc::methods;
 
@@ -49,6 +50,7 @@ use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
+use crate::settings::scripts::ScriptsPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
@@ -549,6 +551,7 @@ pub enum SettingsSection {
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
+    Scripts,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
@@ -565,13 +568,14 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
+        SettingsSection::Scripts,
         SettingsSection::Devices,
         SettingsSection::Cloud,
         SettingsSection::Billing,
@@ -624,6 +628,7 @@ impl SettingsSection {
             SettingsSection::Cloud => "cloud",
             SettingsSection::Billing => "billing",
             SettingsSection::Harnesses => "providers",
+            SettingsSection::Scripts => "scripts",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
@@ -643,6 +648,7 @@ impl SettingsSection {
             "cloud" => SettingsSection::Cloud,
             "billing" => SettingsSection::Billing,
             "providers" | "harnesses" => SettingsSection::Harnesses,
+            "scripts" => SettingsSection::Scripts,
             "agents" => SettingsSection::Agents,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
@@ -670,6 +676,7 @@ impl SettingsSection {
             SettingsSection::Cloud => "Cloud",
             SettingsSection::Billing => "Billing",
             SettingsSection::Harnesses => "Providers",
+            SettingsSection::Scripts => "Scripts",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
@@ -2133,6 +2140,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    scripts_page: Option<Entity<ScriptsPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2679,6 +2687,7 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            scripts_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -2904,6 +2913,17 @@ impl Shell {
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
+        }
+        for notice in state.update(cx, |state, _| state.take_script_notices()) {
+            let (kind, text) = match notice.level {
+                NoticeLevel::Info => (crate::toast::ToastKind::Info, notice.text),
+                NoticeLevel::Success => (crate::toast::ToastKind::Success, notice.text),
+                NoticeLevel::Error => (
+                    crate::toast::ToastKind::Error,
+                    format!("{}: {}", notice.script, notice.text),
+                ),
+            };
+            crate::toast::show(cx, kind, text);
         }
         let next_sync_flow = {
             let state = state.read(cx);
@@ -5751,6 +5771,16 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::Scripts => {
+                if self.scripts_page.is_none() {
+                    let state = self.state.clone();
+                    self.scripts_page = Some(cx.new(|cx| ScriptsPage::new(state, cx)));
+                }
+                match &self.scripts_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Agents => {
                 if self.accounts_page.is_none() {
                     let state = self.state.clone();
@@ -8478,6 +8508,7 @@ impl Shell {
             SettingsSection::Cloud => icons::CLOUD,
             SettingsSection::Billing => icons::WALLET,
             SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Scripts => icons::TERMINAL,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,

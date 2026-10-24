@@ -45,6 +45,10 @@ zeron daemon start
 
 Devices signed in to the same account can read and write each other's workspace files, so only sign in devices you trust. Existing local sessions are never uploaded.
 
+## Scripts
+
+Drop a Luau file into Zeron's scripts folder to react to turns, add palette commands, show notices, or give agents new tools. No build, no restart. See [docs/scripting.md](docs/scripting.md).
+
 ## Sponsors
 
 Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron. You can help fund Zeron's development too by [becoming a sponsor on GitHub](https://github.com/sponsors/zeronsh).

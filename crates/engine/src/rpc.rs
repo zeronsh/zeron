@@ -739,6 +739,12 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    fn scripts(&self) -> Result<&crate::scripts::ScriptHost, RpcError> {
+        self.sessions
+            .scripts()
+            .ok_or_else(|| RpcError::Failed("scripts are not running".into()))
+    }
+
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -4608,6 +4614,40 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "text": text }))
+            }
+            methods::WATCH_SCRIPTS => Ok(RpcReply::Stream(self.scripts()?.frames())),
+            methods::RUN_SCRIPT_COMMAND => {
+                let p: zeron_proto::scripts::RunScriptCommandParams = parse_params(params)?;
+                self.scripts()?
+                    .run_command(&p.script, &p.command)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::RELOAD_SCRIPTS => {
+                self.scripts()?.reload();
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::SET_SCRIPT_ENABLED => {
+                let p: zeron_proto::scripts::SetScriptEnabledParams = parse_params(params)?;
+                self.scripts()?
+                    .set_enabled(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::LIST_SCRIPT_TOOLS => {
+                let tools = self.scripts()?.list_tools().await;
+                RpcReply::value(&serde_json::json!({ "tools": tools }))
+            }
+            methods::CALL_SCRIPT_TOOL => {
+                let p: zeron_proto::scripts::CallScriptToolParams = parse_params(params)?;
+                let result = self
+                    .scripts()?
+                    .call_tool(p)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "result": result }))
             }
             other => Err(RpcError::UnknownMethod(other.to_string())),
         }

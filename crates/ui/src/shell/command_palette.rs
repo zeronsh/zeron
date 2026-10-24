@@ -4,6 +4,7 @@
 use super::*;
 use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
+use zeron_proto::scripts::ScriptsSnapshot;
 use zeron_proto::{
     SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
     WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
@@ -254,18 +255,28 @@ enum Command {
     Settings,
     Theme(AppearanceMode),
     ArchiveThread,
+    Script {
+        script: String,
+        id: String,
+        label: String,
+    },
+    ReloadScripts,
+    OpenScriptsFolder,
 }
 
 impl Command {
-    fn label(&self) -> &'static str {
+    fn label(&self) -> SharedString {
         match self {
-            Self::NewChat => "New chat",
-            Self::NewProject => "New project",
-            Self::Settings => "Open settings",
-            Self::Theme(AppearanceMode::System) => "Switch to system theme",
-            Self::Theme(AppearanceMode::Light) => "Switch to light theme",
-            Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
-            Self::ArchiveThread => "Archive thread",
+            Self::NewChat => "New chat".into(),
+            Self::NewProject => "New project".into(),
+            Self::Settings => "Open settings".into(),
+            Self::Theme(AppearanceMode::System) => "Switch to system theme".into(),
+            Self::Theme(AppearanceMode::Light) => "Switch to light theme".into(),
+            Self::Theme(AppearanceMode::Dark) => "Switch to dark theme".into(),
+            Self::ArchiveThread => "Archive thread".into(),
+            Self::Script { label, .. } => label.clone().into(),
+            Self::ReloadScripts => "Reload scripts".into(),
+            Self::OpenScriptsFolder => "Open scripts folder".into(),
         }
     }
 
@@ -276,6 +287,9 @@ impl Command {
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
+            Self::Script { .. } => icons::TERMINAL,
+            Self::ReloadScripts => icons::REFRESH,
+            Self::OpenScriptsFolder => icons::FOLDER,
         }
     }
 }
@@ -310,6 +324,9 @@ impl PaletteRow {
 
     fn key(&self) -> RowKey {
         let id = match &self.kind {
+            RowKind::Command(Command::Script { script, id, .. }) => {
+                format!("command:script:{script}:{id}")
+            }
             RowKind::Command(command) => format!("command:{}", command.label()),
             RowKind::Chat(id) => format!("chat:{id}"),
             RowKind::File { path, .. } => format!("file:{path}"),
@@ -358,7 +375,12 @@ fn matches_query(query: &str, text: &str) -> bool {
 }
 
 /// `can_archive`: a focused, unarchived chat exists for Archive thread.
-fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
+fn commands_for(
+    query: &str,
+    is_dark: bool,
+    can_archive: bool,
+    scripts: &ScriptsSnapshot,
+) -> Vec<Command> {
     [
         Command::NewChat,
         Command::NewProject,
@@ -371,7 +393,22 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     ]
     .into_iter()
     .chain(can_archive.then_some(Command::ArchiveThread))
-    .filter(|command| matches_query(query, command.label()))
+    .chain(
+        scripts
+            .scripts
+            .iter()
+            .filter(|script| script.error.is_none())
+            .flat_map(|script| {
+                script.commands.iter().map(|command| Command::Script {
+                    script: script.name.clone(),
+                    id: command.id.clone(),
+                    label: command.label.clone(),
+                })
+            }),
+    )
+    .chain((!scripts.scripts.is_empty()).then_some(Command::ReloadScripts))
+    .chain((!scripts.folder.is_empty()).then_some(Command::OpenScriptsFolder))
+    .filter(|command| matches_query(query, &command.label()))
     .collect()
 }
 
@@ -640,12 +677,18 @@ impl Shell {
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
         let can_archive = self.state.read(cx).archivable_selected_chat().is_some();
+        let scripts = &self.state.read(cx).scripts;
         let commands = |section| {
             PaletteSection::new(
                 section,
-                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive)
-                    .into_iter()
-                    .map(RowKind::Command),
+                commands_for(
+                    &query,
+                    Theme::of(cx).appearance.is_dark(),
+                    can_archive,
+                    scripts,
+                )
+                .into_iter()
+                .map(RowKind::Command),
             )
         };
         let threads = |limit| {
@@ -877,6 +920,20 @@ impl Shell {
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
+            RowKind::Command(Command::Script { script, id, .. }) => self.call_scripts_method(
+                methods::RUN_SCRIPT_COMMAND,
+                serde_json::json!({ "script": script, "command": id }),
+                cx,
+            ),
+            RowKind::Command(Command::ReloadScripts) => {
+                self.call_scripts_method(methods::RELOAD_SCRIPTS, serde_json::json!({}), cx)
+            }
+            RowKind::Command(Command::OpenScriptsFolder) => {
+                let folder = &self.state.read(cx).scripts.folder;
+                if !folder.is_empty() {
+                    cx.reveal_path(std::path::Path::new(folder));
+                }
+            }
             RowKind::Chat(id) => self.open_chat(id, cx),
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
@@ -887,6 +944,25 @@ impl Shell {
                 self.open_palette_path(found.path, false, Some((line, column)), window, cx)
             }
         }
+    }
+
+    fn call_scripts_method(
+        &mut self,
+        method: &'static str,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            crate::toast::error(cx, "Engine not connected");
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = engine.client().call(method, params).await {
+                this.update(cx, |_, cx| crate::toast::error(cx, err.to_string()))
+                    .ok();
+            }
+        })
+        .detach();
     }
 
     /// Open a workspace path of the focused chat: a file in an editor tab
@@ -926,7 +1002,10 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
-            Command::Theme(_) => return None,
+            Command::Theme(_)
+            | Command::Script { .. }
+            | Command::ReloadScripts
+            | Command::OpenScriptsFolder => return None,
         };
         let combo = self.settings.keymap.get(id);
         let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
@@ -955,7 +1034,7 @@ impl Shell {
                     .id(("command-action", ix))
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .min_h(px(30.0))
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -968,7 +1047,7 @@ impl Shell {
                             .text_color(theme.text_muted),
                     )
                     .child(div().flex_1().min_w_0().child(popover::search_highlight(
-                        label.into(),
+                        label,
                         Some(query),
                         theme,
                     )))
@@ -1773,9 +1852,12 @@ mod tests {
 
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
-        assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
+        assert!(
+            !commands_for("archive", true, false, &ScriptsSnapshot::default())
+                .contains(&Command::ArchiveThread)
+        );
         assert_eq!(
-            commands_for("archive", true, true),
+            commands_for("archive", true, true, &ScriptsSnapshot::default()),
             vec![Command::ArchiveThread]
         );
     }
@@ -2784,7 +2866,7 @@ mod tests {
     #[test]
     fn action_search_hides_empty_section_and_preserves_order() {
         assert_eq!(
-            commands_for("", true, false),
+            commands_for("", true, false, &ScriptsSnapshot::default()),
             vec![
                 Command::NewChat,
                 Command::NewProject,
@@ -2793,36 +2875,36 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands_for("new", true, false),
+            commands_for("new", true, false, &ScriptsSnapshot::default()),
             vec![Command::NewChat, Command::NewProject]
         );
         assert_eq!(
-            commands_for("settings", true, false),
+            commands_for("settings", true, false, &ScriptsSnapshot::default()),
             vec![Command::Settings]
         );
         assert_eq!(
-            commands_for("theme", true, false),
+            commands_for("theme", true, false, &ScriptsSnapshot::default()),
             vec![Command::Theme(AppearanceMode::Light)]
         );
-        assert!(commands_for("deployment", true, false).is_empty());
+        assert!(commands_for("deployment", true, false, &ScriptsSnapshot::default()).is_empty());
     }
 
     #[test]
     fn theme_action_targets_the_opposite_resolved_appearance() {
         assert_eq!(
-            commands_for("theme", true, false),
+            commands_for("theme", true, false, &ScriptsSnapshot::default()),
             vec![Command::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            commands_for("theme", false, false),
+            commands_for("theme", false, false, &ScriptsSnapshot::default()),
             vec![Command::Theme(AppearanceMode::Dark)]
         );
         assert_eq!(
-            commands_for("light", true, false),
+            commands_for("light", true, false, &ScriptsSnapshot::default()),
             vec![Command::Theme(AppearanceMode::Light)]
         );
         assert_eq!(
-            commands_for("dark", false, false),
+            commands_for("dark", false, false, &ScriptsSnapshot::default()),
             vec![Command::Theme(AppearanceMode::Dark)]
         );
     }

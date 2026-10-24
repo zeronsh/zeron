@@ -827,7 +827,7 @@ pub fn language_for_alias(alias: &str) -> Option<LanguageId> {
         "ruby" | "rb" => LanguageId::Ruby,
         "php" => LanguageId::Php,
         "sql" => LanguageId::Sql,
-        "lua" => LanguageId::Lua,
+        "lua" | "luau" => LanguageId::Lua,
         "dockerfile" | "docker" => LanguageId::Dockerfile,
         "nix" => LanguageId::Nix,
         "make" | "makefile" => LanguageId::Make,

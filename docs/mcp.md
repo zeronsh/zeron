@@ -165,6 +165,15 @@ name (default: the local engine's device).
 | `archive_chat`     | `Mutate setChatArchived`                                  |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 
+Tools registered by user scripts (`zeron.tool{...}` in
+`{data_dir}/scripts/*.luau`, see `docs/scripting.md`) are appended to
+`tools/list` and dispatched through `CallScriptTool {name, arguments, chatId?}`
+with the origin chat as `chatId`. A script tool never shadows a built-in: a
+script that registers a built-in's name is left out of the list. A string
+result is returned as plain text without `structuredContent`. Agents list
+tools once at session start, so a tool added by a new script shows up in the
+next session.
+
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
 cancels server-side, exactly what the sidebar does on attach.

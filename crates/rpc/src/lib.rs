@@ -356,6 +356,12 @@ pub mod methods {
     /// of `repo` (`owner/name`) can start from, through the user's GitHub
     /// connection (the vault calls GitHub), the default first.
     pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
+    pub const WATCH_SCRIPTS: &str = "WatchScripts";
+    pub const RUN_SCRIPT_COMMAND: &str = "RunScriptCommand";
+    pub const RELOAD_SCRIPTS: &str = "ReloadScripts";
+    pub const SET_SCRIPT_ENABLED: &str = "SetScriptEnabled";
+    pub const LIST_SCRIPT_TOOLS: &str = "ListScriptTools";
+    pub const CALL_SCRIPT_TOOL: &str = "CallScriptTool";
 }
 
 /// Stable capability error codes transported without provider stderr.

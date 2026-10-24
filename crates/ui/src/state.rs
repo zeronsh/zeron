@@ -916,6 +916,8 @@ pub struct AppState {
     cloud_repos_task: Option<Task<()>>,
     /// A [`Self::refresh_cloud_repos`] read is in flight (its button spins).
     cloud_repos_refreshing: bool,
+    pub scripts: zeron_proto::scripts::ScriptsSnapshot,
+    script_notices: Vec<zeron_proto::scripts::ScriptNotice>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -1054,6 +1056,8 @@ impl AppState {
             cloud_repos: None,
             cloud_repos_task: None,
             cloud_repos_refreshing: false,
+            scripts: zeron_proto::scripts::ScriptsSnapshot::default(),
+            script_notices: Vec::new(),
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
@@ -1600,6 +1604,29 @@ impl AppState {
         }
         self.harness_updates = statuses;
         true
+    }
+
+    pub fn apply_scripts(&mut self, frame: zeron_proto::scripts::ScriptsFrame) -> bool {
+        const MAX_SCRIPT_NOTICES: usize = 16;
+        match frame {
+            zeron_proto::scripts::ScriptsFrame::Scripts(snapshot) => {
+                if self.scripts == snapshot {
+                    return false;
+                }
+                self.scripts = snapshot;
+            }
+            zeron_proto::scripts::ScriptsFrame::Notice(notice) => {
+                if self.script_notices.len() >= MAX_SCRIPT_NOTICES {
+                    self.script_notices.remove(0);
+                }
+                self.script_notices.push(notice);
+            }
+        }
+        true
+    }
+
+    pub fn take_script_notices(&mut self) -> Vec<zeron_proto::scripts::ScriptNotice> {
+        std::mem::take(&mut self.script_notices)
     }
 
     pub fn apply_auth(&mut self, auth: AuthState) -> bool {
@@ -3210,6 +3237,7 @@ impl AppState {
         self.pending_sends.clear();
         self.upload_progress = None;
         self.transfers.clear();
+        self.scripts = zeron_proto::scripts::ScriptsSnapshot::default();
         self.local_device_id = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
@@ -3538,11 +3566,15 @@ impl AppState {
         let engine_info = handle.engine_info();
         let supports_harness_updates =
             engine_info.supports(zeron_proto::capabilities::HARNESS_UPDATES_V1);
+        let supports_scripts = engine_info.supports(zeron_proto::capabilities::SCRIPTS_V1);
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         if !supports_harness_updates {
             self.harness_updates.clear();
+        }
+        if !supports_scripts {
+            self.scripts = zeron_proto::scripts::ScriptsSnapshot::default();
         }
         self.engine = Some(handle.clone());
         self.engine_exit_expected = false;
@@ -3629,6 +3661,14 @@ impl AppState {
                 }
             }
         }));
+        if supports_scripts {
+            watch_tasks.push(spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SCRIPTS,
+                AppState::apply_scripts,
+            ));
+        }
         self.watch_tasks = watch_tasks;
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which

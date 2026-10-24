@@ -14,6 +14,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
+use zeron_proto::scripts::ScriptTool;
 use zeron_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
@@ -458,6 +459,11 @@ struct ShowVisualArgs {
 }
 
 #[derive(Deserialize)]
+struct ScriptToolList {
+    tools: Vec<ScriptTool>,
+}
+
+#[derive(Deserialize)]
 struct BatchArgs {
     requests: Vec<Value>,
 }
@@ -668,16 +674,38 @@ impl Tools {
         }
     }
 
-    pub fn list(&self) -> Vec<ToolDef> {
+    pub async fn list(&self) -> Vec<Value> {
         let in_chat = self.zeron.origin().chat_id.is_some();
-        catalog()
-            .into_iter()
+        let builtin = catalog();
+        let scripts = self.script_tools().await;
+        builtin
+            .iter()
             .filter(|tool| in_chat || tool.name != SHOW_VISUAL)
+            .map(|tool| json!(tool))
+            .chain(
+                scripts
+                    .iter()
+                    .filter(|tool| builtin.iter().all(|b| b.name != tool.name))
+                    .map(|tool| json!(tool)),
+            )
             .collect()
     }
 
-    pub fn has(&self, name: &str) -> bool {
-        self.list().iter().any(|t| t.name == name)
+    pub async fn has(&self, name: &str) -> bool {
+        catalog().iter().any(|tool| tool.name == name)
+            || self.script_tools().await.iter().any(|tool| tool.name == name)
+    }
+
+    async fn script_tools(&self) -> Vec<ScriptTool> {
+        let listed = self
+            .zeron
+            .call(zeron_rpc::methods::LIST_SCRIPT_TOOLS, json!({}))
+            .await
+            .and_then(|reply| Ok(serde_json::from_value::<ScriptToolList>(reply)?.tools));
+        listed.unwrap_or_else(|error| {
+            tracing::debug!(error = %error, "mcp: script tools unavailable");
+            Vec::new()
+        })
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -701,7 +729,7 @@ impl Tools {
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
-            other => return Err(format!("unknown tool: {other}")),
+            other => self.call_script_tool(other, args).await,
         };
         result.map_err(|e| format!("{e:#}"))
     }
@@ -1260,6 +1288,21 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
     }
 
+    async fn call_script_tool(&self, name: &str, arguments: Value) -> anyhow::Result<Value> {
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::CALL_SCRIPT_TOOL,
+                json!({
+                    "name": name,
+                    "arguments": arguments,
+                    "chatId": self.zeron.origin().chat_id,
+                }),
+            )
+            .await?;
+        Ok(reply.get("result").cloned().unwrap_or_default())
+    }
+
     async fn show_visual(&self, args: ShowVisualArgs) -> anyhow::Result<Value> {
         let chat_id = self
             .zeron
@@ -1783,7 +1826,13 @@ mod tests {
     async fn show_visual_is_offered_only_inside_a_chat() {
         let world = Arc::new(World::default());
         let outside = tools(world.clone(), Origin::default());
-        assert!(!outside.has("show_visual"));
+        assert!(
+            !outside
+                .list()
+                .await
+                .iter()
+                .any(|tool| tool["name"] == SHOW_VISUAL)
+        );
         assert!(
             outside
                 .call(
@@ -1801,7 +1850,13 @@ mod tests {
                 device_id: Some("dev-local".into()),
             },
         );
-        assert!(inside.has("show_visual"));
+        assert!(
+            inside
+                .list()
+                .await
+                .iter()
+                .any(|tool| tool["name"] == SHOW_VISUAL)
+        );
         // The guidance names every color the runtime accepts.
         for name in zeron_visual::TOKEN_NAMES {
             assert!(SHOW_VISUAL_DESCRIPTION.contains(name), "{name}");
