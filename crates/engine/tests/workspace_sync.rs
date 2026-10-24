@@ -699,6 +699,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 checkout_id: Some("co-1".into()),
                 repository_id: None,
                 github_repo: None,
+                created_by_chat_id: None,
                 created_at: now,
             })
             .unwrap();

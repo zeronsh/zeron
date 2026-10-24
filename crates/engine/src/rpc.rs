@@ -327,6 +327,60 @@ struct ListFoldersParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddProjectParams {
+    path: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// The chat whose agent asks; recorded on the row so the UI can say so.
+    #[serde(default)]
+    created_by_chat_id: Option<String>,
+}
+
+/// The folder an `AddProject` names, as the one spelling every alias of it
+/// resolves to: `~` expanded, then canonicalized (symlinks and `..` gone), so
+/// the home check below cannot be walked around. Agents add projects inside
+/// the user's home only — not the home itself, which would hand a chat every
+/// folder at once.
+fn resolve_project_folder(raw: &str, home: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("path is empty".into());
+    }
+    let path = if raw == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        home.join(rest)
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    if !path.is_absolute() {
+        return Err(format!("{raw:?} is not an absolute path"));
+    }
+    let folder = crate::repos::canonical_folder(&path)
+        .map_err(|e| format!("{raw:?} cannot be opened: {e}"))?;
+    if !folder.is_dir() {
+        return Err(format!("{raw:?} is not a folder"));
+    }
+    if folder.to_str().is_none() {
+        return Err(format!("{raw:?} is not valid UTF-8"));
+    }
+    let home = crate::repos::canonical_folder(home)
+        .map_err(|e| format!("home folder cannot be opened: {e}"))?;
+    if folder == home {
+        return Err("the home folder itself cannot be a project; pick a folder inside it".into());
+    }
+    if !folder.starts_with(&home) {
+        return Err(format!(
+            "{} is outside the home folder {}; agents can only add projects inside it",
+            folder.display(),
+            home.display()
+        ));
+    }
+    Ok(folder)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FileSearchParams {
     query: String,
     #[serde(default)]
@@ -4013,6 +4067,32 @@ impl RpcService for EngineRpc {
                 self.repos.release_home_folder_search();
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::ADD_PROJECT => {
+                // Agents add projects on the device they run on, where they
+                // can see the disk; never on behalf of another one.
+                if let Some(target) = params.get("targetDeviceId").and_then(|v| v.as_str())
+                    && target != self.doc_host.device_id()
+                {
+                    return Err(RpcError::BadParams(
+                        "AddProject only adds projects on this device".into(),
+                    ));
+                }
+                let p: AddProjectParams = parse_params(params)?;
+                let home = session_home_dir().map_err(|e| RpcError::Failed(e.into()))?;
+                let workspace = self.workspace.clone();
+                // Canonicalizing touches the disk (and the dedupe re-resolves
+                // the existing projects' folders): off the runtime.
+                let (space, created) = tokio::task::spawn_blocking(move || {
+                    let folder =
+                        resolve_project_folder(&p.path, &home).map_err(RpcError::BadParams)?;
+                    workspace
+                        .add_local_project(&folder, p.name, p.created_by_chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))??;
+                RpcReply::value(&serde_json::json!({ "space": space, "created": created }))
+            }
             methods::LIST_DRIVES => {
                 let drives = self
                     .repos
@@ -4618,6 +4698,52 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    #[test]
+    fn project_folders_resolve_inside_home_only() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = home.join("code").join("comet");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(home.join("notes.txt"), "").unwrap();
+        let outside = root.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let canonical = crate::repos::canonical_folder(&project).unwrap();
+
+        // `~`, a trailing slash and `..` all name the one folder.
+        for raw in [
+            "~/code/comet".to_owned(),
+            format!("{}/", project.display()),
+            format!("{}/code/../code/comet", home.display()),
+        ] {
+            assert_eq!(
+                resolve_project_folder(&raw, &home).unwrap(),
+                canonical,
+                "{raw}"
+            );
+        }
+
+        let rejects = |raw: String, needle: &str| {
+            let error = resolve_project_folder(&raw, &home).unwrap_err();
+            assert!(error.contains(needle), "{raw}: {error}");
+        };
+        rejects("".into(), "empty");
+        rejects("code/comet".into(), "absolute");
+        rejects("~/missing".into(), "cannot be opened");
+        rejects("~/notes.txt".into(), "not a folder");
+        rejects("~".into(), "home folder itself");
+        rejects(
+            format!("{}/../elsewhere", home.display()),
+            "outside the home",
+        );
+        rejects(outside.display().to_string(), "outside the home");
+        #[cfg(unix)]
+        {
+            // A symlink inside home cannot smuggle in a folder outside it.
+            std::os::unix::fs::symlink(&outside, home.join("link")).unwrap();
+            rejects("~/link".into(), "outside the home");
+        }
+    }
+
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -5120,6 +5246,7 @@ mod tests {
     #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
+        assert!(!forwardable(methods::ADD_PROJECT));
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));

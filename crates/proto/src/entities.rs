@@ -141,6 +141,10 @@ pub struct Space {
     /// project can run on its own Cloud machine (the checkout picker's Cloud).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_repo: Option<String>,
+    /// The chat whose agent added this project (Zeron MCP `add_project`);
+    /// absent for projects a person added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_chat_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

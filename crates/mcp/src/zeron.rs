@@ -885,6 +885,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            created_by_chat_id: None,
             created_at: Utc::now(),
         }
     }

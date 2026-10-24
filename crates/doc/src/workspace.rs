@@ -172,6 +172,7 @@ impl WorkspaceDoc {
         set_opt_str(&row, "checkoutId", space.checkout_id.as_deref())?;
         set_opt_str(&row, "repositoryId", space.repository_id.as_deref())?;
         set_opt_str(&row, "githubRepo", space.github_repo.as_deref())?;
+        set_opt_str(&row, "createdByChatId", space.created_by_chat_id.as_deref())?;
         row.insert("createdAt", space.created_at.timestamp_millis())?;
         self.doc.commit();
         Ok(())
@@ -686,6 +687,8 @@ pub(crate) struct RawSpace {
     repository_id: Option<String>,
     github_repo: Option<String>,
     #[serde(default)]
+    created_by_chat_id: Option<String>,
+    #[serde(default)]
     created_at: i64,
 }
 
@@ -701,6 +704,7 @@ impl From<RawSpace> for Space {
             checkout_id: raw.checkout_id,
             repository_id: raw.repository_id,
             github_repo: raw.github_repo,
+            created_by_chat_id: raw.created_by_chat_id,
             created_at: dt(raw.created_at),
         }
     }
@@ -926,6 +930,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            created_by_chat_id: None,
             created_at: ts(1_500),
         }
     }

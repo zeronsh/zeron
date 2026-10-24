@@ -7126,6 +7126,7 @@ impl Shell {
                 zeron_proto::view::cloud_repository_id(&self.state.read(cx).spaces, repo)
             }),
             github_repo: github_repo.clone(),
+            created_by_chat_id: None,
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {
@@ -8809,6 +8810,51 @@ impl Shell {
         cx.notify();
     }
 
+    /// An agent added a project (MCP `add_project`): say which chat did, with
+    /// an Undo that removes it again.
+    pub(super) fn announce_agent_project(&mut self, space_id: String, cx: &mut Context<Self>) {
+        let message = {
+            let state = self.state.read(cx);
+            let Some(space) = state.space_row(&space_id) else {
+                return;
+            };
+            let chat = space
+                .created_by_chat_id
+                .as_deref()
+                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                .and_then(|chat| chat.title.as_deref())
+                .map(str::trim)
+                .filter(|title| !title.is_empty());
+            match chat {
+                Some(chat) => format!("“{chat}” added the project “{}”", space.display_name()),
+                None => format!("An agent added the project “{}”", space.display_name()),
+            }
+        };
+        let shell = cx.entity().downgrade();
+        crate::toast::show_with_action(
+            cx,
+            crate::toast::ToastKind::Info,
+            message,
+            "Undo",
+            move |_, cx| {
+                let space_id = space_id.clone();
+                let _ = shell.update(cx, |shell, cx| shell.undo_agent_project(space_id, cx));
+            },
+        );
+    }
+
+    /// Undo for an agent-added project: an empty one goes at once; one the
+    /// agent already started sessions in asks first, like a manual remove.
+    fn undo_agent_project(&mut self, space_id: String, cx: &mut Context<Self>) {
+        let sessions = self.state.read(cx).chats_deleted_with_space(&space_id);
+        if sessions == 0 {
+            self.delete_space(space_id, cx);
+        } else {
+            self.delete_space_confirm = Some(space_id);
+            cx.notify();
+        }
+    }
+
     pub(super) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.delete_space_confirm = None;
         self.mutate(
@@ -8933,7 +8979,7 @@ impl Shell {
                         .and_then(|s| state.device_name(&s.device_id))
                         .unwrap_or("its device")
                         .to_string(),
-                    state.chats_in_space(&space_id).len(),
+                    state.chats_deleted_with_space(&space_id),
                 )
             };
             let copy = if count == 1 {
