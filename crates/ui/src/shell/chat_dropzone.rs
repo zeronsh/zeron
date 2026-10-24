@@ -53,6 +53,17 @@ impl Shell {
                     if let Some(path) = &payload.workspace_path {
                         this.attach_workspace_drag(path, &composer, window, cx);
                     }
+                    // A pull request tab becomes a pull request chip.
+                    if let Some(pull_request) = &payload.pull_request {
+                        composer.update(cx, |composer, cx| {
+                            composer.add_pull_request_mention(
+                                &pull_request.url,
+                                &pull_request.label,
+                                window,
+                                cx,
+                            )
+                        });
+                    }
                     cx.notify();
                 },
             ))
@@ -85,7 +96,8 @@ impl Shell {
             .child("Drop to attach")
     }
 
-    /// The hint while a sidebar session is carried over a chat.
+    /// The hint while a sidebar session or a pull request tab is carried
+    /// over a chat.
     pub(super) fn mention_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
         div()
             .id("mention-drop-overlay")
@@ -99,6 +111,13 @@ impl Shell {
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
             .drag_over::<SidebarSessionDrag>(|style, _, _, _| style.opacity(1.0))
+            .drag_over::<RightTabDrag>(|style, tab, _, _| {
+                if tab.pull_request.is_some() {
+                    style.opacity(1.0)
+                } else {
+                    style
+                }
+            })
             .child("Drop to mention")
     }
 }

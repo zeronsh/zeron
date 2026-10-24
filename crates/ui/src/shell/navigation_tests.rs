@@ -606,3 +606,32 @@ fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut Te
         });
     });
 }
+
+#[gpui::test]
+fn a_pull_request_tab_dragged_into_the_chat_drops_as_a_mention(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_chat_pull_request("https://github.com/a/b/pull/7".into(), None, window, cx);
+        })
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    // The subagent tabs come first; the pull request's is the last.
+    let from = cx.debug_bounds("right-surface-tab-2").unwrap().center();
+    let to = cx.debug_bounds("chat-dropzone").unwrap().center();
+    cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+    cx.update(|_, cx| assert!(cx.has_active_drag(), "pull request tab drag never started"));
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+    cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        let text = shell.composer.read(cx).input.read(cx).text().to_owned();
+        assert!(
+            text.contains("[#7 Pull request](zeron-pr:https://github.com/a/b/pull/7)"),
+            "the drop mentions the pull request: {text:?}"
+        );
+        // The tab stays where it was.
+        assert_eq!(shell.right_tabs["parent"].len(), 3);
+    });
+}

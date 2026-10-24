@@ -11,6 +11,12 @@ pub(super) struct ChatPullRequest {
     _subscription: Subscription,
 }
 
+/// What a dragged pull request tab mentions when it lands in a composer.
+pub(super) struct PullRequestMentionDrag {
+    pub(super) url: String,
+    pub(super) label: String,
+}
+
 impl Shell {
     /// Whether a pull request opens in the focused session's pane: on the
     /// chat route, with a session (not the new-session canvas) in focus.
@@ -102,6 +108,22 @@ impl Shell {
             None => title.clone(),
         };
         Some((title.into(), detail.into()))
+    }
+
+    /// The chip a tab's pull request becomes when dragged into a composer.
+    pub(super) fn chat_pull_request_mention(
+        &self,
+        id: u64,
+        cx: &App,
+    ) -> Option<PullRequestMentionDrag> {
+        let tab = self.chat_pull_requests.get(&id)?;
+        let (number, title) = tab.page.read(cx).identity();
+        // Still loading, the URL already knows the number.
+        let number = number.or_else(|| tab.url.rsplit('/').next()?.parse().ok());
+        Some(PullRequestMentionDrag {
+            url: tab.url.clone(),
+            label: zeron_proto::pull_request_mentions::pull_request_mention_label(number, &title),
+        })
     }
 
     pub(super) fn chat_pull_request_loading(&self, id: u64, cx: &App) -> bool {
