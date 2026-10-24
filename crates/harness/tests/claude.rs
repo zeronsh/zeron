@@ -343,6 +343,36 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
 }
 
 #[tokio::test]
+async fn questions_closed_unanswered_deny_the_tool() {
+    // No answers is the person closing the questions: the CLI must read a
+    // deny that says so, not an allow with empty picks.
+    let (steer_tx, steer_rx) = mpsc::channel(8);
+    let _steer = steer_tx;
+    let controls = RunControls {
+        realtime: None,
+        execution_lease: None,
+        request_input: Box::new(|_| {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Vec::new());
+            rx
+        }),
+        steering: steer_rx,
+        interrupt: CancellationToken::new(),
+        turn: Default::default(),
+    };
+    let events = run_to_end(&harness(), request("scenario:closed-question"), controls).await;
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: Some("declined".into()),
+            error: None,
+            session_id: Some("sess-ask".into()),
+        })
+    );
+}
+
+#[tokio::test]
 async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
     use zeron_proto::ReasoningLevel;
     use zeron_proto::invocation::{Invocation, SkillCommand, harness_prompt};

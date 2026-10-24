@@ -628,6 +628,13 @@ fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) ->
     key == "escape" && (!input_focused || input_empty)
 }
 
+/// Escape with no page to go back to and nothing given on this one closes
+/// the questions unanswered, like any panel. Anything picked or typed holds
+/// the panel open: a stray Escape must not throw an answer away.
+fn wizard_escape_dismisses(page: usize, page_has_pick: bool, input_empty: bool) -> bool {
+    page == 0 && !page_has_pick && input_empty
+}
+
 /// Find the unresolved input request the panel should serve, if any: an
 /// unresolved input part on the LAST assistant entry — regardless of the
 /// entry's run status. The question stays answerable until the user actually
@@ -9843,6 +9850,13 @@ impl Composer {
         }
     }
 
+    /// Close the questions without answering: the same RespondInput as an
+    /// answer, with none — the run reads its own decline, the chip records
+    /// the questions closed, and the composer comes back.
+    fn wizard_dismiss(&mut self, cx: &mut Context<Self>) {
+        self.wizard_finish(Vec::new(), cx);
+    }
+
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
         let Some(wizard) = self.wizard.take() else {
@@ -9868,6 +9882,11 @@ impl Composer {
             return;
         };
         let request_id = wizard.request_id.clone();
+        let failed = if answers.is_empty() {
+            "Closing the question failed"
+        } else {
+            "Answer failed"
+        };
         let command = SessionCommandPayload::RespondInput {
             request_id: request_id.clone(),
             answers,
@@ -9882,7 +9901,7 @@ impl Composer {
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
-                    composer.failure = Some(format!("Answer failed: {err}").into());
+                    composer.failure = Some(format!("{failed}: {err}").into());
                     composer.failure_key = Some(failure_chat);
                     // The answer never left this device — put the panel back.
                     composer.answered_requests.remove(&request_id);
@@ -9938,7 +9957,14 @@ impl Composer {
             }
         } else if key == "escape" {
             if wizard_escape_goes_back(key, input_focused, input_empty) {
-                self.wizard_back(cx);
+                let dismisses = self.wizard.as_ref().is_some_and(|wizard| {
+                    wizard_escape_dismisses(wizard.page, wizard.page_has_pick(), input_empty)
+                });
+                if dismisses {
+                    self.wizard_dismiss(cx);
+                } else {
+                    self.wizard_back(cx);
+                }
             }
             cx.stop_propagation();
         }
@@ -9950,7 +9976,8 @@ impl Composer {
     /// place of the composer: the same floating-pill chrome (`rounded-[26px]
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
-    /// override over a hairline, and Back / Next-Submit footer.
+    /// override over a hairline, and Back / Next-Submit footer — plus a corner
+    /// close that answers nothing (Escape on an untouched first page too).
     fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
@@ -9982,6 +10009,9 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        // The close's tooltip names Escape only while Escape would close.
+        let escape_closes = wizard_escape_dismisses(page, wizard.page_has_pick(), typed_empty);
+        let dismiss_hover_key: SharedString = format!("wizard-dismiss-{}", cx.entity_id()).into();
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -10064,6 +10094,7 @@ impl Composer {
                 this.on_wizard_key(event, window, cx)
             }))
             .occlude()
+            .relative()
             .rounded(px(COMPOSER_RADIUS))
             .border_1()
             .border_color(theme.border)
@@ -10171,6 +10202,46 @@ impl Composer {
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
+                    ),
+            )
+            // Close without answering — the composer's own close (Cancel
+            // dictation) on the same pill: 28px round, 16px cross. Pinned to
+            // the corner so the header keeps its layout, 12px in so it is
+            // concentric with the 26px radius. No tab stop: the panel owns the
+            // keyboard, and Enter on a focused close would reach Next first.
+            .child(
+                div()
+                    .id("wizard-dismiss")
+                    .role(gpui::Role::Button)
+                    .aria_label("Close without answering")
+                    .absolute()
+                    .top(px(12.0))
+                    .right(px(12.0))
+                    .size(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(
+                        &dismiss_hover_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.10),
+                    ))
+                    .on_hover(motion::hover_listener(dismiss_hover_key))
+                    .tooltip(crate::settings::widgets::text_tooltip(if escape_closes {
+                        "Close without answering · Esc"
+                    } else {
+                        "Close without answering"
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.wizard_dismiss(cx);
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::CLOSE)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
                     ),
             );
         crate::frost::frosted(COMPOSER_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element()
@@ -16146,6 +16217,13 @@ mod tests {
         assert!(wizard_escape_goes_back("escape", true, true));
         assert!(!wizard_escape_goes_back("escape", true, false));
         assert!(!wizard_escape_goes_back("enter", false, true));
+
+        // With nowhere to go back to, Escape closes an untouched panel —
+        // never one holding a pick or typed text.
+        assert!(wizard_escape_dismisses(0, false, true));
+        assert!(!wizard_escape_dismisses(0, true, true));
+        assert!(!wizard_escape_dismisses(0, false, false));
+        assert!(!wizard_escape_dismisses(1, false, true));
     }
 
     #[test]
@@ -16316,6 +16394,7 @@ mod tests {
                     request_id: id.into(),
                     questions: vec![q],
                     resolved,
+                    answers: None,
                 }],
                 created_at: 0,
                 device_id: "device".into(),
@@ -16370,6 +16449,48 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn closing_the_wizard_unanswered_retires_it_and_returns_the_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        state.update(cx, |s, _| s.selected_chat = Some("a".into()));
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            c.input.update(cx, |i, cx| i.set_text("draft", cx));
+        });
+        state.update(cx, |s, _| {
+            s.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "r1".into(),
+                    questions: vec![question("q", &["a", "b"], false)],
+                    resolved: false,
+                    answers: None,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }]
+        });
+        composer.update(cx, |c, cx| {
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_some());
+            c.wizard_dismiss(cx);
+            assert!(c.wizard.is_none());
+            assert_eq!(c.input.read(cx).text(), "draft");
+            // The question still reads open until the close lands: the latch
+            // keeps the panel from coming straight back.
+            c.on_state_changed(cx);
+            assert!(c.wizard.is_none());
+        });
+    }
+
     #[test]
     fn pending_input_detection() {
         use zeron_doc::MessageStatus;
@@ -16378,6 +16499,7 @@ mod tests {
             request_id: "r1".into(),
             questions: vec![question("q", &["a"], false)],
             resolved: false,
+            answers: None,
         };
         let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
             id: "m".into(),
@@ -16434,6 +16556,7 @@ mod tests {
             request_id: "r1".into(),
             questions: vec![],
             resolved: true,
+            answers: None,
         };
         let t = vec![entry(
             Some(MessageStatus::Streaming),

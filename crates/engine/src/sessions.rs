@@ -987,7 +987,11 @@ impl SessionsEngine {
                         answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
                         _ = tx.closed() => {
                             lock(&pending).remove(&request_id);
-                            let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                            // The run stopped waiting: closed unanswered.
+                            let _ = engine_tx.send(AgentEvent::InputResolved {
+                                request_id,
+                                answers: Some(Vec::new()),
+                            });
                         }
                     }
                 });
@@ -1469,8 +1473,10 @@ impl SessionsEngine {
             .is_some_and(|h| h.engine_tx.send(event).is_ok())
     }
 
-    /// Resolve a pending `request_input` question set. Returns `false` when no such
-    /// request is pending (unknown id, or the run already settled).
+    /// Resolve a pending `request_input` question set. Empty `answers` close
+    /// it unanswered — the harness answers with its own decline. Returns
+    /// `false` when no such request is pending (unknown id, or the run
+    /// already settled).
     pub fn respond_input(
         &self,
         chat_id: &str,
@@ -1486,9 +1492,10 @@ impl SessionsEngine {
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
-        let _ = resolver.send(answers);
+        let _ = resolver.send(answers.clone());
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
+            answers: Some(answers),
         });
         Ok(true)
     }
@@ -2852,7 +2859,7 @@ fn turn_tail(events: impl Iterator<Item = AgentEvent>, closed: bool) -> TurnTail
             AgentEvent::Done { .. } if ix == 0 && closed => continue,
             AgentEvent::Done { .. } => break,
             AgentEvent::Subagent { .. } => continue,
-            AgentEvent::InputResolved { request_id } => {
+            AgentEvent::InputResolved { request_id, .. } => {
                 answered.insert(request_id);
             }
             AgentEvent::InputRequested { request_id, .. } => {
@@ -4698,7 +4705,14 @@ async fn drive_run(
             // unresolved question must not outlive the run that asked it
             // (its resolver died with the run; an answer could never land).
             for part in folded.iter_mut() {
-                if let MessagePart::Input { resolved, .. } = part {
+                if let MessagePart::Input {
+                    resolved, answers, ..
+                } = part
+                {
+                    if !*resolved {
+                        // Never answered: it closed with the run.
+                        *answers = Some(Vec::new());
+                    }
                     *resolved = true;
                 }
             }
@@ -5704,6 +5718,7 @@ mod tests {
         };
         let answered = |id: &str| AgentEvent::InputResolved {
             request_id: id.into(),
+            answers: None,
         };
         assert!(tail_of(vec![started(), asked("q1")], false).awaiting_input);
         assert!(

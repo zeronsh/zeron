@@ -528,6 +528,25 @@ async fn a_question_goes_to_the_user_and_back() {
 }
 
 #[tokio::test]
+async fn a_question_closed_unanswered_is_cancelled_not_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    // No answers: the person closed the questions.
+    let (run, controls) = controls(vec![]);
+    let mut stream = harness
+        .run(request(dir.path(), "question-dismissed", "ask me"), run)
+        .await
+        .unwrap();
+    let events = turn(&mut stream).await;
+    assert_eq!(text(&events), "Went ahead without an answer.");
+    let frames = log(dir.path(), "inbound.ndjson");
+    assert!(sent(&frames, "userInput/answer").is_empty());
+    let cancel = sent(&frames, "userInput/cancel")[0];
+    assert_eq!(cancel["params"]["userInputId"], "ask-1");
+    ends(stream, controls).await;
+}
+
+#[tokio::test]
 async fn models_come_from_a_read_only_host() {
     let dir = tempfile::tempdir().unwrap();
     let harness = harness(dir.path());

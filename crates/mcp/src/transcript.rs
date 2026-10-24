@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use zeron_proto::ToolCall;
+use zeron_proto::view::{InputOutcome, input_outcome};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -137,6 +138,7 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
                 request_id,
                 questions,
                 resolved,
+                answers,
                 ..
             } => {
                 if !*resolved {
@@ -144,6 +146,16 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
                         "requestId": request_id,
                         "questions": questions,
                     }));
+                } else if options.include_tools {
+                    // What the person decided, in the ledger like any tool's
+                    // record: `question: Recherche → Deep dive`.
+                    match input_outcome(questions, *resolved, answers.as_deref()) {
+                        InputOutcome::Answered(lines) => {
+                            tools.extend(lines.iter().map(|line| format!("question: {line}")));
+                        }
+                        InputOutcome::Closed(line) => tools.push(format!("question: {line}")),
+                        InputOutcome::Pending | InputOutcome::Unrecorded => {}
+                    }
                 }
             }
             MessagePart::Error { message, .. } => errors.push(message.clone()),
@@ -282,6 +294,7 @@ mod tests {
                         request_id: "req-1".into(),
                         questions: vec![],
                         resolved: false,
+                        answers: None,
                     },
                 ],
             ),
@@ -300,6 +313,52 @@ mod tests {
             Some("req-1")
         );
         assert_eq!(rendered[1].created_at_iso, "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn answered_questions_join_the_tool_ledger() {
+        let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+            id: id.into(),
+            header: header.into(),
+            question: format!("{header}?"),
+            options: vec!["Deep dive".into()],
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+        };
+        let input =
+            |id: &str, answers: Option<Vec<zeron_proto::UserInputAnswer>>| MessagePart::Input {
+                id: id.into(),
+                request_id: id.into(),
+                questions: vec![question("q", "Recherche")],
+                resolved: true,
+                answers,
+            };
+        let entries = vec![entry(
+            "a1",
+            MessageRole::Assistant,
+            vec![
+                input(
+                    "answered",
+                    Some(vec![zeron_proto::UserInputAnswer {
+                        question_id: "q".into(),
+                        labels: vec!["Deep dive".into()],
+                    }]),
+                ),
+                input("closed", Some(vec![])),
+                // Resolved before answers were recorded: nothing to report.
+                input("legacy", None),
+            ],
+        )];
+        let rendered = render_entries(&entries, RenderOptions::default());
+        assert_eq!(
+            rendered[0].tools,
+            vec![
+                "question: Recherche → Deep dive",
+                "question: Recherche → Not answered",
+            ]
+        );
+        assert!(rendered[0].pending_input.is_none());
     }
 
     #[test]

@@ -125,6 +125,49 @@ fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
 
+/// The question chip says what was answered, one `label → answer` line per
+/// question; a chip from before answers were recorded keeps its old text.
+#[test]
+fn question_chip_reads_what_was_answered() {
+    let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+        id: id.into(),
+        header: header.into(),
+        question: format!("{header}?"),
+        options: vec!["Deep dive".into(), "Table".into()],
+        multi_select: false,
+        prefill: None,
+        multiline: false,
+    };
+    let chip = |questions: Vec<zeron_proto::UserInputQuestion>, resolved: bool, answers: Option<Vec<zeron_proto::UserInputAnswer>>| {
+        let mut w = worker(390.0);
+        w.input = TranscriptInput {
+            entries: vec![Arc::new(SessionMessageEntry {
+                id: "a".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input { id: "r1".into(), request_id: "r1".into(), questions, resolved, answers }],
+                created_at: 0,
+                device_id: String::new(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })],
+            ..Default::default()
+        };
+        let frame = w.pass();
+        let row = frame.display(0).unwrap();
+        (row.copy_text, row.height)
+    };
+    let picked = |id: &str, label: &str| zeron_proto::UserInputAnswer { question_id: id.into(), labels: vec![label.into()] };
+    assert_eq!(chip(vec![question("q", "Recherche")], true, None).0, "Answered a question");
+    let (closed, one_line) = chip(vec![question("q", "Recherche")], true, Some(vec![]));
+    assert_eq!(closed, "Recherche → Not answered");
+    let (answered, two_lines) = chip(vec![question("a", "Recherche"), question("b", "Format")], true, Some(vec![picked("a", "Deep dive"), picked("b", "Charts")]));
+    assert_eq!(answered, "Recherche → Deep dive\nFormat → “Charts”");
+    // Short enough to share a line at this width: only a kept break makes
+    // the second answer its own line.
+    assert!(two_lines > one_line, "{two_lines} vs {one_line}");
+}
+
 #[test]
 fn stable_prefix_rows_are_reused_while_streaming() {
     let mut w = worker(390.0);

@@ -68,6 +68,10 @@ required-features = ["project-palette-fixture"]
 name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
+[[example]]
+name = "question-answers-fixture"
+required-features = ["appshots-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true

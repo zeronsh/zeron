@@ -1781,14 +1781,23 @@ fn handle_control_request(
         // input part into the doc whose id no resolver knew — the QuestionPanel
         // answered that unanswerable twin and the run never resumed.
         //
-        // A dropped sender (caller went away) degrades to empty answers so the
-        // agent is unblocked rather than wedged.
+        // No answers — the person closed the questions, or a dropped sender
+        // (caller went away) — is a decline: deny the tool so the agent reads
+        // that it went unanswered, rather than an empty pick, and is
+        // unblocked rather than wedged.
         let answers = (request_input)(questions.clone()).await.unwrap_or_default();
-        let updated = updated_input_with_answers(&input, &questions, &answers);
-        let line = control_response_line(&request_id, allow_response(updated));
+        let response = if answers.is_empty() {
+            serde_json::json!({ "behavior": "deny", "message": QUESTIONS_DISMISSED })
+        } else {
+            allow_response(updated_input_with_answers(&input, &questions, &answers))
+        };
+        let line = control_response_line(&request_id, response);
         let _ = stdin_tx.send(StdinMsg::Line(line));
     });
 }
+
+/// What a declined `AskUserQuestion` tells the agent.
+const QUESTIONS_DISMISSED: &str = "The user dismissed the questions without answering.";
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
 /// (tolerant of `header`/`title`, `question`/`prompt`, string or object

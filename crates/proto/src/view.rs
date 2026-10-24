@@ -859,6 +859,152 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
     summary
 }
 
+// ---------------------------------------------------------------------------
+// Question answers (pure)
+// ---------------------------------------------------------------------------
+
+/// Longest answer or label a one-line surface shows, in chars. The doc keeps
+/// the whole answer; a chip only summarizes it.
+const ANSWER_DISPLAY_MAX: usize = 160;
+
+/// What became of the questions an agent asked — one derivation for every
+/// surface that shows them (the desktop chip, the iOS chip, `read_chat`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputOutcome {
+    /// Still waiting on the person.
+    Pending,
+    /// Resolved before answers were recorded on the transcript: only that it
+    /// was resolved is known.
+    Unrecorded,
+    /// Closed without an answer: dismissed, or the run stopped waiting —
+    /// `Recherche → Not answered`.
+    Closed(AnswerLine),
+    /// One line per question, in the order asked.
+    Answered(Vec<AnswerLine>),
+}
+
+/// One question and what came back, ready for a one-line surface:
+/// `Recherche → Deep dive`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnswerLine {
+    /// The question's header — or its text, when headers don't tell the
+    /// questions apart (an MCP form names every field "<server> asks").
+    pub label: String,
+    /// What the agent received: picked options joined with ", ", typed text
+    /// in quotes, "Skipped" when nothing was given.
+    pub answer: String,
+    /// Some of the answer is text the person typed rather than an offered
+    /// option.
+    pub typed: bool,
+    /// Nothing was given for this question.
+    pub skipped: bool,
+}
+
+impl std::fmt::Display for AnswerLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} → {}", self.label, self.answer)
+    }
+}
+
+/// [`InputOutcome`] from an input part's fields. `answers` is `None` on parts
+/// written before answers were recorded, `Some([])` when the questions closed
+/// unanswered.
+pub fn input_outcome(
+    questions: &[crate::UserInputQuestion],
+    resolved: bool,
+    answers: Option<&[crate::UserInputAnswer]>,
+) -> InputOutcome {
+    if !resolved {
+        return InputOutcome::Pending;
+    }
+    let Some(answers) = answers else {
+        return InputOutcome::Unrecorded;
+    };
+    if answers.is_empty() {
+        return InputOutcome::Closed(AnswerLine {
+            label: input_header(questions),
+            answer: "Not answered".to_owned(),
+            typed: false,
+            skipped: true,
+        });
+    }
+    let lines: Vec<AnswerLine> = questions
+        .iter()
+        .map(|question| {
+            let given: Vec<&String> = answers
+                .iter()
+                .find(|a| a.question_id == question.id)
+                .map(|a| a.labels.iter().filter(|l| !l.trim().is_empty()).collect())
+                .unwrap_or_default();
+            let typed = given.iter().any(|l| !question.options.contains(l));
+            let answer = if given.is_empty() {
+                "Skipped".to_owned()
+            } else {
+                given
+                    .iter()
+                    .map(|l| {
+                        let text = clip(&single_line(l), ANSWER_DISPLAY_MAX);
+                        if question.options.contains(l) {
+                            text
+                        } else {
+                            format!("“{text}”")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            AnswerLine {
+                label: answer_label(question, questions),
+                answer,
+                typed,
+                skipped: given.is_empty(),
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return InputOutcome::Unrecorded;
+    }
+    InputOutcome::Answered(lines)
+}
+
+/// What a one-line surface calls a set of questions: the first one's
+/// header, "Question" when it has none.
+pub fn input_header(questions: &[crate::UserInputQuestion]) -> String {
+    questions
+        .first()
+        .map(|q| single_line(&q.header))
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "Question".to_owned())
+}
+
+fn answer_label(question: &crate::UserInputQuestion, all: &[crate::UserInputQuestion]) -> String {
+    let header = single_line(&question.header);
+    let shared = all
+        .iter()
+        .filter(|q| single_line(&q.header) == header)
+        .count()
+        > 1;
+    if !header.is_empty() && !shared {
+        return header;
+    }
+    let text = single_line(&question.question);
+    if !text.is_empty() {
+        return clip(&text, ANSWER_DISPLAY_MAX);
+    }
+    if header.is_empty() {
+        "Question".to_owned()
+    } else {
+        header
+    }
+}
+
+fn clip(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", text[..end].trim_end()),
+        None => text.to_owned(),
+    }
+}
+
 /// The status-dot palette, as oklch triples (L, C, H°).
 ///
 /// Colors live here rather than in the viewport because the *meaning* of a
@@ -1015,6 +1161,130 @@ mod checkout_tests {
             checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
             "New worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod input_outcome_tests {
+    use super::*;
+    use crate::{UserInputAnswer, UserInputQuestion};
+
+    fn question(id: &str, header: &str, text: &str, options: &[&str]) -> UserInputQuestion {
+        UserInputQuestion {
+            id: id.into(),
+            header: header.into(),
+            question: text.into(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+        }
+    }
+
+    fn answer(id: &str, labels: &[&str]) -> UserInputAnswer {
+        UserInputAnswer {
+            question_id: id.into(),
+            labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+        }
+    }
+
+    fn lines(outcome: InputOutcome) -> Vec<String> {
+        match outcome {
+            InputOutcome::Answered(lines) => lines.iter().map(ToString::to_string).collect(),
+            other => panic!("not answered: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolution_without_answers_reads_as_what_is_known() {
+        let qs = [question("q", "Recherche", "How deep?", &["Deep dive"])];
+        assert_eq!(input_outcome(&qs, false, None), InputOutcome::Pending);
+        // Answers may already be stamped while the part still reads open.
+        assert_eq!(
+            input_outcome(&qs, false, Some(&[answer("q", &["Deep dive"])])),
+            InputOutcome::Pending
+        );
+        // Older docs: resolved, but never recorded what was answered — must
+        // not claim it went unanswered.
+        assert_eq!(input_outcome(&qs, true, None), InputOutcome::Unrecorded);
+        let InputOutcome::Closed(closed) = input_outcome(&qs, true, Some(&[])) else {
+            panic!("closed");
+        };
+        assert_eq!(closed.to_string(), "Recherche → Not answered");
+        assert!(closed.skipped);
+        // No header to name the questions by.
+        let bare = [question("q", " ", "How deep?", &[])];
+        let InputOutcome::Closed(closed) = input_outcome(&bare, true, Some(&[])) else {
+            panic!("closed");
+        };
+        assert_eq!(closed.to_string(), "Question → Not answered");
+    }
+
+    #[test]
+    fn answers_pair_with_their_questions_in_the_order_asked() {
+        let qs = [
+            question("depth", "Recherche", "How deep?", &["Quick", "Deep dive"]),
+            question(
+                "format",
+                "Format",
+                "Deliver as?",
+                &["Table", "Diagram", "Prose"],
+            ),
+            question("scope", "Scope", "Anything else?", &["No"]),
+            question("notes", "Notes", "Notes for me?", &[]),
+        ];
+        let given = [
+            answer("notes", &["  "]),
+            answer("scope", &["Include the\niOS app"]),
+            answer("format", &["Table", "Diagram"]),
+            answer("depth", &["Deep dive"]),
+        ];
+        assert_eq!(
+            lines(input_outcome(&qs, true, Some(&given))),
+            vec![
+                "Recherche → Deep dive",
+                "Format → Table, Diagram",
+                "Scope → “Include the iOS app”",
+                "Notes → Skipped",
+            ]
+        );
+        let InputOutcome::Answered(parsed) = input_outcome(&qs, true, Some(&given)) else {
+            unreachable!()
+        };
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|l| (l.typed, l.skipped))
+                .collect::<Vec<_>>(),
+            vec![(false, false), (false, false), (true, false), (false, true)]
+        );
+    }
+
+    #[test]
+    fn shared_headers_fall_back_to_the_question_text() {
+        // An MCP form asks every field under one "<server> asks" header.
+        let qs = [
+            question("a", "figma asks", "File name", &[]),
+            question("b", "figma asks", "Make it public?", &["Yes", "No"]),
+        ];
+        let given = [answer("a", &["Landing v2"]), answer("b", &["No"])];
+        assert_eq!(
+            lines(input_outcome(&qs, true, Some(&given))),
+            vec!["File name → “Landing v2”", "Make it public? → No"]
+        );
+    }
+
+    #[test]
+    fn long_typed_answers_are_clipped_for_one_line_surfaces() {
+        let qs = [question("q", "Notes", "Notes?", &[])];
+        let long = "word ".repeat(80);
+        let InputOutcome::Answered(parsed) =
+            input_outcome(&qs, true, Some(&[answer("q", &[long.as_str()])]))
+        else {
+            panic!("answered");
+        };
+        assert!(parsed[0].answer.ends_with("…”"), "{}", parsed[0].answer);
+        assert!(parsed[0].answer.chars().count() <= ANSWER_DISPLAY_MAX + 3);
     }
 }
 

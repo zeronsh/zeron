@@ -59,6 +59,13 @@ export interface UserInputQuestion {
   readonly multiSelect?: boolean;
 }
 
+/** What the user picked or typed for one question (mirrors the Rust
+ * `UserInputAnswer`). */
+export interface UserInputAnswer {
+  readonly questionId: string;
+  readonly labels: ReadonlyArray<string>;
+}
+
 /** Message parts — the structured view of an assistant turn (parts.ts). */
 export type MessagePart =
   | { readonly kind: "image"; readonly id: string; readonly path: string; readonly name: string; readonly mimeType: string }
@@ -92,6 +99,9 @@ export type MessagePart =
       readonly requestId: string;
       readonly questions: ReadonlyArray<UserInputQuestion>;
       readonly resolved?: boolean;
+      /** What the run received once resolved: empty ⇒ closed unanswered;
+       * absent ⇒ pending, or resolved before answers were recorded. */
+      readonly answers?: ReadonlyArray<UserInputAnswer>;
     }
   | {
       /** The run ended abnormally (harness failure, stall, interrupt). */

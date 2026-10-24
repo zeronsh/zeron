@@ -742,6 +742,16 @@ impl Runner {
         let id = user_input.clone();
         let task = self.dialogs.spawn(async move {
             let answers = answers.await.unwrap_or_default();
+            // No answers: the questions were closed unanswered (or the run
+            // stopped waiting) — Muse's own decline, not an empty pick.
+            if answers.is_empty() {
+                let _ = client.request(
+                    "userInput/cancel",
+                    json!({"sessionId": session, "userInputId": id,
+                           "reason": "The user dismissed the questions without answering."}),
+                );
+                return;
+            }
             let answers: Vec<Value> = questions
                 .iter()
                 .map(|question| {

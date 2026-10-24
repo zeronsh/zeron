@@ -1574,38 +1574,175 @@ async fn rpc_surface_over_in_memory_transport() {
     }
 }
 
+/// Harness that asks one question through RunControls and echoes the answer —
+/// "picked none" when the question closed without one.
+struct EchoAnswerHarness;
+#[async_trait]
+impl Harness for EchoAnswerHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Asking"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        tokio::spawn(async move {
+            let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                prefill: None,
+                multiline: false,
+                multi_select: false,
+            }])
+            .await
+            .unwrap_or_default();
+            let picked = answers
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+/// The input part a settled transcript records for [`EchoAnswerHarness`]'s
+/// question.
+fn recorded_answers(core: &EngineCore) -> Option<Vec<zeron_proto::UserInputAnswer>> {
+    entries(core).iter().find_map(|e| {
+        e.parts.iter().find_map(|p| match p {
+            MessagePart::Input {
+                resolved: true,
+                answers,
+                ..
+            } => answers.clone(),
+            _ => None,
+        })
+    })
+}
+
 #[tokio::test]
-async fn respond_input_resolves_pending_question() {
-    // Harness that asks a question through RunControls and echoes the answer.
-    struct AskingHarness;
-    #[async_trait]
-    impl Harness for AskingHarness {
-        fn id(&self) -> HarnessId {
-            HarnessId::Mock
+async fn closing_a_question_unanswered_declines_and_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(dir.path(), Arc::new(EchoAnswerHarness));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-close",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    let request_id = loop {
+        let open = entries_now(&core).iter().find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        });
+        if let Some(id) = open {
+            break id;
         }
-        fn display_name(&self) -> &str {
-            "Asking"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> SteeringMode {
-            SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-            Ok(vec![])
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            controls: RunControls,
-        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            tokio::spawn(async move {
-                let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    // Closing the panel sends no answers: the run unblocks with nothing
+    // picked, and the chip records the question closed, not pending.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![],
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts.iter().any(
+                        |p| matches!(p, MessagePart::Text { text, .. } if text == "picked none"),
+                    )
+            })
+        },
+        "turn to continue without an answer",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-close"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+    assert_eq!(recorded_answers(&core), Some(vec![]));
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+}
+
+/// A question whose run already died, closed without an answer: the chip
+/// records it closed, and no turn starts just to say so.
+#[tokio::test]
+async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(MockHarness {
+            script: mock_script(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    // The orphan: a settled entry still holding an open question, with no
+    // live resolver behind it.
+    handle
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: "old-assistant".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: "req-dead".into(),
+                request_id: "req-dead".into(),
+                questions: vec![zeron_proto::UserInputQuestion {
                     id: "q1".into(),
                     header: "Pick".into(),
                     question: "Which one?".into(),
@@ -1613,29 +1750,51 @@ async fn respond_input_resolves_pending_question() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
-                }])
-                .await
-                .unwrap_or_default();
-                let picked = answers
-                    .first()
-                    .and_then(|a| a.labels.first().cloned())
-                    .unwrap_or_else(|| "none".into());
-                let _ = tx
-                    .send(Ok(AgentEvent::TextDelta {
-                        text: format!("picked {picked}"),
-                    }))
-                    .await;
-                let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
-            });
-            Ok(futures::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            })
-            .boxed())
-        }
-    }
+                }],
+                resolved: false,
+                answers: None,
+            }],
+            created_at: 1,
+            device_id: core.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-dead",
+        SessionCommandPayload::RespondInput {
+            request_id: "req-dead".into(),
+            answers: vec![],
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-close-dead")
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the close to apply",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-close-dead"),
+        Some((
+            SessionCommandStatus::Applied,
+            Some("closed unanswered".into())
+        ))
+    );
+    assert_eq!(recorded_answers(&core), Some(vec![]));
+    // Nothing was dispatched: no turn follows the old entry.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(entries(&core).len(), 1);
+    core.shutdown().await;
+}
 
+#[tokio::test]
+async fn respond_input_resolves_pending_question() {
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(AskingHarness));
+    let core = assemble(dir.path(), Arc::new(EchoAnswerHarness));
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1711,12 +1870,14 @@ async fn respond_input_resolves_pending_question() {
         command_status(&core, "cmd-answer-1"),
         Some((SessionCommandStatus::Applied, None))
     );
-    // The input part is marked resolved in the doc.
-    assert!(entries(&core).iter().any(|e| {
-        e.parts
-            .iter()
-            .any(|p| matches!(p, MessagePart::Input { resolved: true, .. }))
-    }));
+    // The input part is marked resolved and records what the run received.
+    assert_eq!(
+        recorded_answers(&core),
+        Some(vec![zeron_proto::UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec!["b".into()],
+        }])
+    );
     // The run task writes the Complete entry BEFORE settling the status row —
     // wait for the transition instead of asserting the instant in between.
     wait_for(
