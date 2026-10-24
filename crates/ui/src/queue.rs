@@ -685,7 +685,12 @@ impl Composer {
                     .text_size(px(QUEUE_TEXT_SIZE))
                     .line_height(px(line_height))
                     .text_color(theme.text.opacity(0.9))
-                    .child(crate::composer::chip_text(text, chips, theme));
+                    .child(crate::composer::chip_text(
+                        text,
+                        chips,
+                        |chat_id| self.state.read(cx).chat_harness(chat_id),
+                        theme,
+                    ));
                 // Attachments the row's chips already show get no tile.
                 let tiled: Vec<String> =
                     crate::attachments::unchipped_attachments(&item.text, &item.attachments)

@@ -6395,6 +6395,7 @@ impl Transcript {
                 row_id,
                 text,
                 mentions,
+                |chat_id| self.state.read(cx).chat_harness(chat_id),
                 theme,
                 measured_h.clone(),
                 cx.entity_id(),
@@ -8867,6 +8868,7 @@ fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+    chat_harness: impl Fn(&str) -> Option<zeron_proto::HarnessId>,
     theme: &Theme,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
@@ -8884,7 +8886,12 @@ fn user_bubble_text(
             (!overlays
                 .iter()
                 .any(|overlay| overlay.status.is_some() && overlay.range == span.range))
-            .then(|| crate::composer::chip_icon(span.kind, &span.path, theme.appearance))
+            .then(|| {
+                let harness = (span.kind == crate::composer::ChipKind::Chat)
+                    .then(|| chat_harness(&span.path))
+                    .flatten();
+                crate::composer::chip_icon(span.kind, &span.path, harness, theme.appearance)
+            })
         })
         .collect();
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();

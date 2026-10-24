@@ -564,9 +564,9 @@ fn sent_messages_project_image_chips_for_the_transcript() {
 #[test]
 fn file_chips_use_the_file_theme_to_tell_formats_apart() {
     use crate::theme::Appearance::Dark;
-    let themed = |kind, name| match chip_icon(kind, name, Dark) {
+    let themed = |kind, name| match chip_icon(kind, name, None, Dark) {
         ChipIcon::FileTheme(path) => path,
-        ChipIcon::Glyph(_) => panic!("{name} should use the file theme"),
+        ChipIcon::Glyph(_) | ChipIcon::Brand(..) => panic!("{name} should use the file theme"),
     };
     assert_ne!(
         themed(ChipKind::File, "README.md"),
@@ -581,8 +581,27 @@ fn file_chips_use_the_file_theme_to_tell_formats_apart() {
         themed(ChipKind::Directory, "src/")
     );
     assert!(matches!(
-        chip_icon(ChipKind::Image, "", Dark),
+        chip_icon(ChipKind::Image, "", None, Dark),
         ChipIcon::Glyph(_)
+    ));
+}
+
+#[test]
+fn chat_chips_show_their_sessions_harness_mark() {
+    use crate::theme::Appearance::Dark;
+    let chat = |harness| chip_icon(ChipKind::Chat, "a1", harness, Dark);
+    assert!(matches!(
+        chat(Some(HarnessId::ClaudeCode)),
+        ChipIcon::Brand(mark, _) if mark == crate::icons::CLAUDE_MARK
+    ));
+    assert!(matches!(
+        chat(Some(HarnessId::Codex)),
+        ChipIcon::Glyph(mark) if mark == crate::icons::OPENAI_MARK
+    ));
+    // A session this device doesn't know keeps the generic chat glyph.
+    assert!(matches!(
+        chat(None),
+        ChipIcon::Glyph(mark) if mark == crate::icons::CHAT_ROUND_LINE
     ));
 }
 

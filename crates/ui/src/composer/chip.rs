@@ -35,10 +35,11 @@ pub enum ChipKind {
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
-/// chip, or the file theme's own polychrome artwork, which tells formats and
-/// languages apart.
+/// chip, a glyph in its brand's color (a harness mark), or the file theme's
+/// own polychrome artwork, which tells formats and languages apart.
 pub(crate) enum ChipIcon {
     Glyph(&'static str),
+    Brand(&'static str, gpui::Hsla),
     FileTheme(SharedString),
 }
 
@@ -161,10 +162,12 @@ pub(super) fn chip_pad_overrides(spans: &[SentMentionSpan]) -> Vec<Range<usize>>
         .collect()
 }
 
-/// The icon of a chip. `path` names the file or folder for the file kinds.
+/// The icon of a chip. `path` names the file or folder for the file kinds;
+/// `harness` is the harness a chat chip's session runs on, when known.
 pub(crate) fn chip_icon(
     kind: ChipKind,
     path: &str,
+    harness: Option<HarnessId>,
     appearance: crate::theme::Appearance,
 ) -> ChipIcon {
     use crate::file_icons::{FileIconIdentity, asset_path};
@@ -172,7 +175,11 @@ pub(crate) fn chip_icon(
         ChipKind::Image => ChipIcon::Glyph(crate::icons::GALLERY),
         ChipKind::Skill => ChipIcon::Glyph(crate::icons::MAGIC_STICK_3),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
-        ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+        ChipKind::Chat => match harness.map(crate::pickers::harness_brand_icon) {
+            Some((mark, Some(color))) => ChipIcon::Brand(mark, color),
+            Some((mark, None)) => ChipIcon::Glyph(mark),
+            None => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+        },
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
@@ -220,31 +227,34 @@ pub(crate) fn paint_chip(
         well_bounds.origin + point((well - side) / 2.0, (well - side) / 2.0),
         size(side, side),
     );
-    match icon {
-        ChipIcon::Glyph(path) => {
-            let _ = window.paint_svg(
-                bounds,
-                (*path).into(),
-                None,
-                gpui::TransformationMatrix::default(),
-                theme.text_muted,
-                cx,
-            );
-        }
+    let (path, color) = match icon {
+        ChipIcon::Glyph(path) => (*path, theme.text_muted),
+        ChipIcon::Brand(path, color) => (*path, *color),
         ChipIcon::FileTheme(path) => {
             if let Some(image) = crate::file_icons::raster(path, cx) {
                 let _ = window.paint_image(bounds, Default::default(), image, 0, false);
             }
+            return;
         }
-    }
+    };
+    let _ = window.paint_svg(
+        bounds,
+        path.into(),
+        None,
+        gpui::TransformationMatrix::default(),
+        color,
+        cx,
+    );
 }
 
 /// A sent message's text with its chips painted over their spans, for rows
 /// that show one line of it (the queue). `text` is the projected display text
-/// and `spans` its chips, as [`sent_mention_display`] returns them.
+/// and `spans` its chips, as [`sent_mention_display`] returns them;
+/// `chat_harness` names the harness of a chat chip's session.
 pub(crate) fn chip_text(
     text: SharedString,
     spans: Vec<SentMentionSpan>,
+    chat_harness: impl Fn(&str) -> Option<HarnessId>,
     theme: &Theme,
 ) -> gpui::AnyElement {
     if spans.is_empty() {
@@ -265,7 +275,12 @@ pub(crate) fn chip_text(
     let layout = styled.layout().clone();
     let icons: Vec<ChipIcon> = spans
         .iter()
-        .map(|span| chip_icon(span.kind, &span.path, theme.appearance))
+        .map(|span| {
+            let harness = (span.kind == ChipKind::Chat)
+                .then(|| chat_harness(&span.path))
+                .flatten();
+            chip_icon(span.kind, &span.path, harness, theme.appearance)
+        })
         .collect();
     let theme = theme.clone();
     let underlay = gpui::canvas(
