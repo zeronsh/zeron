@@ -120,18 +120,18 @@ jobs:
 
       - name: package
         run: |
-          mkdir -p dist
-          apk="dist/zeron-$VERSION-android-arm64.apk"
+          mkdir -p out/android
+          apk="out/android/zeron-$VERSION-android-arm64.apk"
           cp apps/android/app/build/outputs/apk/release/app-release.apk "$apk"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | grep -m1 "certificate SHA-256" || true
-          (cd dist && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
-          ls -la dist
+          (cd out/android && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
+          ls -la out/android
           rm -f "$RUNNER_TEMP/zeron-release.jks"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: android-apk
-          path: dist/*
+          path: out/android/*
           if-no-files-found: error
           retention-days: 14
 
@@ -152,12 +152,12 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: android-apk
-          path: dist
+          path: out/android
       - name: upload to R2 (zeron.sh/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
-          apk="dist/zeron-$VERSION-android-arm64.apk"
-          (cd dist && sha256sum -c "$(basename "$apk").sha256")
+          apk="out/android/zeron-$VERSION-android-arm64.apk"
+          (cd out/android && sha256sum -c "$(basename "$apk").sha256")
           put() {
             npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote \
               --content-type "$3" --cache-control "$4"

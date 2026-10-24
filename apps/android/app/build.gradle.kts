@@ -58,7 +58,9 @@ android {
         targetSdk = 37
         versionCode = buildNumber
         versionName = workspaceVersion
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // The ABIs the core was built for (`ZERON_ANDROID_ABIS`): a dependency's
+        // native libraries for others would only add weight.
+        ndk { abiFilters += (System.getenv("ZERON_ANDROID_ABIS") ?: "arm64-v8a x86_64").split(" ").filter { it.isNotBlank() } }
     }
 
     signingConfigs {
@@ -95,7 +97,12 @@ android {
         res.directories.add(iconsOut.get().asFile.resolve("res").path)
     }
 
-    packaging { jniLibs { useLegacyPackaging = false } }
+    // Compressed: the APK is downloaded from zeron.sh, not delivered by Play
+    // (which compresses for transfer itself); about a third of the size.
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+        dex { useLegacyPackaging = true }
+    }
 }
 
 tasks.named("preBuild") { dependsOn(buildCore, genIcons) }
@@ -115,7 +122,6 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
-    implementation(libs.compose.material.icons)
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
