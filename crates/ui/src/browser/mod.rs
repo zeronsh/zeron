@@ -125,9 +125,9 @@ pub struct BrowserSurface {
     native_tx: tokio::sync::mpsc::Sender<native::NativeEvent>,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     _native_task: gpui::Task<()>,
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     favicon_task: Option<gpui::Task<()>>,
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     favicon_generation: u64,
     /// The page's pointer cursor (Windows: GPUI owns the cursor).
     #[cfg(windows)]
@@ -208,9 +208,9 @@ impl BrowserSurface {
             native_tx,
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             _native_task: native_task,
-            #[cfg(any(target_os = "macos", windows))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             favicon_task: None,
-            #[cfg(any(target_os = "macos", windows))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             favicon_generation: 0,
             #[cfg(windows)]
             page_cursor: gpui::CursorStyle::Arrow,
@@ -364,11 +364,8 @@ impl BrowserSurface {
         self.clear_favicon(cx);
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            #[cfg(any(target_os = "macos", windows))]
-            {
-                self.favicon_generation += 1;
-                self.favicon_task = None;
-            }
+            self.favicon_generation += 1;
+            self.favicon_task = None;
             let result = if let Some(native) = &self.native {
                 native.load(&url)
             } else {
@@ -469,11 +466,8 @@ impl BrowserSurface {
                 cx.defer(move |cx| gpui::ImageSource::Render(image).evict(None, cx));
             }
             self.native = None;
-            #[cfg(any(target_os = "macos", windows))]
-            {
-                self.favicon_task = None;
-                self.favicon_generation += 1;
-            }
+            self.favicon_task = None;
+            self.favicon_generation += 1;
         }
     }
 }
@@ -546,66 +540,72 @@ impl BrowserSurface {
                     cx.notify();
                 }
             }
-            native::NativeEvent::Favicon { page, url } => {
-                if self.page.url.as_deref() != Some(&page) || !model::allowed_navigation(&url) {
-                    return;
-                }
-                let generation = self.favicon_generation;
-                // reqwest's system proxy has no loopback exemption; a local dev
-                // server's favicon must be fetched directly.
-                let direct = url::Url::parse(&url).is_ok_and(|parsed| model::loopback(&parsed));
-                let download = gpui_tokio::Tokio::spawn(cx, async move {
-                    let mut builder = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .redirect(reqwest::redirect::Policy::limited(3));
-                    if direct {
-                        builder = builder.no_proxy();
-                    }
-                    let client = builder.build().ok()?;
-                    let mut response =
-                        client.get(url).send().await.ok()?.error_for_status().ok()?;
-                    if response.content_length().is_some_and(|n| n > 1024 * 1024) {
-                        return None;
-                    }
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) = response.chunk().await.ok()? {
-                        if bytes.len() + chunk.len() > 1024 * 1024 {
-                            return None;
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-                        .with_guessed_format()
-                        .ok()?;
-                    let mut limits = image::Limits::default();
-                    limits.max_image_width = Some(1024);
-                    limits.max_image_height = Some(1024);
-                    limits.max_alloc = Some(8 * 1024 * 1024);
-                    reader.limits(limits);
-                    let icon = reader.decode().ok()?.thumbnail(32, 32);
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    icon.write_to(&mut png, image::ImageFormat::Png).ok()?;
-                    Some(png.into_inner())
-                });
-                self.favicon_task = Some(cx.spawn(async move |this, cx| {
-                    let Ok(Some(bytes)) = download.await else {
-                        return;
-                    };
-                    let _ = this.update(cx, |this, cx| {
-                        if this.favicon_generation == generation
-                            && this.page.url.as_deref() == Some(&page)
-                        {
-                            this.favicon = Some(std::sync::Arc::new(gpui::Image::from_bytes(
-                                gpui::ImageFormat::Png,
-                                bytes,
-                            )));
-                            cx.emit(BrowserEvent::Changed);
-                            cx.notify();
-                        }
-                    });
-                }));
-            }
+            native::NativeEvent::Favicon { page, url } => self.fetch_favicon(page, url, cx),
         }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+impl BrowserSurface {
+    /// Download the icon `page` declares at `url`, show it on the tab and
+    /// remember it for the page's site.
+    fn fetch_favicon(&mut self, page: String, url: String, cx: &mut Context<Self>) {
+        if self.page.url.as_deref() != Some(&page) || !model::allowed_navigation(&url) {
+            return;
+        }
+        let generation = self.favicon_generation;
+        // reqwest's system proxy has no loopback exemption; a local dev
+        // server's favicon must be fetched directly.
+        let direct = url::Url::parse(&url).is_ok_and(|parsed| model::loopback(&parsed));
+        let download = gpui_tokio::Tokio::spawn(cx, async move {
+            let mut builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::limited(3));
+            if direct {
+                builder = builder.no_proxy();
+            }
+            let client = builder.build().ok()?;
+            let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+            if response.content_length().is_some_and(|n| n > 1024 * 1024) {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.ok()? {
+                if bytes.len() + chunk.len() > 1024 * 1024 {
+                    return None;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+                .with_guessed_format()
+                .ok()?;
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(1024);
+            limits.max_image_height = Some(1024);
+            limits.max_alloc = Some(8 * 1024 * 1024);
+            reader.limits(limits);
+            let icon = reader.decode().ok()?.thumbnail(32, 32);
+            let mut png = std::io::Cursor::new(Vec::new());
+            icon.write_to(&mut png, image::ImageFormat::Png).ok()?;
+            Some(png.into_inner())
+        });
+        self.favicon_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(Some(bytes)) = download.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.favicon_generation == generation && this.page.url.as_deref() == Some(&page)
+                {
+                    crate::favicons::store(&page, &bytes);
+                    this.favicon = Some(std::sync::Arc::new(gpui::Image::from_bytes(
+                        gpui::ImageFormat::Png,
+                        bytes,
+                    )));
+                    cx.emit(BrowserEvent::Changed);
+                    cx.notify();
+                }
+            });
+        }));
     }
 }
 

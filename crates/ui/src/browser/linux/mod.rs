@@ -22,6 +22,11 @@ pub enum NativeEvent {
     NewTab(String),
     Clipboard(String),
     Menu(Value),
+    /// The icon a finished `page` declares.
+    Favicon {
+        page: String,
+        url: String,
+    },
 }
 
 #[derive(Clone, Default)]
@@ -250,6 +255,11 @@ impl BrowserData {
                         b'M' => {let Ok(menu)=serde_json::from_slice(&data) else {continue;};NativeEvent::Menu(menu)}
                         b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
                         b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
+                        b'V' => {
+                            let Ok(icon) = serde_json::from_slice::<Value>(&data) else { continue; };
+                            let (Some(page), Some(url)) = (icon["page"].as_str(), icon["url"].as_str()) else { continue; };
+                            NativeEvent::Favicon { page: page.into(), url: url.into() }
+                        }
                         #[cfg(feature = "browser-fixture")]
                         b'J' => { *route.evaluation.lock().unwrap() = serde_json::from_slice(&data).ok(); continue; }
                         _ => continue,
@@ -257,7 +267,7 @@ impl BrowserData {
                     // At most one latest frame is retained per page. A busy UI
                     // never accumulates video frames or blocks the engine.
                     match event {
-                        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => { let _ = route.tx.blocking_send(event); }
+                        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) | NativeEvent::Favicon { .. } => { let _ = route.tx.blocking_send(event); }
                         _ => { let _ = route.tx.try_send(event); }
                     }
                 }
@@ -505,6 +515,7 @@ impl super::BrowserSurface {
             NativeEvent::Clipboard(text) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
+            NativeEvent::Favicon { page, url } => self.fetch_favicon(page, url, cx),
             NativeEvent::Frame | NativeEvent::Changed => {
                 let mut page = native.state();
                 if page.url.is_none() {
@@ -512,6 +523,14 @@ impl super::BrowserSurface {
                 }
                 if page.error.is_some() {
                     page.loading = false;
+                }
+                // A navigation or reload drops the old page's icon.
+                if page.url != self.page.url || (!self.page.loading && page.loading) {
+                    if let Some(image) = self.favicon.take() {
+                        cx.defer(move |cx| gpui::ImageSource::Image(image).evict(None, cx));
+                    }
+                    self.favicon_generation += 1;
+                    self.favicon_task = None;
                 }
                 if !self.address.focus_handle(cx).is_focused(window) {
                     if let Some(url) = &page.url {

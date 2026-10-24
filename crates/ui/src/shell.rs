@@ -1166,6 +1166,14 @@ struct RightTabDrag {
     from: usize,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
+    /// A browser tab's page, which drops into a composer as a web chip.
+    web_page: Option<WebPageDrag>,
+}
+
+/// The page a dragged browser tab shows.
+struct WebPageDrag {
+    url: String,
+    title: String,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -2512,6 +2520,7 @@ impl Shell {
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         let data_dir = boot.data_dir.clone();
+        crate::favicons::init(&data_dir);
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
@@ -3633,6 +3642,17 @@ impl Shell {
                 }
             });
         }
+    }
+
+    fn web_page_for_surface(&self, surface: RightSurface, cx: &App) -> Option<WebPageDrag> {
+        let RightSurface::Browser(id) = surface else {
+            return None;
+        };
+        let page = &self.browsers.get(&id)?.read(cx).page;
+        Some(WebPageDrag {
+            url: page.url.clone()?,
+            title: page.title.clone(),
+        })
     }
 
     fn workspace_path_for_surface(
@@ -12587,6 +12607,7 @@ impl Shell {
             };
             let ghost_title = title.clone();
             let workspace_path = self.workspace_path_for_surface(surface, cx);
+            let web_page = self.web_page_for_surface(surface, cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
                 format!("{accessible_name}, unsaved changes")
@@ -12683,6 +12704,7 @@ impl Shell {
                     from: ix,
                     title: ghost_title,
                     workspace_path,
+                    web_page,
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();
@@ -19295,6 +19317,33 @@ mod settings_modal_regressions {
                 "the drop mentions the chat: {text:?}"
             );
             assert!(shell.sidebar_session_transfer.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_browser_tab_drops_into_the_composer_as_a_web_mention(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.active_chat = "owner".into();
+            shell.add_browser_surface(None, window, cx);
+            let surface = RightSurface::Browser(shell.browser_seq);
+            assert!(
+                shell.web_page_for_surface(surface, cx).is_none(),
+                "a blank tab names no page"
+            );
+            shell.browsers[&shell.browser_seq].update(cx, |browser, _| {
+                browser.page.url = Some("https://docs.rs/gpui/".into());
+                browser.page.title = "gpui - Rust".into();
+            });
+            let page = shell.web_page_for_surface(surface, cx).expect("a page");
+            assert!(shell.workspace_path_for_surface(surface, cx).is_none());
+            shell.composer.update(cx, |composer, cx| {
+                composer.add_web_mention(&page.url, &page.title, window, cx)
+            });
+            let text = shell.composer.read(cx).input.read(cx).text().to_owned();
+            assert_eq!(text, "[gpui - Rust](zeron-web:https://docs.rs/gpui/) ");
         });
     }
 

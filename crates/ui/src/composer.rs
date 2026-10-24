@@ -1279,6 +1279,17 @@ impl TextProjection {
                 }),
         );
         links.extend(
+            zeron_proto::web_mentions::web_mention_links(raw)
+                .into_iter()
+                .map(|link| FileMentionLink {
+                    range: link.range,
+                    basename: link.title,
+                    path: link.url,
+                    kind: ChipKind::Web,
+                    attachment: None,
+                }),
+        );
+        links.extend(
             zeron_proto::attachment_mentions::attachment_mentions(raw)
                 .into_iter()
                 .map(|mention| FileMentionLink {
@@ -1452,8 +1463,10 @@ fn mention_display_labels(links: &[FileMentionLink]) -> Vec<String> {
                         .iter()
                         .filter(|other| other.path != link.path)
                         .collect();
-                    // A chat's "path" is its id: always show its title.
-                    if duplicates.is_empty() || link.kind == ChipKind::Chat {
+                    // A chat's "path" is its id and a page's its address:
+                    // always show the title.
+                    if duplicates.is_empty() || matches!(link.kind, ChipKind::Chat | ChipKind::Web)
+                    {
                         return link.basename.clone();
                     }
                     let parts: Vec<_> = link.path.split('/').collect();
@@ -1508,6 +1521,7 @@ fn has_mention_scheme(raw: &str) -> bool {
         || raw.contains(zeron_proto::attachment_mentions::IMAGE_MENTION_SCHEME)
         || raw.contains(zeron_proto::attachment_mentions::ATTACHMENT_MENTION_SCHEME)
         || raw.contains(zeron_proto::chat_mentions::CHAT_MENTION_SCHEME)
+        || raw.contains(zeron_proto::web_mentions::WEB_MENTION_SCHEME)
 }
 
 /// Project a sent message's raw Markdown for transcript display: mention links
@@ -6752,6 +6766,29 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         let Some(link) = zeron_proto::chat_mentions::chat_mention_link(chat_id, title) else {
+            return;
+        };
+        let inserted = self
+            .input
+            .update(cx, |input, cx| input.insert_reference(&link, cx));
+        if inserted {
+            self.reset_mention(None, cx);
+            self.reset_slash(None, cx);
+            let focus = self.input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// A browser tab dropped on the conversation becomes a web chip.
+    pub(crate) fn add_web_mention(
+        &mut self,
+        url: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(link) = zeron_proto::web_mentions::web_mention_link(url, title) else {
             return;
         };
         let inserted = self
@@ -15391,6 +15428,29 @@ mod tests {
                 .all(|span| display[span.range.clone()].contains("Brief"))
         );
         assert!(!display.contains("a2c4"));
+    }
+
+    #[test]
+    fn web_mentions_show_as_web_chips_with_their_title() {
+        let docs =
+            zeron_proto::web_mentions::web_mention_link("https://docs.rs/gpui/", "gpui").unwrap();
+        let blog =
+            zeron_proto::web_mentions::web_mention_link("https://gpui.rs/blog", "gpui").unwrap();
+        let (display, spans) = sent_mention_display(&format!("read {docs} and {blog}")).unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].kind, ChipKind::Web);
+        assert_eq!(spans[0].path.as_ref(), "https://docs.rs/gpui/");
+        // Two pages with one title keep their titles, never their addresses.
+        assert!(
+            spans
+                .iter()
+                .all(|span| display[span.range.clone()].contains("gpui"))
+        );
+        assert!(!display.contains("https://"));
+        assert!(matches!(
+            chip_icon(ChipKind::Web, "https://docs.rs/gpui/", crate::theme::Appearance::Dark),
+            ChipIcon::Favicon(url) if url.as_ref() == "https://docs.rs/gpui/"
+        ));
     }
 
     #[test]
