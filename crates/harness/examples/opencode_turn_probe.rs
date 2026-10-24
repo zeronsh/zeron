@@ -53,6 +53,7 @@ async fn main() {
         auto_approve: !answer_yes,
         attachments: Vec::new(),
         resume: None,
+        resume_policy: Default::default(),
         worktree: None,
         env: Default::default(),
     };

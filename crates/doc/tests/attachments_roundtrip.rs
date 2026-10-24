@@ -19,6 +19,7 @@ fn run_request_attachments_survive_command_round_trip() {
         attachments: vec!["/tmp/a.png".into()],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     doc.queue_command(&SessionCommandEntry {

@@ -5,14 +5,16 @@
 
 pub mod agent;
 pub mod attachment_mentions;
-pub mod chat_mentions;
 pub mod change_request_assessment;
+pub mod chat_mentions;
 pub mod cloud;
 pub mod device_paths;
 pub mod entities;
 pub mod file_mentions;
 pub mod invocation;
 pub mod motion;
+pub mod native_forks;
+pub use native_forks::*;
 pub mod plan_usage;
 pub mod preview;
 pub mod program_status;

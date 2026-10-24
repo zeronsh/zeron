@@ -46,6 +46,7 @@ async fn turn(
         attachments: vec![],
         worktree: None,
         resume: session.clone(),
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     let mut stream = harness
@@ -170,6 +171,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         attachments: vec![],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
@@ -288,6 +290,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         attachments: vec![],
         worktree: None,
         resume: seed,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();
@@ -427,6 +430,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         attachments: vec![],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     let mut stream = harness.run(request, controls).await.unwrap();

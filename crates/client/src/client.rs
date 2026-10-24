@@ -798,6 +798,7 @@ impl Client {
             harness_session_id: None,
             harness_session_cwd: None,
             harness_session_harness: None,
+            native_fork: false,
             space_id,
             last_seen_at: None,
             room_gen: Some(2),
@@ -828,6 +829,7 @@ impl Client {
         chat.last_message_at = None;
         chat.last_message_preview = None;
         chat.last_seen_at = None;
+        chat.native_fork = false;
         chat.harness_session_id = None;
         chat.harness_session_cwd = None;
         chat.harness_session_harness = None;
@@ -903,6 +905,11 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
+        if self.inner.workspace.chat(chat_id).is_some_and(|chat| {
+            chat.native_fork && chat.harness_session_harness.as_deref() != Some(config.harness.as_str())
+        }) {
+            return Err(ClientError::Unsupported("Native forks must keep their original provider.".into()));
+        }
         // A provider change needs a host that switches: an older one would
         // resume the chat's stored session under the new provider.
         if let Some(chat) = self.inner.workspace.chat(chat_id)

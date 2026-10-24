@@ -318,6 +318,8 @@ pub struct RunRequest {
     pub auto_approve: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::ResumePolicy::is_default")]
+    pub resume_policy: crate::ResumePolicy,
     /// Absolute paths of image attachments already staged on the run device
     /// (composer uploads: UploadChunk/UploadCommit → durable path). The same
     /// paths also ride the prompt text as `Attached images (local files …)`
@@ -366,6 +368,7 @@ impl std::fmt::Debug for RunRequest {
             sandbox,
             auto_approve,
             resume,
+            resume_policy,
             attachments,
             worktree,
             mcp,
@@ -381,6 +384,7 @@ impl std::fmt::Debug for RunRequest {
             .field("sandbox", sandbox)
             .field("auto_approve", auto_approve)
             .field("resume", resume)
+            .field("resume_policy", resume_policy)
             .field("attachments", attachments)
             .field("worktree", worktree)
             .field("mcp", mcp)
@@ -749,6 +753,13 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     AssistantMessageCompleted {
         assistant_message_id: String,
+    },
+    /// Authoritative boundary, emitted before Done. The host stamps device provenance
+    /// and resolves the explicitly bound adapter message ID before journaling.
+    #[serde(rename_all = "camelCase")]
+    NativeForkReady {
+        assistant_message_id: String,
+        point: crate::NativeForkPoint,
     },
     ToolCall {
         id: String,

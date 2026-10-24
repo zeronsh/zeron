@@ -457,6 +457,7 @@ pub(crate) fn seed(
             harness_session_id: None,
             harness_session_cwd: None,
             harness_session_harness: None,
+            native_fork: false,
             space_id: demo.space.map(str::to_owned),
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),

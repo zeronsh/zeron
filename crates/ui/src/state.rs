@@ -1876,6 +1876,7 @@ impl AppState {
         self.push_echo(
             chat_id,
             SessionMessageEntry {
+                native_fork_point: None,
                 id: entry_id,
                 role: zeron_doc::MessageRole::Assistant,
                 parts: vec![zeron_doc::MessagePart::Tool {
@@ -1918,7 +1919,12 @@ impl AppState {
             .iter()
             .rev()
             .find(|entry| entry.role == user)
-            .or_else(|| self.transcript.iter().rev().find(|entry| entry.role == user))?;
+            .or_else(|| {
+                self.transcript
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.role == user)
+            })?;
         let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
         let setup = self
             .pending_echoes()
@@ -3283,7 +3289,8 @@ impl AppState {
         }
         !self.unsaved_side_chat
             && self.selected_chat.as_ref().is_some_and(|id| {
-                !self.pending_sends.contains_key(id)
+                !self.chats.iter().any(|chat| chat.id == *id && chat.native_fork)
+                    && !self.pending_sends.contains_key(id)
                     && !self.chat_turn_running(id)
                     // An older host would resume the chat's stored session
                     // under the new provider.
@@ -5225,6 +5232,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             harness_session_harness: None,
+            native_fork: false,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,
@@ -5279,6 +5287,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 
@@ -5845,6 +5854,7 @@ mod tests {
     #[test]
     fn a_cloud_turn_stays_working_while_its_setup_streams() {
         let entry = |id: &str, role, status| SessionMessageEntry {
+            native_fork_point: None,
             id: id.into(),
             role,
             parts: Vec::new(),
@@ -5863,13 +5873,21 @@ mod tests {
         // session row says Working yet.
         s.apply_transcript(vec![
             entry("m1", user, None),
-            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Streaming)),
+            entry(
+                "m1.cloud-setup",
+                assistant,
+                Some(zeron_doc::MessageStatus::Streaming),
+            ),
         ]);
         assert_eq!(s.indicator_for("c", now), Indicator::Working);
         // Finished: the session row speaks for itself again.
         s.apply_transcript(vec![
             entry("m1", user, None),
-            entry("m1.cloud-setup", assistant, Some(zeron_doc::MessageStatus::Complete)),
+            entry(
+                "m1.cloud-setup",
+                assistant,
+                Some(zeron_doc::MessageStatus::Complete),
+            ),
         ]);
         assert_ne!(s.indicator_for("c", now), Indicator::Working);
     }
@@ -5877,6 +5895,7 @@ mod tests {
     #[test]
     fn a_cloud_turn_is_timed_from_the_send_that_started_its_machine() {
         let entry = |id: &str, role, created_at| SessionMessageEntry {
+            native_fork_point: None,
             id: id.into(),
             role,
             parts: Vec::new(),
@@ -6990,6 +7009,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         let row = |id: &str| zeron_doc::QueuedMessage {
             id: id.into(),
@@ -7028,6 +7048,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         state.push_echo("c1", echo.clone());
         // Duplicate pushes dedupe.
@@ -7066,6 +7087,7 @@ mod tests {
     #[test]
     fn a_cloud_setup_placeholder_hands_off_to_the_machine_entry_or_goes() {
         let entry = |id: &str, role| SessionMessageEntry {
+            native_fork_point: None,
             id: id.into(),
             role,
             parts: vec![],
@@ -7134,6 +7156,7 @@ mod tests {
         state.push_echo(
             "c1",
             SessionMessageEntry {
+                native_fork_point: None,
                 id: "m1".into(),
                 role: zeron_doc::MessageRole::User,
                 parts: vec![],
@@ -7680,5 +7703,12 @@ impl AppState {
             checkout_id: Some(snapshot.checkout_id.clone()),
         };
         self.change_requests.store(key, snapshot);
+    }
+}
+
+#[cfg(feature = "native-forks-fixture")]
+impl AppState {
+    pub fn fixture_native_fork_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        self.attach_engine(handle, cx);
     }
 }

@@ -72,6 +72,7 @@ async fn an_approved_device_login_runs_real_turns_and_signs_out() {
 
     let work = tempfile::tempdir().unwrap();
     let request = |prompt: &str| RunRequest {
+        resume_policy: Default::default(),
         prompt: prompt.into(),
         harness: None,
         model: None,
@@ -187,6 +188,7 @@ async fn a_real_turn_reports_the_subscriptions_usage() {
         turn: TurnControl::default(),
     };
     let request = RunRequest {
+        resume_policy: Default::default(),
         prompt: "Reply with exactly the word: pong".into(),
         harness: None,
         model: None,

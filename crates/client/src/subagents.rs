@@ -291,6 +291,7 @@ mod tests {
     #[test]
     fn lists_spawns_with_their_own_lifecycle() {
         let entry = Arc::new(SessionMessageEntry {
+            native_fork_point: None,
             id: "m1".into(),
             role: MessageRole::Assistant,
             parts: vec![

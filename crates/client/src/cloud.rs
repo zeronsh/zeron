@@ -685,6 +685,7 @@ impl Client {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_harness: None,
+            native_fork: false,
             harness_session_cwd: None,
             space_id: Some(space_id.to_owned()),
             last_seen_at: None,

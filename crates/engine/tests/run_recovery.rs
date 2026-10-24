@@ -41,6 +41,7 @@ type Script =
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
+        resume_policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: None,
@@ -362,6 +363,7 @@ fn manufacture_crash(
     let store = DocsStore::open(dir.join("orgs/dev-org/dev-user")).unwrap();
     let doc = SessionDoc::init(CHAT).unwrap();
     let entry = |id: &str, role, text: &str, created_at, status| SessionMessageEntry {
+        native_fork_point: None,
         id: id.into(),
         role,
         parts: vec![MessagePart::Text {

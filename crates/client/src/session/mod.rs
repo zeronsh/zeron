@@ -826,6 +826,7 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
                             status: Some(MessageStatus::Complete),
                             continuation_of: None,
                             duration_ms: None,
+                            native_fork_point: None,
                         }),
                         echo: Some(LocalEcho {
                             state: pending.state,
@@ -892,6 +893,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
             id: setup_id.clone(),
             rev: st.tracker.next_rev(),
             message: Arc::new(SessionMessageEntry {
+                native_fork_point: None,
                 id: setup_id,
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Tool {
@@ -1157,6 +1159,7 @@ impl SessionHandle {
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
                     auto_approve: true,
                     resume: None,
+                    resume_policy: Default::default(),
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
                     mcp: None,
@@ -1590,6 +1593,7 @@ mod setup_placeholder_tests {
                 id: "m1".into(),
                 rev: 1,
                 message: Arc::new(SessionMessageEntry {
+                    native_fork_point: None,
                     id: "m1".into(),
                     role: MessageRole::User,
                     parts: vec![MessagePart::Text { id: "t0".into(), text: pending.text.clone() }],
