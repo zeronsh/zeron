@@ -522,6 +522,17 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 status == "failed" || status == "declined",
             )
         }
+        // `view_image`: the model looked at an image on disk. It reads like
+        // any file read, so the chip opens the file and previews the image
+        // instead of the turn showing nothing (#962).
+        "imageView" | "image_view" => tool_lifecycle(
+            phase,
+            id,
+            ToolCall::ReadFile {
+                path: str_field(item, &["path"]),
+            },
+            false,
+        ),
         "mcpToolCall" | "mcp_tool_call" => match phase {
             Phase::Started => {
                 let input = item.get("arguments").filter(|v| !v.is_null()).cloned();
@@ -1041,6 +1052,39 @@ mod tests {
                 call: ToolCall::ApplyPatch { path: None },
             }]
         );
+    }
+
+    #[test]
+    fn image_view_maps_to_a_file_read() {
+        let read = ToolCall::ReadFile {
+            path: "/Users/me/Documents/Codex/mockup.png".into(),
+        };
+        for kind in ["imageView", "image_view"] {
+            let item =
+                json!({"type": kind, "id": "v1", "path": "/Users/me/Documents/Codex/mockup.png"});
+            assert_eq!(
+                map_item(Phase::Started, &item),
+                vec![AgentEvent::ToolCall {
+                    id: "v1".into(),
+                    call: read.clone(),
+                }]
+            );
+            assert_eq!(
+                map_item(Phase::Completed, &item),
+                vec![
+                    AgentEvent::ToolCall {
+                        id: "v1".into(),
+                        call: read.clone(),
+                    },
+                    AgentEvent::ToolResult {
+                        id: "v1".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                ]
+            );
+        }
     }
 
     #[test]

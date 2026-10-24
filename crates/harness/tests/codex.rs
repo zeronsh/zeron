@@ -1699,6 +1699,54 @@ async fn image_generation_fake_lifecycle_reaches_done_without_inline_payload() {
     }
 }
 
+/// `view_image` used to leave no trace: the model saw the image, the
+/// transcript showed nothing between its messages (#962). It reads as a
+/// file read, so the chip opens and previews the image.
+#[tokio::test]
+async fn view_image_reads_as_a_file_read() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:view-image"), controls).await;
+    let read = ToolCall::ReadFile {
+        path: "/Users/me/Documents/Codex/mockup.png".into(),
+    };
+    let tools: Vec<AgentEvent> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        tools,
+        vec![
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read.clone(),
+            },
+            AgentEvent::ToolCall {
+                id: "exec-view-1".into(),
+                call: read,
+            },
+            AgentEvent::ToolResult {
+                id: "exec-view-1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        ]
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+}
+
 /// Opt-in provider smoke; the engine integration test verifies the subsequent
 /// import lands under profile uploads. See docs/generated-images-validation.md.
 #[tokio::test]
