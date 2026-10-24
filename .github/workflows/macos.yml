@@ -103,7 +103,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -fsSL --retry 5 -o "$RUNNER_TEMP/nextest.tar.gz" \
             "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-universal-apple-darwin.tar.gz"
           echo "$sha256  $RUNNER_TEMP/nextest.tar.gz" | shasum -a 256 -c -
-          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$HOME/.cargo/bin" cargo-nextest
+          # macOS 26 runners ship rustup from the system package manager, so
+          # ~/.cargo/bin no longer exists. A run-scoped bin dir on PATH also
+          # keeps the verified binary out of the rust-cache'd ~/.cargo.
+          bin="$RUNNER_TEMP/nextest-bin"
+          mkdir -p "$bin"
+          tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
+          echo "$bin" >> "$GITHUB_PATH"
       - name: Build tests and fixtures
         run: |
           cargo nextest run --no-run --locked \
