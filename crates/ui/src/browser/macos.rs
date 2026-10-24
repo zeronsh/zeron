@@ -488,7 +488,7 @@ impl NativePage {
         self.0.clone()
     }
     pub fn focus_chrome(&self) {
-        let _ = self.0.borrow().web.focus_parent();
+        self.0.borrow().focus_chrome();
     }
     pub fn set_shortcuts(&self, shortcuts: Vec<String>) {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
@@ -684,6 +684,12 @@ impl Host {
             }
         }
         self.update_visibility();
+    }
+    /// Return the keyboard to GPUI if the page holds it.
+    pub fn focus_chrome(&self) {
+        if has_focus(&self.view) {
+            let _ = self.web.focus_parent();
+        }
     }
     fn update_visibility(&self) {
         let visible = self.presentation != Presentation::Hidden
