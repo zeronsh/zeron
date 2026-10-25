@@ -119,7 +119,8 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
         connectivity?.state == ConnectivityState.RECONNECTING -> "Reconnecting…"
         model.isDemo -> "Demo workspace"
-        else -> model.accountDetail.takeIf { it.isNotEmpty() }
+        // Who's signed in belongs in Settings, not over the list.
+        else -> null
     }
 
     // "New section…" from a row's Move menu files that row into it. Remembered: every row

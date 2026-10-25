@@ -40,6 +40,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -315,14 +316,27 @@ fun SessionScreen(
                 }
             }
         }
+        // The transcript runs on under the chips and composer and fades out
+        // behind them (iOS's edge fade), instead of stopping at a hard line.
         Box(Modifier.weight(1f).fillMaxWidth()) {
+            val density = LocalDensity.current
+            var stack by remember { mutableStateOf(0.dp) }
+            LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
             Transcript(transcript, actions, Modifier.fillMaxSize())
+            val page = MaterialTheme.colorScheme.background
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(stack + FADE)
+                    .background(Brush.verticalGradient(0f to page.copy(alpha = 0f), FADE / (stack + FADE) to page.copy(alpha = 0.94f), 1f to page)),
+            )
             val showJump by remember { derivedStateOf { !transcript.following && transcript.distanceFromBottom > 400f } }
             androidx.compose.animation.AnimatedVisibility(
                 showJump,
                 enter = fadeIn() + scaleIn(),
                 exit = fadeOut() + scaleOut(),
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = stack + 12.dp),
             ) {
                 SmallFloatingActionButton(
                     onClick = { transcript.scrollToBottom() },
@@ -331,26 +345,34 @@ fun SessionScreen(
                     contentColor = MaterialTheme.colorScheme.onSurface,
                 ) { ZIcon(ZIcons.ArrowDown, "Jump to latest", Modifier.size(22.dp)) }
             }
-        }
-        Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding()) {
-            // A Cloud chat out of credits says so once, above the composer.
-            androidx.compose.animation.AnimatedVisibility(cloudOutOfCredits) {
-                CloudCreditsNotice(nudges, onAddCredits = onOpenBilling)
-            }
-            Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
-                CompanionStrip(companions, onTap = { section -> onShowCompanions?.invoke(section) ?: run { companionsSheet = section; showCompanions = true } }, modifier = if (companions.isEmpty) Modifier else Modifier.padding(vertical = 6.dp))
-            }
-            val input = composer.openInput
-            // The panel replaces the composer while the agent asks.
-            if (input != null) {
-                QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
-            } else {
-                Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
-                    // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                    if (cloudOutOfCredits) nudges++
-                    !cloudOutOfCredits
-                })
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    // Measured with the keyboard and navigation bar: the last row scrolls clear of all of it.
+                    .onSizeChanged { stack = with(density) { it.height.toDp() } }
+                    .imePadding()
+                    .navigationBarsPadding(),
+            ) {
+                // A Cloud chat out of credits says so once, above the composer.
+                androidx.compose.animation.AnimatedVisibility(cloudOutOfCredits) {
+                    CloudCreditsNotice(nudges, onAddCredits = onOpenBilling)
+                }
+                Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { Banner(composer, connectivity?.state, onRetry = { runCatching { handle.retryDelivery() } }, cloud = if (isCloud) model.cloud else null, chatId = chatId, deviceId = row?.deviceId) }
+                    CompanionStrip(companions, onTap = { section -> onShowCompanions?.invoke(section) ?: run { companionsSheet = section; showCompanions = true } }, modifier = if (companions.isEmpty) Modifier else Modifier.padding(vertical = 6.dp))
+                }
+                val input = composer.openInput
+                // The panel replaces the composer while the agent asks.
+                if (input != null) {
+                    QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
+                } else {
+                    Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
+                        // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                        if (cloudOutOfCredits) nudges++
+                        !cloudOutOfCredits
+                    })
+                }
             }
         }
     }
@@ -414,6 +436,9 @@ fun SessionScreen(
         }
     }
 }
+
+/** How far above the chips and composer the transcript starts to fade. */
+private val FADE = 44.dp
 
 /** The status pill above the composer (iOS SessionChrome banner). */
 @Composable
