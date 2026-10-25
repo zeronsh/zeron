@@ -23,6 +23,7 @@ members = [
     "crates/syntax",
     "crates/markdown",
     "crates/mobile",
+    "crates/mobile-bindgen",
     "crates/client",
     "crates/mcp",
     "crates/text",

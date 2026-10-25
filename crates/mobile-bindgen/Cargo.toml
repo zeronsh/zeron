@@ -1,0 +1,17 @@
+[package]
+name = "zeron-mobile-bindgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# UniFFI's binding generator on its own: it reads the bindings out of a built
+# `zeron_mobile` library (any target's), so making them doesn't compile the
+# whole core for the host first (scripts/android/build-core.sh).
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+# Must match zeron-mobile's uniffi: the generator reads its metadata.
+uniffi = { version = "0.32", features = ["cli"] }

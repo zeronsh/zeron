@@ -49,14 +49,16 @@ env:
   NDK_VERSION: 29.0.14206865
   # Phones: arm64 only (an x86_64 core would double the download for emulators).
   ZERON_ANDROID_ABIS: arm64-v8a
-  # Thin LTO, stripped: the profile iOS archives use.
-  ZERON_ANDROID_PROFILE: mobile-dist
+  # Published builds (main): thin LTO, stripped — the profile iOS archives use,
+  # about 10% smaller. Pull requests take the quicker `mobile` profile (AGP
+  # still strips its debug info).
+  ZERON_ANDROID_PROFILE: ${{ github.ref == 'refs/heads/main' && 'mobile-dist' || 'mobile' }}
 
 jobs:
   apk:
     runs-on: ubuntu-latest
-    # Cold: the core twice (host bindings + arm64, thin LTO) and Gradle.
-    timeout-minutes: 75
+    # Cold: the core for arm64 (thin LTO on main), the bindings generator, Gradle.
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
       signed: ${{ steps.signing.outputs.signed }}

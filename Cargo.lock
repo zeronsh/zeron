@@ -13772,6 +13772,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-mobile-bindgen"
+version = "0.2.122"
+dependencies = [
+ "uniffi",
+]
+
+[[package]]
 name = "zeron-notify"
 version = "0.2.122"
 dependencies = [
