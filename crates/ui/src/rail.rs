@@ -36,9 +36,17 @@ pub fn rail_visible(container_width: f32) -> bool {
 /// The most ticks the rail draws. Past it each tick stands for an even slice
 /// of the conversation; the hover list still reaches every prompt.
 pub const RAIL_MAX_TICKS: usize = 10;
-/// Lines a prompt, and its reply, keep in the hover list.
-pub const POPOVER_PREVIEW_LINES: usize = 3;
-pub const POPOVER_WIDTH: f32 = 320.0;
+/// Lines a reply keeps in the hover list; its prompt keeps one.
+pub const REPLY_PREVIEW_LINES: usize = 3;
+/// The hover list sits in the gutter left of the reading column when that
+/// has room for it, never narrower than [`POPOVER_MIN_WIDTH`].
+pub const POPOVER_MAX_WIDTH: f32 = 320.0;
+pub const POPOVER_MIN_WIDTH: f32 = 260.0;
+/// The hover list's height cap, as a share of the band it opens in.
+pub const POPOVER_HEIGHT_SHARE: f32 = 0.75;
+/// How long the pointer rests on the rail before the list opens, so passing
+/// over it (on the way to the sidebar) doesn't flash the list.
+pub const RAIL_HOVER_DELAY: Duration = Duration::from_millis(150);
 /// Characters kept per preview before layout: well past three lines at the
 /// popover's width, so a long reply never lays out in full.
 pub const PREVIEW_CHARS: usize = 360;
@@ -163,6 +171,13 @@ pub fn tick_offset(ix: usize, n: usize, height: f32) -> f32 {
     } else {
         ix.min(n - 1) as f32 / (n - 1) as f32 * height
     }
+}
+
+/// The hover list's width: what the gutter left of the reading column fits
+/// (it opens 8px in from the transcript's edge and keeps 12px clear of the
+/// column), within [`POPOVER_MIN_WIDTH`]..=[`POPOVER_MAX_WIDTH`].
+pub fn popover_width(column_left: f32) -> f32 {
+    (column_left - 20.0).clamp(POPOVER_MIN_WIDTH, POPOVER_MAX_WIDTH)
 }
 
 /// The prompts each tick stands for: one tick per prompt up to `max`, then
@@ -541,6 +556,25 @@ impl Transcript {
         }));
     }
 
+    /// Row `row`'s top and bottom in window coordinates, `None` while it's
+    /// unmeasured. Glued to the bottom, the list reports no row bounds (its
+    /// anchor sits past the last row), but the content's end rests on the
+    /// viewport's bottom, so measured rows place from there.
+    fn row_span(&self, row: usize) -> Option<(f32, f32)> {
+        let list = self.list_state();
+        if let Some(bounds) = list.bounds_for_item(row) {
+            return Some((f32::from(bounds.top()), f32::from(bounds.bottom())));
+        }
+        if !self.is_glued() {
+            return None;
+        }
+        let end = list.offset_for_item(list.item_count());
+        let bottom = f32::from(list.viewport_bounds().bottom());
+        let top = bottom - f32::from(end - list.offset_for_item(row));
+        let row_bottom = bottom - f32::from(end - list.offset_for_item(row + 1));
+        (row_bottom > top).then_some((top, row_bottom))
+    }
+
     /// The rail element — an absolute overlay along the transcript's left
     /// edge: the tick minimap, or the prompt list while the pointer is on it.
     pub fn render_rail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -580,17 +614,27 @@ impl Transcript {
         // (user report). Walk forward over measured rows whose tops are at or
         // above the reading line; unmeasured rows (None bounds) stop the walk,
         // leaving the raw top row — the pre-fix behavior.
-        let mut top_row = self.list_state().logical_scroll_top().item_ix;
         let read_top = f32::from(self.list_state().viewport_bounds().top())
             + crate::transcript::OWN_SEND_TOP_INSET_PX
             + 0.5;
-        while let Some(bounds) = self.list_state().bounds_for_item(top_row + 1) {
-            if f32::from(bounds.top()) <= read_top {
-                top_row += 1;
-            } else {
-                break;
+        let top_row = if self.is_glued() {
+            // Glued to the bottom the list reports no row bounds; place them
+            // from the end instead.
+            (0..self.rows().len())
+                .rev()
+                .find(|&row| self.row_span(row).is_some_and(|(top, _)| top <= read_top))
+                .unwrap_or(0)
+        } else {
+            let mut top_row = self.list_state().logical_scroll_top().item_ix;
+            while let Some(bounds) = self.list_state().bounds_for_item(top_row + 1) {
+                if f32::from(bounds.top()) <= read_top {
+                    top_row += 1;
+                } else {
+                    break;
+                }
             }
-        }
+            top_row
+        };
         let active = active_tick(&tick_rows, top_row);
         // Every prompt whose row shows between the titlebar and the bottom
         // chrome is lit; with none on screen (a long reply), the prompt being
@@ -601,9 +645,8 @@ impl Transcript {
         let in_view: Vec<bool> = tick_rows
             .iter()
             .map(|&row| {
-                self.list_state().bounds_for_item(row).is_some_and(|b| {
-                    f32::from(b.bottom()) > view_top && f32::from(b.top()) < view_bottom
-                })
+                self.row_span(row)
+                    .is_some_and(|(top, bottom)| bottom > view_top && top < view_bottom)
             })
             .collect();
         let any_in_view = in_view.iter().any(|&v| v);
@@ -631,7 +674,9 @@ impl Transcript {
 
         if self.rail_popover().is_some() {
             let items: Vec<RailItem> = pairs.iter().map(|(tick, _)| RailItem::new(tick)).collect();
-            let max_height = (viewport_h - band_top - band_bottom - 16.0).max(120.0);
+            let max_height =
+                ((viewport_h - band_top - band_bottom - 16.0) * POPOVER_HEIGHT_SHARE).max(120.0);
+            let width = popover_width(self.column_left());
             let virtualized = items.len() as f32 * POPOVER_MIN_ITEM_HEIGHT > max_height;
             let count = items.len();
             let popover = self.rail_popover_mut().as_mut().expect("checked above");
@@ -679,7 +724,7 @@ impl Transcript {
                 .id("rail-popover")
                 .debug_selector(|| "rail-popover".into())
                 .relative()
-                .w(px(POPOVER_WIDTH))
+                .w(px(width))
                 .occlude()
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     if !*hovered && this.rail_popover().is_some() {
@@ -737,12 +782,28 @@ impl Transcript {
                     .w_full()
                     .h(px(height + TICK_SLOT))
                     .cursor_pointer()
-                    // The pointer on the rail swaps it for the prompt list.
+                    // The pointer resting on the rail swaps it for the prompt
+                    // list; passing over it doesn't.
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if *hovered && this.rail_popover().is_none() {
-                            *this.rail_popover_mut() = Some(RailPopover::default());
-                            cx.notify();
+                        if !*hovered {
+                            *this.rail_hover_intent_mut() = None;
+                            return;
                         }
+                        if this.rail_popover().is_some() {
+                            return;
+                        }
+                        let open = cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(RAIL_HOVER_DELAY).await;
+                            this.update(cx, |this, cx| {
+                                *this.rail_hover_intent_mut() = None;
+                                if this.rail_popover().is_none() {
+                                    *this.rail_popover_mut() = Some(RailPopover::default());
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        });
+                        *this.rail_hover_intent_mut() = Some(open);
                     }))
                     .children(ticks),
             )
@@ -769,8 +830,8 @@ impl Transcript {
         }
     }
 
-    /// One prompt in the hover list: the prompt and the opening of its reply,
-    /// three lines each; a click glides the transcript to it.
+    /// One prompt in the hover list: the prompt on one line and the opening
+    /// of its reply on up to three; a click glides the transcript to it.
     fn render_rail_item(
         &mut self,
         ix: usize,
@@ -812,8 +873,7 @@ impl Transcript {
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(18.0))
                             .text_color(theme.text)
-                            .line_clamp(POPOVER_PREVIEW_LINES)
-                            .text_ellipsis()
+                            .truncate()
                             .child(item.prompt),
                     )
                     .when_some(item.reply, |el, reply| {
@@ -822,7 +882,7 @@ impl Transcript {
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .line_height(px(17.0))
                                 .text_color(theme.text_muted)
-                                .line_clamp(POPOVER_PREVIEW_LINES)
+                                .line_clamp(REPLY_PREVIEW_LINES)
                                 .text_ellipsis()
                                 .child(reply),
                         )
@@ -890,6 +950,16 @@ mod tests {
                 assert!(!pair[0].is_empty());
             }
         }
+    }
+
+    /// The list fits the gutter left of the reading column when it can, and
+    /// otherwise stays readable rather than shrinking to nothing.
+    #[test]
+    fn popover_width_fits_the_gutter_within_bounds() {
+        assert_eq!(popover_width(600.0), POPOVER_MAX_WIDTH);
+        assert_eq!(popover_width(300.0), 280.0);
+        assert_eq!(popover_width(204.0), POPOVER_MIN_WIDTH);
+        assert_eq!(popover_width(0.0), POPOVER_MIN_WIDTH);
     }
 
     #[test]

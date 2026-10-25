@@ -3387,6 +3387,9 @@ pub struct Transcript {
     bottom_clearance: f32,
     /// The prompt list that replaces the rail while the pointer is on it.
     rail_popover: Option<crate::rail::RailPopover>,
+    /// Opens the prompt list once the pointer has rested on the rail
+    /// ([`crate::rail::RAIL_HOVER_DELAY`]); dropped when it leaves first.
+    rail_hover_intent: Option<Task<()>>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -3713,6 +3716,7 @@ impl Transcript {
             rail_enabled,
             bottom_clearance: 0.0,
             rail_popover: None,
+            rail_hover_intent: None,
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
@@ -3792,6 +3796,19 @@ impl Transcript {
 
     pub(crate) fn rail_popover_mut(&mut self) -> &mut Option<crate::rail::RailPopover> {
         &mut self.rail_popover
+    }
+
+    pub(crate) fn rail_hover_intent_mut(&mut self) -> &mut Option<Task<()>> {
+        &mut self.rail_hover_intent
+    }
+
+    /// Where the reading column starts, from the transcript's left edge: the
+    /// rows' 48px gutter plus whatever centring the configured width leaves
+    /// (a docked side card's room comes off the right, as in the rows).
+    pub(crate) fn column_left(&self) -> f32 {
+        let width = f32::from(self.list.viewport_bounds().size.width);
+        let free = width - 96.0 - self.right_reserve - self.content_width;
+        48.0 + (free / 2.0).max(0.0)
     }
 
     pub(crate) fn bottom_clearance(&self) -> f32 {
