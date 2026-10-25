@@ -1,23 +1,19 @@
 //! MessageRail (feature-inventory §1.8): a left vertical minimap of the user's
-//! prompts — at most [`RAIL_MAX_TICKS`] ticks, each lit while its prompts are
-//! on screen. Hovering it swaps it for a list of every prompt with the opening
-//! of its reply ([`RailPopover`]); clicking one smooth-scrolls the transcript
-//! to it and the list stays open. Hidden below a 48rem container width.
+//! prompts. The active tick brightens, hover grows the tick and shows a preview
+//! card (prompt + reply opening), click smooth-scrolls the transcript to that
+//! row. A conversation too long for the rail's window scrolls its ticks (the
+//! Codex prompt rail), following the prompts on screen. Hidden below a 48rem
+//! container width.
 //!
 //! Pure logic (tick extraction, active detection, width gate, previews) lives
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
 use gpui::{
-    AnyElement, Bounds, Context, ListAlignment, ListOffset, ListState, MouseMoveEvent, Pixels,
-    SharedString, Window, canvas, div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, ListOffset, MouseMoveEvent, Pixels, SharedString, canvas, div,
+    prelude::*, px,
 };
-use std::{
-    cell::Cell,
-    ops::Range,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
@@ -33,28 +29,9 @@ pub fn rail_visible(container_width: f32) -> bool {
     container_width >= RAIL_MIN_CONTAINER_WIDTH
 }
 
-/// The most ticks the rail draws. Past it each tick stands for an even slice
-/// of the conversation; the hover list still reaches every prompt.
-pub const RAIL_MAX_TICKS: usize = 10;
-/// Lines a reply keeps in the hover list; its prompt keeps one.
-pub const REPLY_PREVIEW_LINES: usize = 3;
-/// The hover list sits in the gutter left of the reading column when that
-/// has room for it, never narrower than [`POPOVER_MIN_WIDTH`].
-pub const POPOVER_MAX_WIDTH: f32 = 320.0;
-pub const POPOVER_MIN_WIDTH: f32 = 260.0;
-/// The hover list's height cap, as a share of the band it opens in.
-pub const POPOVER_HEIGHT_SHARE: f32 = 0.75;
-/// How long the pointer rests on the rail before the list opens, so passing
-/// over it (on the way to the sidebar) doesn't flash the list.
-pub const RAIL_HOVER_DELAY: Duration = Duration::from_millis(150);
-/// Characters kept per preview before layout: well past three lines at the
-/// popover's width, so a long reply never lays out in full.
-pub const PREVIEW_CHARS: usize = 360;
-/// The shortest an item can be (a one-line prompt, no reply). A list with
-/// more items than fit the popover at this size must overflow it, so it
-/// virtualizes at full height; a shorter one lays out whole and hugs its
-/// content.
-pub const POPOVER_MIN_ITEM_HEIGHT: f32 = 36.0;
+/// Preview text caps (grapheme-unaware char cut is fine for a preview card).
+pub const PREVIEW_PROMPT_CHARS: usize = 160;
+pub const PREVIEW_REPLY_CHARS: usize = 200;
 
 /// One rail tick: a user prompt and the opening of the reply that followed.
 #[derive(Debug, Clone, PartialEq)]
@@ -148,19 +125,53 @@ pub const TICK_SPACING: f32 = 8.0;
 /// One tick's hit-row height: the stack pads half of it above the first tick
 /// and below the last so the end ticks stay as easy to hit as the rest.
 pub const TICK_SLOT: f32 = 10.0;
-/// Vertical room kept clear of the stack (NeverWrite `100vh - 18rem`), so a
-/// long conversation compresses its ticks instead of overflowing.
-pub const RAIL_RESERVED_V: f32 = 288.0;
+/// The rail's tallest window, as a share of the band between the titlebar
+/// and the bottom chrome, and in absolute terms (Codex `min(70vh, 40rem)`).
+/// A longer conversation scrolls its ticks inside it.
+pub const RAIL_HEIGHT_SHARE: f32 = 0.7;
+pub const RAIL_MAX_HEIGHT: f32 = 640.0;
+/// The fade at a scrolled rail's clipped ends; following keeps lit ticks
+/// clear of it.
+pub const RAIL_EDGE_FADE: f32 = 24.0;
 /// The rail's hit strip width (the widest tick plus breathing room).
 pub const RAIL_HIT_WIDTH: f32 = 32.0;
 
-/// The tick stack's height: one [`TICK_SPACING`] per gap while it fits, then
-/// every prompt shares the available height — every prompt keeps its own tick
-/// at any conversation length.
-pub fn rail_height(n: usize, viewport_height: f32) -> f32 {
-    let natural = n.saturating_sub(1) as f32 * TICK_SPACING;
-    let available = (viewport_height - RAIL_RESERVED_V).max(TICK_SPACING);
-    natural.min(available)
+/// The tick stack's height from first tick to last: one [`TICK_SPACING`] per
+/// gap at any conversation length (it scrolls rather than compresses).
+pub fn rail_height(n: usize) -> f32 {
+    n.saturating_sub(1) as f32 * TICK_SPACING
+}
+
+/// The rail window's height for a stack `content` tall (ticks plus their
+/// slot) in a `band`-tall space: all of it while it fits, else the cap.
+pub fn rail_window(content: f32, band: f32) -> f32 {
+    let cap = (band * RAIL_HEIGHT_SHARE)
+        .min(RAIL_MAX_HEIGHT)
+        .max(TICK_SLOT * 4.0);
+    content.min(cap)
+}
+
+/// The rail scroll position that brings the stack span `top..bottom` into a
+/// `window`-tall view now at `scroll`, `margin` clear of either edge (the
+/// fade): the least movement, the span's top winning when it can't all fit.
+/// Clamped to a stack `content` tall.
+pub fn follow_scroll(
+    scroll: f32,
+    window: f32,
+    content: f32,
+    top: f32,
+    bottom: f32,
+    margin: f32,
+) -> f32 {
+    let margin = margin.min(((window - (bottom - top)) / 2.0).max(0.0));
+    let mut scroll = scroll;
+    if bottom + margin > scroll + window {
+        scroll = bottom + margin - window;
+    }
+    if top - margin < scroll {
+        scroll = top - margin;
+    }
+    scroll.clamp(0.0, (content - window).max(0.0))
 }
 
 /// Tick `ix`'s offset from the stack's first tick: evenly spread over
@@ -173,52 +184,32 @@ pub fn tick_offset(ix: usize, n: usize, height: f32) -> f32 {
     }
 }
 
-/// The hover list's width: what the gutter left of the reading column fits
-/// (it opens 8px in from the transcript's edge and keeps 12px clear of the
-/// column), within [`POPOVER_MIN_WIDTH`]..=[`POPOVER_MAX_WIDTH`].
-pub fn popover_width(column_left: f32) -> f32 {
-    (column_left - 20.0).clamp(POPOVER_MIN_WIDTH, POPOVER_MAX_WIDTH)
-}
-
-/// The prompts each tick stands for: one tick per prompt up to `max`, then
-/// `max` ticks over even slices of the conversation.
-pub fn tick_spans(n: usize, max: usize) -> Vec<Range<usize>> {
-    let ticks = n.min(max);
-    (0..ticks)
-        .map(|k| k * n / ticks..(k + 1) * n / ticks)
-        .collect()
-}
-
-/// A reply's opening as plain text: the hover list shows prose, not the
-/// Markdown markup (`**`, backticks, link targets) it was written in.
-pub fn plain_preview(markdown: &str, max_chars: usize) -> String {
-    use pulldown_cmark::{Event, Parser, TagEnd};
-    let mut text = String::new();
-    for event in Parser::new(markdown) {
-        match event {
-            Event::Text(part) | Event::Code(part) => text.push_str(&part),
-            Event::SoftBreak
-            | Event::HardBreak
-            | Event::End(
-                TagEnd::Paragraph
-                | TagEnd::Heading(_)
-                | TagEnd::Item
-                | TagEnd::CodeBlock
-                | TagEnd::TableCell,
-            ) => text.push(' '),
-            _ => {}
-        }
-        // Enough for the cap even after whitespace collapses.
-        if text.len() > max_chars * 4 {
-            break;
-        }
+/// The prompt under pointer `y` (relative to the stack's first tick): the
+/// nearest tick, clamped to the ends.
+pub fn tick_at(n: usize, height: f32, y: f32) -> Option<usize> {
+    if n == 0 {
+        return None;
     }
-    truncate_preview(&text, max_chars)
+    if n == 1 || height <= 0.0 {
+        return Some(0);
+    }
+    let progress = (y / height).clamp(0.0, 1.0);
+    Some(((progress * (n - 1) as f32).round() as usize).min(n - 1))
+}
+
+/// Fisheye width for a tick `distance` ticks from the hovered one.
+pub fn tick_width(distance: Option<usize>) -> f32 {
+    match distance {
+        Some(0) => 24.0,
+        Some(1) => 16.0,
+        Some(2) => 10.0,
+        _ => 8.0,
+    }
 }
 
 /// Char-cap a preview with an ellipsis. Whitespace runs (including newlines —
 /// prompts and replies are free text) collapse to single spaces first: the
-/// hover list wraps each preview to at most [`POPOVER_PREVIEW_LINES`].
+/// preview card's title is a one-line surface (message-rail.tsx line-clamp-1).
 pub fn truncate_preview(text: &str, max_chars: usize) -> String {
     let flat = crate::transcript::single_line(text);
     if flat.chars().count() <= max_chars {
@@ -226,92 +217,6 @@ pub fn truncate_preview(text: &str, max_chars: usize) -> String {
     }
     let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{}…", cut.trim_end())
-}
-
-/// One prompt in the hover list.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RailItem {
-    pub message_id: SharedString,
-    pub prompt: SharedString,
-    pub reply: Option<SharedString>,
-}
-
-impl RailItem {
-    fn new(tick: &RailTick) -> Self {
-        Self {
-            message_id: tick.message_id.clone().into(),
-            prompt: truncate_preview(&tick.prompt, PREVIEW_CHARS).into(),
-            reply: tick
-                .reply
-                .as_deref()
-                .map(|reply| plain_preview(reply, PREVIEW_CHARS))
-                .filter(|reply| !reply.is_empty())
-                .map(SharedString::from),
-        }
-    }
-}
-
-/// The list of every prompt that replaces the rail while the pointer is on
-/// it. Virtualized once it can't fit: only the rows in view lay out, however
-/// long the chat.
-pub struct RailPopover {
-    list: ListState,
-    /// Scroll position of a list short enough to lay out whole.
-    scroll: gpui::ScrollHandle,
-    items: Vec<RailItem>,
-    /// Per item: its prompt is on screen (or being read) — highlighted.
-    lit: Vec<bool>,
-    /// Scheduled bringing the prompt being read into view, once, on opening.
-    revealed: bool,
-    /// The card's bounds (painted last frame): the pointer leaving them
-    /// closes the list.
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-}
-
-impl Default for RailPopover {
-    fn default() -> Self {
-        Self {
-            // Bottom-anchored: the latest prompts show first, where reading
-            // usually is.
-            list: ListState::new(0, ListAlignment::Bottom, px(240.0)),
-            scroll: gpui::ScrollHandle::new(),
-            items: Vec::new(),
-            lit: Vec::new(),
-            revealed: false,
-            bounds: Rc::new(Cell::new(None)),
-        }
-    }
-}
-
-impl RailPopover {
-    /// Adopt this frame's items, remeasuring only rows whose text changed
-    /// (a streaming reply, a new prompt) so the list keeps its scroll.
-    fn sync(&mut self, items: Vec<RailItem>) {
-        let old = self.items.len();
-        if items.len() == old {
-            for (ix, (before, after)) in self.items.iter().zip(&items).enumerate() {
-                if before != after {
-                    self.list.splice(ix..ix + 1, 1);
-                }
-            }
-        } else {
-            let start = self
-                .items
-                .iter()
-                .zip(&items)
-                .position(|(before, after)| before != after)
-                .unwrap_or(old.min(items.len()));
-            self.list.splice(start..old, items.len() - start);
-        }
-        self.items = items;
-    }
-
-    pub fn item(&self, ix: usize) -> Option<(&RailItem, bool)> {
-        Some((
-            self.items.get(ix)?,
-            self.lit.get(ix).copied().unwrap_or(false),
-        ))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,11 +480,9 @@ impl Transcript {
         (row_bottom > top).then_some((top, row_bottom))
     }
 
-    /// The rail element — an absolute overlay along the transcript's left
-    /// edge: the tick minimap, or the prompt list while the pointer is on it.
-    pub fn render_rail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The rail element — an absolute overlay along the transcript's left edge.
+    pub fn render_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if !self.rail_enabled() {
-            *self.rail_popover_mut() = None;
             return gpui::Empty.into_any_element();
         }
         let (entries, echoes) = {
@@ -601,7 +504,6 @@ impl Transcript {
         // A minimap of one exchange is noise, not navigation — the original
         // rail hides below two marks (message-rail.tsx `marks.length < 2`).
         if pairs.len() < 2 {
-            *self.rail_popover_mut() = None;
             return gpui::Empty.into_any_element();
         }
         let tick_rows: Vec<usize> = pairs.iter().map(|(_, row)| *row).collect();
@@ -637,8 +539,8 @@ impl Transcript {
         };
         let active = active_tick(&tick_rows, top_row);
         // Every prompt whose row shows between the titlebar and the bottom
-        // chrome is lit; with none on screen (a long reply), the prompt being
-        // read stays lit.
+        // chrome lights its tick; with none on screen (a long reply), the
+        // prompt being read stays lit.
         let viewport = self.list_state().viewport_bounds();
         let view_top = f32::from(viewport.top()) + crate::transcript::OWN_SEND_TOP_INSET_PX;
         let view_bottom = f32::from(viewport.bottom()) - self.bottom_clearance();
@@ -650,243 +552,213 @@ impl Transcript {
             })
             .collect();
         let any_in_view = in_view.iter().any(|&v| v);
-        let lit: Vec<bool> = (0..pairs.len())
+        let n = pairs.len();
+        let lit: Vec<bool> = (0..n)
             .map(|ix| in_view[ix] || (!any_in_view && active == Some(ix)))
             .collect();
-        // Rail and list share the band between the titlebar and the bottom
-        // chrome, centered alike, so the list opens under the pointer.
+        let hover = self.rail_hover().filter(|&ix| ix < n);
+        let theme = Theme::of(cx).clone();
+
+        // The rail centres in the band between the titlebar and the bottom
+        // chrome. Pre-layout the viewport reads 0; assume a typical height
+        // for that one frame rather than collapsing the stack.
         let band_top = crate::transcript::OWN_SEND_TOP_INSET_PX;
         let band_bottom = self.bottom_clearance();
-        // Pre-layout the viewport reads 0; assume a typical height for that
-        // one frame rather than collapsing the stack.
         let viewport_h = match f32::from(viewport.size.height) {
             h if h > 0.0 => h,
             _ => 600.0,
         };
-        let band = div()
+        let height = rail_height(n);
+        let content = height + TICK_SLOT;
+        let window_h = rail_window(content, viewport_h - band_top - band_bottom);
+        let scrolls = content > window_h + 0.5;
+        let ids: std::rc::Rc<[SharedString]> = pairs
+            .iter()
+            .map(|(tick, _)| SharedString::from(tick.message_id.clone()))
+            .collect();
+        // A scrolling rail keeps the lit ticks in view, moving only when
+        // what's lit changes (and not under the pointer), so scrolling it by
+        // hand holds.
+        let first_lit = lit.iter().position(|&l| l);
+        let last_lit = lit.iter().rposition(|&l| l);
+        if let (true, None, Some(first), Some(last)) = (scrolls, hover, first_lit, last_lit) {
+            let key = (ids[first].clone(), ids[last].clone());
+            if self.rail_followed_mut().as_ref() != Some(&key) {
+                let scroll = self.rail_scroll().clone();
+                let target = follow_scroll(
+                    -f32::from(scroll.offset().y),
+                    window_h,
+                    content,
+                    tick_offset(first, n, height),
+                    tick_offset(last, n, height) + TICK_SLOT,
+                    RAIL_EDGE_FADE,
+                );
+                scroll.set_offset(gpui::point(px(0.0), px(-target)));
+                *self.rail_followed_mut() = Some(key);
+            }
+        }
+        let rail_scroll = self.rail_scroll().clone();
+        let bounds_cell = self.rail_bounds().clone();
+        let tick_under = {
+            let bounds_cell = bounds_cell.clone();
+            move |y: Pixels| {
+                let bounds = bounds_cell.get()?;
+                tick_at(n, height, f32::from(y - bounds.top()) - TICK_SLOT / 2.0)
+            }
+        };
+        let move_under = tick_under.clone();
+
+        let ticks =
+            pairs.into_iter().enumerate().map(|(ix, (tick, _))| {
+                let distance = hover.map(|h| h.abs_diff(ix));
+                let bar_color = if distance == Some(0) || lit[ix] {
+                    theme.text.opacity(0.8)
+                } else {
+                    crate::theme::ink(0.16)
+                };
+                let card: Option<AnyElement> = (distance == Some(0)).then(|| {
+                    let prompt = truncate_preview(&tick.prompt, PREVIEW_PROMPT_CHARS);
+                    let reply = tick
+                        .reply
+                        .as_deref()
+                        .map(|r| truncate_preview(r, PREVIEW_REPLY_CHARS));
+                    let theme = theme.for_popup();
+                    let card = popover::popover_card(&theme)
+                        .w(px(280.0))
+                        .p(px(Theme::SPACE_SM))
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(prompt)),
+                        )
+                        .when_some(reply, |el, reply| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(reply)),
+                            )
+                        });
+                    // Mounted straight through deferred/anchored (not a popover
+                    // mount helper), so the frost wrap happens here.
+                    crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
+                });
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(tick_offset(ix, n, height)))
+                    .h(px(TICK_SLOT))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .h(px(2.0))
+                            .w(px(tick_width(distance)))
+                            .rounded(px(1.0))
+                            .bg(bar_color),
+                    )
+                    .when_some(card, |el, card| {
+                        el.child(
+                            div().absolute().left_0().top(px(TICK_SLOT / 2.0)).child(
+                                gpui::deferred(
+                                    gpui::anchored()
+                                        .anchor(gpui::Anchor::LeftCenter)
+                                        .snap_to_window_with_margin(px(8.0))
+                                        .child(div().pl(px(RAIL_HIT_WIDTH + 4.0)).child(card)),
+                                ),
+                            ),
+                        )
+                    })
+            });
+
+        let stack = div()
+            .id("rail-ticks")
+            .relative()
+            .w_full()
+            .h(px(content))
+            .cursor_pointer()
+            .child(
+                canvas(
+                    move |bounds, _, _| bounds_cell.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            // One hit strip resolves the nearest tick from the pointer,
+            // so dense stacks never fall between per-tick hitboxes.
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let ix = move_under(event.position.y);
+                if this.rail_hover() != ix {
+                    this.set_rail_hover(ix);
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered && this.rail_hover().is_some() {
+                    this.set_rail_hover(None);
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                let ix = match event {
+                    ClickEvent::Mouse(_) => tick_under(event.position().y),
+                    _ => None,
+                }
+                .or(this.rail_hover());
+                // Resolve the row at click time: rows can splice
+                // between the render that drew the tick and the click.
+                let Some(id) = ix.and_then(|ix| ids.get(ix)) else {
+                    return;
+                };
+                if let Some(row) = this.rows().iter().position(|r| r.id == *id) {
+                    this.scroll_to_row(row, cx);
+                }
+            }))
+            .children(ticks);
+        let body = if scrolls {
+            crate::edge_fade::edge_faded(
+                RAIL_EDGE_FADE,
+                true,
+                true,
+                div()
+                    .id("rail-scroll")
+                    .w_full()
+                    .h(px(window_h))
+                    .overflow_y_scroll()
+                    .track_scroll(&rail_scroll)
+                    .child(stack),
+            )
+            .fade_overflow_y(&rail_scroll)
+            .into_any_element()
+        } else {
+            stack.into_any_element()
+        };
+
+        div()
             .absolute()
             .left(px(16.0))
             .top(px(band_top))
             .bottom(px(band_bottom))
+            .w(px(RAIL_HIT_WIDTH))
             .flex()
             .flex_col()
-            .justify_center();
-
-        if self.rail_popover().is_some() {
-            let items: Vec<RailItem> = pairs.iter().map(|(tick, _)| RailItem::new(tick)).collect();
-            let max_height =
-                ((viewport_h - band_top - band_bottom - 16.0) * POPOVER_HEIGHT_SHARE).max(120.0);
-            let width = popover_width(self.column_left());
-            let virtualized = items.len() as f32 * POPOVER_MIN_ITEM_HEIGHT > max_height;
-            let count = items.len();
-            let popover = self.rail_popover_mut().as_mut().expect("checked above");
-            popover.sync(items);
-            popover.lit = lit;
-            // Bring the prompt being read into view once rows are measured
-            // (they lay out on this frame; before that nothing can place it).
-            if !popover.revealed {
-                popover.revealed = true;
-                if let Some(active) = active {
-                    cx.on_next_frame(window, move |this, _, cx| {
-                        if let Some(popover) = this.rail_popover() {
-                            if virtualized {
-                                popover.list.scroll_to_reveal_item(active);
-                            } else {
-                                popover.scroll.scroll_to_item(active);
-                            }
-                            cx.notify();
-                        }
-                    });
-                }
-            }
-            let list_state = popover.list.clone();
-            let scroll = popover.scroll.clone();
-            let bounds_cell = popover.bounds.clone();
-            let body = if virtualized {
-                list(list_state, cx.processor(Self::render_rail_item))
-                    .w_full()
-                    .h(px(max_height))
-                    .into_any_element()
-            } else {
-                div()
-                    .id("rail-popover-items")
-                    .w_full()
-                    .max_h(px(max_height))
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .flex()
-                    .flex_col()
-                    .children((0..count).map(|ix| self.render_rail_item(ix, window, cx)))
-                    .into_any_element()
-            };
-            let theme = Theme::of(cx).for_popup();
-            let card = popover::popover_card(&theme)
-                .id("rail-popover")
-                .debug_selector(|| "rail-popover".into())
-                .relative()
-                .w(px(width))
-                .occlude()
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if !*hovered && this.rail_popover().is_some() {
-                        *this.rail_popover_mut() = None;
-                        cx.notify();
-                    }
-                }))
-                .child(
-                    canvas(
-                        move |bounds, _, _| bounds_cell.set(Some(bounds)),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-                .child(body);
-            // Mounted straight through deferred (not a popover mount
-            // helper), so the frost wrap happens here.
-            return band
-                .ml(px(-8.0))
-                .child(gpui::deferred(crate::frost::frosted(
-                    popover::CARD_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    card,
-                )))
-                .into_any_element();
-        }
-
-        let theme = Theme::of(cx).clone();
-        let spans = tick_spans(pairs.len(), RAIL_MAX_TICKS);
-        let height = rail_height(spans.len(), viewport_h);
-        let n = spans.len();
-        let ticks = spans.into_iter().enumerate().map(|(ix, span)| {
-            let bar_color = if span.clone().any(|prompt| lit[prompt]) {
-                theme.text.opacity(0.8)
-            } else {
-                crate::theme::ink(0.16)
-            };
-            div()
-                .absolute()
-                .left_0()
-                .top(px(tick_offset(ix, n, height)))
-                .h(px(TICK_SLOT))
-                .w_full()
-                .flex()
-                .items_center()
-                .child(div().h(px(2.0)).w(px(8.0)).rounded(px(1.0)).bg(bar_color))
-        });
-        band.w(px(RAIL_HIT_WIDTH))
+            .justify_center()
             .child(
                 div()
-                    .id("rail-ticks")
-                    .debug_selector(|| "rail-ticks".into())
-                    .relative()
+                    .id("rail")
                     .w_full()
-                    .h(px(height + TICK_SLOT))
-                    .cursor_pointer()
-                    // The pointer resting on the rail swaps it for the prompt
-                    // list; passing over it doesn't.
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if !*hovered {
-                            *this.rail_hover_intent_mut() = None;
-                            return;
-                        }
-                        if this.rail_popover().is_some() {
-                            return;
-                        }
-                        let open = cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(RAIL_HOVER_DELAY).await;
-                            this.update(cx, |this, cx| {
-                                *this.rail_hover_intent_mut() = None;
-                                if this.rail_popover().is_none() {
-                                    *this.rail_popover_mut() = Some(RailPopover::default());
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                        });
-                        *this.rail_hover_intent_mut() = Some(open);
-                    }))
-                    .children(ticks),
-            )
-            .into_any_element()
-    }
-
-    /// Close the prompt list once the pointer moves over the transcript
-    /// outside it (bounds from the last paint): the card's own hover-out
-    /// covers leaving it, this covers a list that never saw the pointer
-    /// arrive.
-    pub(crate) fn rail_pointer_moved(
-        &mut self,
-        event: &MouseMoveEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let outside = self
-            .rail_popover()
-            .and_then(|popover| popover.bounds.get())
-            .is_some_and(|bounds| !bounds.contains(&event.position));
-        if outside {
-            *self.rail_popover_mut() = None;
-            cx.notify();
-        }
-    }
-
-    /// One prompt in the hover list: the prompt on one line and the opening
-    /// of its reply on up to three; a click glides the transcript to it.
-    fn render_rail_item(
-        &mut self,
-        ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some((item, lit)) = self
-            .rail_popover()
-            .and_then(|popover| popover.item(ix))
-            .map(|(item, lit)| (item.clone(), lit))
-        else {
-            return gpui::Empty.into_any_element();
-        };
-        let theme = Theme::of(cx).for_popup();
-        let id = item.message_id.clone();
-        div()
-            .pb(px(popover::MENU_GAP))
-            .child(
-                div()
-                    .id(("rail-item", ix))
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .rounded(px(popover::MENU_ITEM_RADIUS))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .cursor_pointer()
-                    .when(lit, |row| row.bg(crate::theme::ink(0.06)))
-                    .hover(|row| row.bg(crate::theme::ink(0.09)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // Resolved at click time: rows can splice between the
-                        // render that drew the item and the click.
-                        if let Some(row) = this.rows().iter().position(|r| r.id == id) {
-                            this.scroll_to_row(row, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(18.0))
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(item.prompt),
-                    )
-                    .when_some(item.reply, |el, reply| {
-                        el.child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .line_height(px(17.0))
-                                .text_color(theme.text_muted)
-                                .line_clamp(REPLY_PREVIEW_LINES)
-                                .text_ellipsis()
-                                .child(reply),
-                        )
-                    }),
+                    // A scrolling rail keeps the wheel at its ends instead of
+                    // handing it on to the transcript underneath.
+                    .when(scrolls, |rail| {
+                        rail.on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    })
+                    .child(body),
             )
             .into_any_element()
     }
@@ -914,15 +786,43 @@ mod tests {
     }
 
     #[test]
-    fn rail_height_spaces_ticks_then_compresses() {
-        // Natural spacing while it fits.
-        assert_eq!(rail_height(2, 900.0), TICK_SPACING);
-        assert_eq!(rail_height(10, 900.0), 9.0 * TICK_SPACING);
-        // A long conversation shares the available height instead of growing.
-        assert_eq!(rail_height(500, 900.0), 900.0 - RAIL_RESERVED_V);
-        // Tiny (or unmeasured) heights still leave a usable stack.
-        assert_eq!(rail_height(500, 0.0), TICK_SPACING);
-        assert_eq!(rail_height(1, 900.0), 0.0);
+    fn rail_keeps_natural_spacing_and_windows_long_stacks() {
+        assert_eq!(rail_height(2), TICK_SPACING);
+        assert_eq!(rail_height(10), 9.0 * TICK_SPACING);
+        // Long conversations keep their spacing; the window scrolls instead.
+        assert_eq!(rail_height(500), 499.0 * TICK_SPACING);
+        assert_eq!(rail_height(1), 0.0);
+        // A short stack shows whole; a long one caps at 70% of the band, and
+        // at RAIL_MAX_HEIGHT on a tall window.
+        assert_eq!(rail_window(90.0, 700.0), 90.0);
+        assert_eq!(rail_window(4000.0, 700.0), 490.0);
+        assert_eq!(rail_window(4000.0, 2000.0), RAIL_MAX_HEIGHT);
+        // A cramped band still leaves a usable window.
+        assert_eq!(rail_window(4000.0, 0.0), TICK_SLOT * 4.0);
+    }
+
+    #[test]
+    fn follow_scroll_moves_least_and_clears_the_fade() {
+        // Already comfortably in view: no movement.
+        assert_eq!(
+            follow_scroll(100.0, 200.0, 1000.0, 150.0, 160.0, 24.0),
+            100.0
+        );
+        // Below the window: lands just above the bottom fade.
+        assert_eq!(follow_scroll(0.0, 200.0, 1000.0, 400.0, 410.0, 24.0), 234.0);
+        // Above it: lands just below the top fade.
+        assert_eq!(
+            follow_scroll(500.0, 200.0, 1000.0, 300.0, 310.0, 24.0),
+            276.0
+        );
+        // A span taller than the window shows its top.
+        assert_eq!(follow_scroll(0.0, 200.0, 1000.0, 400.0, 700.0, 24.0), 400.0);
+        // Clamped to the stack's ends.
+        assert_eq!(
+            follow_scroll(0.0, 200.0, 1000.0, 990.0, 1000.0, 24.0),
+            800.0
+        );
+        assert_eq!(follow_scroll(300.0, 200.0, 1000.0, 0.0, 10.0, 24.0), 0.0);
     }
 
     #[test]
@@ -933,79 +833,30 @@ mod tests {
         assert_eq!(tick_offset(0, 1, 40.0), 0.0);
     }
 
-    /// Ten ticks at most; past ten each covers an even, gapless slice, so
-    /// every prompt belongs to exactly one tick.
+    /// Every prompt is reachable: pointer → nearest tick → same tick's
+    /// offset, at any density (the old fixed 12-slot buckets skipped prompts).
     #[test]
-    fn ticks_cap_at_ten_and_cover_every_prompt() {
-        assert!(tick_spans(0, RAIL_MAX_TICKS).is_empty());
-        assert_eq!(tick_spans(3, RAIL_MAX_TICKS), vec![0..1, 1..2, 2..3]);
-        assert_eq!(tick_spans(10, RAIL_MAX_TICKS).len(), 10);
-        for n in [11usize, 13, 25, 99, 300] {
-            let spans = tick_spans(n, RAIL_MAX_TICKS);
-            assert_eq!(spans.len(), RAIL_MAX_TICKS, "n={n}");
-            assert_eq!(spans.first().unwrap().start, 0);
-            assert_eq!(spans.last().unwrap().end, n);
-            for pair in spans.windows(2) {
-                assert_eq!(pair[0].end, pair[1].start, "n={n}");
-                assert!(!pair[0].is_empty());
+    fn pointer_maps_to_every_tick() {
+        for n in [2usize, 7, 12, 13, 80, 300] {
+            let height = rail_height(n);
+            for ix in 0..n {
+                let y = tick_offset(ix, n, height);
+                assert_eq!(tick_at(n, height, y), Some(ix), "n={n} ix={ix}");
             }
         }
-    }
-
-    /// The list fits the gutter left of the reading column when it can, and
-    /// otherwise stays readable rather than shrinking to nothing.
-    #[test]
-    fn popover_width_fits_the_gutter_within_bounds() {
-        assert_eq!(popover_width(600.0), POPOVER_MAX_WIDTH);
-        assert_eq!(popover_width(300.0), 280.0);
-        assert_eq!(popover_width(204.0), POPOVER_MIN_WIDTH);
-        assert_eq!(popover_width(0.0), POPOVER_MIN_WIDTH);
+        // Clamped past either end.
+        assert_eq!(tick_at(5, 32.0, -20.0), Some(0));
+        assert_eq!(tick_at(5, 32.0, 99.0), Some(4));
+        assert_eq!(tick_at(0, 32.0, 0.0), None);
+        assert_eq!(tick_at(1, 0.0, 5.0), Some(0));
     }
 
     #[test]
-    fn reply_previews_drop_markdown_markup() {
-        assert_eq!(
-            plain_preview(
-                "**Done.** Ran `cargo test`:\n\n- one\n- [two](https://x.y)",
-                200
-            ),
-            "Done. Ran cargo test: one two"
-        );
-        assert_eq!(
-            plain_preview("# Title\n\n```rust\nfn a() {}\n```", 200),
-            "Title fn a() {}"
-        );
-        let long = "word ".repeat(500);
-        let cut = plain_preview(&long, PREVIEW_CHARS);
-        assert!(cut.chars().count() <= PREVIEW_CHARS && cut.ends_with('…'));
-    }
-
-    /// The hover list remeasures only rows whose text changed, and grows or
-    /// shrinks from the first change, keeping the rest of its layout.
-    #[test]
-    fn popover_sync_tracks_item_changes() {
-        let item = |id: &str, reply: Option<&str>| RailItem {
-            message_id: id.to_owned().into(),
-            prompt: format!("prompt {id}").into(),
-            reply: reply.map(|r| r.to_owned().into()),
-        };
-        let mut popover = RailPopover::default();
-        popover.sync(vec![item("a", Some("x")), item("b", None)]);
-        assert_eq!(popover.list.item_count(), 2);
-        // The streaming reply grows: same count.
-        popover.sync(vec![item("a", Some("x")), item("b", Some("partial"))]);
-        assert_eq!(popover.list.item_count(), 2);
-        assert_eq!(popover.items[1].reply.as_deref(), Some("partial"));
-        // A new prompt.
-        popover.sync(vec![
-            item("a", Some("x")),
-            item("b", Some("partial")),
-            item("c", None),
-        ]);
-        assert_eq!(popover.list.item_count(), 3);
-        // A rewind drops the tail.
-        popover.sync(vec![item("a", Some("x"))]);
-        assert_eq!(popover.list.item_count(), 1);
+    fn fisheye_widths_fall_off_from_hover() {
+        assert_eq!(tick_width(Some(0)), 24.0);
+        assert!(tick_width(Some(1)) < tick_width(Some(0)));
+        assert!(tick_width(Some(2)) < tick_width(Some(1)));
+        assert_eq!(tick_width(Some(3)), tick_width(None));
     }
 
     #[test]

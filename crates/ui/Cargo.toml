@@ -65,6 +65,10 @@ name = "new-project-path-fixture"
 required-features = ["project-path-fixture"]
 
 [[example]]
+name = "rail-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
