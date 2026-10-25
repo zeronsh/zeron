@@ -884,6 +884,7 @@ async fn target_device_id_routes_over_the_relay() {
             worktree: None,
             resume: None,
             env: Default::default(),
+            system_prompt: None,
         },
         message_id: "m-a-1".into(),
     })

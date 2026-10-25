@@ -13,6 +13,7 @@ pub mod entities;
 pub mod file_mentions;
 pub mod invocation;
 pub mod motion;
+pub mod native_history;
 pub mod plan_usage;
 pub mod preview;
 pub mod program_status;

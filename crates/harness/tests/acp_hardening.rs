@@ -47,6 +47,7 @@ fn request(mode: &str) -> RunRequest {
         env: [("FAKE_ACP_MODE".to_owned(), mode.to_owned())]
             .into_iter()
             .collect(),
+            system_prompt: None,
     }
 }
 

@@ -106,6 +106,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     }
 }
 
@@ -173,6 +174,20 @@ async fn reasoning_preserves_summary_parts_and_item_boundaries_per_thread() {
         "**Implementing file badges**\n\n**Preparing fixture screenshots**\n\nChecking the final result."
     );
     assert_eq!(child, "**Checking layout**\n\nInspecting the output panel.");
+}
+
+#[tokio::test]
+async fn the_system_prompt_starts_the_thread_as_developer_instructions() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.system_prompt = Some("Answer in French.".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    let started = events.iter().find_map(|e| match e {
+        AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+        _ => None,
+    });
+    assert_eq!(started.as_deref(), Some("th-instructed"));
 }
 
 #[tokio::test]
@@ -541,6 +556,111 @@ async fn open_commands_report_background_work_and_killed_ones_do_not() {
         .unwrap();
     assert_eq!(until_done(&mut stream, |_| {}).await, DoneStatus::Completed);
     assert!(!turn.background_live(), "nothing left running");
+}
+
+#[tokio::test]
+async fn stopping_a_subagent_interrupts_only_its_own_turn() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    assert_eq!(harness().stops_tools(), cfg!(unix));
+    let mut stream = harness()
+        .run(request("scenario:stop-subagent"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("event");
+            // The spawn chip's id is the stop target.
+            if matches!(
+                &event,
+                AgentEvent::Subagent { event, .. }
+                    if matches!(&**event, AgentEvent::TextDelta { text } if text == "child working")
+            ) {
+                turn.stop_tool("call_alpha");
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("the run finished");
+    // The fake exits 8 on a wrong request, ending the stream without a parent
+    // Done; here the parent carried on and completed.
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "parent carries on".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == "call_alpha"
+                && matches!(&**event, AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+    )));
+}
+
+/// The command's process is signaled: it ends, its item completes failed, and
+/// the turn goes on.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stopping_a_command_signals_its_process_and_the_turn_goes_on() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let started = std::time::Instant::now();
+    let mut stream = harness()
+        .run(request("scenario:stop-command"), controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("event");
+            if let AgentEvent::ToolCall { id, .. } = &event {
+                turn.stop_tool(id.clone());
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("the run finished");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the 45s command was cut short"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::ToolResult { id, is_error: true, .. } if id == "cmd-1")
+        )
+    );
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "carrying on".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

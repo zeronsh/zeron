@@ -371,6 +371,8 @@ impl DemoHost {
                         self.set_status(&client, chat_id, SessionStatus::Idle, None);
                     }
                 }
+                // The demo's scripted turns run no tools to stop.
+                SessionCommandPayload::StopTool { .. } => {}
                 SessionCommandPayload::RespondInput {
                     request_id,
                     answers,

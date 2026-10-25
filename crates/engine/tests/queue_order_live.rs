@@ -132,6 +132,7 @@ impl Rig {
             worktree: None,
             resume: None,
             env: Default::default(),
+            system_prompt: None,
         }
     }
 

@@ -27,6 +27,7 @@ pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod shortcuts;
+pub mod system_prompt;
 pub mod thread_naming;
 pub mod wallpaper;
 pub mod wallpaper_colors;
@@ -566,6 +567,11 @@ pub fn compact_model_picker(cx: &App) -> bool {
         .is_some_and(|store| store.current.compact_model_picker)
 }
 
+pub fn experimental_transcript_editing(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.experimental_transcript_editing)
+}
+
 /// Copy a selected image into Zeron's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -1056,6 +1062,9 @@ pub struct UiSettings {
         std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
     /// Open model selection with an effort slider and a separate model list.
     pub compact_model_picker: bool,
+    /// Experimental: a chat's menu offers "Edit transcript", which rewrites
+    /// the agent's own stored conversation. Device-local and opt-in.
+    pub experimental_transcript_editing: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -1313,6 +1322,7 @@ impl Default for UiSettings {
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            experimental_transcript_editing: false,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
@@ -1928,6 +1938,7 @@ impl UiSettings {
             skills_in_slash_menu,
             skill_completion_by_harness,
             compact_model_picker,
+            experimental_transcript_editing,
             sidebar_width,
             sidebar_collapsed,
             sidebar_grouped,
@@ -3154,6 +3165,7 @@ mod tests {
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             compact_model_picker: true,
+            experimental_transcript_editing: true,
             appshots_enabled: false,
             appshot_sound_enabled: true,
             // The destination is only persisted where Appshots exist (macOS and

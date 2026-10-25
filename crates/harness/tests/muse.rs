@@ -59,6 +59,7 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         ]
         .into_iter()
         .collect(),
+        system_prompt: None,
     }
 }
 

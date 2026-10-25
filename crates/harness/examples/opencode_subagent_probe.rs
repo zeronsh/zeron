@@ -65,6 +65,7 @@ async fn main() {
         resume: None,
         worktree: None,
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = OpencodeHarness::new()
         .run(request, controls)

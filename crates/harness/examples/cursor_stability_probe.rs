@@ -47,6 +47,7 @@ async fn turn(
         worktree: None,
         resume: session.clone(),
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = harness
         .run(request, controls)
@@ -171,6 +172,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let mut id = String::new();
@@ -289,6 +291,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         worktree: None,
         resume: seed,
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let producer = tokio::spawn(async move {
@@ -428,6 +431,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = harness.run(request, controls).await.unwrap();
     let (start_tx, start_rx) = oneshot::channel();

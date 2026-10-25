@@ -66,6 +66,7 @@ async fn check_persistence(
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     };
     core.sessions
         .dispatch(

@@ -45,6 +45,7 @@
 
 pub mod catalog;
 mod discovery;
+mod history;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -123,6 +124,18 @@ fn config_root(env: &std::collections::BTreeMap<String, String>) -> PathBuf {
         "CLAUDE_CONFIG_DIR",
         crate::executable::home_or_current_dir().join(".claude"),
     )
+}
+
+/// The stored session file of a chat's Claude session, for history edits.
+fn stored_session(
+    env: &std::collections::BTreeMap<String, String>,
+    session_id: &str,
+) -> Result<PathBuf, HarnessError> {
+    history::session_file(&config_root(env), session_id).ok_or_else(|| {
+        HarnessError::History(
+            "This chat's Claude session is no longer stored on this device".into(),
+        )
+    })
 }
 
 /// An administrator's `managed-mcp.json` (at the paths Claude Code reads).
@@ -311,6 +324,9 @@ impl ClaudeHarness {
             );
         } else {
             args.extend(["--permission-mode".into(), "default".into()]);
+        }
+        if let Some(prompt) = crate::system_prompt(request) {
+            args.extend(["--append-system-prompt".into(), prompt.to_owned()]);
         }
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
@@ -641,6 +657,11 @@ impl Harness for ClaudeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// `stop_task` kills one task (a command, a subagent) by the id its
+    /// `task_started` reported; the turn goes on.
+    fn stops_tools(&self) -> bool {
+        true
+    }
     /// The `interrupt` control request ends the turn and the CLI keeps
     /// reading stdin; background agents and shells run on.
     fn stops_turn_in_place(&self) -> bool {
@@ -655,7 +676,9 @@ impl Harness for ClaudeHarness {
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
     /// the directory and the permission mode it launched with need a new one.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd && live.auto_approve == next.auto_approve
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && crate::system_prompt(live) == crate::system_prompt(next)
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -738,6 +761,47 @@ impl Harness for ClaudeHarness {
         self.workspace_commands
             .get(cwd, self.discover_commands(Some(cwd)))
             .await
+    }
+
+    fn supports_native_history(&self) -> bool {
+        true
+    }
+
+    async fn read_native_history(
+        &self,
+        session_id: &str,
+        _cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::NativeHistoryRead, HarnessError> {
+        let file = stored_session(env, session_id)?;
+        tokio::task::spawn_blocking(move || {
+            let text = std::fs::read_to_string(&file)?;
+            Ok(history::read(&text))
+        })
+        .await
+        .map_err(|e| HarnessError::Protocol(e.to_string()))?
+    }
+
+    async fn write_edited_session(
+        &self,
+        session_id: &str,
+        _cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+        revision: &str,
+        edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        let file = stored_session(env, session_id)?;
+        let (session_id, revision, edits) =
+            (session_id.to_owned(), revision.to_owned(), edits.to_vec());
+        tokio::task::spawn_blocking(move || {
+            let text = std::fs::read_to_string(&file)?;
+            let (new_id, target) = history::copy_target(&file);
+            let edited = history::rewrite(&text, &session_id, &new_id, &revision, &edits)?;
+            history::write_atomic(&target, &edited)?;
+            Ok(new_id)
+        })
+        .await
+        .map_err(|e| HarnessError::Protocol(e.to_string()))?
     }
 
     async fn run(
@@ -1081,6 +1145,11 @@ async fn run_session(session: Session) {
     // Top-level tool calls in flight: a steer must not abort them (see
     // `wire::steer_message_line`).
     let mut open_tools = std::collections::HashSet::new();
+    // Tool calls the host asked to stop before the CLI reported the task
+    // behind them (a command's `task_started` follows its start by a few
+    // seconds): sent the moment it does, dropped if the call ends first.
+    let mut pending_tool_stops = std::collections::HashSet::<String>::new();
+    let mut tool_stops_sent = 0u64;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1337,6 +1406,7 @@ async fn run_session(session: Session) {
                             }
                             AgentEvent::ToolResult { id, .. } => {
                                 open_tools.remove(id);
+                                norm.tool_finished(id);
                             }
                             AgentEvent::Done { .. } => open_tools.clear(),
                             _ => {}
@@ -1390,6 +1460,18 @@ async fn run_session(session: Session) {
                             }
                         }
                     }
+                    // A task the CLI just reported may be one a stop waits on.
+                    let mut written = true;
+                    pending_tool_stops.retain(|tool| match norm.task_for_tool(tool) {
+                        Some(task) => {
+                            tool_stops_sent += 1;
+                            let id = format!("zeron_stop_task_{tool_stops_sent}");
+                            written &= stdin.line(wire::stop_task_request_line(&id, task));
+                            false
+                        }
+                        None => open_tools.contains(tool),
+                    });
+                    if !written { break 'main; }
                 }
                 // stdout EOF: the CLI exited. An older CLI says it has no
                 // conversation for the session on stderr alone.
@@ -1481,6 +1563,26 @@ async fn run_session(session: Session) {
                         *status = DoneStatus::Interrupted;
                     }
                     stopped_end = Some(done);
+                }
+            },
+
+            // End one running command or subagent; the turn goes on and the
+            // agent sees the call fail.
+            tool = turn.stop_tool_requested(), if !interrupted => {
+                if let Some(task) = norm.task_for_tool(&tool) {
+                    tool_stops_sent += 1;
+                    let id = format!("zeron_stop_task_{tool_stops_sent}");
+                    if !stdin.line(wire::stop_task_request_line(&id, task)) {
+                        break 'main;
+                    }
+                } else if open_tools.contains(&tool) {
+                    pending_tool_stops.insert(tool);
+                } else {
+                    tracing::debug!(
+                        target: "zeron_harness::claude",
+                        tool = %tool,
+                        "tool stop for a call that is not running"
+                    );
                 }
             },
 
@@ -1960,6 +2062,46 @@ mod resolution_tests {
 #[cfg(test)]
 mod mcp_injection_tests {
     use super::*;
+
+    fn run_request(system_prompt: Option<&str>) -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/work".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            env: Default::default(),
+            system_prompt: system_prompt.map(str::to_owned),
+        }
+    }
+
+    /// The user's system prompt is appended at launch, so a change needs a
+    /// new process; a blank one adds nothing.
+    #[test]
+    fn the_system_prompt_is_appended_at_launch() {
+        let args = ClaudeHarness::launch_args(&run_request(Some("Answer in French.")));
+        let at = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .expect("the flag is passed");
+        assert_eq!(args[at + 1], "Answer in French.");
+        for blank in [None, Some("  ")] {
+            let args = ClaudeHarness::launch_args(&run_request(blank));
+            assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        }
+        let harness = ClaudeHarness::new();
+        let (before, after) = (run_request(None), run_request(Some("Be brief.")));
+        assert!(!harness.same_runtime(&before, &after));
+        assert!(!harness.reconfigures_in_place(&before, &after));
+        assert!(harness.same_runtime(&after, &run_request(Some("Be brief."))));
+    }
 
     #[test]
     fn mcp_config_arg_spells_the_server_the_way_the_cli_reads_it() {

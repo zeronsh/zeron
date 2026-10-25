@@ -93,11 +93,17 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    /// The user's own system prompt for this device's agent runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_prompt: Option<String>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
     enabled: Option<Vec<HarnessId>>,
 }
+
+/// Large enough for any hand-written prompt, small enough for a CLI argument.
+const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
 
 /// Per-device automatic session title preferences.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -583,6 +589,23 @@ impl HarnessRegistry {
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
         self.prefs().titles = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    /// The system prompt this device adds to its agents' instructions.
+    pub fn system_prompt(&self) -> Option<String> {
+        self.prefs().system_prompt.clone()
+    }
+
+    /// Set (or, blank, clear) the system prompt. It applies from each chat's
+    /// next message: the runtime restarts to take it.
+    pub fn set_system_prompt(&self, text: Option<String>) -> Result<(), String> {
+        let text = text.filter(|text| !text.trim().is_empty());
+        if text.as_ref().is_some_and(|text| text.len() > MAX_SYSTEM_PROMPT_BYTES) {
+            return Err("The system prompt is too long (64 KB at most)".into());
+        }
+        self.prefs().system_prompt = text;
         self.persist_prefs();
         Ok(())
     }

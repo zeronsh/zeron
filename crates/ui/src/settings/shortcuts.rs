@@ -84,6 +84,7 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    system_prompt: Entity<crate::settings::system_prompt::SystemPromptCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
@@ -130,6 +131,9 @@ impl ShortcutsPage {
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
+            system_prompt: cx.new(|cx| {
+                crate::settings::system_prompt::SystemPromptCard::new(state.clone(), cx)
+            }),
             _state: state,
         }
     }
@@ -924,6 +928,46 @@ impl Render for ShortcutsPage {
                         )),
                 )
                 .child(pull_request_destination_control);
+            let transcript_editing = crate::settings::experimental_transcript_editing(cx);
+            let transcript_editing_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Transcript editing"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "Rewrite what Claude Code and Codex remember from a \
+                                         chat. Files are not changed.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, transcript_editing, "transcript-editing")
+                        .id("transcript-editing-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Transcript editing")
+                        .aria_toggled(if transcript_editing {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                                settings.experimental_transcript_editing = !transcript_editing
+                            });
+                            cx.refresh_windows();
+                            cx.notify();
+                        })),
+                );
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -957,6 +1001,14 @@ impl Render for ShortcutsPage {
                                             .mt_0()
                                             .child(pull_request_destination_row),
                                     ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Experimental",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(transcript_editing_row),
+                                    ))
+                                    .child(self.system_prompt.clone())
                                     .child(self.thread_naming.clone())
                                     .child(self.worktrees.clone()),
                             ),

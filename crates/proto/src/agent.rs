@@ -349,6 +349,13 @@ pub struct RunRequest {
     /// sender can never inject environment into a host's agents.
     #[serde(skip)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// The user's own system prompt, added to the agent's instructions
+    /// (Claude Code `--append-system-prompt`, Codex `developerInstructions`).
+    /// Filled by the HOST from its setting as the run is dispatched, so a
+    /// change starts a fresh runtime; `serde(skip)` like [`Self::env`], so it
+    /// never rides the command plane and no other device can set it.
+    #[serde(skip)]
+    pub system_prompt: Option<String>,
 }
 
 /// Hand-written so a `{:?}` can never print a credential: `env` shows its
@@ -370,6 +377,7 @@ impl std::fmt::Debug for RunRequest {
             worktree,
             mcp,
             env,
+            system_prompt,
         } = self;
         f.debug_struct("RunRequest")
             .field("prompt", prompt)
@@ -385,6 +393,7 @@ impl std::fmt::Debug for RunRequest {
             .field("worktree", worktree)
             .field("mcp", mcp)
             .field("env", &env.keys().collect::<Vec<_>>())
+            .field("system_prompt", &system_prompt.as_ref().map(|p| p.len()))
             .finish()
     }
 }

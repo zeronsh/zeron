@@ -50,6 +50,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     }
 }
 

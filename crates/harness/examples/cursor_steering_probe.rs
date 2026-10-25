@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
         sandbox: SandboxLevel::DangerFullAccess, auto_approve: true,
         attachments: vec![], worktree: None, resume: None,
         env: Default::default(),
+        system_prompt: None,
     };
     let mut stream = CursorHarness::new()
         .run(

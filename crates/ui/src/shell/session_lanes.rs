@@ -57,6 +57,8 @@ impl LaneState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SubagentRow {
     pub doc_id: String,
+    /// The spawn chip's tool part id — what stopping this subagent names.
+    pub tool_id: String,
     pub title: SharedString,
     pub status: Option<SubagentStatus>,
     /// When the latest turn that spawned (or steered) it was written — the
@@ -99,6 +101,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
             DateTime::<Utc>::from_timestamp_millis(entry.created_at).unwrap_or_else(Utc::now);
         for part in &entry.parts {
             let MessagePart::Tool {
+                id: tool_id,
                 call,
                 subagent_ref: Some(doc_id),
                 subagent_status,
@@ -112,6 +115,7 @@ pub(super) fn subagent_rows(state: &AppState, chat_id: &str) -> Vec<SubagentRow>
             }
             let row = SubagentRow {
                 doc_id: doc_id.clone(),
+                tool_id: tool_id.clone(),
                 title: crate::transcript::subagent_tab_title(call),
                 status: *subagent_status,
                 spawned_at,
@@ -264,6 +268,46 @@ fn time_label(text: SharedString, theme: &Theme) -> gpui::Div {
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
         .child(text)
+}
+
+/// A running row's trailing slot: its time label, which hovering the row
+/// swaps for a stop button. A stop already asked for stays up, dimmed.
+fn trailing_slot(
+    group: SharedString,
+    time: SharedString,
+    stop: Option<(gpui::Stateful<gpui::Div>, bool)>,
+    theme: &Theme,
+) -> gpui::Div {
+    let Some((button, pending)) = stop else {
+        return time_label(time, theme);
+    };
+    div()
+        .relative()
+        .flex_none()
+        .min_w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_end()
+        .child(if pending {
+            time_label(time, theme).opacity(0.0)
+        } else {
+            time_label(time, theme).group_hover(group.clone(), |style| style.opacity(0.0))
+        })
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .flex()
+                .items_center()
+                .when(!pending, |slot| {
+                    slot.opacity(0.0)
+                        .group_hover(group, |style| style.opacity(1.0))
+                })
+                .child(button),
+        )
 }
 
 /// A row's title, dissolving at its right edge like the sidebar's.
@@ -549,7 +593,26 @@ impl Shell {
         };
         let open_id = row.chat_id.clone();
         let menu_id = row.chat_id.clone();
+        // A side chat is its own chat: stopping it is the ordinary Stop, aimed
+        // at that chat, and any harness has one.
+        let stop = (row.status == ChatIndicator::Working).then(|| {
+            let chat_id = row.chat_id.clone();
+            let pending = self.composer.read(cx).is_interrupting(&chat_id);
+            let button = crate::tool_stop::stop_button(
+                format!("{key}-stop"),
+                "Stop this side chat",
+                pending,
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    let chat_id = chat_id.clone();
+                    this.composer
+                        .update(cx, |composer, cx| composer.interrupt_chat(chat_id, cx));
+                }),
+            );
+            (button, pending)
+        });
         popover::picker_row(theme, false, false, key.clone())
+            .group(SharedString::from(key.clone()))
             .id(SharedString::from(key.clone()))
             .aria_label(SharedString::from(format!("Open side chat {}", row.title)))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -602,7 +665,12 @@ impl Shell {
                     theme,
                 )
             }))
-            .child(time_label(row.time_ago.clone(), theme))
+            .child(trailing_slot(
+                SharedString::from(key),
+                row.time_ago.clone(),
+                stop,
+                theme,
+            ))
     }
 
     fn render_subagent_row(
@@ -617,8 +685,28 @@ impl Shell {
         let mark = status_mark(key.clone(), row.indicator(), view, theme, cx);
         let time = zeron_proto::view::format_time_ago(row.spawned_at, Utc::now());
         let title = row_title(format!("{key}-title"), row.title.clone());
+        // Claude Code and Codex end just this subagent; the parent turn and
+        // the other subagents carry on.
+        let stop = (row.status == Some(SubagentStatus::Running)
+            && crate::tool_stop::supports(harness))
+        .then(|| {
+            let pending = self.state.read(cx).tool_stop_pending(&row.tool_id);
+            let tool_id = row.tool_id.clone();
+            let button = crate::tool_stop::stop_button(
+                format!("{key}-stop"),
+                "Stop this subagent",
+                pending,
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    let chat_id = this.active_chat.clone();
+                    crate::tool_stop::request(&this.state, &chat_id, &tool_id, cx);
+                }),
+            );
+            (button, pending)
+        });
         popover::picker_row(theme, false, false, key.clone())
-            .id(SharedString::from(key))
+            .group(SharedString::from(key.clone()))
+            .id(SharedString::from(key.clone()))
             .aria_label(SharedString::from(format!("Open subagent {}", row.title)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -634,7 +722,12 @@ impl Shell {
             .child(popover::picker_icon_slot(mark))
             .children(harness.map(|harness| harness_mark(harness, theme)))
             .child(title)
-            .child(time_label(time.into(), theme))
+            .child(trailing_slot(
+                SharedString::from(key),
+                time.into(),
+                stop,
+                theme,
+            ))
     }
 
     /// The settled subagents' fold, with their count.
@@ -810,6 +903,9 @@ mod tests {
         );
         // The bare task, genus stripped — the same title the tab wears.
         assert_eq!(rows[0].title.as_ref(), "verify");
+        // Stopping a subagent names its spawn chip's tool part.
+        assert_eq!(rows[0].tool_id, "t1");
+        assert_eq!(rows[1].tool_id, "t4");
         assert!(rows[1].frozen());
         assert!(!rows[0].frozen());
         // Spawn time comes from the turn that carried the chip.

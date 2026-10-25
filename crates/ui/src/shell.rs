@@ -98,6 +98,7 @@ pub(crate) mod spaces;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
+mod transcript_editing;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
@@ -216,6 +217,7 @@ const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
 const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_EDIT_TRANSCRIPT: u8 = 6;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -2088,6 +2090,8 @@ pub struct Shell {
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     side_chat_creating: bool,
+    /// Experimental transcript editing over one chat (one at a time).
+    transcript_editing: Option<transcript_editing::TranscriptEditing>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2650,6 +2654,7 @@ impl Shell {
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             side_chat_creating: false,
+            transcript_editing: None,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -4429,11 +4434,21 @@ impl Shell {
     /// transcripts (nested spawns open their own tabs).
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        source: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
+            // The editor takes the main column; a side chat's transcript
+            // offers nothing to open it from.
+            TranscriptEvent::EditTranscript {
+                entry_id,
+                content_top,
+            } => {
+                if source == self.transcript {
+                    self.edit_transcript_from(entry_id, *content_top, cx);
+                }
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -11106,9 +11121,37 @@ impl Shell {
                             )
                             .child(SharedString::from("Archive"));
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
+                    let menu = menu
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx));
+                    if self.can_edit_transcript(&chat_id, cx) {
+                        let edit_id = chat_id.clone();
+                        let edit = popover::menu_row(
+                            &theme,
+                            false,
+                            format!("chat-menu-edit-transcript-{chat_id}"),
+                        )
+                        .id("chat-menu-edit-transcript")
+                        .debug_selector(|| "chat-menu-edit-transcript".into())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_transcript_editor(edit_id.clone(), None, cx)
+                        }))
+                        .child(
+                            icon(icons::PEN_NEW_SQUARE)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().flex_1().child(SharedString::from("Edit transcript")))
+                        .child(crate::settings::widgets::badge(&theme, "Beta"));
+                        menu.child(self.chat_menu_hover_row(
+                            CHAT_MENU_ROW_EDIT_TRANSCRIPT,
+                            edit,
+                            cx,
+                        ))
+                    } else {
+                        menu
+                    }
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
@@ -11510,6 +11553,10 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
+        let transcript_editor = self.visible_transcript_editor(cx);
+        if let Some(editor) = &transcript_editor {
+            editor.update(cx, |editor, cx| editor.set_column_width(composer_width, cx));
+        }
         let terminal_geometry =
             std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
                 self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
@@ -11575,7 +11622,10 @@ impl Shell {
                         } else {
                             0.0
                         })
-                        .child(self.transcript.clone()),
+                        .map(|el| match transcript_editor.clone() {
+                            Some(editor) if !departing_transcript => el.child(editor),
+                            _ => el.child(self.transcript.clone()),
+                        }),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
@@ -11805,8 +11855,17 @@ impl Shell {
                                     .w(px(composer_width))
                                     .opacity(composer_opacity)
                                     .mx_auto()
-                                    .child(self.composer.clone())
-                                    .children(if has_selection {
+                                    .map(|el| match &transcript_editor {
+                                        Some(editor) => el.child(
+                                            crate::transcript_edit::TranscriptEditor::render_bar(
+                                                editor,
+                                                composer_width,
+                                                cx,
+                                            ),
+                                        ),
+                                        None => el.child(self.composer.clone()),
+                                    })
+                                    .children(if has_selection && transcript_editor.is_none() {
                                         self.render_jump_to_bottom(cx)
                                     } else {
                                         None

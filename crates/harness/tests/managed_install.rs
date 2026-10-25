@@ -50,6 +50,7 @@ async fn managed_install_reaches_session_started() {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     };
 
     let mut stream = tokio::time::timeout(

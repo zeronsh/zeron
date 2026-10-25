@@ -112,6 +112,7 @@ fn run(
         attachments: vec![],
         worktree: None,
         resume: None,
+        system_prompt: None,
     }
 }
 

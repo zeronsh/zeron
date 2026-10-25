@@ -40,6 +40,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     }
 }
 
@@ -2475,6 +2476,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         resume: None,
         worktree: None,
         env: Default::default(),
+        system_prompt: None,
     };
     core.doc_host
         .queue_command(

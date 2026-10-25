@@ -48,6 +48,7 @@ fn request(cwd: &Path) -> RunRequest {
         ]
         .into_iter()
         .collect(),
+        system_prompt: None,
     }
 }
 

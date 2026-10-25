@@ -177,6 +177,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 attachments: vec![],
                 worktree: None,
                 env: Default::default(),
+                system_prompt: None,
             },
             Some("side-user".into()),
         )
@@ -431,6 +432,7 @@ async fn side_turn(
                 attachments: vec![],
                 worktree: None,
                 env: Default::default(),
+                system_prompt: None,
             },
             Some(message_id.into()),
         )
@@ -640,6 +642,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         attachments: vec![],
         worktree: None,
         env: Default::default(),
+        system_prompt: None,
     };
     let settle = |count: usize| {
         let seen = seen.clone();
@@ -826,6 +829,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         attachments: vec![],
         worktree: None,
         env: Default::default(),
+        system_prompt: None,
     };
     core.sessions
         .dispatch(

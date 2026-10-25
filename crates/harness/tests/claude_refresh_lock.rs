@@ -95,6 +95,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
             config.display().to_string(),
         )]
         .into(),
+        system_prompt: None,
     };
     let (_steer, steering) = tokio::sync::mpsc::channel(1);
     let controls = RunControls {
