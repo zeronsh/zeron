@@ -3385,11 +3385,8 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
-    /// Hovered rail tick (grows + shows the preview card).
-    rail_hover: Option<usize>,
-    /// The rail's tick stack bounds (painted last frame): maps pointer y to
-    /// a prompt index.
-    rail_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The prompt list that replaces the rail while the pointer is on it.
+    rail_popover: Option<crate::rail::RailPopover>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -3715,8 +3712,7 @@ impl Transcript {
             selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
-            rail_hover: None,
-            rail_bounds: Rc::new(Cell::new(None)),
+            rail_popover: None,
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
@@ -3790,16 +3786,12 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn rail_hover(&self) -> Option<usize> {
-        self.rail_hover
+    pub(crate) fn rail_popover(&self) -> Option<&crate::rail::RailPopover> {
+        self.rail_popover.as_ref()
     }
 
-    pub(crate) fn set_rail_hover(&mut self, hover: Option<usize>) {
-        self.rail_hover = hover;
-    }
-
-    pub(crate) fn rail_bounds(&self) -> &Rc<Cell<Option<Bounds<Pixels>>>> {
-        &self.rail_bounds
+    pub(crate) fn rail_popover_mut(&mut self) -> &mut Option<crate::rail::RailPopover> {
+        &mut self.rail_popover
     }
 
     pub(crate) fn bottom_clearance(&self) -> f32 {
@@ -10567,7 +10559,7 @@ impl Render for Transcript {
                     .ok();
             });
         }
-        let rail = self.render_rail(cx);
+        let rail = self.render_rail(window, cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
@@ -10611,6 +10603,7 @@ impl Render for Transcript {
                 cx.listener(Self::on_selection_mouse_down),
             )
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
+            .on_mouse_move(cx.listener(Self::rail_pointer_moved))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
