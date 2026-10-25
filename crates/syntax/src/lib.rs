@@ -52,6 +52,7 @@ pub enum LanguageId {
     Php,
     Sql,
     Lua,
+    Luau,
     Dockerfile,
     Nix,
     Make,
@@ -381,7 +382,8 @@ fn injected_languages(parent: LanguageId) -> Vec<LanguageId> {
         Html => vec![JavaScript, Css, Json],
         Markdown => vec![
             Rust, JavaScript, Jsx, TypeScript, Tsx, Python, Go, Json, Jsonc, Bash, Toml, Html, Css,
-            Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Dockerfile, Nix, Make,
+            Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Luau, Dockerfile, Nix,
+            Make,
         ],
         Dockerfile => vec![Bash, Json, Yaml, Toml],
         _ => Vec::new(),
@@ -390,7 +392,7 @@ fn injected_languages(parent: LanguageId) -> Vec<LanguageId> {
 
 /// Compiled queries contain no document/theme state and are immutable after
 /// capture configuration. Keep one per used grammar instead of recompiling
-/// for every fence or eagerly compiling all 27 Markdown injection targets.
+/// for every fence or eagerly compiling all 28 Markdown injection targets.
 /// Each grammar has its own cell: concurrent requests compile it only once,
 /// while unrelated languages never wait on a global compilation lock.
 fn cached_configuration(
@@ -413,8 +415,8 @@ fn cached_configuration(
     }
     registry!(
         Rust, JavaScript, Jsx, TypeScript, Tsx, Python, Go, Json, Jsonc, Bash, Toml, Markdown,
-        Html, Css, Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Dockerfile, Nix,
-        Make,
+        Html, Css, Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Luau,
+        Dockerfile, Nix, Make,
     )
 }
 
@@ -456,6 +458,50 @@ fn rust_configuration() -> Result<HighlightConfiguration, HighlightError> {
         "",
     )
     .map_err(|error| HighlightError::Parser(error.to_string()))
+}
+
+/// The upstream Luau query is written for Neovim, and several of its patterns
+/// misfire under tree-sitter-highlight. Each rewrite names the exact upstream
+/// text, so a grammar bump that changes it fails the Luau tests instead of
+/// silently highlighting differently.
+const LUAU_QUERY_REWRITES: &[(&str, &str)] = &[
+    // `#lua-match?` takes Lua patterns and the Rust runtime doesn't evaluate
+    // it: every identifier would match the type and constant patterns. The
+    // patterns are regexes already, but for Lua's `%s` class.
+    ("#lua-match?", "#match?"),
+    (r#""^[-][-](%s?)@""#, r#""^[-][-](\\s?)@""#),
+    // A second capture Zeron doesn't map takes the comment's highlight.
+    ("(comment) @comment @spell", "(comment) @comment"),
+    // `type` is a supertype whose subtypes include `identifier`, so this
+    // matches every identifier. A bare type name sits after an annotation's
+    // `:`, a cast's `::` or an alias's `=`, or inside a composite type.
+    (
+        "(type\n  (identifier) @type)",
+        "(parameter \":\" . (identifier) @type)\n\
+         (variable_list \":\" . (identifier) @type)\n\
+         (function_declaration \":\" . (identifier) @type)\n\
+         (function_definition \":\" . (identifier) @type)\n\
+         (object_type \":\" . (identifier) @type)\n\
+         (cast_expression \"::\" . (identifier) @type)\n\
+         (type_definition \"=\" . (identifier) @type)\n\
+         ([(generic_type) (generic_type_list) (union_type) (intersection_type) (optional_type)\n\
+           (variadic_type) (tuple_type) (field_type) (function_type)] (identifier) @type)",
+    ),
+    // Only a name before a `:` is a table type's key; the rest are types.
+    (
+        "(object_type\n  (identifier) @variable.member)",
+        "(object_type (identifier) @variable.member . \":\")",
+    ),
+    // The grammar doesn't parse named parameters in function types, so
+    // every identifier there is a type, not a parameter.
+    ("(function_type\n  (identifier) @variable.parameter)", ""),
+];
+
+fn luau_highlights() -> String {
+    LUAU_QUERY_REWRITES.iter().fold(
+        tree_sitter_luau::HIGHLIGHTS_QUERY.to_owned(),
+        |query, (from, to)| query.replace(from, to),
+    )
 }
 
 fn markdown_configuration() -> Result<HighlightConfiguration, HighlightError> {
@@ -691,6 +737,15 @@ fn configuration(language: LanguageId) -> Result<HighlightConfiguration, Highlig
             "",
             tree_sitter_lua::LOCALS_QUERY,
         ),
+        // Its locals query names definitions `local.definition.var` and the
+        // like, which tree-sitter-highlight doesn't resolve: no locals.
+        Luau => make_configuration(
+            tree_sitter_luau::LANGUAGE.into(),
+            "luau",
+            &luau_highlights(),
+            "",
+            "",
+        ),
         Nix => make_configuration(
             tree_sitter_nix::LANGUAGE.into(),
             "nix",
@@ -828,6 +883,7 @@ pub fn language_for_alias(alias: &str) -> Option<LanguageId> {
         "php" => LanguageId::Php,
         "sql" => LanguageId::Sql,
         "lua" => LanguageId::Lua,
+        "luau" => LanguageId::Luau,
         "dockerfile" | "docker" => LanguageId::Dockerfile,
         "nix" => LanguageId::Nix,
         "make" | "makefile" => LanguageId::Make,
@@ -1042,9 +1098,13 @@ mod tests {
     }
 
     fn highlighted_fragments(source: &str) -> Vec<(&str, HighlightKind)> {
+        highlighted_fragments_at("src/lib.rs", source)
+    }
+
+    fn highlighted_fragments_at<'a>(path: &str, source: &'a str) -> Vec<(&'a str, HighlightKind)> {
         let document = highlight(HighlightRequest {
             source,
-            path: Some("src/lib.rs"),
+            path: Some(path),
             fence_tag: None,
         })
         .unwrap();
@@ -1079,6 +1139,74 @@ fn build(value: usize) -> Widget {
                 "missing {text:?} as {expected:?}: {fragments:?}"
             );
         }
+    }
+
+    #[test]
+    fn luau_highlighting_covers_its_syntax_beyond_lua() {
+        let source = r#"--!strict
+export type Point<T> = { x: T, y: T? }
+local MAX_COUNT = 10
+local function add(a: Point<number>, b: Point<number>): Point<number>
+    return { x = a.x + b.x, y = a.y + b.y }
+end
+local total = 0
+for i = 1, MAX_COUNT do
+    if i % 2 == 0 then continue end
+    total += i
+end
+local label = if total > 10 then `big {total}` else "small"
+local Players = game:GetService("Players")
+local item = value :: Item
+print(typeof(label), self)"#;
+        let fragments = highlighted_fragments_at("app.luau", source);
+        for (text, expected) in [
+            ("--!strict", HighlightKind::Comment),
+            ("export", HighlightKind::Keyword),
+            ("type", HighlightKind::Keyword),
+            ("number", HighlightKind::TypeBuiltin),
+            ("Item", HighlightKind::Type),
+            ("x", HighlightKind::Variable),
+            ("a", HighlightKind::Parameter),
+            ("MAX_COUNT", HighlightKind::Constant),
+            ("add", HighlightKind::Function),
+            ("GetService", HighlightKind::Function),
+            ("continue", HighlightKind::Keyword),
+            ("+=", HighlightKind::Operator),
+            ("`big {total}`", HighlightKind::String),
+            ("typeof", HighlightKind::FunctionBuiltin),
+            ("self", HighlightKind::VariableSpecial),
+        ] {
+            assert!(
+                fragments.contains(&(text, expected)),
+                "missing {text:?} as {expected:?}: {fragments:?}"
+            );
+        }
+        // Upstream, every identifier matched the type patterns.
+        for text in ["total", "i", "label", "item", "value", "a"] {
+            assert!(
+                !fragments.contains(&(text, HighlightKind::Type)),
+                "{text:?} highlighted as a type: {fragments:?}"
+            );
+        }
+        assert!(fragments.contains(&("Point", HighlightKind::Type)));
+        assert!(fragments.contains(&("T", HighlightKind::Type)));
+    }
+
+    #[test]
+    fn luau_query_rewrites_still_apply_to_the_pinned_grammar() {
+        for (from, _) in LUAU_QUERY_REWRITES {
+            assert!(
+                tree_sitter_luau::HIGHLIGHTS_QUERY.contains(from),
+                "the upstream Luau query no longer contains {from:?}"
+            );
+        }
+        let query = luau_highlights();
+        assert!(!query.contains("lua-match") && !query.contains("@spell"));
+        assert_eq!(
+            language_for_path("src/Main.client.luau"),
+            Some(LanguageId::Luau)
+        );
+        assert_eq!(language_for_alias("luau"), Some(LanguageId::Luau));
     }
 
     #[test]
@@ -1196,6 +1324,7 @@ fn build(value: usize) -> Widget {
             ),
             (LanguageId::Sql, "query.sql", "SELECT name FROM users;"),
             (LanguageId::Lua, "app.lua", "local value = 1"),
+            (LanguageId::Luau, "app.luau", "local value: number = 1"),
             (LanguageId::Nix, "flake.nix", "{ pkgs }: pkgs.hello"),
             (LanguageId::Make, "Makefile", "all:\n\techo hello"),
             (
