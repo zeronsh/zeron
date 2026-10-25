@@ -20,8 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.BottomAppBar
-import androidx.compose.material3.BottomAppBarDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -499,44 +498,48 @@ private fun Home(
     onVoice: () -> Unit,
     onVoiceSettings: () -> Unit,
 ) {
-    val bar = BottomAppBarDefaults.exitAlwaysScrollBehavior()
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Box(Modifier.fillMaxSize().nestedScroll(bar.nestedScrollConnection)) {
-            SessionsScreen(model, onOpen = open, onArchived = onArchived, selected = selected)
+    // The FAB shows its label at rest and tucks to its icon while the list scrolls down (Gmail's Compose).
+    var fabExpanded by rememberSaveable { mutableStateOf(true) }
+    val fabScroll = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                if (available.y < -4f) fabExpanded = false else if (available.y > 4f) fabExpanded = true
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
         }
-        val voice = sh.zeron.android.voice.rememberVoiceVisible(model.voice)
-        BottomAppBar(
-            actions = {
-                Tip("Settings") {
-                    IconButton(onClick = onSettings) { ZIcon(ZIcons.Settings, "Settings", Modifier.size(24.dp)) }
-                }
-                Tip("Search") {
-                    IconButton(onClick = onSearch) { ZIcon(ZIcons.Search, "Search", Modifier.size(24.dp)) }
-                }
-                if (voice) {
+    }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.fillMaxSize().nestedScroll(fabScroll)) {
+            SessionsScreen(
+                model,
+                onOpen = open,
+                onArchived = onArchived,
+                selected = selected,
+                onSearch = onSearch,
+                onSettings = onSettings,
+                searchActions = {
                     // Tap calls (or opens the live call); hold picks the host and style.
-                    sh.zeron.android.voice.VoiceHeaderButton(
-                        model.voice,
-                        onOpenStage = onVoice,
-                        onOpenSettings = onVoiceSettings,
-                        size = 48.dp,
-                        container = Color.Transparent,
-                    )
-                }
-            },
-            floatingActionButton = {
-                Tip("New session") {
-                    FloatingActionButton(
-                        onClick = onNew,
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                        elevation = androidx.compose.material3.FloatingActionButtonDefaults.bottomAppBarFabElevation(),
-                    ) { ZIcon(ZIcons.NewSession, "New session", Modifier.size(24.dp)) }
-                }
-            },
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            scrollBehavior = bar,
-            modifier = Modifier.align(Alignment.BottomCenter),
+                    if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
+                        sh.zeron.android.voice.VoiceHeaderButton(
+                            model.voice,
+                            onOpenStage = onVoice,
+                            onOpenSettings = onVoiceSettings,
+                            size = 40.dp,
+                            container = Color.Transparent,
+                        )
+                    }
+                },
+            )
+        }
+        ExtendedFloatingActionButton(
+            text = { Text("New session") },
+            icon = { ZIcon(ZIcons.NewSession, null, Modifier.size(24.dp)) },
+            onClick = onNew,
+            expanded = fabExpanded,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(16.dp),
         )
     }
 }

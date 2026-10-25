@@ -1,6 +1,17 @@
 package sh.zeron.android.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.focus.focusRequester
@@ -75,6 +86,68 @@ import uniffi.zeron_core.PullRequestState
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.WorkspaceSnapshot
 
+private val SEARCH_BAR_HEIGHT = 56.dp
+
+/**
+ * The Material 3 search bar on top of the list, as Gmail has it: the list's
+ * options behind the leading menu, "Search sessions" opening search, voice
+ * when a host can take a call, and the account's avatar opening Settings.
+ */
+@Composable
+private fun SessionsSearchBar(
+    onSearch: () -> Unit,
+    onSettings: () -> Unit,
+    account: String,
+    actions: @Composable RowScope.() -> Unit,
+    menu: @Composable (open: Boolean, dismiss: () -> Unit) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var open by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onSearch,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier
+            .statusBarsPadding()
+            .padding(start = 16.dp, end = 16.dp, top = 8.dp)
+            .fillMaxWidth()
+            .height(SEARCH_BAR_HEIGHT)
+            .semantics { contentDescription = "Search sessions" },
+    ) {
+        Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box {
+                IconButton(onClick = { open = true }) { ZIcon(ZIcons.Menu, "Session options", Modifier.size(24.dp)) }
+                menu(open) { open = false }
+            }
+            Text(
+                "Search sessions",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = Modifier.weight(1f).padding(start = 4.dp),
+            )
+            actions()
+            // The account, Settings behind it (Google apps' avatar).
+            Box(
+                Modifier
+                    .padding(start = 4.dp, end = 8.dp)
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .clickable(onClickLabel = "Settings", onClick = onSettings)
+                    .semantics { contentDescription = "Settings, $account" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    account.trim().take(1).uppercase().ifEmpty { "Z" },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        }
+    }
+}
+
 private enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
 
 /** "2 working · 1 needs you" — the live summary beside New session. */
@@ -99,14 +172,22 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> Unit, selected: String? = null) {
+fun SessionsScreen(
+    model: AppModel,
+    onOpen: (String) -> Unit,
+    onArchived: () -> Unit,
+    selected: String? = null,
+    onSearch: () -> Unit = {},
+    onSettings: () -> Unit = {},
+    /** Inside the search bar, before the avatar (voice, when a host can take a call). */
+    searchActions: @Composable RowScope.() -> Unit = {},
+) {
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     val collapsedGroups by model.collapsed.collectAsState()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val scope = rememberCoroutineScope()
-    var options by remember { mutableStateOf(false) }
     var newSection by remember { mutableStateOf<String?>(null) }
     var renameSection by remember { mutableStateOf<uniffi.zeron_core.SectionView?>(null) }
     var reorder by remember { mutableStateOf(false) }
@@ -139,7 +220,21 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
 
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
     val density = androidx.compose.ui.platform.LocalDensity.current
-    Box(Modifier.fillMaxSize()) {
+    // The search bar slides away while the list scrolls down and comes back on the way up (Gmail's).
+    val barSpace = with(density) { (SEARCH_BAR_HEIGHT + 16.dp).toPx() + WindowInsets.statusBars.asPaddingValues().calculateTopPadding().toPx() }
+    var barHidden by remember { mutableFloatStateOf(0f) }
+    val barScroll = remember(barSpace) {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                barHidden = (barHidden - available.y).coerceIn(0f, barSpace)
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
+    }
+    // Back at the top it's always there.
+    val atTop by remember { derivedStateOf { list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset < 8 } }
+    LaunchedEffect(atTop) { if (atTop) barHidden = 0f }
+    Box(Modifier.fillMaxSize().nestedScroll(barScroll)) {
         sh.zeron.android.design.WallpaperHero(
             model.wallpaper,
             scrollFade = {
@@ -168,34 +263,27 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
         ) {
             LazyColumn(
                 state = list,
-                contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 128.dp),
+                contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + SEARCH_BAR_HEIGHT + 16.dp, bottom = 112.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                item("header") {
-                    ScreenHeader("Sessions", subtitle) {
-                        if (connectivity?.state == ConnectivityState.OFFLINE) {
-                            TonalCircleButton(
-                                ZIcons.Offline, "Offline", onClick = { scope.launch { model.refresh() } },
-                                container = MaterialTheme.colorScheme.errorContainer, content = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        }
-                        Box {
-                            TonalCircleButton(ZIcons.More, "Session options", onClick = { options = true })
-                            ActionMenu(
-                                options,
-                                { options = false },
-                                listOf(
-                                    MenuAction("New section…", ZIcons.Folder) { newSection = "" },
-                                    MenuAction("Collapse all", ZIcons.Collapse) {
-                                        val front = ws?.front ?: return@MenuAction
-                                        for (section in front.sections) if (!section.collapsed) model.setSectionCollapsed(section.id, true)
-                                        val local = listOf("pinned", "recent") +
-                                            if (groupByProject) projectGroups(front.recent, ws.projects).map { it.id } else emptyList()
-                                        local.forEach { model.setGroupCollapsed(it, true) }
-                                    },
-                                    MenuAction("Group by project", ZIcons.Project, checked = groupByProject) { model.setGroupByProject(!groupByProject) },
-                                    MenuAction("Archived", ZIcons.Archive, onClick = onArchived),
-                                ),
+                // Only when there's something to say: offline, reconnecting, the demo.
+                if (subtitle != null) {
+                    item("status") {
+                        val offline = connectivity?.state == ConnectivityState.OFFLINE
+                        Row(
+                            Modifier
+                                .padding(start = 28.dp, end = 16.dp, top = 4.dp)
+                                .then(if (offline) Modifier.clickable(onClickLabel = "Try again") { scope.launch { model.refresh() } } else Modifier),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (offline) {
+                                ZIcon(ZIcons.Offline, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(
+                                if (offline) "$subtitle · Tap to retry" else subtitle,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (offline) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -273,6 +361,33 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
             }
         }
         StatusBarScrim(list)
+        SessionsSearchBar(
+            onSearch = onSearch,
+            onSettings = onSettings,
+            account = model.accountName,
+            actions = searchActions,
+            menu = { open, dismiss ->
+                ActionMenu(
+                    open,
+                    dismiss,
+                    listOf(
+                        MenuAction("New section…", ZIcons.Folder) { newSection = "" },
+                        MenuAction("Collapse all", ZIcons.Collapse) {
+                            val front = ws?.front ?: return@MenuAction
+                            for (section in front.sections) if (!section.collapsed) model.setSectionCollapsed(section.id, true)
+                            val local = listOf("pinned", "recent") +
+                                if (groupByProject) projectGroups(front.recent, ws.projects).map { it.id } else emptyList()
+                            local.forEach { model.setGroupCollapsed(it, true) }
+                        },
+                        MenuAction("Group by project", ZIcons.Project, checked = groupByProject) { model.setGroupByProject(!groupByProject) },
+                        MenuAction("Archived", ZIcons.Archive, onClick = onArchived),
+                    ),
+                )
+            },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .graphicsLayer { translationY = -barHidden },
+        )
     }
 
     newSection?.let { chatId ->

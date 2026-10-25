@@ -95,6 +95,7 @@ object ZIcons {
     val Globe = R.drawable.zi_global
     val GitHub = R.drawable.zi_github
     val Zeron = R.drawable.zi_zeron
+    val Menu = R.drawable.zi_menu
 }
 
 @Composable
