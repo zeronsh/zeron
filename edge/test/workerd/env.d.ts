@@ -15,6 +15,7 @@ declare module "cloudflare:test" {
     CLOUD_DELETE: Workflow;
     VAULT: { calls(): Promise<{ method: string; args: unknown[] }[]> };
     BLOBS: R2Bucket;
+    RELEASES: R2Bucket;
     AUTH_MODE: string;
     ADMIN_TOKEN: string;
     RUNNER_JWT_PUBLIC_KEY: string;

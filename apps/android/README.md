@@ -35,7 +35,7 @@ iterating on Kotlin; `ZERON_ANDROID_ABIS=arm64-v8a` builds one ABI.
 `mobile-dist` profile) whenever the app or the Rust core changes: pull requests
 get it as a workflow artifact, and pushes to `main` publish it to
 `zeron.sh/releases/zeron-android-arm64.apk` — the website's Android download —
-with a versioned copy (`zeron-<version>-android-arm64.apk`) and `.sha256`s.
+with a copy per build (`zeron-<version>-<build>-android-arm64.apk`) and `.sha256`s.
 
 The version is the workspace's (`Cargo.toml`); the build number grows with each
 run. Publishing needs the upload key in repository secrets

@@ -12,6 +12,7 @@ import type { Env } from "../../src/env";
 import { deviceParam, forward } from "../../src/forward";
 import { runnerChatGate, runnerDeviceGate } from "../../src/runner-access";
 import { previewRoute } from "../../src/preview-route";
+import { releaseRoute } from "../../src/releases";
 import { runnerRefusal } from "../../src/runner-policy";
 import { handleVaultRoute } from "../../src/vault-routes";
 export { DeviceRoom } from "../../src/device-room";
@@ -100,7 +101,7 @@ const json = (value: unknown, status = 200) =>
 
 /**
  * The production routing seam, in src/index.ts's order, minus the routes
- * that need loro's WASM (which cannot load in this tier): admin + runner
+ * that need loro's WASM (which cannot load in this tier): releases, admin + runner
  * pre-bearer routes, bearer gate, runner policy, /cloud, /vault, preview,
  * /device (with Cloud auto-wake), /registry, /chat2 and /blob (with the
  * runner chat gate) — all through the production `forward`.
@@ -108,6 +109,8 @@ const json = (value: unknown, status = 200) =>
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const release = await releaseRoute(request, env, url);
+    if (release) return release;
     const admin = await handleAdminRoute(request, env, url);
     if (admin) return admin;
     const billing = await handleBillingPublicRoute(request, env, url);

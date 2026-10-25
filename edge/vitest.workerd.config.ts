@@ -38,7 +38,7 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
-        r2Buckets: ["BLOBS"],
+        r2Buckets: ["BLOBS", "RELEASES"],
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
@@ -57,7 +57,7 @@ export default defineConfig({
         serviceBindings: {
           VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
         },
-        r2Buckets: ["BLOBS"],
+        r2Buckets: ["BLOBS", "RELEASES"],
         bindings: {
           AUTH_MODE: "dev",
           WORKOS_CLIENT_ID: "test-only",

@@ -3,8 +3,9 @@ name: Android
 # Builds the Android APK whenever the app or its Rust core changes. Pull
 # requests get it as a workflow artifact; main also publishes it to the
 # `comet-native-releases` R2 bucket, served at
-# zeron.sh/releases/zeron-android-arm64.apk (the website's download), with a
-# versioned copy and its sha256 beside it.
+# zeron.sh/releases/zeron-android-arm64.apk (the website's download, served
+# `no-cache` since every build replaces it), with a copy named for its version
+# and build number — so never replaced, and cacheable for good — and sha256s.
 #
 # Publishing needs the upload key, so every build installs over the last:
 #   ANDROID_KEYSTORE_BASE64    base64 of the release keystore (.jks)
@@ -61,6 +62,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
       signed: ${{ steps.signing.outputs.signed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -91,6 +93,7 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           # Only grows: Android installs a build over another only when it's higher.
           echo "BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "build=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
 
       - id: signing
         name: release key
@@ -123,7 +126,7 @@ jobs:
       - name: package
         run: |
           mkdir -p out/android
-          apk="out/android/zeron-$VERSION-android-arm64.apk"
+          apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
           cp apps/android/app/build/outputs/apk/release/app-release.apk "$apk"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | grep -m1 "certificate SHA-256" || true
           (cd out/android && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
@@ -150,6 +153,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: b57dde68ee5964dccc025437b5478a5b
       VERSION: ${{ needs.apk.outputs.version }}
+      BUILD_NUMBER: ${{ needs.apk.outputs.build }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -158,17 +162,19 @@ jobs:
       - name: upload to R2 (zeron.sh/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
-          apk="out/android/zeron-$VERSION-android-arm64.apk"
+          apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
           (cd out/android && sha256sum -c "$(basename "$apk").sha256")
           put() {
             npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote \
               --content-type "$3" --cache-control "$4"
           }
           type=application/vnd.android.package-archive
-          # The versioned build, then the stable name the website links to
-          # (revalidated, so a new build is picked up at once).
-          put "$(basename "$apk")" "$apk" "$type" "public, max-age=3600"
-          put "$(basename "$apk").sha256" "$apk.sha256" text/plain "public, max-age=3600"
+          # This build under its own name (never replaced), then the stable
+          # name the website links to (revalidated, so a new build is picked
+          # up at once; the edge serves each object's own cache-control).
+          immutable="public, max-age=31536000, immutable"
+          put "$(basename "$apk")" "$apk" "$type" "$immutable"
+          put "$(basename "$apk").sha256" "$apk.sha256" text/plain "$immutable"
           put zeron-android-arm64.apk "$apk" "$type" "no-cache"
           sed "s/$(basename "$apk")/zeron-android-arm64.apk/" "$apk.sha256" > latest.sha256
           put zeron-android-arm64.apk.sha256 latest.sha256 text/plain "no-cache"
