@@ -1168,6 +1168,8 @@ struct RightTabDrag {
     from: usize,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
+    /// A pull request tab drops into a composer as a chip.
+    pull_request: Option<chat_pull_requests::PullRequestMentionDrag>,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -12623,6 +12625,10 @@ impl Shell {
             };
             let ghost_title = title.clone();
             let workspace_path = self.workspace_path_for_surface(surface, cx);
+            let pull_request = match surface {
+                RightSurface::PullRequest(id) => self.chat_pull_request_mention(id, cx),
+                _ => None,
+            };
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
                 format!("{accessible_name}, unsaved changes")
@@ -12719,6 +12725,7 @@ impl Shell {
                     from: ix,
                     title: ghost_title,
                     workspace_path,
+                    pull_request,
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();
