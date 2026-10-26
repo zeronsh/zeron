@@ -124,6 +124,8 @@ pub struct Visual {
     lua: Lua,
     view: Function,
     handlers: Vec<Function>,
+    /// Tabs' option values by handler, from the last render.
+    choices: std::collections::HashMap<HandlerId, Vec<(String, Value)>>,
     randomseed: Function,
     seed: i64,
     deadline: Rc<Cell<Option<Instant>>>,
@@ -243,6 +245,7 @@ impl Visual {
             lua,
             view,
             handlers: Vec::new(),
+            choices: Default::default(),
             randomseed,
             seed,
             deadline,
@@ -284,6 +287,7 @@ impl Visual {
         self.deadline.set(None);
         let tree = tree?;
         self.handlers = parser.handlers;
+        self.choices = parser.choices;
         Ok(tree)
     }
 
@@ -296,7 +300,17 @@ impl Visual {
     /// Call an event handler. The caller renders again afterwards.
     pub fn call(&mut self, id: HandlerId, arg: HandlerArg) -> Result<(), VisualError> {
         let handler = self.handler(id)?.clone();
+        // A tab hands over its option's own value (a key or a position), not
+        // the label it shows.
+        let choice = match (&arg, self.choices.get(&id)) {
+            (HandlerArg::Text(label), Some(choices)) => choices
+                .iter()
+                .find(|(shown, _)| shown == label)
+                .map(|(_, value)| value.clone()),
+            _ => None,
+        };
         self.budgeted(CALL_BUDGET, || match arg {
+            _ if choice.is_some() => handler.call::<()>(choice),
             HandlerArg::None => handler.call::<()>(()),
             HandlerArg::Text(text) => handler.call::<()>(text),
             HandlerArg::Bool(b) => handler.call::<()>(b),
@@ -397,6 +411,8 @@ pub fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
 pub struct Report {
     pub nodes: usize,
     pub interactions: usize,
+    /// Tabs controls whose every option was checked to show its own view.
+    pub tabs: usize,
     pub logs: Vec<String>,
 }
 
@@ -410,7 +426,7 @@ pub fn check(source: &str, seed: u64) -> Result<Report, VisualError> {
 
 /// [`check`] for a script shipped with asset files.
 pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Report, VisualError> {
-    let mut visual = Visual::load(source, seed)?.with_assets(assets);
+    let mut visual = Visual::load(source, seed)?.with_assets(assets.clone());
     let tree = visual.render()?;
     let mut report = Report::default();
     exercise_draws(&mut visual, &tree, &mut report)?;
@@ -432,8 +448,263 @@ pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Repo
             .map_err(|e| VisualError::script(format!("after {describe}: {}", e.message)))?;
         report.interactions += 1;
     }
+    report.tabs = check_tabs(source, seed, &assets)?;
     report.logs = visual.logs();
     Ok(report)
+}
+
+/// Tabs controls checked (each on a fresh run), nested ones included.
+const MAX_TAB_CHECKS: usize = 8;
+/// Selection prefixes replayed while looking for tabs nested in a tab.
+const MAX_TAB_PREFIXES: usize = 24;
+/// Each replay reruns setup; a heavy script stops looking for more tabs here.
+const TAB_CHECK_BUDGET: Duration = Duration::from_millis(1500);
+
+type Selection = (Vec<usize>, String);
+
+/// Every tab must work: selecting an option selects it, each option shows its
+/// own view, and the first render is the view of the tab it shows selected.
+/// A view that keys on a different string than the option (`"overview"` for
+/// `"Overview"`), or state that starts nil, otherwise passes the plain check
+/// and leaves the reader clicking tabs that show nothing.
+fn check_tabs(source: &str, seed: u64, assets: &Assets) -> Result<usize, VisualError> {
+    let replay = |prefix: &[Selection]| -> Result<(Visual, Node), VisualError> {
+        let mut visual = Visual::load(source, seed)?.with_assets(assets.clone());
+        let mut tree = visual.render()?;
+        for (path, option) in prefix {
+            let id = handler_at(&tree, path).ok_or_else(|| VisualError::script("stale tabs"))?;
+            visual.call(id, HandlerArg::Text(option.clone()))?;
+            tree = visual.render()?;
+        }
+        Ok((visual, tree))
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::from([Vec::<Selection>::new()]);
+    let (mut checked, mut replayed) = (0, 0);
+    let started = Instant::now();
+    while let Some(prefix) = queue.pop_front() {
+        if checked >= MAX_TAB_CHECKS
+            || replayed >= MAX_TAB_PREFIXES
+            || started.elapsed() > TAB_CHECK_BUDGET
+        {
+            break;
+        }
+        replayed += 1;
+        let (_, tree) = replay(&prefix)?;
+        let mut paths = Vec::new();
+        tabs_paths(&tree, &mut Vec::new(), &mut paths);
+        for path in paths {
+            if checked >= MAX_TAB_CHECKS || !seen.insert(path.clone()) {
+                continue;
+            }
+            checked += 1;
+            let (mut visual, initial) = replay(&prefix)?;
+            let Some(NodeKind::Tabs { options, value, .. }) =
+                node_at(&initial, &path).map(|n| &n.kind)
+            else {
+                continue;
+            };
+            let first = value.clone();
+            if let Some(NodeKind::Tabs { on_change, .. }) =
+                node_at(&initial, &path).map(|n| &n.kind)
+                && let Some(choices) = visual.choices.get(on_change)
+            {
+                miskeyed_tab(source, choices)?;
+            }
+            let mut order: Vec<String> = Vec::new();
+            for option in options.iter().filter(|o| **o != first) {
+                if !order.contains(option) {
+                    order.push(option.clone());
+                }
+            }
+            order.push(first.clone());
+            let mut views: Vec<(String, View)> = Vec::new();
+            for option in order {
+                let failed = |e: VisualError| {
+                    VisualError::script(format!("after selecting tab '{option}': {}", e.message))
+                };
+                let current = visual.render()?;
+                let Some(id) = handler_at(&current, &path) else {
+                    break;
+                };
+                visual
+                    .call(id, HandlerArg::Text(option.clone()))
+                    .map_err(failed)?;
+                let tree = visual.render().map_err(failed)?;
+                match node_at(&tree, &path).map(|n| &n.kind) {
+                    Some(NodeKind::Tabs { value, .. }) if *value == option => {}
+                    Some(NodeKind::Tabs { value, .. }) => {
+                        return Err(VisualError::script(format!(
+                            "after selecting tab '{option}', the tabs still show '{value}' \
+                             selected: on_change receives the option ('{option}'); store it in \
+                             state and pass that state back as value"
+                        )));
+                    }
+                    // The view moved the tabs; nothing to compare against.
+                    _ => break,
+                }
+                let view = view_of(&mut visual, &tree, &path).map_err(failed)?;
+                if let Some((other, _)) = views.iter().find(|(_, v)| *v == view) {
+                    return Err(VisualError::script(format!(
+                        "tabs '{other}' and '{option}' show the same view: the view must \
+                         change with the selected tab (on_change receives the option text, \
+                         e.g. '{option}'; if you branch with `cond and node or nil`, compare \
+                         against exactly those strings)"
+                    )));
+                }
+                if queue.len() < MAX_TAB_PREFIXES {
+                    let mut next = prefix.clone();
+                    next.push((path.clone(), option.clone()));
+                    queue.push_back(next);
+                }
+                views.push((option, view));
+            }
+            // The last selection was the tab shown first: before any click the
+            // reader must see its content. Only less is a fault; a handler may
+            // also reset other state (a selection), which changes but doesn't
+            // empty the view.
+            if let Some((_, selected)) = views.last()
+                && let (mut fresh, untouched) = replay(&prefix)?
+                && count_nodes(&view_of(&mut fresh, &untouched, &path)?.tree)
+                    < count_nodes(&selected.tree)
+            {
+                return Err(VisualError::script(format!(
+                    "the first view shows tab '{first}' selected but not its content (is the \
+                     tab state nil at first? start it at \"{first}\")"
+                )));
+            }
+        }
+    }
+    Ok(checked)
+}
+
+/// A string the script compares against (`s.tab == "details"`) that matches
+/// a tab's value only up to case: that tab would show nothing of its own.
+fn miskeyed_tab(source: &str, choices: &[(String, Value)]) -> Result<(), VisualError> {
+    let values: Vec<String> = choices
+        .iter()
+        .filter_map(|(_, value)| value.as_string().map(|s| s.to_string_lossy()))
+        .collect();
+    for literal in compared_literals(source) {
+        if values.contains(&literal) {
+            continue;
+        }
+        if let Some(value) = values
+            .iter()
+            .find(|v| v.to_lowercase() == literal.to_lowercase())
+        {
+            return Err(VisualError::script(format!(
+                "the script compares the tab state with \"{literal}\", but the tab is \
+                 \"{value}\": on_change receives the option exactly, so that tab would show \
+                 nothing"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// String literals on either side of `==` or `~=`.
+fn compared_literals(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(at) = source[i..].find(['"', '\'']).map(|at| at + i) {
+        let quote = bytes[at];
+        let Some(len) = source[at + 1..].find(quote as char) else {
+            break;
+        };
+        let end = at + 1 + len;
+        let before = source[..at].trim_end();
+        let after = source[end + 1..].trim_start();
+        let compared = |s: &str| s.ends_with("==") || s.ends_with("~=");
+        if compared(before) || after.starts_with("==") || after.starts_with("~=") {
+            out.push(source[at + 1..end].to_owned());
+        }
+        i = end + 1;
+    }
+    out
+}
+
+/// What a reader sees with one tabs control's selection taken out: the tree
+/// and every canvas and scene drawing.
+#[derive(PartialEq)]
+struct View {
+    tree: Node,
+    drawings: Vec<Drawing>,
+}
+
+#[derive(PartialEq)]
+enum Drawing {
+    Canvas(Vec<DrawCmd>),
+    Scene(Scene),
+}
+
+fn view_of(visual: &mut Visual, tree: &Node, tabs: &[usize]) -> Result<View, VisualError> {
+    fn drawings(
+        visual: &mut Visual,
+        node: &Node,
+        out: &mut Vec<Drawing>,
+    ) -> Result<(), VisualError> {
+        match &node.kind {
+            NodeKind::Canvas(canvas) => out.push(Drawing::Canvas(visual.draw_canvas(
+                canvas.draw,
+                640.0,
+                canvas.height,
+                0.0,
+                None,
+            )?)),
+            NodeKind::Scene(scene) => out.push(Drawing::Scene(visual.draw_scene(scene.draw, 0.0)?)),
+            _ => {}
+        }
+        for child in children(node) {
+            drawings(visual, child, out)?;
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    drawings(visual, tree, &mut out)?;
+    let mut tree = tree.clone();
+    if let Some(NodeKind::Tabs { value, .. }) = node_at_mut(&mut tree, tabs).map(|n| &mut n.kind) {
+        value.clear();
+    }
+    Ok(View {
+        tree,
+        drawings: out,
+    })
+}
+
+fn count_nodes(node: &Node) -> usize {
+    1 + children(node).map(count_nodes).sum::<usize>()
+}
+
+fn tabs_paths(node: &Node, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+    if matches!(node.kind, NodeKind::Tabs { .. }) {
+        out.push(path.clone());
+    }
+    for (ix, child) in children(node).enumerate() {
+        path.push(ix);
+        tabs_paths(child, path, out);
+        path.pop();
+    }
+}
+
+fn node_at<'a>(mut node: &'a Node, path: &[usize]) -> Option<&'a Node> {
+    for ix in path {
+        node = children(node).nth(*ix)?;
+    }
+    Some(node)
+}
+
+fn node_at_mut<'a>(mut node: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
+    for ix in path {
+        node = match &mut node.kind {
+            NodeKind::Stack(stack) => stack.children.get_mut(*ix)?,
+            NodeKind::Grid { children, .. } => children.get_mut(*ix)?,
+            NodeKind::Table(table) => table.rows.iter_mut().flatten().nth(*ix)?,
+            _ => return None,
+        };
+    }
+    Some(node)
 }
 
 fn exercise_draws(
@@ -595,11 +866,7 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
 }
 
 fn handler_at(node: &Node, path: &[usize]) -> Option<HandlerId> {
-    let mut node = node;
-    for ix in path {
-        node = children(node).nth(*ix)?;
-    }
-    match &node.kind {
+    match &node_at(node, path)?.kind {
         NodeKind::Tabs { on_change, .. }
         | NodeKind::Toggle { on_change, .. }
         | NodeKind::Slider { on_change, .. } => Some(*on_change),

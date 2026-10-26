@@ -228,9 +228,11 @@ impl Layouter<'_, '_> {
                     .plain(value, TextSize::Xxl, Weight::Semibold, self.palette.text)
                     .natural();
                 let delta_w = delta.as_deref().filter(|d| !d.is_empty()).map_or(0.0, |d| {
-                    6.0 + self
-                        .plain(d, TextSize::Sm, Weight::Regular, self.palette.text)
-                        .natural()
+                    let (up, note) = delta_direction(d);
+                    6.0 + up.map_or(0.0, |_| ARROW_W + ARROW_GAP)
+                        + self
+                            .plain(note, TextSize::Sm, Weight::Medium, self.palette.text)
+                            .natural()
                 });
                 let label_w = self
                     .plain(label, TextSize::Sm, Weight::Regular, self.palette.text)
@@ -717,18 +719,32 @@ impl Layouter<'_, '_> {
             true,
         );
         if let Some(delta) = delta {
-            let change = self.plain(
-                delta,
-                TextSize::Sm,
-                Weight::Regular,
-                tone.unwrap_or(self.palette.muted),
-            );
+            let color = tone.unwrap_or(self.palette.muted);
+            let (up, note) = delta_direction(delta);
+            let change = self.plain(note, TextSize::Sm, Weight::Medium, color);
             // Baseline-aligned with the figure.
             let top = y + figure.base - change.base;
+            let mut left = x + value_w + 6.0;
+            if let Some(up) = up {
+                // A small solid triangle, centered on the figures' height,
+                // carries the sign.
+                let mid = top + change.base - change.lh * 0.28;
+                let (half, h) = (ARROW_W / 2.0, ARROW_W * 0.8);
+                let (tip, foot) = if up {
+                    (mid - h / 2.0, mid + h / 2.0)
+                } else {
+                    (mid + h / 2.0, mid - h / 2.0)
+                };
+                self.out.paint.fill(
+                    [[left + half, tip], [left + ARROW_W, foot], [left, foot]],
+                    color,
+                );
+                left += ARROW_W + ARROW_GAP;
+            }
             self.out.paint.para(
                 self.ctx,
                 &change,
-                x + value_w + 6.0,
+                left,
                 top,
                 change.natural().max(1.0),
                 Align::Start,
@@ -1103,5 +1119,28 @@ pub(crate) fn gesture(node: &SurfaceNode, reads_pointer: bool) -> SurfaceGesture
         SurfaceNode::Canvas(canvas) if canvas.on_click.is_some() => SurfaceGesture::Tap,
         SurfaceNode::Canvas(_) => SurfaceGesture::None,
         SurfaceNode::Chart { .. } => SurfaceGesture::HorizontalDrag,
+    }
+}
+
+const ARROW_W: f32 = 7.0;
+const ARROW_GAP: f32 = 3.0;
+
+/// A stat's change note read for its direction ("+12%" is up, "−8%" down),
+/// and the note without the sign the arrow then carries. Notes that aren't a
+/// signed figure keep their text and get no arrow.
+pub(crate) fn delta_direction(delta: &str) -> (Option<bool>, &str) {
+    let trimmed = delta.trim_start();
+    let mut chars = trimmed.chars();
+    let up = match chars.next() {
+        Some('+' | '▲' | '↑') => true,
+        Some('-' | '−' | '–' | '▼' | '↓') => false,
+        _ => return (None, delta),
+    };
+    let rest = chars.as_str().trim_start();
+    if rest.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '.' | '$' | '€' | '£' | '¥'))
+    {
+        (Some(up), rest)
+    } else {
+        (None, delta)
     }
 }

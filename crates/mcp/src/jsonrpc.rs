@@ -54,8 +54,8 @@ Pass `cloud: true` to run a child on a Cloud machine of its own (Codex or Claude
 from a Cloud chat it clones the same repository, and without `cloud` it shares your machine.\n\
 \n\
 When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
-`show_visual` is available, write a Luau visual script and show it with `show_visual` before \
-your final reply. Zeron renders it with its own native interface and enforces its style: \
+`show_visual` is available, write a Luau visual script (`read_visual_docs` has its API; read it \
+before your first visual) and show it with `show_visual` before your final reply. Zeron renders it with its own native interface and enforces its style: \
 content sits directly on the chat with no cards or boxed panels, text uses the interface font \
 and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
 The reader sees the visual above that reply, so don't announce or restate it.";
