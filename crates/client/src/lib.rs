@@ -32,6 +32,7 @@ pub mod cloud;
 pub mod config;
 pub mod connectivity;
 mod demo;
+pub mod drafts;
 pub mod error;
 pub mod events;
 mod host_stream;
@@ -51,6 +52,7 @@ pub use config::{
     AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
+pub use drafts::{DraftEdit, DraftFile, LoadedDraft};
 pub use error::ClientError;
 pub use events::{ClientEvent, ClientListener};
 pub use provider_login::{LoginProvider, ProviderLoginStart};
@@ -63,8 +65,9 @@ pub use session::{
 pub use subagents::{SubagentInfo, SubagentSink, SubagentState, SubagentWatch};
 pub use terminal::{TerminalInfo, TerminalLink, TerminalReplies, TerminalSink, TerminalUpdate};
 pub use workspace::{
-    DeviceView, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField, SearchHit,
-    SectionView, SessionRow, WorkspaceSnapshot, project_color_index, relative_time_label,
+    DeviceView, DraftRow, FrontPage, ProjectRef, ProjectView, PullRequestGroups, SearchField,
+    SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
+    relative_time_label,
 };
 pub use zeron_term_link::remote::TerminalPath;
 
@@ -72,7 +75,7 @@ pub use zeron_term_link::remote::TerminalPath;
 /// transcript carries without a direct `zeron-doc` dependency.
 pub use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 pub use zeron_proto::{
-    ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage,
+    ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage, DraftTarget,
     UserInputAnswer, UserInputQuestion, WorktreeSpec,
 };
 

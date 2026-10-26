@@ -265,20 +265,28 @@ pub fn run_app(config: UiConfig) {
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
             app_update::install_on_quit(cx);
-            // The background engine outlives this app: banners resume at
-            // once rather than after the last focus report goes stale.
+            // Release the viewport so the surviving engine can post banners.
             let unfocus = quit_state.read(cx).viewport_closing();
-            let shutdown =
-                quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
-                });
-            async move {
+            let saves = composer::prompt_drafts::quit_saves(cx);
+            let handle = quit_state.read(cx).engine().cloned();
+            let shutdown = gpui_tokio::Tokio::spawn(cx, async move {
                 if let Some(unfocus) = unfocus {
                     unfocus.await;
                 }
-                if let Some(task) = shutdown {
-                    let _ = task.await;
+                for (engine, draft, gate) in saves {
+                    let mut known = gate.lock().await;
+                    if let Err(error) =
+                        composer::prompt_drafts::save_request(&engine, draft, &mut known).await
+                    {
+                        tracing::warn!(%error, "draft flush before shutdown failed");
+                    }
                 }
+                if let Some(handle) = handle {
+                    handle.shutdown().await;
+                }
+            });
+            async move {
+                let _ = shutdown.await;
             }
         })
         .detach();

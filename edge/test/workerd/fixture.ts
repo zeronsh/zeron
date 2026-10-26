@@ -1,4 +1,5 @@
 import { chatRoute } from "../../src/chat-route";
+import { draftContentRoute } from "../../src/draft-content";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
 import { handleAdminRoute } from "../../src/cloud/billing";
@@ -125,6 +126,8 @@ export default {
     if (cloud) return cloud;
     const vault = await handleVaultRoute(request, env, auth, url);
     if (vault) return vault;
+    const draft = draftContentRoute(request, env, auth);
+    if (draft) return draft;
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
     const parts = url.pathname.split("/").filter(Boolean);
@@ -150,7 +153,7 @@ export default {
     if (parts[0] === "registry" && parts[1] === auth.orgId) {
       const room = `reg1/${parts[1]}/${auth.userId}`;
       if (parts[2] === "ws") return forward(env.REGISTRY_ROOMS, room, request, auth, "/ws", `?${deviceParam(url).replace(/^&/, "")}`);
-      if (parts[2] === "rows" || parts[2] === "push" || parts[2] === "stats") {
+      if (parts[2] === "rows" || parts[2] === "push" || parts[2] === "stats" || (parts[2] === "draft-claim" && request.method === "POST")) {
         return forward(env.REGISTRY_ROOMS, room, request, auth, `/${parts[2]}`, url.search);
       }
     }

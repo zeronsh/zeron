@@ -13,13 +13,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use zeron_doc::{RegistryDoc, WorkspaceState};
-use zeron_proto::{CheckoutChangeRequestStatus, SidebarPreferences};
+use zeron_proto::{CheckoutChangeRequestStatus, PromptDraft, SaveDraft, SidebarPreferences};
 
 pub(crate) use view::{DeriveContext, device_online};
 pub use view::{
-    DeviceView, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView, PullRequestGroups,
-    SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot, project_color_index,
-    relative_time_label,
+    DeviceView, DraftRow, FrontPage, PROJECT_COLOR_COUNT, ProjectRef, ProjectView,
+    PullRequestGroups, SearchField, SearchHit, SectionView, SessionRow, WorkspaceSnapshot,
+    project_color_index, relative_time_label,
 };
 
 use crate::{lock, read, write};
@@ -38,6 +38,10 @@ pub(crate) struct WorkspaceStore {
     snapshot: RwLock<Arc<WorkspaceSnapshot>>,
     recompute: Mutex<()>,
     revision: AtomicU64,
+    /// `read_drafts` per registry generation.
+    drafts: Mutex<Option<(u64, Arc<Vec<PromptDraft>>)>>,
+    /// This device's saves not yet in the registry (listed anyway).
+    pending_drafts: Mutex<Vec<SaveDraft>>,
 }
 
 impl WorkspaceStore {
@@ -50,6 +54,8 @@ impl WorkspaceStore {
             snapshot: RwLock::new(Arc::new(WorkspaceSnapshot::default())),
             recompute: Mutex::new(()),
             revision: AtomicU64::new(0),
+            drafts: Mutex::new(None),
+            pending_drafts: Mutex::new(Vec::new()),
         }
     }
 
@@ -90,6 +96,29 @@ impl WorkspaceStore {
             prefs: prefs.clone(),
         });
         (state, prefs)
+    }
+
+    pub(crate) fn set_pending_drafts(&self, pending: Vec<SaveDraft>) {
+        *lock(&self.pending_drafts) = pending;
+    }
+
+    /// Listed drafts: the registry's, with unpublished saves laid over.
+    fn drafts(&self) -> Vec<PromptDraft> {
+        let doc = lock(&self.doc);
+        let generation = doc.generation();
+        let registry = {
+            let mut cache = lock(&self.drafts);
+            match cache.as_ref() {
+                Some((cached, drafts)) if *cached == generation => drafts.clone(),
+                _ => {
+                    let drafts = Arc::new(doc.read_drafts());
+                    *cache = Some((generation, drafts.clone()));
+                    drafts
+                }
+            }
+        };
+        let pending = lock(&self.pending_drafts);
+        crate::drafts::overlay(&registry, &pending, |id| doc.draft_closed(id))
     }
 
     pub(crate) fn chat(&self, chat_id: &str) -> Option<zeron_proto::Chat> {
@@ -141,6 +170,7 @@ impl WorkspaceStore {
         let (state, prefs) = self.state();
         let presence = self.presence();
         let change_requests = lock(&self.change_requests).clone();
+        let drafts = self.drafts();
         let previous = self.snapshot();
         let mut next = view::derive(
             &state,
@@ -153,6 +183,7 @@ impl WorkspaceStore {
                 send_states,
                 synced,
                 previous: Some(&previous),
+                drafts: &drafts,
             },
         );
         if previous.revision > 0 && next.content_hash() == previous.content_hash() {

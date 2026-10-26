@@ -302,6 +302,36 @@ impl Shell {
         project_icon_frame(chat_id, &name, &device, size, art)
     }
 
+    /// A row that is not a chat yet (a prompt draft): the artwork of the
+    /// project it targets, with the same tooltip a chat row would show.
+    pub(super) fn render_space_project_icon(
+        &self,
+        row_id: &str,
+        space: Option<&zeron_proto::Space>,
+        device_id: Option<&str>,
+        size: f32,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let name = space
+            .map(|space| space.display_name().to_string())
+            .unwrap_or_else(|| "No project".into());
+        // Same fallback as the row's "@ device" fragment.
+        let device = device_id
+            .and_then(|id| state.device_name(id))
+            .unwrap_or("Unknown device")
+            .to_string();
+        let art = self.project_icons.render(
+            &self.state,
+            space,
+            self.active_sidebar_pin_profile_key(cx),
+            selected,
+            cx,
+        );
+        project_icon_frame(row_id, &name, &device, size, art)
+    }
+
     /// A project group header's icon: the same artwork its rows would wear,
     /// without the tooltip — the label beside it already names the project.
     pub(super) fn render_project_group_icon(
