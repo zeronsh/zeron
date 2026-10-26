@@ -176,12 +176,12 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list() })),
+        "tools/list" => ok_response(id, json!({ "tools": tools.list().await })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
             };
-            if !tools.has(name) {
+            if !tools.has(name).await {
                 return error_response(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
             }
             let arguments = params
@@ -189,14 +189,16 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match tools.call(name, arguments).await {
-                Ok(value) => ok_response(
-                    id,
-                    json!({
+                Ok(value) => {
+                    let mut result = json!({
                         "content": [{ "type": "text", "text": pretty(&value) }],
-                        "structuredContent": wrap_structured(value),
                         "isError": false,
-                    }),
-                ),
+                    });
+                    if !value.is_string() {
+                        result["structuredContent"] = wrap_structured(value);
+                    }
+                    ok_response(id, result)
+                }
                 Err(message) => ok_response(
                     id,
                     json!({

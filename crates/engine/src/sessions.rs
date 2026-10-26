@@ -307,6 +307,7 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    scripts: OnceLock<crate::scripts::ScriptHost>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -356,6 +357,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                scripts: OnceLock::new(),
             }),
         }
     }
@@ -420,6 +422,14 @@ impl SessionsEngine {
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    pub fn set_scripts(&self, scripts: crate::scripts::ScriptHost) {
+        let _ = self.inner.scripts.set(scripts);
+    }
+
+    pub fn scripts(&self) -> Option<&crate::scripts::ScriptHost> {
+        self.inner.scripts.get()
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -1948,6 +1958,9 @@ impl Inner {
                 event: event.clone(),
             });
         }
+        if let Some(scripts) = self.scripts.get() {
+            scripts.observe(chat_id, event);
+        }
         seq
     }
 
@@ -3380,6 +3393,9 @@ async fn drive_run(
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id);
+    }
+    if let Some(scripts) = inner.scripts.get() {
+        request = scripts.before_run(&chat_id, request).await;
     }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside

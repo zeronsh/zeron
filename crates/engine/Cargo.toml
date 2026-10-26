@@ -18,6 +18,7 @@ zeron-rpc.workspace = true
 zeron-update.workspace = true
 zeron-notify.workspace = true
 zeron-visual.workspace = true
+mlua = { version = "0.12", features = ["luau", "serde"] }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true

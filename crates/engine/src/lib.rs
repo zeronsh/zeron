@@ -45,6 +45,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
+pub mod scripts;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
@@ -361,6 +362,10 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        sessions.set_scripts(scripts::ScriptHost::start(
+            data_dir.join("scripts"),
+            scripts::ScriptLinks::new(&workspace, &sessions, doc_host.clone()),
+        ));
         Ok(Self {
             sessions,
             doc_host,
