@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::sync::CancellationToken;
 
 /// Mux service ids of sign-in callbacks: the prefix, then the login id.
@@ -38,13 +38,25 @@ struct Route {
 
 /// The running device's side: which login callbacks a peer may reach.
 #[derive(Clone, Default)]
-pub struct CallbackRoutes(Arc<Mutex<HashMap<String, Route>>>);
+pub struct CallbackRoutes {
+    routes: Arc<Mutex<HashMap<String, Route>>>,
+    /// Told of every new route, so signaling can rejoin as a sign-in.
+    registered: Arc<Notify>,
+}
 
 impl CallbackRoutes {
+    /// Routes that notify `registered` whenever one is added.
+    pub(crate) fn notifying(registered: Arc<Notify>) -> Self {
+        Self {
+            routes: Default::default(),
+            registered,
+        }
+    }
+
     /// Let `peer` reach loopback `port` for `login_id` until `ttl` passes or
     /// [`Self::remove`] — whichever comes first.
     pub fn register(&self, login_id: &str, port: u16, peer: &str, ttl: Duration) {
-        self.0.lock().unwrap().insert(
+        self.routes.lock().unwrap().insert(
             login_id.to_owned(),
             Route {
                 port,
@@ -52,14 +64,25 @@ impl CallbackRoutes {
                 expires: Instant::now() + ttl,
             },
         );
+        self.registered.notify_one();
     }
 
     pub fn remove(&self, login_id: &str) {
-        self.0.lock().unwrap().remove(login_id);
+        self.routes.lock().unwrap().remove(login_id);
     }
 
     pub fn is_registered(&self, login_id: &str) -> bool {
-        self.0.lock().unwrap().contains_key(login_id)
+        self.routes.lock().unwrap().contains_key(login_id)
+    }
+
+    /// Whether any login is waiting for a peer's callback right now.
+    pub(crate) fn any_live(&self) -> bool {
+        let now = Instant::now();
+        self.routes
+            .lock()
+            .unwrap()
+            .values()
+            .any(|route| route.expires > now)
     }
 
     /// The loopback port of a live login `peer` started — for a device that
@@ -77,7 +100,7 @@ impl CallbackRoutes {
     /// started. Local (same-device) opens carry no peer and are refused.
     pub(crate) fn target(&self, peer: Option<&str>, service: &str) -> Option<anyhow::Result<u16>> {
         let login_id = service.strip_prefix(SERVICE_PREFIX)?;
-        let mut routes = self.0.lock().unwrap();
+        let mut routes = self.routes.lock().unwrap();
         let now = Instant::now();
         routes.retain(|_, route| route.expires > now);
         Some(match (routes.get(login_id), peer) {
@@ -181,7 +204,7 @@ impl CallbackForwarder {
                 };
                 tokio::select! {
                     _ = stop.cancelled() => {}
-                    _ = tokio::time::sleep(lifetime) => {}
+                    _ = tokio::time::sleep(lifetime) => stop.cancel(),
                     _ = serve => {}
                 }
             });
@@ -213,6 +236,15 @@ impl CallbackTunnels {
     /// Stop forwarding `login_id` (a no-op when none runs).
     pub fn close(&self, login_id: &str) {
         self.0.lock().unwrap().remove(login_id);
+    }
+
+    /// Whether any forwarder is still listening.
+    pub(crate) fn any_live(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .values()
+            .any(|forwarder| !forwarder.stop.is_cancelled())
     }
 }
 
@@ -407,6 +439,35 @@ mod tests {
         assert!(
             message.contains(&format!("Port {port} is already in use")),
             "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_counts_as_live_only_while_it_can_be_reached() {
+        let registered = Arc::new(Notify::new());
+        let routes = CallbackRoutes::notifying(registered.clone());
+        assert!(!routes.any_live());
+        routes.register("login-1", 1234, "device-a", Duration::from_secs(60));
+        assert!(routes.any_live());
+        // Registering woke signaling (the permit waits for it).
+        tokio::time::timeout(Duration::from_secs(1), registered.notified())
+            .await
+            .expect("a new route wakes signaling");
+        routes.remove("login-1");
+        routes.register("login-2", 1234, "device-a", Duration::ZERO);
+        assert!(!routes.any_live(), "an expired route is no sign-in");
+
+        let tunnels = CallbackTunnels::default();
+        let open: Opener = Arc::new(|| Box::pin(async { anyhow::bail!("never dialed") }));
+        let forwarder = CallbackForwarder::bind(0, Duration::from_millis(50), open)
+            .await
+            .unwrap();
+        tunnels.insert("login-1", forwarder);
+        assert!(tunnels.any_live());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !tunnels.any_live(),
+            "a forwarder past its lifetime is no sign-in"
         );
     }
 
