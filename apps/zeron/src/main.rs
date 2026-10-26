@@ -46,6 +46,15 @@ enum Command {
     /// Live sync introspection from the running engine: per-room connection
     /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
     Sync,
+    /// Show or switch this account's labs flags (synced to every device):
+    /// `zeron labs`, `zeron labs chat3 on|off`. `chat3` births new chats on
+    /// the chat3 transcript plane (docs/chat3-sync.md) — turn it on only once
+    /// every app you use is on this release.
+    Labs {
+        flag: Option<String>,
+        /// `on` or `off`.
+        state: Option<String>,
+    },
     /// Cloud sleep handshake: ask the running engine to start no new work.
     /// Exits 0 when quiesced, 75 when busy (a turn in flight, a message
     /// waiting) — the edge then keeps the machine awake.
@@ -153,6 +162,11 @@ fn main() -> anyhow::Result<()> {
             let config = engine_config_from_env();
             runtime.block_on(quiesce_cli(config.ipc_port, &config.data_dir))
         }
+        Some(Command::Labs { flag, state }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(labs_cli(config.ipc_port, &config.data_dir, flag, state))
+        }
         Some(Command::Mcp) => zeron_app::run_mcp(),
         Some(Command::Engine) => zeron_app::background::run(),
         #[cfg(target_os = "linux")]
@@ -243,6 +257,48 @@ async fn quiesce_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Resul
         reply["busy"].as_str().unwrap_or("the engine is busy")
     );
     std::process::exit(QUIESCE_BUSY_EXIT);
+}
+
+async fn labs_cli(
+    ipc_port: u16,
+    data_dir: &std::path::Path,
+    flag: Option<String>,
+    state: Option<String>,
+) -> anyhow::Result<()> {
+    let client = zeron_rpc::connect_ipc(ipc_port, Some(data_dir))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
+        })?;
+    if let Some(flag) = flag {
+        let on = match state.as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => anyhow::bail!("usage: zeron labs {flag} on|off"),
+        };
+        let reply = client
+            .call(
+                zeron_rpc::methods::SET_LABS_FLAG,
+                serde_json::json!({ "flag": flag, "on": on }),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("SetLabsFlag failed: {e}"))?;
+        let changed = reply["changed"].as_bool() == Some(true);
+        println!(
+            "{flag} {}{}",
+            if on { "on" } else { "off" },
+            if changed { "" } else { " (unchanged)" }
+        );
+        return Ok(());
+    }
+    let flags = client
+        .call(zeron_rpc::methods::GET_LABS_FLAGS, serde_json::json!({}))
+        .await
+        .map_err(|e| anyhow::anyhow!("GetLabsFlags failed: {e}"))?;
+    for (name, on) in flags.as_object().into_iter().flatten() {
+        println!("{name}: {}", if on.as_bool() == Some(true) { "on" } else { "off" });
+    }
+    Ok(())
 }
 
 async fn sync_cli(ipc_port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {

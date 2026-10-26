@@ -254,6 +254,10 @@ pub struct Chat {
     pub parent_chat_id: Option<String>,
 }
 
+/// The newest sync room generation this build can open: 2 = chat2 relay,
+/// 3 = chat2 relay for state + the chat3 transcript plane.
+pub const MAX_KNOWN_ROOM_GEN: u32 = 3;
+
 impl Chat {
     /// A session the user sees in chat lists: neither another chat's worker
     /// (`parent_chat_id`) nor a hidden voice orchestrator.
@@ -261,9 +265,27 @@ impl Chat {
         self.parent_chat_id.is_none() && !crate::voice::is_orchestrator_chat(&self.id)
     }
 
-    /// True when this chat syncs over the chat2 dumb relay.
+    /// The sync room generation (absent = 1, the retired s2 rooms).
+    pub fn room_generation(&self) -> u32 {
+        self.room_gen.unwrap_or(1)
+    }
+
+    /// True when this chat's shared state syncs over the chat2 dumb relay —
+    /// gen 2, and gen 3 whose state log is the same relay.
     pub fn on_chat2(&self) -> bool {
-        self.room_gen.unwrap_or(1) >= 2
+        (2..=MAX_KNOWN_ROOM_GEN).contains(&self.room_generation())
+    }
+
+    /// True when the transcript lives on the chat3 plane (docs/chat3-sync.md).
+    pub fn on_chat3(&self) -> bool {
+        self.room_generation() == 3
+    }
+
+    /// A generation newer than this build serves: show "update to view"
+    /// rather than dial the wrong room (old builds read every gen ≥ 2 as
+    /// chat2 and saw an empty transcript).
+    pub fn needs_newer_app(&self) -> bool {
+        self.room_generation() > MAX_KNOWN_ROOM_GEN
     }
 }
 

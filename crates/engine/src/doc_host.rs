@@ -556,6 +556,9 @@ pub enum FinishQueueEditOutcome {
 pub struct TranscriptSnapshot {
     pub entries: Arc<Vec<SessionMessageEntry>>,
     pub replay_baseline: Arc<zeron_doc::TranscriptBaseline>,
+    /// gen 3: the local transcript starts after the room's first row, so the
+    /// UI can offer older history (`FetchEarlierMessages`).
+    pub history_more: bool,
 }
 
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
@@ -566,7 +569,7 @@ pub struct ChatDocHandle {
     messages_tx: watch::Sender<TranscriptSnapshot>,
     /// Serialize historical imports with publication so an async doc-change
     /// task cannot publish recovered content before its presentation cutoff.
-    transcript_import: Mutex<()>,
+    transcript_import: Arc<Mutex<()>>,
     transcript_history: Arc<Mutex<crate::transcript_history::TranscriptHistory>>,
     /// Pending-message queue watch (WatchQueue). Cheap to rebuild — a handful
     /// of short rows — so unlike the transcript mirror it publishes on every
@@ -652,6 +655,13 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+    /// gen 3: the transcript plane state (docs/chat3-sync.md), and the
+    /// subscription on the split doc's local transcript.
+    chat3: Option<Arc<crate::chat3_host::Chat3>>,
+    _transcript_sub: Option<loro::Subscription>,
+    /// The generation came from the labs flag or a parent chat because the
+    /// registry row hadn't synced yet; the cutover watcher re-checks it.
+    gen_assumed: bool,
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -1001,19 +1011,26 @@ impl ChatDocHandle {
         match self.doc.read_entries() {
             Ok(entries) => {
                 let replay_baseline =
-                    lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
+                    lock(&self.transcript_history).snapshot(self.doc.transcript_doc(), &entries);
                 let joined = join_continuation_entries(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
                 self.messages_tx.send_replace(TranscriptSnapshot {
                     entries: Arc::new(joined),
                     replay_baseline: replay_baseline.clone(),
+                    history_more: self.chat3.is_some()
+                        && zeron_doc::transcript_plane::Reader::cursor(&self.doc).more_before,
                 });
             }
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "transcript read failed");
             }
         }
+    }
+
+    /// gen 3: the transcript plane state (None for chat2 handles).
+    pub fn chat3(&self) -> Option<&Arc<crate::chat3_host::Chat3>> {
+        self.chat3.as_ref()
     }
 
     pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
@@ -1428,11 +1445,11 @@ impl DocHost {
                 if chats.changed().await.is_err() {
                     return; // workspace host gone (shutdown)
                 }
-                let flipped: Vec<String> = chats
+                let flipped: Vec<(String, u32)> = chats
                     .borrow_and_update()
                     .iter()
-                    .filter(|c| c.room_gen.unwrap_or(1) >= 2)
-                    .map(|c| c.id.clone())
+                    .filter(|c| c.on_chat2())
+                    .map(|c| (c.id.clone(), c.room_generation()))
                     .collect();
                 if flipped.is_empty() {
                     continue;
@@ -1441,14 +1458,34 @@ impl DocHost {
                 let mut stuck_live: Vec<(String, Arc<ChatDocHandle>)> = Vec::new();
                 {
                     let mut handles = lock(&host.inner.handles);
-                    for chat_id in flipped {
+                    for (chat_id, row_gen) in flipped {
                         let Some(handle) = handles.get(&chat_id) else {
                             continue;
                         };
-                        if handle.room_gen >= 2 {
-                            continue; // already chat2-mode
+                        // Opened before the row synced, on the generation
+                        // it assumed, and the row says otherwise: reopen
+                        // onto the right room. Its doc can hold nothing the
+                        // host wrote (the host writes only in answer to
+                        // commands, which arrive through the right room).
+                        let wrong_guess = handle.gen_assumed && handle.room_gen >= 2 && handle.room_gen != row_gen;
+                        if handle.room_gen >= 2 && !wrong_guess {
+                            continue; // already on its generation
                         }
                         let live_writer = Arc::strong_count(&handle.doc) > 1;
+                        if wrong_guess {
+                            if live_writer {
+                                tracing::warn!(chat = %chat_id, opened = handle.room_gen, row = row_gen,
+                                    "chat opened on an assumed generation the registry contradicts; a live writer holds it");
+                                continue;
+                            }
+                            handle.retired.store(true, Ordering::Relaxed);
+                            let opened = handle.room_gen;
+                            handles.remove(&chat_id);
+                            tracing::info!(chat = %chat_id, opened, row = row_gen,
+                                "assumed-generation handle dropped; reopening on the registry's");
+                            dropped.push(chat_id);
+                            continue;
+                        }
                         if live_writer {
                             // A run is writing into this s2 doc while the
                             // registry already says chat2 — the born-gen2
@@ -1551,14 +1588,27 @@ impl DocHost {
         // follow the row's gen 2 to an empty chat2 room), the run's live doc
         // ref blocked every heal, and the transcript never synced anywhere
         // (2026-08-11).
+        let gen_assumed = chat_row.is_none();
         let registry_gen = match chat_row.as_ref() {
+            // A generation this build doesn't know opens read-only like a
+            // retired s2 chat: dialing the wrong room shows an empty
+            // transcript and strands anything sent from here.
+            Some(row) if row.needs_newer_app() => 1,
             Some(row) => row.room_gen.unwrap_or(1),
-            None => 2,
+            None => self.assumed_room_gen(chat_id),
         };
         {
             let mut handles = lock(&self.inner.handles);
             if let Some(handle) = handles.get(chat_id) {
-                let stale = registry_gen >= 2 && handle.room_gen < 2;
+                // A handle opened on an assumed generation (no row yet)
+                // that the row now contradicts is stale too: gen 2 and 3
+                // are different rooms and different local lineages.
+                let wrong_guess = handle.gen_assumed
+                    && !gen_assumed
+                    && registry_gen >= 2
+                    && handle.room_gen >= 2
+                    && handle.room_gen != registry_gen;
+                let stale = (registry_gen >= 2 && handle.room_gen < 2) || wrong_guess;
                 if (stale || handle.retired.load(Ordering::Relaxed)) && !self.pinned(handle) {
                     // A seed flipped this chat under a cached fat handle
                     // (review B1): drop it so this open converges onto the
@@ -1590,15 +1640,25 @@ impl DocHost {
         self.inner.document_loads.fetch_add(1, Ordering::Relaxed);
         let stored = self.inner.store.load_snapshot_with_cursor(chat_id)?;
         let stored_epoch = stored.as_ref().map(|(_, _, e)| *e).unwrap_or(0);
-        let room_gen = if stored_epoch >= crate::chat2_host::CHAT2_DOC_EPOCH {
-            if registry_gen < 2
-                && let Some(ws) = self.workspace()
-            {
-                let _ = ws.set_chat_room_gen(chat_id, 2);
-                tracing::info!(chat = %chat_id,
-                    "completed interrupted chat2 flip (local epoch 2, registry said s2)");
+        let room_gen = if stored_epoch >= crate::chat2_host::CHAT3_DOC_EPOCH {
+            // A split lineage on disk is gen 3 — unless a real row says gen
+            // 2: then this device split the doc on an assumed generation
+            // before the row synced, and the chat2 branch adopts (rollback
+            // copy kept, own pending commands carried over).
+            if chat_row.is_some() && registry_gen == 2 { 2 } else { 3 }
+        } else if stored_epoch >= crate::chat2_host::CHAT2_DOC_EPOCH {
+            if registry_gen == 3 {
+                3 // the gen-3 branch below adopts the stray epoch-2 doc
+            } else {
+                if registry_gen < 2
+                    && let Some(ws) = self.workspace()
+                {
+                    let _ = ws.set_chat_room_gen(chat_id, 2);
+                    tracing::info!(chat = %chat_id,
+                        "completed interrupted chat2 flip (local epoch 2, registry said s2)");
+                }
+                2
             }
-            2
         } else {
             registry_gen
         };
@@ -1609,9 +1669,13 @@ impl DocHost {
         let mut snapshot_len = 0usize;
         let mut chat2_cursor = 0u64;
         let mut requeue_commands: Vec<SessionCommandEntry> = Vec::new();
-        let doc = if room_gen >= 2 {
+        let doc = if room_gen == 3 {
+            self.open_split_doc(chat_id, stored, &mut snapshot_len, &mut chat2_cursor, &mut requeue_commands)?
+        } else if room_gen >= 2 {
             match stored {
-                Some((bytes, cursor, epoch)) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH => {
+                Some((bytes, cursor, epoch))
+                    if (crate::chat2_host::CHAT2_DOC_EPOCH..crate::chat2_host::CHAT3_DOC_EPOCH).contains(&epoch) =>
+                {
                     snapshot_len = bytes.len();
                     chat2_cursor = cursor;
                     let raw = loro::LoroDoc::new();
@@ -1726,13 +1790,13 @@ impl DocHost {
         let history = transcript_history.clone();
         let watched = messages_tx.clone();
         let weak_doc = Arc::downgrade(&doc);
-        let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
+        let on_change: Arc<dyn Fn(&loro::event::DiffEvent<'_>) + Send + Sync> = Arc::new(move |diff| {
             // This callback runs before the change worker can publish. The
             // import origin belongs to the event, so concurrent local commits
             // cannot inherit a remote replay's presentation classification.
             if watched.receiver_count() > 0 {
                 if let Some(doc) = weak_doc.upgrade() {
-                    lock(&history).observe(doc.doc(), &diff);
+                    lock(&history).observe(doc.transcript_doc(), diff);
                 }
             } else {
                 *lock(&history) = Default::default();
@@ -1741,7 +1805,23 @@ impl DocHost {
                 persistence.dirty(false);
             }
             changed_tx.send_modify(|v| *v = v.wrapping_add(1));
-        }));
+        });
+        let state_change = on_change.clone();
+        let sub = doc.doc().subscribe_root(Arc::new(move |diff| state_change(&diff)));
+        let transcript_import = Arc::new(Mutex::new(()));
+        // gen 3: the local transcript is its own doc. Its commits feed the
+        // same change plumbing, plus the publisher (docs/chat3-sync.md).
+        let chat3 = doc.is_split().then(|| {
+            let known = self.inner.store.chat3_published(chat_id).unwrap_or_default();
+            crate::chat3_host::Chat3::new(chat_id, known, self.plane_host(chat_id), transcript_import.clone())
+        });
+        let transcript_sub = chat3.as_ref().map(|chat3| {
+            let chat3 = chat3.clone();
+            doc.transcript_doc().subscribe_root(Arc::new(move |diff| {
+                chat3.observe(&diff);
+                on_change(&diff);
+            }))
+        });
         // The mirror starts dirty and empty; watch_messages materializes it
         // once on attach instead of maintaining an unwatched transcript.
         let initial_queue = doc.read_queue().unwrap_or_default();
@@ -1758,7 +1838,7 @@ impl DocHost {
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
-            transcript_import: Mutex::default(),
+            transcript_import,
             transcript_history,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
@@ -1791,7 +1871,13 @@ impl DocHost {
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
             _sub: sub,
+            chat3,
+            _transcript_sub: transcript_sub,
+            gen_assumed,
         });
+        if handle.chat3.is_some() {
+            self.spawn_chat3_publisher(&handle);
+        }
         // Snapshot recovery may restore several independently edited rows.
         // Each row needs its own checked expiry wake; otherwise a non-head
         // edit could remain displayed as live indefinitely.
@@ -2387,6 +2473,8 @@ impl DocHost {
         let weak = Arc::downgrade(handle);
         let host = self.clone();
         let mut token_changes = edge.token_changes();
+        // gen 3 keeps the chat2 log for its state doc, in its own room.
+        let room = crate::chat2_host::room_prefix(handle.room_gen);
         self.spawn_sync_worker(cancel.clone(), async move {
             let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
                 .with_handle(weak.clone()));
@@ -2398,9 +2486,9 @@ impl DocHost {
                 http,
                 edge.clone(),
                 chat.clone(),
-            ).with_priority(priority));
+            ).with_priority(priority).with_room(room));
             let remote_host = host.remote_host_for(&chat);
-            let url = edge.room_url_with_host(format!("/chat2/{chat}/ws"), remote_host.clone());
+            let url = edge.room_url_with_host(format!("/{room}/{chat}/ws"), remote_host.clone());
             let mut wake = zeron_sync::wake::subscribe();
             // Sibling-dial successes end a backoff wait immediately, exactly
             // like the joined clients' own reconnect loops (chat_client.rs).
@@ -2425,7 +2513,7 @@ impl DocHost {
                     edge.clone(),
                     chat.clone(),
                     device.clone(),
-                ).with_host_device(remote_host.clone()).with_priority(priority));
+                ).with_host_device(remote_host.clone()).with_priority(priority).with_room(room));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     zeron_sync::ChatClient::connect_via_transport(
@@ -2448,6 +2536,7 @@ impl DocHost {
                         };
                         let mut events = client.events();
                         let mut lifecycle_events = client.events();
+                        let chat3_events = client.events();
                         {
                             // Store + drain under ONE client-lock critical
                             // section: the subscription pushes to the buffer
@@ -2469,7 +2558,10 @@ impl DocHost {
                             }
                             *client_slot = Some(client);
                         }
-                        tracing::info!(chat = %chat, "chat2 client admitted (catch-up pending)");
+                        tracing::info!(chat = %chat, room, "chat2 client admitted (catch-up pending)");
+                        if handle.chat3.is_some() {
+                            host.spawn_chat3_roles(edge.clone(), &handle, chat3_events, cancel.clone(), priority);
+                        }
                         // A missed event, failed POST or actor restart must not
                         // forget rejected operations. Any author can checkpoint
                         // its own durable history, including a non-host desktop.
@@ -2899,6 +2991,12 @@ impl DocHost {
             .store
             .load_snapshot_with_cursor(chat_id)
             .map_err(|e| e.to_string())?;
+        if stored.as_ref().is_some_and(|(_, _, epoch)| *epoch >= crate::chat2_host::CHAT3_DOC_EPOCH) {
+            // gen 3 keeps its transcript in its own snapshot and the room's
+            // plane; the main snapshot never holds messages, so "empty" here
+            // proves nothing and a journal rebuild would duplicate entries.
+            return Ok(());
+        }
         if let Some((bytes, _, epoch)) = &stored {
             // A pre-chat2 snapshot may be discarded by open() during adoption;
             // its entries are a recovery SOURCE, not proof the new doc is healthy.
@@ -3017,8 +3115,13 @@ impl DocHost {
         let chat_id = handle.chat_id.clone();
         // A whale's last 64 joined messages can still contain its entire
         // history. Materialization/encoding must not occupy a network worker.
+        // gen 3 has no tail sidecar: readers page the transcript plane.
         let doc = handle.doc.clone();
+        let wants_tail = handle.chat3.is_none();
         let body = tokio::task::spawn_blocking(move || {
+            if !wants_tail {
+                return None;
+            }
             let tail =
                 zeron_doc::materialize_tail(&doc, now_ms(), zeron_doc::TAIL_MESSAGE_COUNT).ok()?;
             serde_json::to_vec(&tail).ok()
@@ -3090,6 +3193,7 @@ impl DocHost {
         let in_flight = handle.checkpointing.clone();
         let publication_store = self.inner.store.clone();
         let snapshot_doc = handle.doc.clone();
+        let room = crate::chat2_host::room_prefix(handle.room_gen);
         let seq_covered = stats.cursor;
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
@@ -3117,8 +3221,9 @@ impl DocHost {
                 return;
             };
             let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}",
+                "{}/{}/{}/checkpoint?seqCovered={}",
                 edge.url.trim_end_matches('/'),
+                room,
                 chat_id,
                 seq_covered
             );
@@ -3572,6 +3677,7 @@ impl DocHost {
         if let Err(err) = self.inner.store.delete_snapshot(chat_id) {
             tracing::warn!(chat = %chat_id, error = %err, "snapshot delete failed");
         }
+        self.purge_chat3(chat_id);
     }
 
     /// Composer path: append an immutable pending command entry (rule 1). Durable by
@@ -5088,6 +5194,15 @@ impl DocHost {
     /// `…​.diff`) — the UI's lazy "Show full output" path, served over RPC
     /// because the UI crate has no HTTP client or edge bearer.
     pub async fn fetch_tool_blob(&self, blob_ref: &str) -> Result<String, EngineError> {
+        // gen 3 outputs live in the chat's room (docs/chat3-sync.md).
+        if let Some((chat, part)) = zeron_sync::chat3::parse_output_ref(blob_ref) {
+            let chat_ok = chat.len() <= 128
+                && chat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+            if !chat_ok || !zeron_sync::chat3::valid_part_id(part) {
+                return Err(EngineError::Other(format!("bad blob ref: {blob_ref}")));
+            }
+            return self.fetch_chat3_output(chat, part).await;
+        }
         // Same shape `apply_sidecar_refs` writes; anything else is a forged ref.
         let valid = blob_ref.split_once('/').is_some_and(|(chat, part)| {
             !chat.is_empty()
@@ -6154,6 +6269,17 @@ impl DocHost {
 
     /// A fork must be durable before publishing its discoverable registry row.
     pub(crate) fn persist_fork(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
+        if let Some(persistence) = handle.persistence.as_ref().filter(|_| handle.doc.is_split()) {
+            // A split fork's state and transcript snapshots save together,
+            // stamped epoch 3, through the same writer as every other save.
+            persistence.dirty(true);
+            persistence.flush_sync();
+            return if persistence.is_clean() {
+                Ok(())
+            } else {
+                Err(EngineError::Other("fork snapshot not durable".into()))
+            };
+        }
         let bytes = handle.doc.export_snapshot()?;
         self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
@@ -6914,3 +7040,6 @@ mod sync_lifecycle_tests;
 
 #[path = "doc_host_delivery.rs"]
 mod remote_delivery;
+
+#[path = "doc_host_chat3.rs"]
+mod chat3_wiring;

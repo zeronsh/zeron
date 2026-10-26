@@ -2375,3 +2375,18 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
     ws.upsert_device(&back).unwrap();
     assert!(!ws.device_deleted("cloud-1"));
 }
+
+#[test]
+fn labs_flags_switch_new_chats_onto_chat3_and_refuse_unknown_names() {
+    let mut doc = RegistryDoc::new("dev-a");
+    assert!(!doc.labs_flag("chat3"));
+    assert_eq!(doc.new_chat_room_gen(), 2);
+    assert!(doc.set_labs_flag("chat3", true).unwrap());
+    assert!(doc.labs_flag("chat3"));
+    assert_eq!(doc.new_chat_room_gen(), 3);
+    // Idempotent: no second write for the same value.
+    assert!(!doc.set_labs_flag("chat3", true).unwrap());
+    assert!(doc.set_labs_flag("chat3", false).unwrap());
+    assert_eq!(doc.new_chat_room_gen(), 2);
+    assert!(doc.set_labs_flag("chat33", true).is_err());
+}

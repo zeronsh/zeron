@@ -12,12 +12,14 @@
 
 pub mod budget;
 pub mod chat_client;
+pub mod chat3;
 pub mod chat_frames;
 pub mod dial;
 pub mod net_path;
 pub mod registry;
 pub mod socket;
 mod store;
+mod store_chat3;
 mod sync_jobs;
 mod types;
 pub mod wake;
@@ -29,4 +31,5 @@ pub use registry::{
     ReconnectState, RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning,
 };
 pub use store::{DocsStore, StoreError};
+pub use store_chat3::OutboxItem;
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};

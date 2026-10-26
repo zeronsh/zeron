@@ -860,6 +860,11 @@ pub struct AppState {
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
+    /// gen 3 (docs/chat3-sync.md): the selected chat's transcript starts
+    /// after the room's first row; older history loads on request.
+    pub transcript_history_more: bool,
+    /// A `FetchEarlierMessages` call for the selected chat is in flight.
+    pub loading_earlier: bool,
     transcript_baselines: HashMap<String, Arc<zeron_doc::TranscriptBaseline>>,
     transcript_cache: std::collections::VecDeque<CachedTranscript>,
     pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
@@ -1033,6 +1038,8 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
+            transcript_history_more: false,
+            loading_earlier: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),
@@ -3160,6 +3167,45 @@ impl AppState {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
 
+    /// gen 3: page older history into the selected chat. The engine
+    /// republishes the transcript (and `historyMore`) when the page lands.
+    pub fn load_earlier_messages(&mut self, cx: &mut Context<Self>) {
+        if self.loading_earlier || !self.transcript_history_more {
+            return;
+        }
+        let (Some(chat_id), Some(engine)) = (self.selected_chat.clone(), self.engine().cloned()) else {
+            return;
+        };
+        self.loading_earlier = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let reply = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                zeron_rpc::methods::FETCH_EARLIER_MESSAGES,
+                serde_json::json!({ "chatId": chat_id }),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+            if let Err(err) = &reply {
+                tracing::warn!(%chat_id, error = %err, "load earlier messages failed");
+            }
+            this.update(cx, |state, cx| {
+                if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                    state.loading_earlier = false;
+                    if let Ok(value) = &reply
+                        && let Some(more) = value.get("more").and_then(|m| m.as_bool())
+                    {
+                        state.transcript_history_more = more;
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn engine(&self) -> Option<&EngineHandle> {
         self.engine.as_ref()
     }
@@ -3923,6 +3969,8 @@ impl AppState {
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
+        self.transcript_history_more = false;
+        self.loading_earlier = false;
         if let Some(cached) = cached {
             self.transcript_baselines.insert(
                 cached.chat_id.clone(),
@@ -4404,6 +4452,9 @@ fn spawn_transcript_watch(
                     .get("historyPending")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                // gen 3: sent while older history exists, and once when it
+                // stops (docs/chat3-sync.md).
+                let history_more = value.get("historyMore").and_then(|v| v.as_bool());
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
@@ -4430,6 +4481,12 @@ fn spawn_transcript_watch(
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                        if let Some(more) = history_more
+                            && state.transcript_history_more != more
+                        {
+                            state.transcript_history_more = more;
+                            cx.notify();
+                        }
                         if history_pending && state.transcript_replayed {
                             return;
                         }

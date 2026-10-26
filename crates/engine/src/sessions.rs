@@ -1930,6 +1930,17 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
+        // Output deltas are display-only: the result carries what survives,
+        // and a build's every line would otherwise bloat the journal.
+        if let AgentEvent::ToolOutputDelta { .. } = event {
+            if let Some(hub) = lock(&self.hubs).get(chat_id) {
+                let _ = hub.send(JournaledEvent {
+                    seq: 0,
+                    event: event.clone(),
+                });
+            }
+            return 0;
+        }
         let seq = match self.journal.append(chat_id, event) {
             Ok(seq) => seq,
             Err(err) => {
@@ -3428,6 +3439,9 @@ async fn drive_run(
     // a fresh session needs all prior user text, not just the latest tail.
     let doc_ref: &SessionDoc = &doc;
     let mut folded: Vec<MessagePart> = Vec::new();
+    // gen 3: running tools' streamed output, for their live tail and the
+    // full upload when they resolve (docs/chat3-sync.md).
+    let mut tool_outputs: HashMap<String, crate::chat3_host::OutputBuffer> = HashMap::new();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -4679,6 +4693,13 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            if doc_ref.is_split()
+                && let Some((part, full)) =
+                    crate::chat3_host::fold_tool_output(&mut folded, &event, &mut tool_outputs, &chat_id)
+                && let Some(host) = inner.doc_host()
+            {
+                host.queue_tool_output(&chat_id, &part, &full);
+            }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run

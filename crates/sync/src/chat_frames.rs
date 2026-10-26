@@ -19,6 +19,11 @@ pub mod frame_type {
     pub const PROBE: u8 = 0x09;
     pub const PROBE_OK: u8 = 0x0a;
     pub const ERROR: u8 = 0x0b;
+    // chat3 transcript plane (docs/chat3-sync.md).
+    pub const ITEM_PUT: u8 = 0x10;
+    pub const LIVE: u8 = 0x11;
+    pub const ITEM: u8 = 0x12;
+    pub const ITEMS_DONE: u8 = 0x13;
 }
 
 /// Headers are ids + a few integers; anything bigger is a peer bug.

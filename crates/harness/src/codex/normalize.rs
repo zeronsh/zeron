@@ -490,10 +490,16 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 let exit_code = field(item, &["exitCode", "exit_code"])
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
+                // The command's combined stdout/stderr (the engine stores it
+                // for gen-3 chats; gen-2 folds drop it, as before).
+                let output = field(item, &["aggregatedOutput", "aggregated_output"])
+                    .and_then(Value::as_str)
+                    .filter(|o| !o.is_empty())
+                    .map(crate::tool_output::cap_tool_output);
                 vec![AgentEvent::ToolResult {
                     id,
                     is_error: status == "failed" || exit_code != 0,
-                    output: None,
+                    output,
                     diff: None,
                 }]
             }
@@ -957,6 +963,24 @@ mod tests {
         assert_eq!(delta_text(&json!({"textDelta": "b"})), Some("b".into()));
         assert_eq!(delta_text(&json!({"delta": ""})), None);
         assert_eq!(delta_text(&json!({})), None);
+    }
+
+    #[test]
+    fn command_execution_keeps_its_aggregated_output() {
+        let completed = map_item(
+            Phase::Completed,
+            &json!({"type": "commandExecution", "id": "c1", "status": "completed", "exitCode": 0,
+                    "aggregatedOutput": "Compiling zeron\nFinished\n"}),
+        );
+        assert_eq!(
+            completed,
+            vec![AgentEvent::ToolResult {
+                id: "c1".into(),
+                is_error: false,
+                output: Some("Compiling zeron\nFinished\n".into()),
+                diff: None,
+            }]
+        );
     }
 
     #[test]

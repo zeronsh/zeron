@@ -1756,6 +1756,17 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // A running command's output, as it prints.
+                    "item/commandExecution/outputDelta" => {
+                        let id = item_id(&params);
+                        if !id.is_empty()
+                            && let Some(text) = delta_text(&params)
+                            && !send(&event_tx, AgentEvent::ToolOutputDelta { id, text }).await
+                        {
+                            break 'main;
+                        }
+                    }
+
                     "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta"
                     | "item/reasoning/summaryPartAdded" => {
                         for event in reasoning_streams.entry(thread_id.clone()).or_default()

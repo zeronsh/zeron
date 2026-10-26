@@ -36,8 +36,11 @@ fn string(map: &loro::LoroMap, key: &str) -> Option<String> {
 
 impl TranscriptHistory {
     pub(crate) fn observe(&mut self, doc: &LoroDoc, event: &loro::event::DiffEvent<'_>) {
-        let replay =
-            event.triggered_by == EventTriggerKind::Import && event.origin == REPLAY_ORIGIN;
+        // chat2 replays are imports; a chat3 reader's page/feed rows are
+        // local commits on its local-only transcript doc. Both carry the
+        // replay origin, which no ordinary local write sets.
+        let replay = matches!(event.triggered_by, EventTriggerKind::Import | EventTriggerKind::Local)
+            && event.origin == REPLAY_ORIGIN;
         let mut changed = HashSet::new();
         for change in &event.events {
             let path = change.path;

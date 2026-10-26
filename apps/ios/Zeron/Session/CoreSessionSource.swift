@@ -40,6 +40,10 @@ final class CoreSessionSource: SessionSource {
         refresh()
     }
 
+    func loadEarlier() async {
+        _ = try? await handle.loadEarlier()
+    }
+
     func attach(_ engine: TranscriptView) {
         _ = engine.attach(client: client, chatId: chatId)
         self.engine = engine

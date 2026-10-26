@@ -107,6 +107,9 @@ pub struct SessionSnapshot {
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
     pub hydrated: bool,
+    /// gen 3: older history exists in the room (docs/chat3-sync.md). Offer
+    /// "Load earlier messages" ([`super::SessionHandle::load_earlier`]).
+    pub history_more: bool,
     pub delta: SnapshotDelta,
     pub(crate) index: Arc<HashMap<String, usize>>,
 }

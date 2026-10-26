@@ -16,6 +16,7 @@ use loro::VersionVector;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::SessionDoc;
+use zeron_sync::chat3::{ReaderPlane, TranscriptTransport};
 use zeron_sync::chat_client::{ChatTransport, RowImportOutcome};
 use zeron_sync::{
     ChatClient, ChatDocSink, ChatEvent, CheckpointFetcher, DocsStore, SyncError, UrlProvider,
@@ -26,6 +27,18 @@ use crate::lock;
 
 /// chat2 doc epoch stamped on every snapshot (pre-chat2 epochs are ignored).
 pub(crate) const CHAT2_DOC_EPOCH: u32 = 2;
+/// A gen-3 (split) chat's epoch: the state snapshot under the chat id, the
+/// local transcript under [`transcript_doc_id`] (docs/chat3-sync.md).
+pub(crate) const CHAT3_DOC_EPOCH: u32 = 3;
+
+pub(crate) fn transcript_doc_id(chat_id: &str) -> String {
+    format!("{chat_id}.t3")
+}
+
+/// The edge route prefix for a room generation.
+pub(crate) fn room_prefix(room_gen: u32) -> &'static str {
+    if room_gen == 3 { "chat3" } else { "chat2" }
+}
 /// Snapshot flush cadence while rows stream in.
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -37,14 +50,21 @@ pub(crate) struct LocalDoc {
     pub had_content: bool,
 }
 
-/// Restore a chat doc from disk: the chat2 snapshot (epoch ≥ 2 only — a
+/// Restore a chat doc from disk: the chat2 snapshot (epoch 2 only — a
 /// retired s2 lineage is never imported) plus any unacknowledged own writes.
-pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
+/// A gen-3 chat restores its state doc (epoch 3) and its local transcript.
+pub(crate) fn load_local(store: &DocsStore, chat_id: &str, room_gen: u32) -> LocalDoc {
+    let split = room_gen == 3;
+    let epochs = if split {
+        CHAT3_DOC_EPOCH..CHAT3_DOC_EPOCH + 1
+    } else {
+        CHAT2_DOC_EPOCH..CHAT3_DOC_EPOCH
+    };
     let raw = loro::LoroDoc::new();
     let mut cursor = 0;
     let mut had_content = false;
     match store.load_snapshot_with_cursor(chat_id) {
-        Ok(Some((bytes, stored_cursor, epoch))) if epoch >= CHAT2_DOC_EPOCH => {
+        Ok(Some((bytes, stored_cursor, epoch))) if epochs.contains(&epoch) => {
             match raw.import(&bytes) {
                 Ok(_) => {
                     had_content = true;
@@ -67,8 +87,19 @@ pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
             }
         }
     }
+    let doc = if split {
+        let transcript = loro::LoroDoc::new();
+        if let Ok(Some((bytes, _, _))) = store.load_snapshot_with_cursor(&transcript_doc_id(chat_id)) {
+            if let Err(err) = transcript.import(&bytes) {
+                tracing::warn!(chat = %chat_id, error = %err, "chat3 transcript cache unreadable; refilling");
+            }
+        }
+        SessionDoc::from_split(raw, transcript)
+    } else {
+        SessionDoc::from_doc(raw)
+    };
     LocalDoc {
-        doc: SessionDoc::from_doc(raw),
+        doc,
         cursor,
         had_content,
     }
@@ -176,11 +207,29 @@ impl Persister {
                 return;
             }
         };
+        let epoch = if doc.is_split() { CHAT3_DOC_EPOCH } else { CHAT2_DOC_EPOCH };
+        // A split doc's transcript first, so the state never runs ahead of it.
+        match doc.export_transcript_snapshot() {
+            Ok(Some(transcript)) => {
+                if let Err(err) =
+                    self.store
+                        .save_snapshot_with_cursor(&transcript_doc_id(&self.chat_id), &transcript, 0, epoch)
+                {
+                    tracing::warn!(chat = %self.chat_id, error = %err, "chat3 transcript save failed");
+                    return;
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err, "chat3 transcript export failed");
+                return;
+            }
+        }
         match self.store.save_verified_snapshot_with_cursor(
             &self.chat_id,
             &bytes,
             cursor,
-            CHAT2_DOC_EPOCH,
+            epoch,
         ) {
             Ok(()) => self.saved.store(generation, Ordering::Release),
             Err(err) => {
@@ -198,6 +247,8 @@ pub(crate) struct ViewerSink {
     pub(crate) persister: Arc<Persister>,
     /// Coalesced "the doc changed remotely" wake (republish).
     pub(crate) on_applied: Arc<dyn Fn() + Send + Sync>,
+    /// gen 3: the transcript plane reader (docs/chat3-sync.md).
+    pub(crate) plane: Option<Arc<ReaderPlane>>,
 }
 
 impl ViewerSink {
@@ -298,12 +349,23 @@ impl ChatDocSink for ViewerSink {
     fn advance_cursor(&self, cursor: u64) {
         self.persister.applied(cursor, true);
     }
+
+    fn apply_transcript_frame(&self, kind: u8, header: &serde_json::Value, payload: &[u8]) {
+        let (Some(plane), Some(doc)) = (&self.plane, self.doc.upgrade()) else {
+            return;
+        };
+        if plane.apply_frame(&doc, kind, header, payload) {
+            self.persister.dirty(false);
+            (self.on_applied)();
+        }
+    }
 }
 
 /// Fresh `?token=` per dial.
 pub(crate) struct ChatUrl {
     pub(crate) bearer: Bearer,
     pub(crate) edge: String,
+    pub(crate) room: &'static str,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
     pub(crate) host_device_id: String,
@@ -313,6 +375,7 @@ impl UrlProvider for ChatUrl {
     fn url(&self) -> BoxFuture<'static, Result<String, SyncError>> {
         let bearer = self.bearer.clone();
         let host = self.host_device_id.clone();
+        let room = self.room;
         let (edge, chat, device) = (
             self.edge.clone(),
             self.chat_id.clone(),
@@ -322,7 +385,7 @@ impl UrlProvider for ChatUrl {
             let token = bearer.get().await?;
             Ok(format!(
                 "{}&hostDevice={}",
-                urls::chat_ws(&edge, &chat, &token, &device),
+                urls::chat_ws(&edge, room, &chat, &token, &device),
                 urls::encode(&host)
             ))
         })
@@ -334,6 +397,7 @@ impl UrlProvider for ChatUrl {
 pub(crate) struct ChatHttp {
     pub(crate) bearer: Bearer,
     pub(crate) edge: String,
+    pub(crate) room: &'static str,
     pub(crate) chat_id: String,
     pub(crate) device_id: String,
     pub(crate) host_device_id: String,
@@ -346,7 +410,7 @@ fn http_err(err: reqwest::Error) -> SyncError {
 impl CheckpointFetcher for ChatHttp {
     fn fetch(&self) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::chat_checkpoint(&self.edge, &self.chat_id);
+        let url = urls::chat_checkpoint(&self.edge, self.room, &self.chat_id);
         Box::pin(async move {
             let mut got: Vec<u8> = Vec::new();
             let mut seen_seq: Option<String> = None;
@@ -413,7 +477,7 @@ impl CheckpointFetcher for ChatHttp {
 impl ChatTransport for ChatHttp {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         let bearer = self.bearer.clone();
-        let url = urls::chat_rows(&self.edge, &self.chat_id, after, &self.device_id);
+        let url = urls::chat_rows(&self.edge, self.room, &self.chat_id, after, &self.device_id);
         Box::pin(async move {
             let _permit = zeron_sync::budget::shared()
                 .http(zeron_sync::budget::Priority::Interactive)
@@ -444,7 +508,7 @@ impl ChatTransport for ChatHttp {
         let bearer = self.bearer.clone();
         let url = format!(
             "{}&hostDevice={}",
-            urls::chat_push(&self.edge, &self.chat_id, &batch_id, &self.device_id),
+            urls::chat_push(&self.edge, self.room, &self.chat_id, &batch_id, &self.device_id),
             urls::encode(&self.host_device_id)
         );
         Box::pin(async move {
@@ -470,6 +534,60 @@ impl ChatTransport for ChatHttp {
     }
 }
 
+/// chat3 pages, feed and tool outputs over the same bearer auth. A viewer
+/// never writes rows or outputs: only the chat's host engine does.
+impl TranscriptTransport for ChatHttp {
+    fn post_items(&self, _body: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(async { Err(SyncError::Protocol("viewers do not publish transcript rows".into())) })
+    }
+
+    fn fetch_items(&self, query: String) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        let bearer = self.bearer.clone();
+        let url = urls::chat3_items(&self.edge, &self.chat_id, &query);
+        Box::pin(async move {
+            let _permit = zeron_sync::budget::shared()
+                .http(zeron_sync::budget::Priority::Interactive)
+                .await?;
+            let token = bearer.get().await?;
+            let response = crate::auth::http()
+                .get(url)
+                .bearer_auth(token)
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+                .map_err(http_err)?;
+            if !response.status().is_success() {
+                return Err(SyncError::Protocol(format!("chat3 items http {}", response.status())));
+            }
+            Ok(response.bytes().await.map_err(http_err)?.to_vec())
+        })
+    }
+
+    fn put_output(&self, _part: String, _bytes: Vec<u8>) -> BoxFuture<'static, Result<(), SyncError>> {
+        Box::pin(async { Err(SyncError::Protocol("viewers do not publish tool outputs".into())) })
+    }
+
+    fn get_output(&self, part: String) -> BoxFuture<'static, Result<Option<Vec<u8>>, SyncError>> {
+        let bearer = self.bearer.clone();
+        let url = urls::chat3_output(&self.edge, &self.chat_id, &part);
+        Box::pin(async move {
+            let token = bearer.get().await?;
+            let response = crate::auth::http()
+                .get(url)
+                .bearer_auth(token)
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+                .map_err(http_err)?;
+            match response.status().as_u16() {
+                404 => Ok(None),
+                200..=299 => Ok(Some(response.bytes().await.map_err(http_err)?.to_vec())),
+                code => Err(SyncError::Protocol(format!("chat3 output http {code}"))),
+            }
+        })
+    }
+}
+
 /// Room connection posture (feeds connectivity + the composer strip).
 #[derive(Default)]
 pub(crate) struct RoomStatus {
@@ -489,6 +607,8 @@ pub(crate) struct Room {
     pub(crate) persister: Arc<Persister>,
     cancel: CancellationToken,
     _local_updates: loro::Subscription,
+    /// gen 3: the transcript plane reader and its HTTP transport.
+    plane: Option<(Arc<ReaderPlane>, Arc<ChatHttp>, Weak<SessionDoc>)>,
 }
 
 #[derive(Default)]
@@ -513,6 +633,8 @@ pub(crate) struct RoomDeps {
     /// The client's lifetime: sign-out stops the room even while a view
     /// still holds its session.
     pub cancel: CancellationToken,
+    /// Sync room generation: 2 = chat2, 3 = chat2 state log + transcript plane.
+    pub room_gen: u32,
 }
 
 impl Room {
@@ -551,6 +673,20 @@ impl Room {
                 true
             }));
 
+        let plane = (deps.room_gen == 3).then(|| {
+            (
+                Arc::new(ReaderPlane::new(Arc::new(Mutex::new(())))),
+                Arc::new(ChatHttp {
+                    bearer: deps.bearer.clone(),
+                    edge: deps.edge.clone(),
+                    room: "chat3",
+                    chat_id: chat_id.to_owned(),
+                    device_id: deps.device_id.clone(),
+                    host_device_id: deps.host_device_id.clone(),
+                }),
+                Arc::downgrade(doc),
+            )
+        });
         let room = Arc::new(Self {
             chat_id: chat_id.to_owned(),
             slot,
@@ -558,22 +694,44 @@ impl Room {
             persister,
             cancel,
             _local_updates: local_updates,
+            plane,
         });
         room.spawn_join(doc, deps);
         room
     }
 
+    /// gen 3: page older history in. Returns whether still older rows exist.
+    pub(crate) async fn load_earlier(&self) -> Result<bool, SyncError> {
+        let Some((plane, http, doc)) = &self.plane else {
+            return Ok(false);
+        };
+        let more = plane.load_earlier(doc, http.as_ref()).await?;
+        self.persister.dirty(false);
+        Ok(more)
+    }
+
+    /// gen 3: a tool's full output from the room (`chat3:` refs).
+    pub(crate) async fn fetch_output(&self, part_id: &str) -> Result<Option<Vec<u8>>, SyncError> {
+        let Some((_, http, _)) = &self.plane else {
+            return Ok(None);
+        };
+        http.get_output(part_id.to_owned()).await
+    }
+
     fn spawn_join(self: &Arc<Self>, doc: &Arc<SessionDoc>, deps: RoomDeps) {
+        let room_prefix = room_prefix(deps.room_gen);
         let sink = Arc::new(ViewerSink {
             doc: Arc::downgrade(doc),
             store: deps.store.clone(),
             chat_id: self.chat_id.clone(),
             persister: self.persister.clone(),
             on_applied: deps.on_applied.clone(),
+            plane: self.plane.as_ref().map(|(plane, _, _)| plane.clone()),
         });
         let url: Arc<dyn UrlProvider> = Arc::new(ChatUrl {
             bearer: deps.bearer.clone(),
             edge: deps.edge.clone(),
+            room: room_prefix,
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
             host_device_id: deps.host_device_id.clone(),
@@ -581,6 +739,7 @@ impl Room {
         let http = Arc::new(ChatHttp {
             bearer: deps.bearer.clone(),
             edge: deps.edge.clone(),
+            room: room_prefix,
             chat_id: self.chat_id.clone(),
             device_id: deps.device_id.clone(),
             host_device_id: deps.host_device_id.clone(),
@@ -628,6 +787,7 @@ impl Room {
                 backoff = (backoff * 2).min(JOIN_RETRY_CAP);
             };
             let mut events = client.events();
+            let plane_events = client.events();
             {
                 let Some(room) = weak.upgrade() else { return };
                 let mut slot = lock(&room.slot);
@@ -635,6 +795,18 @@ impl Room {
                     client.enqueue_batch(batch_id, bytes);
                 }
                 slot.client = Some(client);
+                if let Some((plane, http, doc)) = room.plane.clone() {
+                    spawn_plane_reader(
+                        plane,
+                        http,
+                        doc,
+                        plane_events,
+                        cancel.clone(),
+                        room.persister.clone(),
+                        room.status.clone(),
+                        on_applied.clone(),
+                    );
+                }
             }
             on_status();
             loop {
@@ -711,6 +883,62 @@ impl Room {
     pub(crate) fn flush(&self) {
         self.persister.flush();
     }
+}
+
+/// gen 3 reader: catch up on join, on every reconnect and on a rev gap —
+/// and every 30 s while the socket is down (rows reach a reader by socket
+/// relay; the HTTPS pull transport never carries them).
+#[allow(clippy::too_many_arguments)]
+fn spawn_plane_reader(
+    plane: Arc<ReaderPlane>,
+    http: Arc<ChatHttp>,
+    doc: Weak<SessionDoc>,
+    mut events: tokio::sync::broadcast::Receiver<ChatEvent>,
+    cancel: CancellationToken,
+    persister: Arc<Persister>,
+    status: Arc<RoomStatus>,
+    on_applied: Arc<dyn Fn() + Send + Sync>,
+) {
+    crate::runtime::shared().spawn(async move {
+        let mut backoff = JOIN_RETRY_BASE;
+        loop {
+            let caught_up = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = plane.catch_up(&doc, http.as_ref()) => result,
+            };
+            match caught_up {
+                Ok(()) => {
+                    backoff = JOIN_RETRY_BASE;
+                    persister.dirty(false);
+                    on_applied();
+                }
+                Err(err) => {
+                    tracing::debug!(chat = %http.chat_id, error = %err, "chat3 catch-up failed; retrying");
+                    if !super::wait_backoff(&cancel, backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(JOIN_RETRY_CAP);
+                    continue;
+                }
+            }
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = plane.catch_up.notified() => break,
+                    event = events.recv() => match event {
+                        Ok(ChatEvent::Connected) => break,
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if !status.connected.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 impl Drop for Room {

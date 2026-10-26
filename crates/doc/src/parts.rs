@@ -402,6 +402,10 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 });
             }
         }
+        // Output deltas never enter a gen-2 doc (outputs don't); a gen-3
+        // host folds them into the running part's live tail itself
+        // (chat3_host::fold_tool_output).
+        AgentEvent::ToolOutputDelta { .. } => {}
         AgentEvent::ToolResult {
             id,
             is_error,
