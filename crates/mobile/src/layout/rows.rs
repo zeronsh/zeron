@@ -78,12 +78,8 @@ pub(crate) fn next_version() -> u64 {
 
 pub(crate) struct UserBubble {
     /// `Message from [mark] Chat` over the bubble, for a message another
-    /// chat sent through Zeron's `send_message`; `Message to [mark] Chat`
-    /// over one this chat's agent sent.
+    /// chat sent through Zeron's `send_message`.
     pub sender: Option<PText>,
-    /// A message this chat's agent sent another chat: it sits on the agent's
-    /// side, left-aligned, with no attachments.
-    pub outgoing: bool,
     pub text: PText,
     pub images: Vec<String>,
     /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
@@ -114,6 +110,9 @@ pub(crate) enum Content {
     Tools(ToolGroup),
     Chip(Chip),
     Notice(Notice),
+    /// One muted line on the agent's side: `Message to [mark] Chat` for a
+    /// message this chat's agent sent. Faded while sending.
+    Caption { text: PText, pending: bool },
     Image { reference: String },
     Working { since_ms: Option<i64>, streaming: bool },
     /// An agent visual: its height comes from its worker.
@@ -427,8 +426,9 @@ impl RowBuilder {
                 MessagePart::Tool { id, call, is_error, resolved, .. }
                     if let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call) =>
                 {
-                    // A message to another chat reads as the message, not a
-                    // tool: it leaves the group, one bubble per recipient.
+                    // A message to another chat reads as one line naming the
+                    // recipient, not a tool: it leaves the group, one line
+                    // per recipient.
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     for (mi, message) in sent.iter().enumerate() {
                         let gap = gap_for(&rows, false);
@@ -579,9 +579,8 @@ impl RowBuilder {
         next
     }
 
-    /// A message this chat's agent sent another (`send_message`): the
-    /// recipient over a bubble on the agent's side. Faded while sending; a
-    /// failed send says so.
+    /// A message this chat's agent sent another (`send_message`): one line
+    /// naming the recipient. Faded while sending; a failed send says so.
     #[allow(clippy::too_many_arguments)]
     fn outgoing_row(
         &mut self,
@@ -593,42 +592,16 @@ impl RowBuilder {
         failed: bool,
         workspace: Option<&WorkspaceSnapshot>,
     ) -> RowCore {
-        let key = row_key(&format!("{entry_id}#{part_id}"));
         let (title, harness, id) = recipient_chat(&message.chat, workspace);
         let lead = if failed { "Couldn't message" } else { "Message to" };
-        let sender = chat_caption(ctx, lead, &title, harness.as_deref(), id.as_deref());
-        let (size, lh) = TYPE.body;
-        let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
-        let lh = ctx.typo.px(lh);
-        let text = prepare_plain(ctx, &message.text, style, lh, if failed { ColorRole::TextSecondary } else { ColorRole::Text }, WhiteSpace::PreWrap);
-        let (msize, mlh) = TYPE.small;
-        let mstyle = ctx.typo.style(Family::Sans, Weight::Medium, false, msize);
-        let expanded = self.expanded.contains(&key);
-        let more = prepare_plain(
-            ctx,
-            if expanded { "Show less" } else { "Show more" },
-            mstyle,
-            ctx.typo.px(mlh),
-            ColorRole::TextSecondary,
-            WhiteSpace::Pre,
-        );
         RowCore {
-            key,
+            key: row_key(&format!("{entry_id}#{part_id}")),
             version: next_version(),
             // Agent content, not a prompt: user rows anchor the turn scroll.
             kind: RowKind::Markdown,
             entry_id: Arc::from(entry_id),
-            content: Content::User(UserBubble {
-                sender: Some(sender),
-                outgoing: true,
-                text,
-                images: Vec::new(),
-                files: Vec::new(),
-                pending,
-                expanded,
-                more,
-            }),
-            copy_text: message.text.clone(),
+            content: Content::Caption { text: chat_caption(ctx, lead, &title, harness.as_deref(), id.as_deref()), pending },
+            copy_text: format!("{lead} {title}"),
         }
     }
 
@@ -693,7 +666,6 @@ impl RowBuilder {
             entry_id: Arc::from(id),
             content: Content::User(UserBubble {
                 sender,
-                outgoing: false,
                 text,
                 images,
                 files,
@@ -1057,6 +1029,20 @@ pub(crate) fn place_row(
             let th = place_text(&c.text, x + px.v(24.0), top + px.v(4.0), cw - px.v(24.0), out);
             h.max(th + px.v(8.0))
         }
+        Content::Caption { text, pending } => {
+            // Left-aligned like the agent's text; a long title fades.
+            if let Some(out) = out.as_deref_mut() {
+                let w = text.p.max_content_width().ceil().min(cw);
+                let first = out.runs.len();
+                place_text_lines(text, x, top, w, 1, px, out);
+                if *pending {
+                    for r in &mut out.runs[first..] {
+                        r.color = ColorRole::TextTertiary;
+                    }
+                }
+            }
+            text.lh
+        }
         Content::Notice(n) => {
             // Card: padding, the warning glyph beside the text, and the
             // action button trailing it; text and button centered on each
@@ -1190,8 +1176,7 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     if let Some(caption) = &u.sender {
         let under = if bubble_h > 0.0 { bubble_w } else { max_w };
         let cw_caption = caption.p.max_content_width().ceil().min(under);
-        let cx = if u.outgoing { x } else { x + cw - cw_caption };
-        place_text_lines(caption, cx, y, cw_caption, 1, px, out);
+        place_text_lines(caption, x + cw - cw_caption, y, cw_caption, 1, px, out);
     }
     let y = y + caption_h;
     // Thumbnails right-aligned above the bubble.
@@ -1216,7 +1201,7 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
         fy += pill_h + gap;
     }
     if bubble_h > 0.0 {
-        let bx = if u.outgoing { x } else { x + cw - bubble_w };
+        let bx = x + cw - bubble_w;
         let by = y + thumbs_h;
         out.fill(bx, by, bubble_w, bubble_h, px.v(BUBBLE_RADIUS).min(bubble_h / 2.0), ColorRole::UserBubble);
         place_text_lines(&u.text, bx + pad_x, by + pad_y, text_w, shown, px, out);
@@ -1264,6 +1249,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::User(u) => u.sender.as_ref().map_or(0, |c| c.p.heap_bytes()) + u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
+        Content::Caption { text, .. } => text.p.heap_bytes(),
         Content::Notice(n) => n.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,

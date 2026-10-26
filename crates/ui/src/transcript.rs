@@ -1074,12 +1074,11 @@ pub enum RowKind {
         pending: bool,
     },
     /// A message this chat's agent sent another chat through Zeron's
-    /// `send_message`: the message, not the tool call, on the agent's side.
+    /// `send_message`: one `Message to [logo] Chat` line, not the tool call.
     SentMessage {
         /// The recipient as the call named it (id, id prefix, or title),
         /// resolved against the chat list at render.
         to: SharedString,
-        text: SharedString,
         /// The call hasn't returned yet.
         pending: bool,
         failed: bool,
@@ -1518,8 +1517,8 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
-                // A message to another chat reads as the message it sent,
-                // one bubble per recipient, out of the tool fold (compact
+                // A message to another chat reads as one line naming the
+                // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
                 if !compact
                     && let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call)
@@ -1534,17 +1533,16 @@ pub fn rows_for_entry(
                         let version = {
                             use std::hash::{Hash, Hasher};
                             let mut h = std::collections::hash_map::DefaultHasher::new();
-                            (&message.chat, &message.text, *resolved, *is_error).hash(&mut h);
+                            (&message.chat, *resolved, *is_error).hash(&mut h);
                             h.finish()
                         };
                         rows.push(Row {
                             id: format!("{}#{}.m{message_ix}", entry.id, part.id()).into(),
                             version,
                             turn_start: false,
-                            copy_text: Some(message.text.clone().into()),
+                            copy_text: None,
                             kind: RowKind::SentMessage {
                                 to: message.chat.into(),
-                                text: message.text.into(),
                                 pending: !*resolved,
                                 failed: *is_error,
                             },
@@ -6570,15 +6568,19 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_chat_caption(
-            row_id,
-            "Message from",
-            Some(sender.chat_id.as_ref()),
-            sender.title.clone(),
-            true,
-            theme,
-            cx,
-        )
+        div()
+            .w_full()
+            .pb(px(USER_CAPTION_GAP))
+            .child(self.render_chat_caption(
+                row_id,
+                "Message from",
+                Some(sender.chat_id.as_ref()),
+                sender.title.clone(),
+                true,
+                theme,
+                cx,
+            ))
+            .into_any_element()
     }
 
     /// `{lead} [logo] Chat` over a message between chats: chat `chat_id`'s
@@ -6630,7 +6632,6 @@ impl Transcript {
             .flex()
             .when(end, |el| el.justify_end())
             .when(!end, |el| el.justify_start())
-            .pb(px(USER_CAPTION_GAP))
             .child(
                 user_caption(theme)
                     .id(SharedString::from(format!("{row_id}-chat")))
@@ -7674,7 +7675,6 @@ impl Transcript {
             }
             RowKind::SentMessage {
                 to,
-                text,
                 pending,
                 failed,
             } => {
@@ -7693,12 +7693,9 @@ impl Transcript {
                 } else {
                     "Message to"
                 };
-                let (text, pending, failed) = (text.clone(), *pending, *failed);
-                // The user bubble mirrored to the agent's side.
                 div()
                     .w_full()
-                    .flex()
-                    .flex_col()
+                    .when(*pending, |el| el.opacity(0.65))
                     .child(self.render_chat_caption(
                         &row.id,
                         lead,
@@ -7708,30 +7705,6 @@ impl Transcript {
                         &theme,
                         cx,
                     ))
-                    .child(
-                        div().w_full().flex().justify_start().child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(self.content_width * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
-                                .rounded(px(Theme::BUBBLE_RADIUS))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .text_size(crate::typography::ui_rems(14.0))
-                                .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
-                                .text_color(if failed { theme.text_muted } else { theme.text })
-                                .when(pending, |el| el.opacity(0.65))
-                                .child(self.render_user_body(
-                                    &row.id,
-                                    ix,
-                                    text,
-                                    Arc::new(Vec::new()),
-                                    &theme,
-                                    window,
-                                    cx,
-                                )),
-                        ),
-                    )
                     .into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
@@ -12421,10 +12394,10 @@ mod tests {
         // The ordinary tool keeps its fold; each message is its own row.
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
-        let RowKind::SentMessage { to, text, pending, failed } = &rows[1].kind else {
+        let RowKind::SentMessage { to, pending, failed } = &rows[1].kind else {
             panic!("expected a sent message");
         };
-        assert_eq!((to.as_ref(), text.as_ref(), *pending, *failed), ("Windows lane", "Run it.", true, false));
+        assert_eq!((to.as_ref(), *pending, *failed), ("Windows lane", true, false));
         assert!(matches!(&rows[3].kind, RowKind::SentMessage { to, .. } if to.as_ref() == "b"));
         // Compact mode folds the whole turn, sends included: they show when
         // the work fold opens.

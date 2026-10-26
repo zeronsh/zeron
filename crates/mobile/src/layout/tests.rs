@@ -146,7 +146,7 @@ fn agent_messages_show_their_sender_over_the_bubble() {
 }
 
 #[test]
-fn messages_the_agent_sent_show_as_bubbles_on_its_side() {
+fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
     let tool = |id: &str, name: &str, input: serde_json::Value| MessagePart::Tool {
         id: id.into(),
         call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: name.into(), input: Some(input) },
@@ -185,13 +185,12 @@ fn messages_the_agent_sent_show_as_bubbles_on_its_side() {
     assert_eq!(frame.row_count(), 4);
     assert_eq!(frame.placement(1).unwrap().kind, RowKind::Markdown);
     let d = frame.display(1).unwrap();
-    assert!(d.text.starts_with("Message to \u{2060} Windows lane"), "{}", d.text);
-    assert!(d.text.contains("Run the matrix."), "{}", d.text);
-    // Left-aligned: the caption and the bubble start at the column's edge.
-    let bubble = d.boxes.iter().find(|b| b.color == display::ColorRole::UserBubble).unwrap();
-    let caption = d.runs.first().unwrap();
-    assert!((caption.x - bubble.x).abs() < 0.5 && bubble.x < 40.0, "{caption:?} {bubble:?}");
-    assert!(frame.display(3).unwrap().text.contains("two"));
+    // Just the recipient: no bubble, no message text.
+    assert_eq!(d.text, "Message to \u{2060} Windows lane");
+    assert!(d.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
+    // Left-aligned at the column's edge.
+    assert!(d.runs.first().unwrap().x < 40.0);
+    assert!(frame.display(3).unwrap().text.ends_with(" b"));
 }
 
 fn transcript_one(text: &str) -> TranscriptInput {
