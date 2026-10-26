@@ -823,7 +823,9 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
     let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);
     let mark = ctx.typo.px(14.0);
-    let text = format!("Message from {title}");
+    // The mark rides a zero-width word joiner's padding, with a space on
+    // either side, so it sits as far from the title as from "from".
+    let text = format!("Message from \u{2060} {title}");
     let split = "Message from ".len();
     let spans = vec![
         zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
@@ -1072,9 +1074,11 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let caption_h = u.sender.as_ref().map_or(0.0, |c| c.lh + px.v(CAPTION_GAP));
     let h = caption_h + thumbs_h + bubble_h;
     let Some(out) = out else { return h };
-    // The sender caption, right-aligned over everything; a long title fades.
+    // The sender caption, right-aligned over everything and never wider than
+    // the bubble under it; a long title fades.
     if let Some(caption) = &u.sender {
-        let cw_caption = caption.p.max_content_width().ceil().min(max_w);
+        let under = if bubble_h > 0.0 { bubble_w } else { max_w };
+        let cw_caption = caption.p.max_content_width().ceil().min(under);
         place_text_lines(caption, x + cw - cw_caption, y, cw_caption, 1, px, out);
     }
     let y = y + caption_h;

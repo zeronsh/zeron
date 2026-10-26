@@ -129,7 +129,7 @@ fn agent_messages_show_their_sender_over_the_bubble() {
     w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
     let frame = w.pass();
     let d = frame.display(0).unwrap();
-    assert!(d.text.starts_with("Message from Windows lane"), "{}", d.text);
+    assert!(d.text.starts_with("Message from \u{2060} Windows lane"), "{}", d.text);
     assert!(d.text.contains("Windows lane: done."), "{}", d.text);
     assert!(!d.text.contains("send_message") && !d.text.contains("cd27c5c2"), "{}", d.text);
     assert_eq!(frame.message_text(0).as_deref(), Some("Windows lane: done."));
@@ -141,6 +141,8 @@ fn agent_messages_show_their_sender_over_the_bubble() {
     let bubble = d.boxes.iter().find(|b| b.color == display::ColorRole::UserBubble).unwrap();
     let caption = d.runs.first().unwrap();
     assert!(caption.baseline < bubble.y, "{caption:?} {bubble:?}");
+    // No wider than the bubble: nothing of it starts left of the bubble.
+    assert!(d.runs.iter().filter(|r| r.baseline < bubble.y).all(|r| r.x >= bubble.x - 0.5), "{:?} {bubble:?}", d.runs);
 }
 
 fn transcript_one(text: &str) -> TranscriptInput {
