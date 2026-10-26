@@ -1125,6 +1125,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func markSeen(chatId: String) 
     
+    func markUnread(chatId: String) throws 
+    
     /**
      * Reorder a pin between neighbours (`None` at either end).
      */
@@ -1817,6 +1819,15 @@ open func listRefs(deviceId: String, repoPath: String)async throws  -> [RepoRef]
 open func markSeen(chatId: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_zeron_mobile_fn_method_coreclient_mark_seen(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(chatId),uniffiCallStatus
+    )
+}
+}
+    
+open func markUnread(chatId: String)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_mark_unread(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(chatId),uniffiCallStatus
     )
@@ -21908,6 +21919,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_mark_seen() != 64234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_mark_unread() != 27854) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_move_pin() != 26081) {

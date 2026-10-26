@@ -87,6 +87,17 @@ Server→client:
 - Re-applying any op is a no-op (`>` compare) — reconnect re-pushes are idempotent by
   construction.
 
+### Read and unread session intents
+
+Session read state is not a separate boolean. A chat is unread when it has a
+`lastMessageAt` and `lastSeenAt` is absent or older. Opening a session writes
+`lastSeenAt = max(now, lastMessageAt)`; the explicit **Unread** action writes
+`lastSeenAt: null`. Null removes the value but deliberately retains the newer
+per-field clock, so a delayed older seen marker cannot resurrect it. Either desktop
+or iOS may issue the next intent from its local replica, even when the chat's host is
+offline. Snapshot and pending-op persistence make the same rule survive offline
+restarts and converge when the registry reconnects.
+
 ## Cursor + recovery
 
 - `seq` bumps once per accepted batch; every touched row is stamped with it. Delta sync is
