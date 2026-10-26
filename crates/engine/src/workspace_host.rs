@@ -1368,6 +1368,13 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// Promote a child chat (side chat, MCP-spawned worker) to a top-level
+    /// session by dropping its parent link. Returns false when the chat
+    /// doesn't exist.
+    pub fn clear_chat_parent(&self, chat_id: &str) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.clear_chat_parent(chat_id))?)
+    }
+
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.

@@ -882,3 +882,170 @@ async fn orphaned_history_steer_still_owes_the_history() {
     );
     core.shutdown().await;
 }
+
+async fn promote(client: &zeron_rpc::RpcClient, chat_id: &str) -> Result<(), String> {
+    client
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "promoteSideChat", "chatId": chat_id }),
+        )
+        .await
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+#[tokio::test]
+async fn promoting_a_side_chat_makes_it_a_top_level_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat("main", None, Some(&core.device_id), None, None)
+        .unwrap();
+    let main = core.doc_host.open("main").unwrap();
+    main.doc()
+        .push_message(&message(
+            "u1",
+            MessageRole::User,
+            "hi",
+            MessageStatus::Complete,
+        ))
+        .unwrap();
+    main.doc()
+        .push_message(&message(
+            "a1",
+            MessageRole::Assistant,
+            "hello",
+            MessageStatus::Complete,
+        ))
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    for id in ["side", "other-side"] {
+        client
+            .call(
+                methods::FORK_SIDE_CHAT,
+                serde_json::json!({ "chatId": id, "sourceChatId": "main" }),
+            )
+            .await
+            .unwrap();
+    }
+    let children = |core: &EngineCore| -> Vec<String> {
+        let mut ids: Vec<_> = core
+            .workspace
+            .read_chats()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.parent_chat_id.as_deref() == Some("main"))
+            .map(|c| c.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(children(&core), ["other-side", "side"]);
+    assert!(!core.workspace.chat("side").unwrap().unwrap().is_top_level());
+
+    promote(&client, "side").await.unwrap();
+    let row = core.workspace.chat("side").unwrap().unwrap();
+    assert!(row.is_top_level());
+    assert_eq!(row.parent_chat_id, None);
+    assert_eq!(children(&core), ["other-side"], "the sibling stays a child");
+    // The transcript, seam included, is the same doc it always was.
+    let entries = core
+        .doc_host
+        .open("side")
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().any(|e| e.id == "fork:side"));
+    // Promoting again, or promoting a chat that was never a child, is a no-op.
+    promote(&client, "side").await.unwrap();
+    promote(&client, "main").await.unwrap();
+    assert!(core.workspace.chat("main").unwrap().unwrap().is_top_level());
+    assert!(promote(&client, "missing").await.is_err());
+    // A hidden voice orchestrator is never listed.
+    let orchestrator = format!("{}x", zeron_proto::voice::ORCHESTRATOR_CHAT_PREFIX);
+    core.workspace
+        .create_chat(&orchestrator, None, Some(&core.device_id), None, None)
+        .unwrap();
+    assert!(promote(&client, &orchestrator).await.is_err());
+
+    // The promotion is durable.
+    core.shutdown().await;
+    drop(client);
+    drop(main);
+    drop(core);
+    let restarted = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    assert!(
+        restarted
+            .workspace
+            .chat("side")
+            .unwrap()
+            .unwrap()
+            .is_top_level()
+    );
+    assert_eq!(children(&restarted), ["other-side"]);
+    restarted.shutdown().await;
+}
+
+/// A fork promoted before its first turn has not yet been given the copied
+/// history; losing the side-chat marker must not lose that bootstrap.
+#[tokio::test]
+async fn a_promoted_fork_is_still_owed_its_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(Capture(requests.clone())));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.workspace
+        .create_chat(
+            "main",
+            None,
+            Some(&core.device_id),
+            None,
+            Some("/tmp".into()),
+        )
+        .unwrap();
+    let main = core.doc_host.open("main").unwrap();
+    main.doc()
+        .push_message(&message(
+            "u1",
+            MessageRole::User,
+            "Remember PINEAPPLE",
+            MessageStatus::Complete,
+        ))
+        .unwrap();
+    main.doc()
+        .push_message(&message(
+            "a1",
+            MessageRole::Assistant,
+            "I remember PINEAPPLE",
+            MessageStatus::Complete,
+        ))
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            methods::FORK_SIDE_CHAT,
+            serde_json::json!({ "chatId": "side", "sourceChatId": "main" }),
+        )
+        .await
+        .unwrap();
+    promote(&client, "side").await.unwrap();
+    assert!(core.workspace.chat("side").unwrap().unwrap().is_top_level());
+    let request = side_turn(&core, &requests, "side", "What did I ask?", "side-user").await;
+    assert!(request.prompt.contains("PINEAPPLE"));
+    core.shutdown().await;
+}

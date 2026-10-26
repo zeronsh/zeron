@@ -1365,6 +1365,23 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Promote a child chat to a top-level session: drop its `parentChatId`
+    /// so it lists in the main sidebar. LWW per-field from any device; the
+    /// transcript doc and harness session are untouched. `false` when no
+    /// such row.
+    pub fn clear_chat_parent(&mut self, chat_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("parentChatId", Value::Null)]),
+        );
+        Ok(true)
+    }
+
     /// Flip the chat's sync room generation (docs/chat2-sync.md M2). The
     /// host calls this in the same breath as seeding the chat2 checkpoint;
     /// LWW per-field like every registry write, so the flip is per-chat and

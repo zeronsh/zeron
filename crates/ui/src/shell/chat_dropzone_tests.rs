@@ -443,3 +443,63 @@ fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mu
         });
     }
 }
+
+/// A saved side chat's tab dropped on the sidebar moves the chat there, the
+/// same engine change as "Move to sidebar". Other tabs, and a side chat not
+/// sent yet, drop there as no-ops.
+#[gpui::test]
+fn side_chat_tab_dropped_on_the_sidebar_moves_it_there(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let (shell, cx) = setup_with_shell(cx, true);
+    let (out, mut requests) = tokio::sync::mpsc::channel::<String>(16);
+    let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                let mut side = state.chats[0].clone();
+                side.id = "saved-side".into();
+                side.parent_chat_id = Some("parent".into());
+                state.chats.push(side);
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                    zeron_rpc::RpcClient::new(out, inbound),
+                ));
+            });
+            shell.right_tween = None;
+            cx.notify();
+        });
+        window.draw(cx).clear();
+    });
+    let sidebar = cx.debug_bounds("sidebar-pane").unwrap().center();
+    // Tab 0 is a file, tab 2 the side chat not sent yet.
+    for tab in ["right-surface-tab-0", "right-surface-tab-2"] {
+        drag(cx, tab, sidebar);
+        cx.run_until_parked();
+        assert!(
+            mutations(&mut requests).is_empty(),
+            "{tab} must not move anything"
+        );
+    }
+    drag(cx, "right-surface-tab-1", sidebar);
+    cx.run_until_parked();
+    let moved = mutations(&mut requests);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0]["op"], "promoteSideChat");
+    assert_eq!(moved[0]["chatId"], "saved-side");
+}
+
+/// The `Mutate` params sent so far; the shell's background watches are
+/// skipped.
+fn mutations(requests: &mut tokio::sync::mpsc::Receiver<String>) -> Vec<serde_json::Value> {
+    let mut sent = Vec::new();
+    while let Ok(frame) = requests.try_recv() {
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if frame["method"] == "Mutate" {
+            sent.push(frame["params"].clone());
+        }
+    }
+    sent
+}

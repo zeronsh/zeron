@@ -462,6 +462,25 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Whether this chat began as a fork that was since promoted out from
+    /// under its parent. The registry row no longer says "side chat", but the
+    /// copied history is still owed to any provider session that never
+    /// received it. A cheap meta read, like [`Self::provider_switched`].
+    pub fn promoted_fork(&self) -> bool {
+        matches!(
+            self.doc.get_map("meta").get("promotedFork"),
+            Some(loro::ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+
+    pub fn mark_promoted_fork(&self) -> Result<(), DocError> {
+        if !self.promoted_fork() {
+            self.doc.get_map("meta").insert("promotedFork", true)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     /// Whether this chat has ever changed provider. Its transcript then holds
     /// turns the current provider session never saw, so a fresh session is
     /// owed the history. A cheap meta read: the warm-send path checks it on

@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, promoteSideChat, deleteChat, renameDevice, markChatSeen)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -683,6 +683,11 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
+    /// Move a side chat (or any child chat) out from under its parent into
+    /// the sidebar as a session of its own. Idempotent; the transcript and
+    /// provider session carry over untouched.
+    #[serde(rename_all = "camelCase")]
+    PromoteSideChat { chat_id: String },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1786,6 +1791,39 @@ impl EngineRpc {
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::PromoteSideChat { chat_id } => {
+                if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
+                    return Err(RpcError::Failed(
+                        "A voice chat can't move to the sidebar".into(),
+                    ));
+                }
+                let chat = self
+                    .workspace
+                    .chat(&chat_id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::Failed("Chat no longer exists".into()))?;
+                if chat.parent_chat_id.is_none() {
+                    return Ok(());
+                }
+                // The registry row stops saying "side chat" but its copied
+                // history may still be owed to a provider session: record
+                // that on the transcript doc first, so no host sees the
+                // promoted row without it.
+                match self.doc_host.open(&chat_id) {
+                    Ok(handle) => {
+                        if let Err(err) = handle.doc().mark_promoted_fork() {
+                            tracing::warn!(chat = %chat_id, error = %err, "marking a promoted fork failed");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(chat = %chat_id, error = %err, "opening a promoted fork failed");
+                    }
+                }
+                self.workspace
+                    .clear_chat_parent(&chat_id)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
