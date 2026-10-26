@@ -124,6 +124,7 @@ pub struct FrontPage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectView {
     pub id: String,
+    pub icon_path: Option<String>,
     pub name: String,
     pub path: String,
     pub color_index: u32,
@@ -652,6 +653,7 @@ pub(crate) fn derive(
                 .unwrap_or(ChatIndicator::Idle);
             let representative = representative_space(&state.spaces, space);
             ProjectView {
+                icon_path: representative.icon_path.clone(),
                 id: space.id.clone(),
                 name: space.display_name().to_owned(),
                 path: space.path.clone(),
@@ -796,6 +798,7 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
         project.id.hash(&mut h);
         project.name.hash(&mut h);
         project.path.hash(&mut h);
+        project.icon_path.hash(&mut h);
         project.color_index.hash(&mut h);
         project.group_key.hash(&mut h);
         project.group_name.hash(&mut h);

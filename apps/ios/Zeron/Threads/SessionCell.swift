@@ -29,6 +29,7 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    var projectIcon: Data? = nil
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -114,7 +115,7 @@ final class SessionCell: UICollectionViewListCell {
         // the title's leading edge (a separately framed tile drifted high).
         let metaFont = Fonts.ui(.sans, TypeScale.size(13.5))
         let tileSide = (14 * TypeScale.factor).rounded()
-        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide))
+        let tile = NSTextAttachment(image: ProjectTile.image(name: vm.hasProject ? vm.projectName : "Home", colorIndex: vm.colorIndex, side: tileSide, artwork: vm.projectIcon))
         tile.bounds = CGRect(x: 0, y: (metaFont.xHeight - tileSide) / 2, width: tileSide, height: tileSide)
         let metaText = NSMutableAttributedString(attachment: tile)
         metaText.append(NSAttributedString(string: "  " + vm.projectName, attributes: [.font: metaFont, .foregroundColor: Palette.secondary]))

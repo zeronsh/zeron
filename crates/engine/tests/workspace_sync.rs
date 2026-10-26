@@ -694,6 +694,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 device_id: "dev-a".into(),
                 path: "/tmp/legacy".into(),
                 name: Some("Legacy Space".into()),
+                icon_path: None,
                 git_detected: true,
                 git_checked_at: Some(now),
                 checkout_id: Some("co-1".into()),

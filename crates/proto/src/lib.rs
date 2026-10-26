@@ -17,6 +17,7 @@ pub mod motion;
 pub mod plan_usage;
 pub mod preview;
 pub mod program_status;
+pub mod project_icon;
 pub mod projectless;
 pub mod providers;
 pub mod run_errors;

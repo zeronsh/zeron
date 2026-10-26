@@ -325,6 +325,72 @@ impl CoreClient {
             .await
     }
 
+    pub async fn project_images(&self, space_id: String, query: String) -> CoreResult<Vec<String>> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                client.project_images(&space_id, &query),
+            )
+            .await
+            .map_err(|_| {
+                zeron_client::ClientError::HostUnavailable("Image search timed out".into())
+            })?
+        })
+        .await
+    }
+
+    pub async fn project_image(&self, space_id: String, path: Option<String>) -> CoreResult<Vec<u8>> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            let (mime, bytes) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                client.project_image(&space_id, path.as_deref()),
+            )
+            .await
+            .map_err(|_| {
+                zeron_client::ClientError::HostUnavailable("Image preview timed out".into())
+            })??;
+            tokio::task::spawn_blocking(move || crate::project_icon::thumbnail(&mime, bytes))
+                .await
+                .map_err(|_| zeron_client::ClientError::Internal("Icon task failed".into()))?
+                .map_err(zeron_client::ClientError::InvalidArgument)
+        })
+        .await
+    }
+
+    pub async fn project_icon(&self, space_id: String) -> CoreResult<Vec<u8>> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            let (mime, bytes) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                client.project_icon(&space_id),
+            )
+            .await
+            .map_err(|_| {
+                zeron_client::ClientError::HostUnavailable("Project icon timed out".into())
+            })??;
+            tokio::task::spawn_blocking(move || crate::project_icon::thumbnail(&mime, bytes))
+                .await
+                .map_err(|_| zeron_client::ClientError::Internal("Icon task failed".into()))?
+                .map_err(zeron_client::ClientError::InvalidArgument)
+        })
+        .await
+    }
+
+    pub fn edit_project(
+        &self,
+        space_id: String,
+        name: Option<String>,
+        icon_path: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.edit_project(
+            &space_id,
+            name.as_deref(),
+            icon_path.as_deref(),
+        )?)
+    }
+
     pub fn rename_project(&self, space_id: String, name: Option<String>) -> CoreResult<()> {
         Ok(self.client.rename_project(&space_id, name.as_deref())?)
     }

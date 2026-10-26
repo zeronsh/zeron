@@ -101,7 +101,7 @@ mod tabs;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
-use spaces::{AddSpaceFlow, RenameSpaceDialog};
+use spaces::{AddSpaceFlow, EditProjectDialog};
 
 /// `connected` already includes the engine's degradation grace. A brief
 /// focus-triggered dial needs no sidebar status; queued changes or a sustained
@@ -2156,7 +2156,7 @@ pub struct Shell {
     discard_working_tree_task: Option<Task<()>>,
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
-    rename_space_dialog: Option<RenameSpaceDialog>,
+    edit_project_dialog: Option<EditProjectDialog>,
     sidebar_section_migration: Option<(String, crate::state::EngineHandle)>,
     section_dialog: Option<sidebar_sections::SectionDialog>,
     section_menu: Option<(String, Point<Pixels>)>,
@@ -2699,7 +2699,7 @@ impl Shell {
             discard_working_tree: None,
             discard_working_tree_task: None,
             space_menu: popover::Popup::default(),
-            rename_space_dialog: None,
+            edit_project_dialog: None,
             sidebar_section_migration: None,
             section_dialog: None,
             section_menu: None,
@@ -10901,8 +10901,8 @@ impl Shell {
             self.finish_rename_chat(false, cx);
             return true;
         }
-        if self.rename_space_dialog.is_some() {
-            self.rename_space_dialog = None;
+        if self.edit_project_dialog.is_some() {
+            self.edit_project_dialog = None;
             cx.notify();
             return true;
         }
@@ -17203,6 +17203,7 @@ mod exit_regressions {
                     device_id: device.into(),
                     path: format!("/{id}"),
                     name: None,
+                    icon_path: None,
                     git_detected: true,
                     git_checked_at: None,
                     checkout_id: None,
@@ -17471,6 +17472,7 @@ mod exit_regressions {
                         device_id: "local".into(),
                         path: "/repo".into(),
                         name: None,
+                        icon_path: None,
                         git_detected: false,
                         git_checked_at: None,
                         checkout_id: None,
@@ -17541,6 +17543,7 @@ mod exit_regressions {
             device_id: device.into(),
             path: format!("/{id}"),
             name: None,
+            icon_path: None,
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
@@ -17627,6 +17630,7 @@ mod exit_regressions {
             device_id: "local".into(),
             path: format!("/{id}"),
             name: None,
+            icon_path: None,
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
@@ -17995,6 +17999,7 @@ mod exit_regressions {
                         device_id: "local".into(),
                         path: project.to_string_lossy().into_owned(),
                         name: None,
+                        icon_path: None,
                         git_detected: false,
                         git_checked_at: None,
                         checkout_id: None,

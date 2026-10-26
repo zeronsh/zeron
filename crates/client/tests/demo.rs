@@ -636,3 +636,15 @@ fn provider_switch_needs_a_host_that_switches() {
     model.model = Some("another-model".into());
     client.set_session_config("chat-blog", &model).unwrap();
 }
+
+
+#[test]
+fn an_icon_only_edit_refreshes_the_project_snapshot() {
+    let (client, _dir) = demo(fast());
+    client.edit_project("space-zeron", None, Some("assets/icon.svg")).unwrap();
+    let workspace = client.workspace();
+    for project in workspace.projects.iter().filter(|project| project.group_name == "zeron") {
+        assert_eq!(project.icon_path.as_deref(), Some("assets/icon.svg"));
+    }
+    assert_eq!(workspace.projects.iter().find(|project| project.id == "space-zeron").unwrap().icon_path.as_deref(), Some("assets/icon.svg"));
+}

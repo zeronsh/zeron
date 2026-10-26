@@ -1093,6 +1093,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     
     func devices()  -> [DeviceView]
     
+    func editProject(spaceId: String, name: String?, iconPath: String?) throws 
+    
     /**
      * Devices that can run sessions (new-session / new-project pickers).
      */
@@ -1172,6 +1174,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func preloadSessions() 
     
     func project(spaceId: String)  -> ProjectView?
+    
+    func projectIcon(spaceId: String) async throws  -> Data
+    
+    func projectImage(spaceId: String, path: String?) async throws  -> Data
+    
+    func projectImages(spaceId: String, query: String) async throws  -> [String]
     
     /**
      * Active sessions without a project.
@@ -1705,6 +1713,17 @@ open func devices() -> [DeviceView]  {
 })
 }
     
+open func editProject(spaceId: String, name: String?, iconPath: String?)throws   {try rustCallWithError(FfiConverterTypeCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_edit_project(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterOptionString.lower(name),
+        FfiConverterOptionString.lower(iconPath),uniffiCallStatus
+    )
+}
+}
+    
     /**
      * Devices that can run sessions (new-session / new-project pickers).
      */
@@ -1951,6 +1970,54 @@ open func project(spaceId: String) -> ProjectView?  {
         FfiConverterString.lower(spaceId),uniffiCallStatus
     )
 })
+}
+    
+open func projectIcon(spaceId: String)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_project_icon(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(spaceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func projectImage(spaceId: String, path: String?)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_project_image(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(spaceId),FfiConverterOptionString.lower(path)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+open func projectImages(spaceId: String, query: String)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_project_images(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(spaceId),FfiConverterString.lower(query)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -10876,6 +10943,7 @@ public func FfiConverterTypeProjectRef_lower(_ value: ProjectRef) -> RustBuffer 
 
 public struct ProjectView: Equatable, Hashable {
     public var id: String
+    public var iconPath: String?
     public var name: String
     public var path: String
     public var colorIndex: UInt32
@@ -10912,7 +10980,7 @@ public struct ProjectView: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, name: String, path: String, colorIndex: UInt32, deviceId: String, deviceName: String?, deviceOnline: Bool, 
+    public init(id: String, iconPath: String?, name: String, path: String, colorIndex: UInt32, deviceId: String, deviceName: String?, deviceOnline: Bool, 
         /**
          * Cloud: its own Cloud machine (sessions) or Cloud alone (projects).
          */isCloud: Bool, 
@@ -10932,6 +11000,7 @@ public struct ProjectView: Equatable, Hashable {
          * Active sessions, recency order.
          */sessions: [SessionRow]) {
         self.id = id
+        self.iconPath = iconPath
         self.name = name
         self.path = path
         self.colorIndex = colorIndex
@@ -10966,6 +11035,7 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
         return
             try ProjectView(
                 id: FfiConverterString.read(from: &buf), 
+                iconPath: FfiConverterOptionString.read(from: &buf), 
                 name: FfiConverterString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 colorIndex: FfiConverterUInt32.read(from: &buf), 
@@ -10986,6 +11056,7 @@ public struct FfiConverterTypeProjectView: FfiConverterRustBuffer {
 
     public static func write(_ value: ProjectView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.id, into: &buf)
+        FfiConverterOptionString.write(value.iconPath, into: &buf)
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterUInt32.write(value.colorIndex, into: &buf)
@@ -21886,6 +21957,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_devices() != 57985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_edit_project() != 18902) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_execution_devices() != 15578) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21941,6 +22015,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_project() != 50153) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_project_icon() != 60329) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_project_image() != 47592) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_project_images() != 4158) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_projectless_sessions() != 26434) {

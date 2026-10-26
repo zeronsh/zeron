@@ -5241,6 +5241,7 @@ mod tests {
             device_id: device_id.into(),
             path: path.into(),
             name: None,
+            icon_path: None,
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,

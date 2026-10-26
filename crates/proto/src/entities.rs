@@ -118,6 +118,9 @@ pub struct Space {
     /// User rename; absent ⇒ display = basename(path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Optional artwork path relative to the checkout root; absent means automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
     /// Owner-stamped: is `path` inside a git work tree?
     #[serde(default)]
     pub git_detected: bool,

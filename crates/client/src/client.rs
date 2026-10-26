@@ -1139,6 +1139,7 @@ impl Client {
             device_id: device_id.to_owned(),
             path: path.to_owned(),
             name: None,
+            icon_path: None,
             git_detected,
             git_checked_at: None,
             checkout_id: None,
@@ -1192,6 +1193,24 @@ impl Client {
         }
         self.inner.registry_write(|doc| doc.upsert_space(&space))?;
         Ok(id)
+    }
+
+    /// Name and artwork for every checkout of the project. `name: None`
+    /// keeps the current name; no artwork path means automatic.
+    pub fn edit_project(
+        &self,
+        space_id: &str,
+        name: Option<&str>,
+        icon_path: Option<&str>,
+    ) -> Result<()> {
+        if self
+            .inner
+            .registry_write(|doc| doc.edit_project(space_id, name, icon_path))?
+        {
+            Ok(())
+        } else {
+            Err(ClientError::NotFound(space_id.to_owned()))
+        }
     }
 
     pub fn rename_project(&self, space_id: &str, name: Option<&str>) -> Result<()> {

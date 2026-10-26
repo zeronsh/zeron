@@ -8,7 +8,14 @@ enum ProjectTile {
     }
 
     /// The tile as an image (composer chips), light/dark aware.
-    static func image(name: String, colorIndex: Int, side: CGFloat = 14) -> UIImage {
+    static func image(name: String, colorIndex: Int, side: CGFloat = 14, artwork: Data? = nil) -> UIImage {
+        if let artwork, let image = UIImage(data: artwork) {
+            let ratio = min(side / image.size.width, side / image.size.height)
+            let size = CGSize(width: image.size.width * ratio, height: image.size.height * ratio)
+            return UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
+                image.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height))
+            }.withRenderingMode(.alwaysOriginal)
+        }
         let tone = Palette.projectDots[colorIndex % Palette.projectDots.count]
         let asset = UIImageAsset()
         let scale = UITraitCollection.current.displayScale > 0 ? UITraitCollection.current.displayScale : 3

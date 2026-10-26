@@ -226,67 +226,23 @@ impl WorkspaceFilesClient {
         path: String,
         checkout_id: String,
     ) -> Result<(String, Vec<u8>), FilesClientError> {
-        use base64::Engine as _;
-        use zeron_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
-        // Outside files carry no checkout identity — the device resolves
-        // them by absolute path.
-        if checkout_id.is_empty() && !path.starts_with('/') {
-            return Err(FilesClientError::Decode(
-                "Workspace checkout identity unavailable".into(),
-            ));
-        }
-        let mut request = zeron_proto::ReadWorkspaceImageRequest {
+        let request = zeron_proto::ReadWorkspaceImageRequest {
             target: self.context.target.clone(),
             path,
             expected_checkout_id: checkout_id,
             offset: 0,
             expected_content_hash: None,
         };
-        let mut bytes = Vec::new();
-        let mut mime = None;
-        let mut size = None;
-        for _ in 0..=MAX_WORKSPACE_IMAGE_BYTES / WORKSPACE_IMAGE_CHUNK_BYTES {
-            let chunk: zeron_proto::WorkspaceImageChunk =
-                self.call(methods::READ_WORKSPACE_IMAGE, &request).await?;
-            if chunk.checkout_id != request.expected_checkout_id
-                || chunk.content_hash.is_empty()
-                || chunk.size > MAX_WORKSPACE_IMAGE_BYTES
-                || chunk.data.len() > WORKSPACE_IMAGE_CHUNK_BYTES.div_ceil(3) * 4
-                || request
-                    .expected_content_hash
-                    .as_ref()
-                    .is_some_and(|hash| hash != &chunk.content_hash)
-                || mime.as_ref().is_some_and(|m| m != &chunk.mime_type)
-                || size.is_some_and(|s| s != chunk.size)
-            {
-                return Err(FilesClientError::Decode(
-                    "Image identity or size changed".into(),
-                ));
+        zeron_client::workspace_image::read_image(request, |request| async move {
+            self.call(methods::READ_WORKSPACE_IMAGE, &request).await
+        })
+        .await
+        .map_err(|error| match error {
+            zeron_client::workspace_image::ImageReadError::Request(error) => error,
+            zeron_client::workspace_image::ImageReadError::Invalid(message) => {
+                FilesClientError::Decode(message)
             }
-            let part = base64::engine::general_purpose::STANDARD
-                .decode(&chunk.data)
-                .map_err(|e| FilesClientError::Decode(e.to_string()))?;
-            if part.is_empty()
-                || request.offset.checked_add(part.len()) != Some(chunk.next_offset)
-                || chunk.next_offset > chunk.size
-                || chunk.done != (chunk.next_offset == chunk.size)
-            {
-                return Err(FilesClientError::Decode(
-                    "Invalid image chunk offset".into(),
-                ));
-            }
-            bytes.extend(part);
-            if chunk.done {
-                return Ok((chunk.mime_type, bytes));
-            }
-            request.offset = chunk.next_offset;
-            request.expected_content_hash = Some(chunk.content_hash);
-            mime = Some(chunk.mime_type);
-            size = Some(chunk.size);
-        }
-        Err(FilesClientError::Decode(
-            "Image chunk limit exceeded".into(),
-        ))
+        })
     }
 
     pub async fn write_file(

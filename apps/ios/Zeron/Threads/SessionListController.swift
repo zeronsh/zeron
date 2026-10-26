@@ -289,7 +289,14 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                     self.deleteAction(id),
                 ])
             }
-            return UIMenu(children: [
+            var projectActions: [UIMenuElement] = []
+            if let project = self.app.row(id)?.project {
+                projectActions.append(UIAction(title: "Edit Project…", image: UIImage(systemName: "pencil.circle")) { [weak self] _ in
+                    guard let self else { return }
+                    self.editProject(project.id, app: self.app)
+                })
+            }
+            return UIMenu(children: projectActions + [
                 UIAction(title: vm.pinned ? "Unpin" : "Pin", image: UIImage(systemName: vm.pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(id, !vm.pinned) },
                 self.moveMenu(id),
                 UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },

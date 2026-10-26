@@ -9,13 +9,14 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
+use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::pickers::{
     breadcrumbs, browser_rows, completion_prefix_len, escape_typed_path, folder_path_key,
     is_windows_path, parent_path, resolve_typed_path, same_folder_path, split_typed_leaf,
     unescape_typed_path,
 };
 use gpui::{FocusHandle, Window};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use zeron_proto::{
     ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
@@ -2905,13 +2906,40 @@ fn tilde_path(path: &str, home: Option<&str>) -> String {
         .map_or_else(|| path.to_owned(), |rest| format!("~{rest}"))
 }
 
-/// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
-pub(super) struct RenameSpaceDialog {
+/// Project name and artwork editor.
+pub(super) struct EditProjectDialog {
     pub space_id: String,
     pub input: Entity<ComposerInput>,
+    pub icon_path: Option<String>,
+    pub seed: String,
+    /// The name shown on open; leaving it untouched keeps the stored name.
+    pub original_name: String,
+    /// Where artwork is read and browsed: this device's checkout, else the
+    /// representative's on its host.
+    pub artwork: FilesRequestContext,
+    /// The live tile preview and the icon path it loaded.
+    pub preview: Option<(Option<String>, Entity<super::project_icon::ProjectIcon>)>,
+    pub browser: Option<IconBrowser>,
+    pub error: Option<String>,
     pub focus_pending: bool,
     pub _events: Subscription,
 }
+
+/// The Edit Project dialog's searchable list of the checkout's images.
+pub(super) struct IconBrowser {
+    pub filter: Entity<ComposerInput>,
+    /// Search results in host order; `None` while searching.
+    pub results: Option<Result<Vec<String>, String>>,
+    pub active: usize,
+    pub scroll: gpui::UniformListScrollHandle,
+    pub thumbnails: HashMap<String, Entity<super::project_icon::ProjectIcon>>,
+    pub focus_pending: bool,
+    pub _search: Option<Task<()>>,
+    pub _events: Subscription,
+}
+
+/// Rows the icon browser shows before scrolling.
+const ICON_BROWSER_ROWS: usize = 6;
 
 /// Dot color for a chat's display status (tab dots + Sessions rows).
 pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
@@ -5879,7 +5907,7 @@ impl Shell {
                         .and_then(|space| state.project_members(space).first().map(|m| m.id.clone()))
                 })
                 .flatten();
-            let new_chat_button = group_space.map(|project| {
+            let new_chat_button = group_space.clone().map(|project| {
                 div()
                     .id(SharedString::from(format!(
                         "sidebar-group-new-chat-{collapse_key}"
@@ -5921,6 +5949,16 @@ impl Shell {
                 )
                     .group(group_name)
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                .when_some(group_space, |header, space_id| {
+                    header.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.space_menu.open((space_id.clone(), event.position));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
                     this.begin_sidebar_disclosure_motion(
@@ -7119,6 +7157,7 @@ impl Shell {
             device_id: device.id.clone(),
             path: path.clone(),
             name: None,
+            icon_path: None,
             git_detected,
             git_checked_at: None,
             checkout_id: None,
@@ -8762,7 +8801,7 @@ impl Shell {
         Some(command_palette::palette_overlay(viewport, card))
     }
 
-    // ---- space context menu / rename / delete overlays ----
+    // ---- space context menu / edit / delete overlays ----
 
     fn close_space_menu(&mut self, cx: &mut Context<Self>) {
         if self.space_menu.begin_close() {
@@ -8771,42 +8810,624 @@ impl Shell {
         }
     }
 
-    pub(super) fn open_rename_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+    pub(super) fn open_edit_project(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.close_space_menu(cx);
-        let current = self
-            .state
-            .read(cx)
-            .space_row(&space_id)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_default();
-        let input = cx.new(|cx| ComposerInput::new("Project name", cx));
+        let state = self.state.read(cx);
+        let Some(space) = state.space_row(&space_id) else {
+            return;
+        };
+        // The project's name and artwork live on its representative.
+        let representative = state.representative_space(space);
+        let current = representative.display_name().to_string();
+        let original_name = current.clone();
+        let icon_path = representative.icon_path.clone();
+        let seed = representative.path.clone();
+        let artwork = super::project_icon::artwork_context(state, space);
+        let field = |placeholder, cx: &mut Context<ComposerInput>| {
+            ComposerInput::new(placeholder, cx)
+                .with_single_line()
+                .with_text_metrics(14.0, 18.0)
+                .with_tab_stop()
+                .with_accessibility_role(gpui::Role::TextInput)
+        };
+        let input = cx.new(|cx| field("Project name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
-        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.submit_rename_space(cx);
-            }
+        let submit_or_redraw =
+            |this: &mut Shell, event: &ComposerInputEvent, cx: &mut Context<Shell>| {
+                match event {
+                    ComposerInputEvent::Submitted => this.submit_edit_project(cx),
+                    // The preview follows the name and icon path.
+                    ComposerInputEvent::Edited => cx.notify(),
+                    _ => {}
+                }
+            };
+        let events = cx.subscribe(&input, move |this, _, event, cx| {
+            submit_or_redraw(this, event, cx)
         });
-        self.rename_space_dialog = Some(RenameSpaceDialog {
+        self.edit_project_dialog = Some(EditProjectDialog {
             space_id,
             input,
+            icon_path,
+            seed,
+            original_name,
+            artwork,
+            preview: None,
+            browser: None,
+            error: None,
             focus_pending: true,
             _events: events,
         });
         cx.notify();
     }
 
-    pub(super) fn submit_rename_space(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename_space_dialog.take() else {
+    /// Open (or close) the in-dialog browser of the checkout's images. It
+    /// searches through the owning host, so remote checkouts work too.
+    fn toggle_icon_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.edit_project_dialog.as_mut() else {
             return;
         };
+        if dialog.browser.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let filter = cx.new(|cx| {
+            ComposerInput::new("Filter images", cx)
+                .with_single_line()
+                .with_text_metrics(13.0, 18.0)
+                .with_tab_stop()
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        let events = cx.subscribe(&filter, |this: &mut Shell, _, event, cx| match event {
+            ComposerInputEvent::Edited => this.search_icon_browser(cx),
+            ComposerInputEvent::Submitted => this.pick_browsed_icon(None, cx),
+            _ => {}
+        });
+        dialog.browser = Some(IconBrowser {
+            filter,
+            results: None,
+            active: 0,
+            scroll: gpui::UniformListScrollHandle::new(),
+            thumbnails: HashMap::new(),
+            focus_pending: true,
+            _search: None,
+            _events: events,
+        });
+        self.search_icon_browser(cx);
+        cx.notify();
+    }
+
+    fn search_icon_browser(&mut self, cx: &mut Context<Self>) {
+        let engine = self.state.read(cx).engine().cloned();
+        let Some(dialog) = self.edit_project_dialog.as_mut() else {
+            return;
+        };
+        let context = dialog.artwork.clone();
+        let Some(browser) = dialog.browser.as_mut() else {
+            return;
+        };
+        let filter = browser.filter.read(cx).text().to_string();
+        let Some(engine) = engine else {
+            browser.results = Some(Err("Not connected".into()));
+            return;
+        };
+        browser._search = Some(cx.spawn(async move |this, cx| {
+            // Coalesce typing.
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            let client = WorkspaceFilesClient::new(engine, context.clone());
+            let results = client
+                .search(zeron_proto::SearchWorkspaceFilesRequest {
+                    target: context.target.clone(),
+                    query: zeron_proto::project_icon::browse_query(&filter),
+                    include_ignored: false,
+                    limit: Some(200),
+                })
+                .await
+                .map(|found| {
+                    found
+                        .into_iter()
+                        .filter(|file| file.kind == zeron_proto::WorkspaceEntryKind::File)
+                        .map(|file| file.path)
+                        .collect()
+                })
+                .map_err(|error| error.to_string());
+            let _ = this.update(cx, |this, cx| {
+                if let Some(browser) = this
+                    .edit_project_dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.browser.as_mut())
+                {
+                    browser.results = Some(results);
+                    browser.active = 0;
+                    browser.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Fill the icon path with a browsed image: `index`, else the highlighted row.
+    fn pick_browsed_icon(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(dialog) = self.edit_project_dialog.as_mut() else {
+            return;
+        };
+        let Some(browser) = dialog.browser.as_ref() else {
+            return;
+        };
+        let Some(Ok(results)) = &browser.results else {
+            return;
+        };
+        let Some(path) = results.get(index.unwrap_or(browser.active)).cloned() else {
+            return;
+        };
+        dialog.browser = None;
+        dialog.error = None;
+        dialog.icon_path = Some(path);
+        cx.notify();
+    }
+
+    fn step_icon_browser(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(browser) = self
+            .edit_project_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.browser.as_mut())
+        else {
+            return;
+        };
+        let count = match &browser.results {
+            Some(Ok(results)) => results.len(),
+            _ => 0,
+        };
+        browser.active = popover::menu_step(Some(browser.active), count, delta).unwrap_or(0);
+        browser
+            .scroll
+            .scroll_to_item(browser.active, gpui::ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    pub(super) fn submit_edit_project(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.edit_project_dialog.as_mut() else {
+            return;
+        };
+        let icon_path = match zeron_proto::project_icon::normalize_path(dialog.icon_path.as_deref())
+        {
+            Ok(path) => path,
+            Err(message) => {
+                dialog.error = Some(message.into());
+                cx.notify();
+                return;
+            }
+        };
+        let Some(dialog) = self.edit_project_dialog.take() else {
+            return;
+        };
+        // Untouched: keep the stored name; blank: restore the folder name.
         let name = dialog.input.read(cx).text().trim().to_string();
-        if !name.is_empty() {
-            self.mutate(
-                serde_json::json!({ "op": "renameSpace", "spaceId": dialog.space_id, "name": name }),
-                cx,
+        let name = (name != dialog.original_name).then_some(name);
+        self.mutate(
+            serde_json::json!({
+                "op": "editProject",
+                "spaceId": dialog.space_id,
+                "name": name,
+                "iconPath": icon_path,
+            }),
+            cx,
+        );
+        // Reload artwork now, even when only the file behind the path changed.
+        self.project_icons.clear();
+        cx.notify();
+    }
+
+    /// Project name and browsed artwork, with a live preview.
+    fn render_edit_project_dialog(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let engine = self.state.read(cx).engine().cloned();
+        let dialog = self.edit_project_dialog.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
+        if let Some(browser) = dialog.browser.as_mut()
+            && std::mem::take(&mut browser.focus_pending)
+        {
+            window.focus(&browser.filter.focus_handle(cx), cx);
+        }
+        let seed = dialog.seed.clone();
+        let name = dialog.input.read(cx).text().trim().to_string();
+        let name = if name.is_empty() {
+            dialog.original_name.clone()
+        } else {
+            name
+        };
+        // Preview the selected artwork.
+        let preview_path =
+            zeron_proto::project_icon::normalize_path(dialog.icon_path.as_deref()).ok();
+        let artwork = preview_path.and_then(|path| {
+            if dialog.preview.as_ref().map(|(loaded, _)| loaded) != Some(&path) {
+                let context = dialog.artwork.clone();
+                let icon_path = path.clone();
+                let engine = engine.clone();
+                let entity = cx.new(|cx| {
+                    super::project_icon::ProjectIcon::new(
+                        String::new(),
+                        seed.clone(),
+                        context,
+                        icon_path,
+                        engine,
+                        36.0,
+                        cx,
+                    )
+                });
+                cx.observe(&entity, |_, _, cx| cx.notify()).detach();
+                dialog.preview = Some((path, entity));
+            }
+            dialog
+                .preview
+                .as_ref()
+                .map(|(_, entity)| entity.clone())
+                .filter(|entity| entity.read(cx).has_artwork())
+        });
+        let tile = div()
+            .size(px(36.0))
+            .flex_none()
+            .child(match artwork {
+                Some(artwork) => artwork.into_any_element(),
+                None => super::project_icon::monogram(&name, &seed, false, theme),
+            });
+
+        let input = dialog.input.clone();
+        let icon_name = dialog
+            .icon_path
+            .as_deref()
+            .and_then(|path| path.rsplit('/').next())
+            .unwrap_or("Automatic")
+            .to_string();
+        let error = dialog.error.clone();
+        let browsing = dialog.browser.is_some();
+        let section_label = |label: &'static str| {
+            div()
+                .mt(px(14.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(label)
+        };
+        let browser = self.render_icon_browser(theme, cx);
+        let card = popover::dialog_card(theme)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                let browsing = this
+                    .edit_project_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.browser.is_some());
+                match ev.keystroke.key.as_str() {
+                    "escape" if browsing => {
+                        if let Some(dialog) = this.edit_project_dialog.as_mut() {
+                            dialog.browser = None;
+                        }
+                    }
+                    "escape" => this.edit_project_dialog = None,
+                    "up" if browsing => this.step_icon_browser(-1, cx),
+                    "down" if browsing => this.step_icon_browser(1, cx),
+                    _ => return,
+                }
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(popover::dialog_title(theme, "Edit Project"))
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(tile)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(popover::dialog_field(input.into_any_element())),
+                    ),
+            )
+            .child(section_label("Icon"))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            div()
+                                .w_full()
+                                .h(px(32.0))
+                                .px(px(12.0))
+                                .rounded(px(8.0))
+                                .bg(crate::theme::ink(0.04))
+                                .flex()
+                                .items_center()
+                                .text_size(crate::typography::ui_rems(14.0))
+                                .child(icon_name),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .id("edit-project-browse")
+                            .role(gpui::Role::Button)
+                            .aria_label("Browse project images")
+                            .aria_expanded(browsing)
+                            .tab_index(0)
+                            .size(px(32.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .text_color(theme.text_muted)
+                            .when(browsing, |el| el.bg(theme.glass_hover()))
+                            .hover(|el| el.bg(theme.glass_hover()))
+                            .tooltip(crate::settings::widgets::text_tooltip(
+                                "Browse project images",
+                            ))
+                            .child(
+                                icon(icons::FOLDER)
+                                    .size(px(16.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_icon_browser(cx)))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.toggle_icon_browser(cx);
+                                    cx.stop_propagation();
+                                }
+                            })),
+                    ),
+            )
+            .children(browser)
+            .when_some(error, |el, error| {
+                el.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(
+                                popover::btn_ghost(theme, "Cancel", "edit-project-cancel")
+                                    .id("edit-project-cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.edit_project_dialog = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                popover::btn_primary(theme, "Save")
+                                    .id("edit-project-save")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.submit_edit_project(cx)),
+                                    ),
+                            ),
+                    ),
+            );
+        Some(card.into_any_element())
+    }
+
+    /// The icon browser panel: a filter over a virtualized list of images
+    /// with thumbnails; thumbnails load only for rows on screen.
+    fn render_icon_browser(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let browser = self.edit_project_dialog.as_ref()?.browser.as_ref()?;
+        const ROW_HEIGHT: f32 = 28.0;
+        let note = |text: String| {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(text)
+                .into_any_element()
+        };
+        let list = match &browser.results {
+            None => note("Searching images…".into()),
+            Some(Err(error)) => note(error.clone()),
+            Some(Ok(results)) if results.is_empty() => note("No images found".into()),
+            Some(Ok(results)) => {
+                let shell = cx.entity();
+                gpui::uniform_list(
+                    "edit-project-icon-list",
+                    results.len(),
+                    move |range, _, app| {
+                        shell.update(app, |this, cx| this.render_icon_browser_rows(range, cx))
+                    },
+                )
+                .size_full()
+                .px(px(popover::CARD_INSET))
+                .track_scroll(&browser.scroll)
+                .into_any_element()
+            }
+        };
+        let filter = browser.filter.clone();
+        Some(
+            div()
+                .mt(px(8.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.08))
+                .bg(crate::theme::ink(0.02))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(34.0))
+                        .px(px(10.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .border_b_1()
+                        .border_color(crate::theme::hairline(0.08))
+                        .child(
+                            icon(icons::MAGNIFER)
+                                .size(px(13.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .child(filter),
+                        ),
+                )
+                .child(
+                    popover::menu_row(theme, false, "project-icon-automatic")
+                        .id("project-icon-automatic")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(dialog) = this.edit_project_dialog.as_mut() {
+                                dialog.icon_path = None;
+                                dialog.browser = None;
+                                cx.notify();
+                            }
+                        }))
+                        .child("Automatic"),
+                )
+                .child(
+                    div()
+                        .id("edit-project-icon-list-host")
+                        .h(px(ROW_HEIGHT * ICON_BROWSER_ROWS as f32 + 8.0))
+                        .py(px(popover::CARD_INSET))
+                        .child(list),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_icon_browser_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let engine = self.state.read(cx).engine().cloned();
+        let Some(dialog) = self.edit_project_dialog.as_mut() else {
+            return Vec::new();
+        };
+        let context = dialog.artwork.clone();
+        let Some(browser) = dialog.browser.as_mut() else {
+            return Vec::new();
+        };
+        let Some(Ok(results)) = &browser.results else {
+            return Vec::new();
+        };
+        let visible: Vec<(usize, String)> = range
+            .filter_map(|ix| results.get(ix).map(|path| (ix, path.clone())))
+            .collect();
+        let mut rows = Vec::new();
+        for (ix, path) in visible {
+            let path = &path;
+            let thumbnail = browser
+                .thumbnails
+                .entry(path.clone())
+                .or_insert_with(|| {
+                    let (context, path, engine) = (context.clone(), path.clone(), engine.clone());
+                    let entity = cx.new(|cx| {
+                        super::project_icon::ProjectIcon::new(
+                            String::new(),
+                            String::new(),
+                            context,
+                            Some(path),
+                            engine,
+                            18.0,
+                            cx,
+                        )
+                    });
+                    cx.observe(&entity, |_, _, cx| cx.notify()).detach();
+                    entity
+                })
+                .clone();
+            let art = if thumbnail.read(cx).has_artwork() {
+                thumbnail.into_any_element()
+            } else {
+                icon(icons::FILE_IMAGE)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted)
+                    .into_any_element()
+            };
+            let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+            rows.push(
+                popover::picker_row(
+                    &theme,
+                    false,
+                    ix == browser.active,
+                    format!("edit-project-icon-{path}"),
+                )
+                .id(("edit-project-icon", ix))
+                .w_full()
+                .h(px(28.0))
+                .min_h(px(28.0))
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_browsed_icon(Some(ix), cx)))
+                .child(
+                    div()
+                        .size(px(18.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(art),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .gap(px(6.0))
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(200.0))
+                                .truncate()
+                                .whitespace_nowrap()
+                                .child(name.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .whitespace_nowrap()
+                                .text_color(theme.text_muted)
+                                .child(folder.to_string()),
+                        ),
+                )
+                .into_any_element(),
             );
         }
-        cx.notify();
+        rows
     }
 
     pub(super) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
@@ -8818,7 +9439,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// Space context menu + rename dialog + delete confirm (appended to the
+    /// Space context menu + edit dialog + delete confirm (appended to the
     /// shell's overlay list).
     pub(super) fn render_space_overlays(
         &mut self,
@@ -8841,13 +9462,13 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .child(
-                    popover::menu_row(&theme, false, format!("space-menu-rename-{space_id}"))
-                        .id("space-menu-rename")
+                    popover::menu_row(&theme, false, format!("space-menu-edit-{space_id}"))
+                        .id("space-menu-edit")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_space(rename_id.clone(), cx)
+                            this.open_edit_project(rename_id.clone(), cx)
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
+                        .child(SharedString::from("Edit Project…")),
                 )
                 .child(popover::menu_separator())
                 .child(
@@ -8875,50 +9496,8 @@ impl Shell {
             ));
         }
 
-        if let Some(dialog) = &mut self.rename_space_dialog {
-            if std::mem::take(&mut dialog.focus_pending) {
-                window.focus(&dialog.input.focus_handle(cx), cx);
-            }
-            let input = dialog.input.clone();
-            let card = popover::dialog_card(&theme)
-                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                    if ev.keystroke.key == "escape" {
-                        this.rename_space_dialog = None;
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                }))
-                .child(popover::dialog_title(&theme, "Rename project"))
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "rename-space-cancel")
-                                .id("rename-space-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.rename_space_dialog = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Rename")
-                                .id("rename-space-save")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_space(cx)),
-                                ),
-                        ),
-                )
-                .into_any_element();
-            overlays.push(popover::modal("rename-space-dialog", viewport, card));
+        if let Some(card) = self.render_edit_project_dialog(&theme, window, cx) {
+            overlays.push(popover::modal("edit-project-dialog", viewport, card));
         }
 
         if let Some(space_id) = self.delete_space_confirm.clone() {

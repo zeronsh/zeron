@@ -38,12 +38,14 @@ mod host_stream;
 mod live;
 pub mod provider_login;
 pub mod providers;
+mod project_icon;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
 pub mod subagents;
 pub mod terminal;
 pub mod workspace;
+pub mod workspace_image;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
 pub use cloud::CloudRepoRef;

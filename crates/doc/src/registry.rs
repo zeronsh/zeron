@@ -1128,6 +1128,7 @@ impl RegistryDoc {
             ("deviceId", json!(space.device_id)),
             ("path", json!(space.path)),
             ("name", opt_str(space.name.as_deref())),
+            ("iconPath", opt_str(space.icon_path.as_deref())),
             ("gitDetected", json!(space.git_detected)),
             ("gitCheckedAt", opt_ms(space.git_checked_at)),
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
@@ -1154,6 +1155,35 @@ impl RegistryDoc {
             .collect();
         spaces.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(spaces)
+    }
+
+    /// Edit every checkout of the repository together in one registry batch.
+    /// `name: None` leaves names alone; a blank name restores the basename.
+    pub fn edit_project(
+        &mut self,
+        space_id: &str,
+        name: Option<&str>,
+        icon_path: Option<&str>,
+    ) -> Result<bool, DocError> {
+        let icon_path = zeron_proto::project_icon::normalize_path(icon_path)
+            .map_err(|message| DocError::Schema(message.into()))?;
+        let Some(space) = self.space(space_id)? else {
+            return Ok(false);
+        };
+        let key = zeron_proto::view::project_key(&space);
+        let name = name.map(|name| opt_str(Some(name.trim()).filter(|name| !name.is_empty())));
+        for member in self
+            .read_spaces()?
+            .into_iter()
+            .filter(|s| zeron_proto::view::project_key(s) == key)
+        {
+            let mut set = fields([("iconPath", opt_str(icon_path.as_deref()))]);
+            if let Some(name) = &name {
+                set.insert("name".into(), name.clone());
+            }
+            self.write(KIND_SPACES, &member.id, OpKind::Update, set);
+        }
+        Ok(true)
     }
 
     /// LWW display-name set from any device; `None` clears back to the derived
@@ -1652,6 +1682,7 @@ impl RegistryDoc {
                     ("deviceId", json!(space.device_id)),
                     ("path", json!(space.path)),
                     ("name", opt_str(space.name.as_deref())),
+                    ("iconPath", opt_str(space.icon_path.as_deref())),
                     ("gitDetected", json!(space.git_detected)),
                     ("gitCheckedAt", opt_ms(space.git_checked_at)),
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),

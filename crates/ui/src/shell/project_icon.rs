@@ -3,38 +3,31 @@ use super::*;
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
 
-pub(super) const ICON_PATHS: &[&str] = &[
-    "public/apple-touch-icon.png",
-    "apple-touch-icon.png",
-    "public/favicon.svg",
-    "favicon.svg",
-    "public/favicon.png",
-    "public/icon.png",
-    "public/logo.png",
-    "favicon.png",
-    "app/icon.png",
-    "src/app/icon.png",
-    "public/favicon.ico",
-    "favicon.ico",
-    "app/favicon.ico",
-    "static/favicon.ico",
-    "src-tauri/icons/icon.png",
-    "assets/icon.png",
-    "src/assets/icon.png",
-];
+use zeron_proto::project_icon::candidates;
 
-fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
-    // A project can point at a subdirectory; match the remote workspace RPC's
-    // checkout-root resolution, including linked worktrees with a .git file.
-    let canonical = root.canonicalize().ok()?;
+/// A project can point at a subdirectory; match the remote workspace RPC's
+/// checkout-root resolution, including linked worktrees with a .git file.
+pub(super) fn checkout_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canonical = path.canonicalize().ok()?;
     let root = canonical
         .ancestors()
         .find(|path| path.join(".git").exists())
         .unwrap_or(&canonical);
-    for path in ICON_PATHS {
+    Some(root.to_path_buf())
+}
+
+fn load_local_icon(root: &std::path::Path, icon_path: Option<&str>) -> Option<MediaImage> {
+    let icon_path = zeron_proto::project_icon::normalize_path(icon_path).ok()?;
+    let root = checkout_root(root)?;
+    let root = root.as_path();
+    for path in candidates(icon_path.as_deref()) {
         let path = root.join(path);
         if !path.is_file() {
             continue;
+        }
+        let path = path.canonicalize().ok()?;
+        if !path.starts_with(root) {
+            return None;
         }
         let bytes = std::fs::File::open(&path).ok().and_then(|file| {
             use std::io::Read;
@@ -44,7 +37,11 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
                 .ok()?;
             Some(bytes)
         })?;
-        let mime = if path.extension().is_some_and(|e| e == "svg") {
+        let mime = if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+        {
             "image/svg+xml"
         } else {
             "image/png"
@@ -68,7 +65,7 @@ const MONOGRAM_PALETTE: [(u32, u32); 8] = [
     (0xfdba74, 0xc2410c), // orange
 ];
 
-fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement {
+pub(super) fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement {
     // FNV-1a selects a stable entry from the curated palette.
     let hash = seed.bytes().fold(2166136261u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(16777619)
@@ -130,11 +127,15 @@ pub(super) struct ProjectIcon {
 }
 
 impl ProjectIcon {
-    fn new(
+    /// Loads `icon_path` (or the automatic candidates) for a view `view_size`
+    /// points square.
+    pub(super) fn new(
         name: String,
         seed: String,
         context: FilesRequestContext,
+        icon_path: Option<String>,
         engine: Option<crate::state::EngineHandle>,
+        view_size: f32,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(|this, cx| release_media(this.media.take(), cx))
@@ -144,15 +145,17 @@ impl ProjectIcon {
             let load = async {
                 if context.target_device_id.is_none() {
                     let root = std::path::PathBuf::from(context.cwd);
-                    return executor.spawn(async move { load_local_icon(&root) }).await;
+                    return executor
+                        .spawn(async move { load_local_icon(&root, icon_path.as_deref()) })
+                        .await;
                 }
                 let client = WorkspaceFilesClient::new(engine?, context.clone());
-                for path in ICON_PATHS {
+                for path in candidates(icon_path.as_deref()) {
                     // This also resolves the current checkout identity on the owning host.
                     let file = match client
                         .read_file(zeron_proto::ReadWorkspaceFileRequest {
                             target: context.target.clone(),
-                            path: (*path).into(),
+                            path: path.into(),
                         })
                         .await
                     {
@@ -161,7 +164,7 @@ impl ProjectIcon {
                         Err(_) => continue,
                     };
                     let (mime, bytes) = client
-                        .read_image((*path).into(), file.checkout_id)
+                        .read_image(path.into(), file.checkout_id)
                         .await
                         .ok()?;
                     return executor
@@ -177,7 +180,7 @@ impl ProjectIcon {
             .await
             {
                 futures::future::Either::Left((media, _)) => {
-                    media.map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
+                    media.map(|media| media.for_view((view_size, view_size), 2.0, 4096))
                 }
                 _ => None,
             };
@@ -193,6 +196,12 @@ impl ProjectIcon {
             refreshed: std::time::Instant::now(),
             _task: task,
         }
+    }
+}
+
+impl ProjectIcon {
+    pub(super) fn has_artwork(&self) -> bool {
+        self.media.is_some()
     }
 }
 
@@ -343,6 +352,27 @@ impl Shell {
     }
 }
 
+/// Where a project's artwork is read: this device's checkout when there is
+/// one (no round trip), else the representative's.
+pub(super) fn artwork_context(state: &AppState, space: &zeron_proto::Space) -> FilesRequestContext {
+    let space = state
+        .project_members(space)
+        .into_iter()
+        .find(|member| state.local_device_id.as_deref() == Some(&member.device_id))
+        .unwrap_or_else(|| state.representative_space(space));
+    FilesRequestContext {
+        target: zeron_proto::WorkspaceTarget {
+            chat_id: None,
+            space_id: Some(space.id.clone()),
+            checkout_path: None,
+        },
+        target_device_id: (state.local_device_id.as_deref() != Some(&space.device_id))
+            .then(|| space.device_id.clone()),
+        cwd: space.path.clone(),
+        checkout_id: space.checkout_id.clone(),
+    }
+}
+
 /// Shared artwork pipeline for sidebar and repository picker. Each owner keeps
 /// the entities alive; loading stays off the render thread and has a deadline.
 #[derive(Default)]
@@ -351,6 +381,11 @@ pub(crate) struct ProjectIcons {
 }
 
 impl ProjectIcons {
+    /// Drop cached artwork so the next render reloads it (e.g. after an edit).
+    pub(crate) fn clear(&self) {
+        self.entries.borrow_mut().clear();
+    }
+
     pub(crate) fn render<V: 'static>(
         &self,
         state: &Entity<AppState>,
@@ -367,30 +402,18 @@ impl ProjectIcons {
         let seed = representative
             .map(|space| space.path.clone())
             .unwrap_or_else(|| "home".into());
-        let artwork = space.map(|space| {
-            state
-                .project_members(space)
-                .into_iter()
-                .find(|member| state.local_device_id.as_deref() == Some(&member.device_id))
-                .unwrap_or_else(|| state.representative_space(space))
-        });
-        let context = artwork.map(|space| FilesRequestContext {
-            target: zeron_proto::WorkspaceTarget {
-                chat_id: None,
-                space_id: Some(space.id.clone()),
-                checkout_path: None,
-            },
-            target_device_id: (state.local_device_id.as_deref() != Some(&space.device_id))
-                .then(|| space.device_id.clone()),
-            cwd: space.path.clone(),
-            checkout_id: space.checkout_id.clone(),
-        });
-        let Some(context) = context else {
+        let Some(context) = space.map(|space| artwork_context(state, space)) else {
             return monogram(&name, &seed, selected, Theme::of(cx));
         };
+        let icon_path = representative.and_then(|space| space.icon_path.clone());
         let key = format!(
-            "{:?}:{:?}:{}:{:?}:{}",
-            profile, context.target_device_id, context.cwd, context.checkout_id, name
+            "{:?}:{:?}:{}:{:?}:{}:{:?}",
+            profile,
+            context.target_device_id,
+            context.cwd,
+            context.checkout_id,
+            name,
+            icon_path
         );
         let engine = state.engine().cloned();
         // Don't cache a remote miss before a connection exists.
@@ -402,8 +425,9 @@ impl ProjectIcons {
         let entity = cache
             .entry(key)
             .or_insert_with(|| {
-                let entity =
-                    cx.new(|cx| ProjectIcon::new(name.clone(), seed.clone(), context, engine, cx));
+                let entity = cx.new(|cx| {
+                    ProjectIcon::new(name.clone(), seed.clone(), context, icon_path, engine, 16.0, cx)
+                });
                 // The owner draws the selected monogram and redraws when artwork lands.
                 cx.observe(&entity, |_, _, cx| cx.notify()).detach();
                 entity
@@ -426,33 +450,50 @@ mod tests {
     #[test]
     fn sidebar_project_icon_priority_and_missing_fallback() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
+        assert!(load_local_icon(temp.path(), None).is_none());
         png(&temp.path().join("favicon.png"), 3);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 3.0);
+        assert_eq!(load_local_icon(temp.path(), None).unwrap().width, 3.0);
         std::fs::create_dir(temp.path().join("public")).unwrap();
         png(&temp.path().join("public/apple-touch-icon.png"), 7);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
+        assert_eq!(load_local_icon(temp.path(), None).unwrap().width, 7.0);
         std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
         std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
         assert_eq!(
-            load_local_icon(&temp.path().join("src/nested"))
+            load_local_icon(&temp.path().join("src/nested"), None)
                 .unwrap()
                 .width,
             7.0
         );
         // A corrupt first match uses the default rather than showing unrelated lower-priority art.
         std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
+        assert!(load_local_icon(temp.path(), None).is_none());
     }
+    #[test]
+    fn explicit_monorepo_artwork_overrides_detection_and_can_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        png(&temp.path().join("favicon.png"), 3);
+        std::fs::create_dir_all(temp.path().join("apps/web/public")).unwrap();
+        png(&temp.path().join("apps/web/public/icon.png"), 9);
+        assert_eq!(
+            load_local_icon(temp.path(), Some("apps/web/public/icon.png"))
+                .unwrap()
+                .width,
+            9.0
+        );
+        assert!(load_local_icon(temp.path(), Some("apps/missing.png")).is_none());
+        assert!(load_local_icon(temp.path(), Some("../favicon.png")).is_none());
+        assert_eq!(load_local_icon(temp.path(), None).unwrap().width, 3.0);
+    }
+
     #[test]
     fn sidebar_project_icons_support_svg_and_ico() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("favicon.svg"), br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#f00"/></svg>"##).unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 12.0);
+        assert_eq!(load_local_icon(temp.path(), None).unwrap().width, 12.0);
         std::fs::remove_file(temp.path().join("favicon.svg")).unwrap();
         image::RgbaImage::new(16, 16)
             .save(temp.path().join("favicon.ico"))
             .unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
+        assert_eq!(load_local_icon(temp.path(), None).unwrap().width, 16.0);
     }
 }

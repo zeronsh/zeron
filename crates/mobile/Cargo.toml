@@ -38,6 +38,7 @@ zeron-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
+resvg = { version = "0.46", default-features = false }
 zeron-syntax.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 thiserror.workspace = true

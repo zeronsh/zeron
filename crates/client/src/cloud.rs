@@ -573,6 +573,7 @@ impl Client {
             device_id: device,
             path: format!("{CLOUD_HOME}/{name}"),
             name: None,
+            icon_path: None,
             git_detected: true,
             git_checked_at: Some(Utc::now()),
             checkout_id: None,

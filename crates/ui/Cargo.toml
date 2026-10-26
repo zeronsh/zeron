@@ -88,6 +88,7 @@ zeron-veil.workspace = true
 zeron-voice = { path = "../voice" }
 url = "2"
 zeron-proto.workspace = true
+zeron-client.workspace = true
 similar.workspace = true
 zeron-doc.workspace = true
 zeron-engine.workspace = true
