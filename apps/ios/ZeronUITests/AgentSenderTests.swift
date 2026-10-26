@@ -26,7 +26,7 @@ final class AgentSenderTests: XCTestCase {
         XCTAssertFalse(body.label.contains("send_message"))
         snapshot(app, "sender-caption")
 
-        let sender = app.descendants(matching: .any)["Open sending chat"].firstMatch
+        let sender = app.descendants(matching: .any)["Open chat"].firstMatch
         XCTAssertTrue(sender.exists)
         sender.tap()
         let reply = app.descendants(matching: .any)

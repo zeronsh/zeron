@@ -145,6 +145,55 @@ fn agent_messages_show_their_sender_over_the_bubble() {
     assert!(d.runs.iter().filter(|r| r.baseline < bubble.y).all(|r| r.x >= bubble.x - 0.5), "{:?} {bubble:?}", d.runs);
 }
 
+#[test]
+fn messages_the_agent_sent_show_as_bubbles_on_its_side() {
+    let tool = |id: &str, name: &str, input: serde_json::Value| MessagePart::Tool {
+        id: id.into(),
+        call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: name.into(), input: Some(input) },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+    };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                tool("k1", "list_chats", serde_json::json!({})),
+                tool("k2", "send_message", serde_json::json!({ "chat": "Windows lane", "text": "Run the matrix." })),
+                tool("k3", "send_messages", serde_json::json!({ "requests": [{ "chat": "a", "text": "one" }, { "chat": "b", "text": "two" }] })),
+            ],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    // The ordinary tool keeps its group; each message is its own row.
+    assert_eq!(frame.row_count(), 4);
+    assert_eq!(frame.placement(1).unwrap().kind, RowKind::Markdown);
+    let d = frame.display(1).unwrap();
+    assert!(d.text.starts_with("Message to \u{2060} Windows lane"), "{}", d.text);
+    assert!(d.text.contains("Run the matrix."), "{}", d.text);
+    // Left-aligned: the caption and the bubble start at the column's edge.
+    let bubble = d.boxes.iter().find(|b| b.color == display::ColorRole::UserBubble).unwrap();
+    let caption = d.runs.first().unwrap();
+    assert!((caption.x - bubble.x).abs() < 0.5 && bubble.x < 40.0, "{caption:?} {bubble:?}");
+    assert!(frame.display(3).unwrap().text.contains("two"));
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
