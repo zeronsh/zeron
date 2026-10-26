@@ -50,6 +50,7 @@ mod new_thread_background_effects;
 mod new_thread_background_image;
 mod new_thread_background_mask;
 mod notice;
+pub mod notes;
 pub use zeron_notify as notify;
 pub mod onboarding;
 pub mod orb;

@@ -5,7 +5,10 @@
 //!   boundary, so a streamed delta costs O(delta + last block).
 //! - [`mend`] auto-closes hanging inline markers in the streaming *display*
 //!   parse only; the canonical tree settles honestly on completion.
+//! - [`live`] reads a Markdown source being edited: faces, the markers a live
+//!   preview hides, and list editing.
 
+pub mod live;
 pub mod mend;
 pub mod parser;
 

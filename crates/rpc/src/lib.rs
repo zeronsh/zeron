@@ -84,6 +84,14 @@ pub mod methods {
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
+    /// The session's markdown notes. `{ chatId }` → stream of `{ text, hash }`.
+    /// Served by the caller's own engine, never forwarded: every device keeps
+    /// a replica of the chat doc, so notes work while the host is offline.
+    pub const WATCH_SESSION_NOTES: &str = "WatchSessionNotes";
+    /// Compare-and-set the notes. `{ chatId, baseHash, text }` →
+    /// `{ kind: "applied", hash } | { kind: "conflict", current: { text, hash } }
+    /// | { kind: "tooLarge", limit }`.
+    pub const SET_SESSION_NOTES: &str = "SetSessionNotes";
     /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
     pub const QUEUE_MESSAGE: &str = "QueueMessage";
     /// Retype a queued message; empty text deletes it.

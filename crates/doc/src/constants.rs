@@ -25,5 +25,9 @@ pub const TAIL_MESSAGE_COUNT: usize = 64;
 pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 4;
 /// Default TTL for durable commands.
 pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+/// Session notes may not grow past this many bytes. A room row caps at 1 MiB
+/// and iOS never posts a checkpoint for a rejected batch, so one paste must
+/// never come near that.
+pub const NOTES_MAX_BYTES: usize = 256 * 1024;
 /// Current session doc schema version (`meta.schemaVersion`).
 pub const SESSION_SCHEMA_VERSION: u32 = 1;

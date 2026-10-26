@@ -156,6 +156,7 @@ icon_assets![
     (PALETTE_SEARCH, "palette-search"),
     (COMMAND, "command"),
     (DOCUMENT, "document"),
+    (NOTEBOOK, "notebook"),
     (DOCUMENT_ADD, "document-add"),
     // File-kind glyphs, drawn in the same linear family for transcript badges.
     (FILE_CODE, "file-code"),
@@ -367,6 +368,7 @@ mod tests {
         for path in [
             PULL_REQUEST,
             DOCUMENT,
+            NOTEBOOK,
             FILE_CODE,
             FOLDER_WITH_FILES,
             CHECK,

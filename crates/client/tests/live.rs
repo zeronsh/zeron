@@ -1110,3 +1110,84 @@ async fn stalled_wakes_yield_delivery_capacity_to_later_chats() {
     );
     client.shutdown();
 }
+
+/// Notes written on the phone reach the room as ordinary rows; another
+/// device's notes edit comes back through the same room into the watch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notes_sync_both_ways_through_the_chat_room() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("chat row", Duration::from_secs(10), || {
+                client.workspace().session(CHAT).is_some()
+            })
+        }
+    })
+    .await
+    .unwrap();
+    let session = client.open_session(CHAT).unwrap();
+    session.set_view_attached(true);
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let _watch = session.watch_notes({
+        let seen = seen.clone();
+        move |notes| seen.lock().unwrap().push(notes.text)
+    });
+
+    let base = session.notes().hash;
+    let written = session.set_notes(&base, "# Phone\n").unwrap();
+    assert!(matches!(written, zeron_client::NotesWrite::Applied { .. }));
+    assert_eq!(session.notes().text, "# Phone\n");
+    // A stale base is refused without writing.
+    assert!(matches!(
+        session.set_notes(&base, "stale").unwrap(),
+        zeron_client::NotesWrite::Conflict { .. }
+    ));
+
+    // The host's replica picks the notes up from the room's rows.
+    let host_doc = LoroDoc::new();
+    let start = Instant::now();
+    loop {
+        for row in edge.rows(CHAT) {
+            let _ = host_doc.import(&row.bytes);
+        }
+        if SessionDoc::from_doc(host_doc.clone()).notes_text() == "# Phone\n" {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "notes never reached the room"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Another device appends; the phone's watch sees the merge.
+    let host_session = SessionDoc::from_doc(host_doc.clone());
+    let before = host_doc.oplog_vv();
+    host_session
+        .set_notes_text("# Phone\n- added on the desktop\n")
+        .unwrap();
+    edge.inject(
+        CHAT,
+        HOST,
+        host_doc.export(ExportMode::updates(&before)).unwrap(),
+    );
+    tokio::task::spawn_blocking({
+        let seen = seen.clone();
+        move || {
+            wait_for("remote notes", Duration::from_secs(10), || {
+                seen.lock()
+                    .unwrap()
+                    .last()
+                    .is_some_and(|t| t == "# Phone\n- added on the desktop\n")
+            })
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session.notes().text, "# Phone\n- added on the desktop\n");
+    client.shutdown();
+}

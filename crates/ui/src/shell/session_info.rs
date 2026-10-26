@@ -559,6 +559,19 @@ impl Shell {
                 }))
         });
 
+        // ── The user's own notes on this session; side chats have none.
+        let notes_row = chat.is_top_level().then(|| {
+            popover::picker_row(&theme, false, false, "session-info-notes")
+                .id("session-info-notes")
+                .debug_selector(|| "session-info-notes".into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_session_info_overlay(cx);
+                    this.open_session_notes(window, cx);
+                }))
+                .child(popover::picker_icon_slot(row_glyph(icons::NOTEBOOK, &theme)))
+                .child("Notes")
+        });
+
         // ── The project's run actions.
         let actions = self.render_session_info_actions(&theme, cx);
 
@@ -580,6 +593,7 @@ impl Shell {
             .child(device_row)
             .child(project_row)
             .children(branch_row)
+            .children(notes_row)
             .children(actions);
 
         // ── The ports its agents and terminals serve, at most a third of the

@@ -9,6 +9,7 @@
 //!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
 //! - `queue`:    LoroMovableList of LoroMap {
 //!   id, text, attachments?, issuedBy, issuedAt, editedAt? }        (any device writes)
+//! - `notes`:    LoroText — the user's markdown scratchpad (any device writes; see `notes.rs`)
 //!
 //! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image", text?: LoroText,
 //! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, message? }.
@@ -386,12 +387,19 @@ pub struct ProviderSessionMark {
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
+    /// Held across a notes write's read and its ops, and across imports that
+    /// go through [`SessionDoc::import_with`], so neither another write nor a
+    /// remote change can land between them (see `notes.rs`).
+    pub(crate) notes_gate: std::sync::Mutex<crate::notes::NotesClock>,
 }
 
 impl SessionDoc {
     /// Wrap an existing doc (e.g. imported from a snapshot).
     pub fn from_doc(doc: LoroDoc) -> Self {
-        Self { doc }
+        Self {
+            doc,
+            notes_gate: Default::default(),
+        }
     }
 
     /// Create + initialize a fresh doc for `chat_id` (host-only).
@@ -401,7 +409,7 @@ impl SessionDoc {
         meta.insert("chatId", chat_id)?;
         meta.insert("schemaVersion", SESSION_SCHEMA_VERSION as i64)?;
         doc.commit();
-        Ok(Self { doc })
+        Ok(Self::from_doc(doc))
     }
 
     pub fn doc(&self) -> &LoroDoc {

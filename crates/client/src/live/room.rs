@@ -205,7 +205,7 @@ impl ViewerSink {
         let Some(doc) = self.doc.upgrade() else {
             return RowImportOutcome::Applied;
         };
-        match doc.doc().import(bytes) {
+        match doc.import_with(bytes, "") {
             Ok(status) if status.pending.is_some() => RowImportOutcome::PendingDependencies,
             Ok(_) => {
                 self.persister.applied(cursor, urgent);

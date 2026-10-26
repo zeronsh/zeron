@@ -205,6 +205,31 @@ fn input_overflow_edges(
 
 /// During the reveal, stop at a complete row boundary instead of slicing
 /// glyphs with a moving clip. Scrolling offsets the row grid inside the box.
+/// Text and line-height scale of a Markdown heading in a document editor:
+/// a quick step down toward body size, like the transcript's headings.
+fn heading_scale(level: u8) -> (f32, f32) {
+    match level {
+        1 => (1.5, 1.4),
+        2 => (1.28, 1.22),
+        3 => (1.14, 1.1),
+        _ => (1.0, 1.0),
+    }
+}
+
+/// The heading level of the source line starting at `line_start`, if a
+/// heading covers it. A setext underline belongs to its heading but is not
+/// set large itself.
+fn heading_level_at(headings: &[(Range<usize>, u8)], line_start: usize, line: &str) -> Option<u8> {
+    let ix = headings.partition_point(|(range, _)| range.end <= line_start);
+    let (range, level) = headings.get(ix)?;
+    let underline = {
+        let trimmed = line.trim();
+        !trimmed.is_empty()
+            && (trimmed.chars().all(|c| c == '=') || trimmed.chars().all(|c| c == '-'))
+    };
+    (range.start <= line_start && !underline).then_some(*level)
+}
+
 fn input_reveal_height(visible: f32, scroll: f32, line_height: f32, resizing: bool) -> f32 {
     if !resizing {
         return visible;
@@ -907,6 +932,47 @@ struct EditSnapshot {
     caret_affinity: CaretAffinity,
 }
 
+/// Carry an undo (or redo) history across a change made elsewhere, `before`
+/// becoming `after`. Snapshots are walked from the newest: each differs from
+/// the next by one step of the user's, so the change moves into it exactly
+/// as long as that step and the change touch different text. At the first
+/// step that overlaps the change, that snapshot and every older one go:
+/// restoring them would revert or garble someone else's typing.
+fn rebase_history(stack: Vec<EditSnapshot>, before: &str, after: &str) -> Vec<EditSnapshot> {
+    let mut kept = Vec::new();
+    let (mut base, mut moved) = (before.to_owned(), after.to_owned());
+    for snapshot in stack.into_iter().rev() {
+        let step = zeron_doc::single_range_diff(&base, &snapshot.content);
+        let change = zeron_doc::single_range_diff(&base, &moved);
+        let overlaps = step
+            .as_ref()
+            .zip(change.as_ref())
+            .is_some_and(|(step, change)| {
+                !(change.range.end <= step.range.start || step.range.end <= change.range.start)
+            });
+        if overlaps {
+            break;
+        }
+        let content = zeron_doc::rebase_notes(&base, &snapshot.content, &moved);
+        let shift = zeron_doc::single_range_diff(&snapshot.content, &content);
+        let map = |offset: usize| {
+            shift
+                .as_ref()
+                .map_or(offset, |edit| edit.map_offset(offset))
+        };
+        let selected_range = map(snapshot.selected_range.start)..map(snapshot.selected_range.end);
+        base = snapshot.content;
+        moved = content.clone();
+        kept.push(EditSnapshot {
+            content,
+            selected_range,
+            ..snapshot
+        });
+    }
+    kept.reverse();
+    kept
+}
+
 /// A strict, local-only Markdown representation of a file mention. The
 /// underlying prompt always contains this form; the editor projects it to a
 /// chip for display without leaking a second data model into submission.
@@ -1217,13 +1283,19 @@ fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: P
 
 impl TextProjection {
     fn new(raw: &str) -> Self {
-        Self::project(raw, None, false, None)
+        Self::project(raw, None, false, None, true)
     }
 
     /// `live` names the attachments the draft still holds; a chip outside it is
     /// a dangling reference and shows as its plain label.
     fn rich(raw: &str, active: Option<Range<usize>>, live: Option<&HashSet<u32>>) -> Self {
-        Self::project(raw, active, true, live)
+        Self::project(raw, active, true, live, true)
+    }
+
+    /// Markdown decorations alone, for documents where a reference link is
+    /// just a link, never a chip.
+    fn markdown(raw: &str, active: Range<usize>) -> Self {
+        Self::project(raw, Some(active), true, None, false)
     }
 
     /// Secret fields: every character shown as one bullet. A mapping per
@@ -1246,7 +1318,11 @@ impl TextProjection {
         active: Option<Range<usize>>,
         compact: bool,
         live: Option<&HashSet<u32>>,
+        chips: bool,
     ) -> Self {
+        if !chips {
+            return Self::assemble(raw, active, Vec::new());
+        }
         let mut links = file_mention_links(raw);
         links.extend(
             zeron_proto::invocation::invocation_links(raw)
@@ -1306,8 +1382,7 @@ impl TextProjection {
         } else {
             labels
         };
-        let mut projection = Self::default();
-        let mut edits: Vec<(Range<usize>, String, Option<FileMentionLink>)> = links
+        let edits: Vec<(Range<usize>, String, Option<FileMentionLink>)> = links
             .into_iter()
             .zip(labels)
             .map(|(link, label)| {
@@ -1322,6 +1397,17 @@ impl TextProjection {
                 (link.range.clone(), display, Some(link))
             })
             .collect();
+        Self::assemble(raw, active, edits)
+    }
+
+    /// Lay chip `edits` and, around an `active` source range, the Markdown
+    /// decorations out into one display string with its offset mappings.
+    fn assemble(
+        raw: &str,
+        active: Option<Range<usize>>,
+        mut edits: Vec<(Range<usize>, String, Option<FileMentionLink>)>,
+    ) -> Self {
+        let mut projection = Self::default();
         if let Some(active) = active {
             let links: Vec<_> = edits.iter().map(|(range, _, _)| range.clone()).collect();
             for (range, replacement) in composer_markdown::decorations(raw, active) {
@@ -1550,6 +1636,8 @@ enum EditKind {
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
 pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
+/// A document: Enter breaks the line and nothing submits.
+pub(crate) const DOCUMENT_INPUT_CONTEXT: &str = "DocumentInput";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1709,6 +1797,13 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         Some(GENERIC_COMPOSER_CONTEXT),
     ));
 
+    let mut document_bindings = input_bindings(DOCUMENT_INPUT_CONTEXT);
+    document_bindings.push(KeyBinding::new(
+        "enter",
+        Newline,
+        Some(DOCUMENT_INPUT_CONTEXT),
+    ));
+
     let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT);
     for binding in message_enter_bindings(send_behavior, &platform_combo("mod-enter")) {
         match binding.action {
@@ -1797,6 +1892,7 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     }
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
+    cx.bind_keys(document_bindings);
     cx.bind_keys(message_bindings);
 }
 
@@ -1922,6 +2018,57 @@ impl VoiceTween {
     }
 }
 
+/// Everything that shaped one logical line. Equal keys shape identically, so
+/// an edit reshapes only the lines it changed.
+#[derive(Clone, PartialEq)]
+struct LineShapeKey {
+    text: String,
+    runs: Vec<TextRun>,
+    font_size: Pixels,
+    wrap_width: Option<Pixels>,
+    chips: Vec<Range<usize>>,
+}
+
+/// The previous layout's shaped lines, offered for reuse by the next one.
+/// Lines are found by text, so they still match after lines above them were
+/// inserted or removed.
+struct ShapedLineCache {
+    lines: Vec<Option<WrappedLine>>,
+    keys: Vec<LineShapeKey>,
+    by_text: HashMap<u64, Vec<usize>>,
+}
+
+impl ShapedLineCache {
+    fn new(lines: Vec<WrappedLine>, keys: Vec<LineShapeKey>) -> Self {
+        let mut by_text: HashMap<u64, Vec<usize>> = HashMap::new();
+        if lines.len() == keys.len() {
+            for (ix, key) in keys.iter().enumerate() {
+                by_text.entry(text_hash(&key.text)).or_default().push(ix);
+            }
+        }
+        Self {
+            lines: lines.into_iter().map(Some).collect(),
+            keys,
+            by_text,
+        }
+    }
+
+    fn take(&mut self, key: &LineShapeKey) -> Option<WrappedLine> {
+        let candidates = self.by_text.get(&text_hash(&key.text))?;
+        candidates
+            .iter()
+            .find(|ix| self.keys[**ix] == *key && self.lines[**ix].is_some())
+            .and_then(|ix| self.lines[*ix].take())
+    }
+}
+
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Shaping inputs excluding mutable viewport and selection geometry.
 #[derive(Clone, PartialEq)]
 struct InputLayoutKey {
@@ -1935,6 +2082,7 @@ struct InputLayoutKey {
     marked_range: Option<Range<usize>>,
     placeholder: SharedString,
     mentions_enabled: bool,
+    markdown: bool,
     active_line: Option<Range<usize>>,
 }
 
@@ -2005,6 +2153,13 @@ pub struct ComposerInput {
     last_lines: Vec<WrappedLine>,
     line_starts: Vec<usize>,
     line_indents: Vec<Pixels>,
+    /// Row height of each logical line: `line_height`, except headings in a
+    /// Markdown document, which are set larger.
+    line_heights: Vec<Pixels>,
+    /// What shaped each line of `last_lines`, for reuse on the next layout.
+    line_keys: Vec<LineShapeKey>,
+    #[cfg(test)]
+    shaped_lines: usize,
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     content_height: f32,
@@ -2023,6 +2178,12 @@ pub struct ComposerInput {
     /// File mentions are a composer feature, not a behavior of generic inputs
     /// (picker searches and rename fields also use this type).
     mentions_enabled: bool,
+    /// Live Markdown (hidden markers off the caret's line, list editing, code
+    /// highlighting) without the composer's chips. Mentions imply it.
+    markdown: bool,
+    /// Take the parent's full height and scroll inside it, like a document
+    /// pane, instead of growing with the text up to a cap.
+    fill_height: bool,
     /// Secret entry (API keys): shown as bullets and never copied or cut.
     masked: bool,
     /// Bumped once per `layout_text` pass — the flip logic uses it to apply at
@@ -2124,6 +2285,10 @@ impl ComposerInput {
             last_lines: Vec::new(),
             line_starts: vec![0],
             line_indents: Vec::new(),
+            line_heights: Vec::new(),
+            line_keys: Vec::new(),
+            #[cfg(test)]
+            shaped_lines: 0,
             last_bounds: None,
             line_height: px(INPUT_LINE_HEIGHT),
             content_height: INPUT_LINE_HEIGHT,
@@ -2135,6 +2300,8 @@ impl ComposerInput {
             syntax_task: None,
             ghost: None,
             mentions_enabled: false,
+            markdown: false,
+            fill_height: false,
             masked: false,
             layout_epoch: 0,
             display_is_placeholder: true,
@@ -2183,6 +2350,23 @@ impl ComposerInput {
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
+    }
+
+    /// Edit Markdown as a document: markers hide off the caret's line, lists
+    /// continue and indent, fenced code is highlighted. Links stay links.
+    pub(crate) fn with_markdown(mut self) -> Self {
+        self.markdown = true;
+        self
+    }
+
+    /// Fill the parent's height (which must be definite) and scroll inside it.
+    pub(crate) fn with_fill_height(mut self) -> Self {
+        self.fill_height = true;
+        self
+    }
+
+    fn projects_markdown(&self) -> bool {
+        self.mentions_enabled || self.markdown
     }
 
     /// Join the window's Tab order, for a field the keyboard must reach.
@@ -2289,6 +2473,8 @@ impl ComposerInput {
                 Some(self.editing_source_range()),
                 live.as_ref(),
             )
+        } else if self.markdown {
+            TextProjection::markdown(&self.content, self.editing_source_range())
         } else {
             TextProjection {
                 display: self.content.clone(),
@@ -2588,6 +2774,50 @@ impl ComposerInput {
         self.reset_blink();
         self.needs_measure = true;
         cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+    }
+
+    /// Apply a change made elsewhere (another device editing a synced
+    /// document): `range` becomes `text`, and the caret, selection and scroll
+    /// position carry across it. Emits no `Edited`, since the owner already
+    /// knows. Undo and redo keep working and never revert the change: see
+    /// [`rebase_history`].
+    pub(crate) fn apply_external_edit(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if range.start > range.end
+            || range.end > self.content.len()
+            || !self.content.is_char_boundary(range.start)
+            || !self.content.is_char_boundary(range.end)
+        {
+            return;
+        }
+        let edit = zeron_doc::TextEdit {
+            range,
+            insert: text.to_owned(),
+        };
+        self.invalidate_mention_tooltip();
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        let before = std::mem::take(&mut self.content);
+        self.content = edit.apply(&before);
+        self.undo_stack =
+            rebase_history(std::mem::take(&mut self.undo_stack), &before, &self.content);
+        self.redo_stack =
+            rebase_history(std::mem::take(&mut self.redo_stack), &before, &self.content);
+        self.selected_range =
+            edit.map_offset(self.selected_range.start)..edit.map_offset(self.selected_range.end);
+        self.marked_range = self
+            .marked_range
+            .take()
+            .map(|marked| edit.map_offset(marked.start)..edit.map_offset(marked.end))
+            .filter(|marked| !marked.is_empty());
+        self.preferred_column = None;
+        self.last_edit = None;
+        self.refresh_projection();
+        self.needs_measure = true;
         cx.notify();
     }
 
@@ -3300,7 +3530,13 @@ impl ComposerInput {
     fn vertical_target(&self, dir: f32) -> Option<(usize, CaretAffinity, Pixels)> {
         let current = self.cursor_point()?;
         let column = self.preferred_column.unwrap_or(current.x);
-        let target_y = f32::from(current.y) + dir * f32::from(self.line_height);
+        // Into the row below this one, or just inside the bottom of the one
+        // above: rows may differ in height.
+        let target_y = if dir > 0.0 {
+            f32::from(current.y) + f32::from(self.caret_height())
+        } else {
+            f32::from(current.y) - 1.0
+        };
         if target_y < 0.0 {
             return Some((0, CaretAffinity::Downstream, column));
         }
@@ -3600,7 +3836,8 @@ impl ComposerInput {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mentions_enabled && self.selected_range.is_empty() && self.marked_range.is_none() {
+        if self.projects_markdown() && self.selected_range.is_empty() && self.marked_range.is_none()
+        {
             if let Some((range, inserted)) =
                 composer_markdown::newline_edit(&self.content, self.cursor_offset())
             {
@@ -3662,7 +3899,7 @@ impl ComposerInput {
     }
 
     fn indent_list(&mut self, outdent: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.mentions_enabled
+        if !self.projects_markdown()
             || self.read_only
             || self.marked_range.is_some()
             || self.mention_open
@@ -3762,6 +3999,28 @@ impl ComposerInput {
     /// Content-local point for a shaped projection byte index. The icon layer
     /// uses this to occupy its explicit projection slot without inventing a
     /// second coordinate system beside the custom text editor.
+    /// Row height of logical line `line_ix`.
+    fn line_height_at(&self, line_ix: usize) -> Pixels {
+        self.line_heights
+            .get(line_ix)
+            .copied()
+            .unwrap_or(self.line_height)
+    }
+
+    /// Row height of the logical line holding projected byte `index`.
+    fn line_height_for_display_index(&self, index: usize) -> Pixels {
+        let line_ix = self
+            .line_starts
+            .partition_point(|start| *start <= index)
+            .saturating_sub(1);
+        self.line_height_at(line_ix)
+    }
+
+    /// Row height at the caret.
+    fn caret_height(&self) -> Pixels {
+        self.line_height_for_display_index(self.projection.raw_to_display(self.cursor_offset()))
+    }
+
     fn point_for_display_index(&self, index: usize) -> Option<Point<Pixels>> {
         self.point_for_display_index_with_affinity(index, CaretAffinity::Downstream)
     }
@@ -3779,6 +4038,7 @@ impl ComposerInput {
             }
             if index <= line_start + line_len {
                 let relative_index = index - line_start;
+                let line_height = self.line_height_at(line_ix);
                 let local = if affinity == CaretAffinity::Downstream {
                     line.wrap_boundaries()
                         .iter()
@@ -3786,16 +4046,17 @@ impl ComposerInput {
                             line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
                                 == relative_index
                         })
-                        .map(|row| point(px(0.0), self.line_height * (row + 1)))
-                        .or_else(|| line.position_for_index(relative_index, self.line_height))?
+                        .map(|row| point(px(0.0), line_height * (row + 1)))
+                        .or_else(|| line.position_for_index(relative_index, line_height))?
                 } else {
-                    line.position_for_index(relative_index, self.line_height)?
+                    line.position_for_index(relative_index, line_height)?
                 };
                 let y_offset: f32 = self
                     .last_lines
                     .iter()
                     .take(line_ix)
-                    .map(|l| f32::from(l.size(self.line_height).height))
+                    .enumerate()
+                    .map(|(ix, l)| f32::from(l.size(self.line_height_at(ix)).height))
                     .sum();
                 let indent = if local.y > px(0.0) {
                     self.line_indents.get(line_ix).copied().unwrap_or_default()
@@ -3826,7 +4087,7 @@ impl ComposerInput {
                 &line.unwrapped_layout,
                 label - start,
                 row_top,
-                self.line_height,
+                self.line_height_at(line_ix),
                 room,
                 window,
             ),
@@ -3843,6 +4104,7 @@ impl ComposerInput {
         let mut bounds = Vec::new();
         let mut y_offset = px(0.0);
         for (line_ix, line) in self.last_lines.iter().enumerate() {
+            let line_height = self.line_height_at(line_ix);
             let line_start = self.line_starts.get(line_ix).copied().unwrap_or(0);
             let local_start = range.start.saturating_sub(line_start).min(line.len());
             let local_end = range.end.saturating_sub(line_start).min(line.len());
@@ -3850,7 +4112,7 @@ impl ComposerInput {
                 || range.end <= line_start
                 || range.start >= line_start + line.len()
             {
-                y_offset += line.size(self.line_height).height;
+                y_offset += line.size(line_height).height;
                 continue;
             }
 
@@ -3862,15 +4124,15 @@ impl ComposerInput {
             for (row_ix, row_start, segment) in
                 display_row_segments(local_start..local_end, row_ends)
             {
-                let row_y = y_offset + self.line_height * row_ix;
+                let row_y = y_offset + line_height * row_ix;
                 let start_x = if segment.start == row_start {
                     px(0.0)
                 } else {
-                    line.position_for_index(segment.start, self.line_height)
+                    line.position_for_index(segment.start, line_height)
                         .map(|point| point.x)
                         .unwrap_or(px(0.0))
                 };
-                if let Some(end_point) = line.position_for_index(segment.end, self.line_height)
+                if let Some(end_point) = line.position_for_index(segment.end, line_height)
                     && end_point.x > start_x
                 {
                     bounds.push(Bounds::new(
@@ -3883,11 +4145,11 @@ impl ComposerInput {
                                 },
                             row_y,
                         ),
-                        size(end_point.x - start_x, self.line_height),
+                        size(end_point.x - start_x, line_height),
                     ));
                 }
             }
-            y_offset += line.size(self.line_height).height;
+            y_offset += line.size(line_height).height;
         }
         bounds
     }
@@ -3902,17 +4164,18 @@ impl ComposerInput {
             return (0, CaretAffinity::Downstream);
         }
         for (line_ix, line) in self.last_lines.iter().enumerate() {
-            let height = f32::from(line.size(self.line_height).height);
+            let line_height = self.line_height_at(line_ix);
+            let height = f32::from(line.size(line_height).height);
             let line_start = self.line_starts.get(line_ix).copied().unwrap_or(0);
             if y < height || line_ix + 1 == self.last_lines.len() {
-                let indent = if y >= f32::from(self.line_height) {
+                let indent = if y >= f32::from(line_height) {
                     self.line_indents.get(line_ix).copied().unwrap_or_default()
                 } else {
                     px(0.0)
                 };
                 let local = point(position.x - indent, px(y.min(height - 1.0).max(0.0)));
                 let ix = line
-                    .closest_index_for_position(local, self.line_height)
+                    .closest_index_for_position(local, line_height)
                     .unwrap_or_else(|ix| ix);
                 let affinity = line
                     .wrap_boundaries()
@@ -3920,7 +4183,7 @@ impl ComposerInput {
                     .position(|boundary| {
                         line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index == ix
                     })
-                    .filter(|row| local.y < self.line_height * (row + 1))
+                    .filter(|row| local.y < line_height * (row + 1))
                     .map_or(CaretAffinity::Downstream, |_| CaretAffinity::Upstream);
                 let mut raw = self
                     .projection
@@ -4247,7 +4510,10 @@ impl ComposerInput {
             marked_range: self.marked_range.clone(),
             placeholder: self.placeholder.clone(),
             mentions_enabled: self.mentions_enabled,
-            active_line: self.mentions_enabled.then(|| self.editing_source_range()),
+            markdown: self.markdown,
+            active_line: self
+                .projects_markdown()
+                .then(|| self.editing_source_range()),
         };
         // Height-only animation, scrolling, selection and caret blinking do
         // not change shaping. Reuse the entity's single retained layout,
@@ -4297,12 +4563,12 @@ impl ComposerInput {
             }),
             strikethrough: None,
         };
-        let raw_faces = if self.mentions_enabled && !is_placeholder {
+        let raw_faces = if self.projects_markdown() && !is_placeholder {
             composer_markdown::faces(&self.content)
         } else {
             Vec::new()
         };
-        let faces = if self.mentions_enabled && !is_placeholder {
+        let faces = if self.projects_markdown() && !is_placeholder {
             raw_faces
                 .iter()
                 .cloned()
@@ -4317,7 +4583,7 @@ impl ComposerInput {
         } else {
             Vec::new()
         };
-        let syntax: Vec<_> = if self.mentions_enabled && self.syntax_source == self.content {
+        let syntax: Vec<_> = if self.projects_markdown() && self.syntax_source == self.content {
             self.syntax_spans
                 .iter()
                 .map(|span| {
@@ -4431,6 +4697,11 @@ impl ComposerInput {
 
         // Each logical list line reserves its marker width for continuation
         // rows. Painting and hit testing apply the same continuation offset.
+        let mut cache = ShapedLineCache::new(
+            std::mem::take(&mut self.last_lines),
+            std::mem::take(&mut self.line_keys),
+        );
+        let mut line_keys = Vec::new();
         let mut lines = Vec::new();
         let mut indents = Vec::new();
         let mut display_at = 0;
@@ -4449,6 +4720,13 @@ impl ComposerInput {
             .filter(|(_, face)| *face == composer_markdown::Face::Code)
             .map(|(range, _)| range)
             .collect();
+        // Documents size their headings; the message composer keeps one size.
+        let headings = if self.markdown && !is_placeholder {
+            composer_markdown::headings(&self.content)
+        } else {
+            Vec::new()
+        };
+        let mut line_heights = Vec::new();
         for text in display.split('\n') {
             let raw_line = self
                 .content
@@ -4458,7 +4736,7 @@ impl ComposerInput {
                 .next()
                 .unwrap_or_default();
             let mut indent = px(0.0);
-            if self.mentions_enabled && !is_placeholder {
+            if self.projects_markdown() && !is_placeholder {
                 if let Some(prefix) = composer_markdown::list_prefix(raw_line).filter(|prefix| {
                     let marker_at = raw_at + prefix.indent;
                     let code_ix = code_ranges.partition_point(|range| range.end <= marker_at);
@@ -4480,6 +4758,17 @@ impl ComposerInput {
                         .min(width * 0.4);
                 }
             }
+            let (line_font_size, line_height) = match heading_level_at(&headings, raw_at, raw_line)
+            {
+                Some(level) => {
+                    let (text_scale, height_scale) = heading_scale(level);
+                    (
+                        font_size * text_scale,
+                        px(self.configured_line_height * height_scale),
+                    )
+                }
+                None => (font_size, px(self.configured_line_height)),
+            };
             let end = display_at + text.len();
             let first_run = run_ranges.partition_point(|(r, _)| r.end <= display_at);
             let line_runs: Vec<TextRun> = run_ranges[first_run..]
@@ -4496,34 +4785,54 @@ impl ComposerInput {
                     })
                 })
                 .collect();
-            if let Ok(shaped) = window.text_system().shape_text(
-                text.to_string().into(),
-                font_size,
-                &line_runs,
-                (!self.single_line).then_some((width - indent).max(px(20.0))),
+            let chips: Vec<_> = self.projection.mentions[self
+                .projection
+                .mentions
+                .partition_point(|(_, r)| r.end <= display_at)..]
+                .iter()
+                .take_while(|(_, r)| r.start < end)
+                .filter(|(_, r)| r.start >= display_at && r.end <= end)
+                .map(|(_, r)| r.start - display_at..r.end - display_at)
+                .collect();
+            let key = LineShapeKey {
+                text: text.to_string(),
+                runs: line_runs,
+                font_size: line_font_size,
+                wrap_width: (!self.single_line).then_some((width - indent).max(px(20.0))),
+                chips,
+            };
+            if let Some(line) = cache.take(&key) {
+                lines.push(line);
+                line_keys.push(key);
+                indents.push(indent);
+                line_heights.push(line_height);
+            } else if let Ok(shaped) = window.text_system().shape_text(
+                key.text.clone().into(),
+                key.font_size,
+                &key.runs,
+                key.wrap_width,
                 None,
             ) {
-                let chips: Vec<_> = self.projection.mentions[self
-                    .projection
-                    .mentions
-                    .partition_point(|(_, r)| r.end <= display_at)..]
-                    .iter()
-                    .take_while(|(_, r)| r.start < end)
-                    .filter(|(_, r)| r.start >= display_at && r.end <= end)
-                    .map(|(_, r)| r.start - display_at..r.end - display_at)
-                    .collect();
+                #[cfg(test)]
+                {
+                    self.shaped_lines += 1;
+                }
                 for mut line in shaped {
-                    if !self.single_line {
-                        wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
+                    if let Some(wrap_width) = key.wrap_width {
+                        wrap_reference_chips(&mut line, &key.chips, wrap_width);
                     }
                     lines.push(line);
+                    line_keys.push(key.clone());
                     indents.push(indent);
+                    line_heights.push(line_height);
                 }
             }
             display_at = end + 1;
             raw_at += raw_line.len() + 1;
         }
         self.line_indents = indents;
+        self.line_heights = line_heights;
+        self.line_keys = line_keys;
 
         // Logical line byte offsets (each shaped line covers one \n-split line).
         let mut line_starts = Vec::with_capacity(lines.len());
@@ -4538,7 +4847,8 @@ impl ComposerInput {
 
         let content_height: f32 = lines
             .iter()
-            .map(|l| f32::from(l.size(self.line_height).height))
+            .zip(&self.line_heights)
+            .map(|(l, height)| f32::from(l.size(*height).height))
             .sum();
         let max_line_width: f32 = lines
             .iter()
@@ -4606,7 +4916,7 @@ impl ComposerInput {
                 self.scroll_top = input_scroll_offset_for_cursor(
                     self.scroll_top,
                     f32::from(cursor.y),
-                    f32::from(self.line_height),
+                    f32::from(self.caret_height()),
                     self.content_height,
                     element_height,
                     self.settled_viewport_height,
@@ -4803,7 +5113,7 @@ impl EntityInputHandler for ComposerInput {
             bounds.left() + start.x - px(self.scroll_left),
             bounds.top() + start.y - px(self.scroll_top),
         );
-        Some(Bounds::new(origin, size(px(2.0), self.line_height)))
+        Some(Bounds::new(origin, size(px(2.0), self.caret_height())))
     }
 
     fn character_index_for_point(
@@ -4822,6 +5132,8 @@ struct ComposerTextElement {
     input: Entity<ComposerInput>,
     /// Max content height before internal scrolling kicks in.
     max_content_height: f32,
+    /// Take the parent's height rather than the text's.
+    fill_height: bool,
 }
 
 struct MentionPathTooltip {
@@ -4898,6 +5210,9 @@ impl gpui::Element for ComposerTextElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
+        if self.fill_height {
+            style.size.height = relative(1.0).into();
+        }
         let input = self.input.clone();
         let text_style = window.text_style();
         let max_content = self.max_content_height;
@@ -4910,7 +5225,10 @@ impl gpui::Element for ComposerTextElement {
                 let content_height = input.update(cx, |input, cx| {
                     input.layout_text(width, &text_style, window, cx)
                 });
-                size(width, px(content_height.min(max_content)))
+                size(
+                    width,
+                    known.height.unwrap_or(px(content_height.min(max_content))),
+                )
             });
         (layout_id, ())
     }
@@ -5012,7 +5330,7 @@ impl gpui::Element for ComposerTextElement {
                 cursor = Some(fill(
                     Bounds::new(
                         point(origin.x + p.x, origin.y + p.y),
-                        size(px(2.0), input.line_height),
+                        size(px(2.0), input.caret_height()),
                     ),
                     caret_color,
                 ));
@@ -5029,12 +5347,19 @@ impl gpui::Element for ComposerTextElement {
                 CaretAffinity::Upstream,
             ),
         ) {
-            let lh = input.line_height;
+            // Rows may differ in height (Markdown headings): the first and
+            // last rows take their own lines' heights.
+            let start_lh = input.line_height_for_display_index(
+                input.projection.raw_to_display(input.selected_range.start),
+            );
+            let end_lh = input.line_height_for_display_index(
+                input.projection.raw_to_display(input.selected_range.end),
+            );
             if start.y == end.y {
                 selection_quads.push(fill(
                     Bounds::from_corners(
                         point(origin.x + start.x, origin.y + start.y),
-                        point(origin.x + end.x, origin.y + start.y + lh),
+                        point(origin.x + end.x, origin.y + start.y + start_lh),
                     ),
                     selection_color,
                 ));
@@ -5043,14 +5368,14 @@ impl gpui::Element for ComposerTextElement {
                 selection_quads.push(fill(
                     Bounds::from_corners(
                         point(origin.x + start.x, origin.y + start.y),
-                        point(bounds.right(), origin.y + start.y + lh),
+                        point(bounds.right(), origin.y + start.y + start_lh),
                     ),
                     selection_color,
                 ));
-                if end.y > start.y + lh {
+                if end.y > start.y + start_lh {
                     selection_quads.push(fill(
                         Bounds::from_corners(
-                            point(origin.x, origin.y + start.y + lh),
+                            point(origin.x, origin.y + start.y + start_lh),
                             point(bounds.right(), origin.y + end.y),
                         ),
                         selection_color,
@@ -5059,7 +5384,7 @@ impl gpui::Element for ComposerTextElement {
                 selection_quads.push(fill(
                     Bounds::from_corners(
                         point(origin.x, origin.y + end.y),
-                        point(origin.x + end.x, origin.y + end.y + lh),
+                        point(origin.x + end.x, origin.y + end.y + end_lh),
                     ),
                     selection_color,
                 ));
@@ -5142,11 +5467,12 @@ impl gpui::Element for ComposerTextElement {
 
         // WrappedLine isn't Clone — temporarily take the shaped lines out of the
         // entity for painting, then put them back for mouse mapping.
-        let (lines, indents, line_height, scroll, scroll_left) =
+        let (lines, indents, line_heights, line_height, scroll, scroll_left) =
             self.input.update(cx, |input, _| {
                 (
                     std::mem::take(&mut input.last_lines),
                     input.line_indents.clone(),
+                    input.line_heights.clone(),
                     input.line_height,
                     input.scroll_top,
                     input.scroll_left,
@@ -5168,7 +5494,17 @@ impl gpui::Element for ComposerTextElement {
                 }
                 let mut y = bounds.top() - px(scroll);
                 for (line_ix, line) in lines.iter().enumerate() {
+                    let line_height = line_heights.get(line_ix).copied().unwrap_or(line_height);
                     let height = line.size(line_height).height;
+                    // Only the rows in view are painted; a long document's
+                    // other lines cost nothing per frame.
+                    if y > paint_bounds.bottom() {
+                        break;
+                    }
+                    if y + height < paint_bounds.top() {
+                        y += height;
+                        continue;
+                    }
                     let indent = indents.get(line_ix).copied().unwrap_or_default();
                     if indent > px(0.0) && !line.wrap_boundaries().is_empty() {
                         for row in 0..=line.wrap_boundaries().len() {
@@ -5250,7 +5586,7 @@ impl gpui::Element for ComposerTextElement {
 
 impl Render for ComposerInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.mentions_enabled && self.syntax_source != self.content {
+        if self.projects_markdown() && self.syntax_source != self.content {
             self.syntax_source = self.content.clone();
             self.syntax_spans.clear();
             let source = self.syntax_source.clone();
@@ -5351,6 +5687,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .w_full()
+            .when(self.fill_height, |el| el.h_full())
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
             .text_color(text_color)
@@ -5358,6 +5695,7 @@ impl Render for ComposerInput {
             .child({
                 let input = cx.entity();
                 let ascent = self.max_ascent;
+                let fill_height = self.fill_height;
                 crate::edge_fade::edge_faded(
                     INPUT_FADE_BAND,
                     true,
@@ -5367,6 +5705,7 @@ impl Render for ComposerInput {
                         max_content_height: self
                             .viewport_height
                             .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+                        fill_height,
                     },
                 )
                 // Fade through the existing top padding, like the transcript
@@ -5380,9 +5719,11 @@ impl Render for ComposerInput {
                         .map_or(0.0, |bounds| f32::from(bounds.size.height));
                     input_overflow_edges(
                         input.content_height,
-                        input
-                            .settled_viewport_height
-                            .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+                        input.settled_viewport_height.unwrap_or(if fill_height {
+                            visible_height
+                        } else {
+                            TEXTAREA_MAX - TEXTAREA_PAD_V
+                        }),
                         visible_height,
                         input.scroll_top,
                     )
@@ -11946,6 +12287,192 @@ mod tests {
                 ""
             );
         }
+    }
+
+    #[gpui::test]
+    fn document_inputs_break_lines_and_continue_lists_on_enter(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            init(cx, ComposerSendBehavior::default());
+        });
+        let handle = cx.add_window(|window, cx| {
+            let mut input =
+                ComposerInput::with_context("", DOCUMENT_INPUT_CONTEXT, cx).with_markdown();
+            input.set_text("- first", cx);
+            window.focus(&input.focus_handle, cx);
+            input
+        });
+        let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
+        handle
+            .update(cx, |_, _, cx| {
+                let submitted = submitted.clone();
+                cx.subscribe_self(move |_, event: &ComposerInputEvent, _| {
+                    if matches!(
+                        event,
+                        ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted
+                    ) {
+                        submitted.set(true);
+                    }
+                })
+                .detach();
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "enter");
+        cx.simulate_input(handle.into(), "second");
+        // Enter on the empty item ends the list.
+        cx.simulate_keystrokes(handle.into(), "enter enter");
+        cx.simulate_input(handle.into(), "after");
+        assert_eq!(
+            handle
+                .read_with(cx, |input, _| input.text().to_owned())
+                .unwrap(),
+            "- first\n- second\nafter"
+        );
+        assert!(!submitted.get(), "a document never submits");
+    }
+
+    #[gpui::test]
+    fn document_headings_take_taller_rows_for_layout_caret_and_hits(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            input.markdown = true;
+            input.set_text("# Title\nbody", cx);
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            let (heading, body) = (input.line_heights[0], input.line_heights[1]);
+            assert!(heading > body);
+            assert_eq!(body, px(input.configured_line_height));
+            assert_eq!(input.content_height, f32::from(heading + body));
+            // The body line starts below the taller heading row.
+            input.move_to(input.text().len(), cx);
+            assert_eq!(input.cursor_point().unwrap().y, heading);
+            assert_eq!(input.caret_height(), body);
+            // A press low in the heading row still lands on the heading.
+            let (ix, _) = input.caret_for_point(point(px(1.0), heading - px(2.0)));
+            assert!(ix <= "# Title".len(), "{ix}");
+            // Up from the body reaches the heading, and down comes back.
+            let (up, _, _) = input.vertical_target(-1.0).unwrap();
+            assert!(up <= "# Title".len(), "{up}");
+            input.move_to(up, cx);
+            let (down, _, _) = input.vertical_target(1.0).unwrap();
+            assert!(down > "# Title".len(), "{down}");
+            // The message composer keeps one row height.
+            input.markdown = false;
+            input.needs_measure = true;
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            assert_eq!(input.line_heights[0], input.line_heights[1]);
+        });
+    }
+
+    #[gpui::test]
+    fn layout_reshapes_only_the_lines_an_edit_changed(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("one\ntwo\nthree", cx);
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            let shaped = input.shaped_lines;
+            // Moving the caret over plain lines reshapes nothing.
+            input.move_to(5, cx);
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            assert_eq!(input.shaped_lines, shaped);
+            input.replace_text_in_range(None, "X", window, cx);
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            assert_eq!(input.shaped_lines, shaped + 1);
+            assert_eq!(input.last_lines.len(), 3);
+            // A line inserted above keeps the rest cached.
+            input.move_to(0, cx);
+            input.replace_text_in_range(None, "zero\n", window, cx);
+            input.layout_text(px(400.), &window.text_style(), window, cx);
+            assert_eq!(input.shaped_lines, shaped + 2);
+            assert_eq!(input.last_lines.len(), 4);
+            // A new width reshapes every line.
+            input.layout_text(px(300.), &window.text_style(), window, cx);
+            assert_eq!(input.shaped_lines, shaped + 6);
+        });
+    }
+
+    #[test]
+    fn setext_underlines_keep_body_size() {
+        let text = "Title\n===\nbody";
+        let headings = composer_markdown::headings(text);
+        assert_eq!(heading_level_at(&headings, 0, "Title"), Some(1));
+        assert_eq!(heading_level_at(&headings, 6, "==="), None);
+        assert_eq!(heading_level_at(&headings, 10, "body"), None);
+    }
+
+    #[gpui::test]
+    fn markdown_documents_decorate_without_chips(cx: &mut gpui::TestAppContext) {
+        let input = cx.new(|cx| ComposerInput::new("Notes", cx).with_markdown());
+        input.update(cx, |input, cx| {
+            let link = local_file_link("src/main.rs", false);
+            input.set_text(format!("**bold** {link}\nactive"), cx);
+            input.refresh_projection();
+            assert!(input.projection.mentions.is_empty(), "links stay links");
+            assert!(input.projection.display.starts_with("bold "));
+            assert!(input.projection.display.contains(&link));
+            // The caret's own line shows its source.
+            input.move_to(2, cx);
+            input.refresh_projection();
+            assert!(input.projection.display.starts_with("**bold**"));
+        });
+    }
+
+    #[gpui::test]
+    fn external_edits_carry_the_caret_and_selection(cx: &mut gpui::TestAppContext) {
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("alpha beta gamma", cx);
+            input.move_to(input.text().len(), cx);
+            input.replace_text_in_range(None, "!", window, cx);
+            assert!(!input.undo_stack.is_empty());
+            // Select "beta", then another device rewrites "alpha".
+            input.selected_range = 6..10;
+            input.apply_external_edit(0..5, "ALPHA, ALPHA", cx);
+            assert_eq!(input.text(), "ALPHA, ALPHA beta gamma!");
+            assert_eq!(&input.text()[input.selected_range.clone()], "beta");
+            // An edit after the selection leaves it alone.
+            input.apply_external_edit(input.text().len()..input.text().len(), "?", cx);
+            assert_eq!(&input.text()[input.selected_range.clone()], "beta");
+            // Undo takes back only this side's "!", never the other's edits.
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "ALPHA, ALPHA beta gamma?");
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.text(), "ALPHA, ALPHA beta gamma!?");
+            // Out-of-bounds or mid-char ranges are ignored.
+            input.apply_external_edit(0..1000, "x", cx);
+            input.set_text("é", cx);
+            input.apply_external_edit(1..1, "x", cx);
+            assert_eq!(input.text(), "é");
+        });
+    }
+    #[gpui::test]
+    fn undo_history_survives_changes_elsewhere_and_stops_at_overlaps(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("top\nmiddle\nbottom", cx);
+            // Two steps of our own at the bottom, a pause apart.
+            input.move_to(input.text().len(), cx);
+            input.replace_text_in_range(None, " one", window, cx);
+            input.last_edit = None;
+            input.replace_text_in_range(None, " two", window, cx);
+            assert_eq!(input.undo_stack.len(), 2);
+            // Another device edits the top: both steps survive.
+            input.apply_external_edit(0..3, "TOP", cx);
+            assert_eq!(input.undo_stack.len(), 2);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "TOP\nmiddle\nbottom one");
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "TOP\nmiddle\nbottom");
+            input.redo(&Redo, window, cx);
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.text(), "TOP\nmiddle\nbottom one two");
+            // A change inside our latest step drops it and all older ones.
+            let at = input.text().find("two").unwrap();
+            input.apply_external_edit(at..at + 3, "2", cx);
+            assert!(input.undo_stack.is_empty());
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "TOP\nmiddle\nbottom one 2");
+        });
     }
 
     #[gpui::test]
