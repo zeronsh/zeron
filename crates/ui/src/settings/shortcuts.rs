@@ -924,6 +924,43 @@ impl Render for ShortcutsPage {
                         )),
                 )
                 .child(pull_request_destination_control);
+            let github_activity = crate::settings::current(cx).github_activity;
+            let github_activity_row = widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "GitHub activity"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Show your contributions and pull requests under the new chat composer.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, github_activity, "github-activity")
+                        .id("github-activity-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("GitHub activity")
+                        .aria_toggled(if github_activity {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::update(SavePolicy::Debounced, cx, |settings| {
+                                settings.github_activity = !github_activity
+                            });
+                            cx.refresh_windows();
+                            cx.notify();
+                        })),
+                );
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -948,7 +985,8 @@ impl Render for ShortcutsPage {
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
-                                            .child(escape_behavior_row),
+                                            .child(escape_behavior_row)
+                                            .child(github_activity_row),
                                     )
                                     .child(widgets::section(
                                         &theme,
