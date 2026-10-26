@@ -151,16 +151,27 @@ pub fn parse_full(source: &str) -> BlockTree {
     parse_at(source, 0)
 }
 
+/// Parse a message a person typed: like [`parse_full`], but every newline
+/// inside a paragraph is a line break (GFM comments' `breaks`), so a prompt
+/// keeps the lines it was written in.
+pub fn parse_message(source: &str) -> BlockTree {
+    parse_breaking(source, 0, options(), true)
+}
+
 fn parse_at(source: &str, offset: usize) -> BlockTree {
     parse_with(source, offset, options())
 }
 
 fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
+    parse_breaking(source, offset, options, false)
+}
+
+fn parse_breaking(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     // pulldown-cmark 0.12 can panic on some malformed input (a slice index
     // in its first pass); a message must never take the app down with it.
     // Such a source renders as its plain text.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_rewritten(source, offset, options)
+        parse_rewritten(source, offset, options, breaks)
     }))
     .unwrap_or_else(|_| BlockTree {
         blocks: vec![Arc::new(TopBlock {
@@ -199,7 +210,7 @@ impl Skip {
 /// text, placed the way the innermost kept container takes children.
 const MAX_NESTING: usize = 32;
 
-fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
+fn parse_rewritten(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     let mut skip = Skip::default();
     // Every rewrite is checked against the parse it produced: a dollar pair
     // or a `\(…\)` pair must come out as exactly one formula, a destination
@@ -256,7 +267,10 @@ fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
         }
         let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options)
             .into_offset_iter()
-            .map(|(event, range)| (event, to_source(&maps, range)))
+            .map(|(event, range)| match event {
+                Event::SoftBreak if breaks => (Event::HardBreak, to_source(&maps, range)),
+                event => (event, to_source(&maps, range)),
+            })
             .collect();
         let failed = if skip.all {
             Vec::new()
@@ -3094,6 +3108,32 @@ mod math_tests {
 
     fn paragraph(runs: Vec<InlineRun>) -> Block {
         Block::Paragraph { runs }
+    }
+
+    #[test]
+    fn message_newlines_are_line_breaks() {
+        let blocks = |tree: BlockTree| -> Vec<Block> {
+            tree.blocks.iter().map(|top| top.block.clone()).collect()
+        };
+        assert_eq!(
+            blocks(parse_message("one\ntwo\n\nthree")),
+            [
+                paragraph(vec![plain("one\ntwo")]),
+                paragraph(vec![plain("three")]),
+            ]
+        );
+        assert_eq!(
+            blocks(parse_full("one\ntwo")),
+            [paragraph(vec![plain("one two")])]
+        );
+        // Fences keep their own newlines either way.
+        assert_eq!(
+            blocks(parse_message("```\na\nb\n```")),
+            [Block::CodeBlock {
+                language: None,
+                code: "a\nb".into(),
+            }]
+        );
     }
 
     #[test]

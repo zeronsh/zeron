@@ -10,17 +10,18 @@
 //! extension since the rail shares the transcript's rows and `ListState`.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, ListOffset, MouseMoveEvent, Pixels, SharedString, canvas, div,
-    prelude::*, px,
+    AnyElement, ClickEvent, Context, ListOffset, MouseMoveEvent, Pixels, SharedString, StyledText,
+    canvas, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
+use crate::markdown::{Block, InlineRun, InlineStyle};
 use crate::motion;
 use crate::popover;
 use crate::theme::Theme;
-use crate::transcript::Transcript;
+use crate::transcript::{AgentSender, ChatIdentity, Transcript};
 
 /// 48rem — the container width below which the rail (and wide gutters) collapse.
 pub const RAIL_MIN_CONTAINER_WIDTH: f32 = 768.0;
@@ -29,9 +30,11 @@ pub fn rail_visible(container_width: f32) -> bool {
     container_width >= RAIL_MIN_CONTAINER_WIDTH
 }
 
-/// Preview text caps (grapheme-unaware char cut is fine for a preview card).
-pub const PREVIEW_PROMPT_CHARS: usize = 160;
-pub const PREVIEW_REPLY_CHARS: usize = 200;
+/// Preview line caps: the prompt and the reply's opening clamp to these.
+pub const PREVIEW_PROMPT_LINES: usize = 3;
+pub const PREVIEW_REPLY_LINES: usize = 4;
+/// Source a preview parses at most; the clamp shows far less of it.
+const PREVIEW_SOURCE_BYTES: usize = 2048;
 
 /// One rail tick: a user prompt and the opening of the reply that followed.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,10 +42,13 @@ pub struct RailTick {
     /// Message id — equals the user row's id in the transcript row model.
     pub message_id: String,
     pub prompt: String,
+    /// The chat that sent the prompt through Zeron's `send_message`; its
+    /// routing header is off `prompt`, as in the transcript.
+    pub sender: Option<AgentSender>,
     pub reply: Option<String>,
 }
 
-fn user_text(entry: &SessionMessageEntry) -> String {
+fn user_text(entry: &SessionMessageEntry) -> (String, Option<AgentSender>) {
     let raw = entry
         .parts
         .iter()
@@ -55,7 +61,13 @@ fn user_text(entry: &SessionMessageEntry) -> String {
     // Attachment refs ride the message text — the rail shows the visible
     // prompt, or "Attached image(s)" for image-only sends
     // (message-attachments.ts `userMessageRailText`).
-    crate::attachments::user_message_rail_text(&zeron_proto::annotation::annotation_display(&raw))
+    let text = crate::attachments::user_message_rail_text(
+        &zeron_proto::annotation::annotation_display(&raw),
+    );
+    match crate::transcript::agent_message_sender(&text) {
+        Some((sender, body)) => (body.to_owned(), Some(sender)),
+        None => (text, None),
+    }
 }
 
 fn first_reply_text(entries: &[SessionMessageEntry]) -> Option<String> {
@@ -85,17 +97,21 @@ pub fn rail_ticks(
         if entry.role != MessageRole::User {
             continue;
         }
+        let (prompt, sender) = user_text(entry);
         ticks.push(RailTick {
             message_id: entry.id.clone(),
-            prompt: user_text(entry),
+            prompt,
+            sender,
             reply: first_reply_text(&entries[ix + 1..]),
         });
     }
     for echo in echoes {
         if echo.role == MessageRole::User && !ticks.iter().any(|t| t.message_id == echo.id) {
+            let (prompt, sender) = user_text(echo);
             ticks.push(RailTick {
                 message_id: echo.id.clone(),
-                prompt: user_text(echo),
+                prompt,
+                sender,
                 reply: None,
             });
         }
@@ -207,16 +223,162 @@ pub fn tick_width(distance: Option<usize>) -> f32 {
     }
 }
 
-/// Char-cap a preview with an ellipsis. Whitespace runs (including newlines —
-/// prompts and replies are free text) collapse to single spaces first: the
-/// preview card's title is a one-line surface (message-rail.tsx line-clamp-1).
-pub fn truncate_preview(text: &str, max_chars: usize) -> String {
-    let flat = crate::transcript::single_line(text);
-    if flat.chars().count() <= max_chars {
-        return flat;
+/// A preview's Markdown as one run of prose: the styling stays (strong,
+/// emphasis, code, links), while block structure, which the card's few lines
+/// have no room for, flattens to spaces. Only prose shows (paragraphs,
+/// headings, list items): a fence, quote, table or display formula would
+/// spend those lines on its least telling part, so it is left out, and a
+/// message of nothing else shows its first fence's opening line. Inline math
+/// and images show their source.
+pub fn preview_runs(source: &str) -> Vec<InlineRun> {
+    let mut end = source.len().min(PREVIEW_SOURCE_BYTES);
+    while !source.is_char_boundary(end) {
+        end -= 1;
     }
-    let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{}…", cut.trim_end())
+    let tree = crate::markdown::parse_full(&source[..end]);
+    let mut runs = Vec::new();
+    for top in &tree.blocks {
+        push_block_runs(&top.block, &mut runs);
+    }
+    if runs.iter().all(|run| run.text.trim().is_empty()) {
+        runs = tree
+            .blocks
+            .iter()
+            .find_map(|top| first_code_line(&top.block))
+            .map(|line| InlineRun {
+                text: line.to_owned(),
+                style: InlineStyle {
+                    code: true,
+                    ..InlineStyle::default()
+                },
+            })
+            .into_iter()
+            .collect();
+    }
+    // Whitespace (line breaks included) collapses, like the transcript's
+    // one-line titles.
+    // A collapsed space between runs is its own plain run, so a code wash
+    // never takes in a blank.
+    let mut out: Vec<InlineRun> = Vec::with_capacity(runs.len());
+    let mut space = false;
+    for run in runs {
+        let mut text = String::with_capacity(run.text.len());
+        for c in run.text.chars() {
+            if c.is_whitespace() {
+                space = !out.is_empty() || !text.is_empty();
+            } else {
+                if space {
+                    if text.is_empty() {
+                        out.push(InlineRun {
+                            text: " ".into(),
+                            style: InlineStyle::default(),
+                        });
+                    } else {
+                        text.push(' ');
+                    }
+                    space = false;
+                }
+                text.push(c);
+            }
+        }
+        if !text.is_empty() {
+            out.push(InlineRun {
+                text,
+                style: run.style,
+            });
+        }
+    }
+    out
+}
+
+fn push_block_runs(block: &Block, runs: &mut Vec<InlineRun>) {
+    let inline = |run: &InlineRun, bold: bool| {
+        let mut style = run.style.clone();
+        style.bold |= bold;
+        let text = match (&style.image, style.math) {
+            (Some(image), _) => image.alt.clone(),
+            (None, true) => {
+                // A formula needs a painted slot; the card shows its source.
+                style.math = false;
+                style.code = true;
+                format!("${}$", run.text)
+            }
+            (None, false) => run.text.clone(),
+        };
+        InlineRun { text, style }
+    };
+    match block {
+        Block::Paragraph { runs: inlines } => runs.extend(inlines.iter().map(|r| inline(r, false))),
+        Block::Heading { runs: inlines, .. } => {
+            runs.extend(inlines.iter().map(|r| inline(r, true)))
+        }
+        Block::List { items, .. } => {
+            for child in items.iter().flatten() {
+                push_block_runs(child, runs);
+            }
+        }
+        Block::CodeBlock { .. }
+        | Block::Math { .. }
+        | Block::BlockQuote { .. }
+        | Block::Table { .. }
+        | Block::Rule => return,
+    }
+    runs.push(InlineRun {
+        text: " ".into(),
+        style: InlineStyle::default(),
+    });
+}
+
+/// The first non-blank line of the first fence in `block`, at any depth.
+fn first_code_line(block: &Block) -> Option<&str> {
+    match block {
+        Block::CodeBlock { code, .. } => code.lines().map(str::trim).find(|line| !line.is_empty()),
+        Block::BlockQuote { children } => children.iter().find_map(first_code_line),
+        Block::List { items, .. } => items.iter().flatten().find_map(first_code_line),
+        _ => None,
+    }
+}
+
+/// A preview's text at the card's size: [`preview_runs`] styled like a
+/// reply's Markdown, in `color` where the reply would use body text, with
+/// inline code on its rounded wash.
+fn preview_text(source: &str, color: gpui::Hsla, theme: &Theme) -> Option<AnyElement> {
+    use crate::markdown::render;
+    let runs = preview_runs(source);
+    if runs.is_empty() {
+        return None;
+    }
+    let mut theme = theme.clone();
+    theme.text = color;
+    let flat = render::flatten_runs(&runs, &theme, false);
+    let styled = StyledText::new(flat.text).with_runs(flat.runs);
+    let layout = styled.layout().clone();
+    let wash = render::inline_code_wash(&theme);
+    let code_ranges = flat.code_ranges;
+    div()
+        .relative()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    for range in &code_ranges {
+                        for rect in render::range_rects(
+                            &layout,
+                            range,
+                            render::INLINE_CODE_PAD_X,
+                            render::INLINE_CODE_INSET_Y / 2.0,
+                        ) {
+                            window.paint_quad(gpui::fill(rect, wash).corner_radii(px(3.5)));
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(styled)
+        .into_any_element()
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +720,21 @@ impl Transcript {
             .collect();
         let hover = self.rail_hover().filter(|&ix| ix < n);
         let theme = Theme::of(cx).clone();
+        let senders: Vec<Option<ChatIdentity>> = {
+            let state = self.state_entity().read(cx);
+            pairs
+                .iter()
+                .map(|(tick, _)| {
+                    tick.sender.as_ref().map(|sender| {
+                        crate::transcript::chat_identity(
+                            state,
+                            Some(sender.chat_id.as_ref()),
+                            &sender.title,
+                        )
+                    })
+                })
+                .collect()
+        };
 
         // The rail centres in the band between the titlebar and the bottom
         // chrome. Pre-layout the viewport reads 0; assume a typical height
@@ -608,8 +785,11 @@ impl Transcript {
         };
         let move_under = tick_under.clone();
 
-        let ticks =
-            pairs.into_iter().enumerate().map(|(ix, (tick, _))| {
+        let ticks = pairs
+            .into_iter()
+            .zip(senders)
+            .enumerate()
+            .map(|(ix, ((tick, _), sender))| {
                 let distance = hover.map(|h| h.abs_diff(ix));
                 let bar_color = if distance == Some(0) || lit[ix] {
                     theme.text.opacity(0.8)
@@ -617,30 +797,54 @@ impl Transcript {
                     crate::theme::ink(0.16)
                 };
                 let card: Option<AnyElement> = (distance == Some(0)).then(|| {
-                    let prompt = truncate_preview(&tick.prompt, PREVIEW_PROMPT_CHARS);
+                    let theme = theme.for_popup();
+                    // The sender rides over the prompt as it does over the
+                    // bubble: `Message from [mark] Chat`.
+                    let sender = sender.map(|ChatIdentity { title, mark, .. }| {
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(div().flex_none().child("Message from"))
+                            .child(crate::transcript::caption_label(
+                                title,
+                                Some(mark),
+                                theme.text_muted,
+                            ))
+                    });
+                    let prompt = preview_text(&tick.prompt, theme.text, &theme);
                     let reply = tick
                         .reply
                         .as_deref()
-                        .map(|r| truncate_preview(r, PREVIEW_REPLY_CHARS));
-                    let theme = theme.for_popup();
+                        .and_then(|reply| preview_text(reply, theme.text_muted, &theme));
                     let card = popover::popover_card(&theme)
                         .w(px(280.0))
                         .p(px(Theme::SPACE_SM))
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from(prompt)),
-                        )
+                        .children(sender)
+                        .when_some(prompt, |el, prompt| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text)
+                                    .line_clamp(PREVIEW_PROMPT_LINES)
+                                    .text_ellipsis()
+                                    .child(prompt),
+                            )
+                        })
                         .when_some(reply, |el, reply| {
                             el.child(
                                 div()
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_muted)
-                                    .child(SharedString::from(reply)),
+                                    .line_clamp(PREVIEW_REPLY_LINES)
+                                    .text_ellipsis()
+                                    .child(reply),
                             )
                         });
                     // Mounted straight through deferred/anchored (not a popover
@@ -1000,16 +1204,71 @@ mod tests {
     }
 
     #[test]
-    fn preview_truncation() {
-        assert_eq!(truncate_preview("short", 10), "short");
-        assert_eq!(truncate_preview("  padded  ", 10), "padded");
-        let long = "x".repeat(50);
-        let cut = truncate_preview(&long, 10);
-        assert!(cut.chars().count() <= 10);
-        assert!(cut.ends_with('…'));
-        // Multi-byte safety.
-        let uni = "héllo wörld attaché case overflowing";
-        let cut = truncate_preview(uni, 12);
-        assert!(cut.ends_with('…'));
+    fn previews_render_markdown_as_one_line_of_prose() {
+        let runs = preview_runs("Use **bold** and `code`.\n\n- one\n- *two*");
+        let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(text, "Use bold and code. one two");
+        let style = |needle: &str| &runs.iter().find(|run| run.text == needle).unwrap().style;
+        assert!(style("bold").bold);
+        assert!(style("code").code);
+        assert!(style("two").italic);
+        // Spaces between runs stay outside their styling.
+        assert!(
+            runs.iter()
+                .filter(|run| run.style != InlineStyle::default())
+                .all(|run| !run.text.starts_with(' ') && !run.text.ends_with(' '))
+        );
+        // Markers and list bullets never show as source.
+        assert!(!text.contains('*') && !text.contains('`'));
+        // Whitespace collapses; nothing leads or trails.
+        let runs = preview_runs("  padded\nlines  ");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "padded lines");
+        // A long source is cut on a char boundary before parsing.
+        let long = "é".repeat(PREVIEW_SOURCE_BYTES);
+        assert!(!preview_runs(&long).is_empty());
+        // Inline formulas show their source as code.
+        let runs = preview_runs("area $x^2$");
+        assert_eq!(runs.last().unwrap().text, "$x^2$");
+        assert!(runs.last().unwrap().style.code);
+    }
+
+    #[test]
+    fn previews_leave_out_blocks_that_are_not_prose() {
+        let text = |source: &str| -> String {
+            preview_runs(source)
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect()
+        };
+        let source = "Run this:\n\n```sh\ncargo test\n```\n\n> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n$$x$$\n\n---\n\nthen report.";
+        assert_eq!(text(source), "Run this: then report.");
+        // A fence inside a list item goes too.
+        assert_eq!(text("- step\n\n  ```\n  make\n  ```"), "step");
+        // A message of nothing but a fence shows its opening line.
+        let runs = preview_runs("```rust\n\nfn main() {\n}\n```");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "fn main() {");
+        assert!(runs[0].style.code);
+        // Nothing to show at all stays empty.
+        assert!(preview_runs("---").is_empty());
+    }
+
+    #[test]
+    fn agent_sent_prompts_carry_their_sender() {
+        let id = "c563133c-2825-4056-8d1e-4b2a18c210ae";
+        let routed = format!(
+            "[Message from Zeron chat Harden Orbit (c563133c). Reply to it with the Zeron `send_message` tool, chat {id}.]\n\nYou own the **soak**."
+        );
+        let entries = vec![
+            entry("u1", MessageRole::User, &routed),
+            entry("u2", MessageRole::User, "plain"),
+        ];
+        let ticks = rail_ticks(&entries, &[]);
+        let sender = ticks[0].sender.as_ref().unwrap();
+        assert_eq!(sender.chat_id.as_ref(), id);
+        assert_eq!(sender.title.as_ref(), "Harden Orbit");
+        assert_eq!(ticks[0].prompt, "You own the **soak**.");
+        assert!(ticks[1].sender.is_none());
     }
 }

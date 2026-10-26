@@ -89,6 +89,10 @@ name = "message-captions-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "message-markdown-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 

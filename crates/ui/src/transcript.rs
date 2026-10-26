@@ -1069,6 +1069,10 @@ pub enum RowKind {
         /// once per entry change in [`rows_for_entry`] (rows are cached by
         /// fingerprint), never per frame. Empty for ordinary prompts.
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        /// `text` parsed as Markdown, when it uses any and carries no chips
+        /// (their pills paint over `text`'s own layout). `None` shows `text`
+        /// as typed.
+        markdown: Option<Arc<BlockTree>>,
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
@@ -1426,6 +1430,11 @@ pub fn rows_for_entry(
                     .iter()
                     .any(|chip| crate::attachments::chip_names_attachment(chip, &att.path))
         });
+        let markdown = mentions
+            .is_empty()
+            .then(|| crate::markdown::parse_message(&text))
+            .filter(|tree| !plain_markdown(tree))
+            .map(Arc::new);
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
@@ -1434,6 +1443,7 @@ pub fn rows_for_entry(
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
+                markdown,
                 attachments: Arc::new(attachments),
                 badges: Arc::new(badges),
                 sender,
@@ -1529,8 +1539,7 @@ pub fn rows_for_entry(
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
-                if !compact
-                    && let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call)
+                if !compact && let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call)
                 {
                     flush_group(
                         &mut rows,
@@ -6628,6 +6637,7 @@ impl Transcript {
         row_ix: usize,
         text: SharedString,
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        markdown: Option<Arc<BlockTree>>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -6697,18 +6707,23 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(
-                row_id,
-                text,
-                mentions,
-                theme,
-                measured_h.clone(),
-                cx.entity_id(),
-                chip_overlays,
-                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip_image(path, window, cx);
-                })),
-            ));
+            .child(match markdown {
+                Some(tree) => {
+                    self.render_user_markdown(row_id, &tree, measured_h.clone(), theme, window, cx)
+                }
+                None => user_bubble_text(
+                    row_id,
+                    text,
+                    mentions,
+                    theme,
+                    measured_h.clone(),
+                    cx.entity_id(),
+                    chip_overlays,
+                    Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
+                        this.open_chip_image(path, window, cx);
+                    })),
+                ),
+            });
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
         // full text remains laid out behind the clip; only the viewport over it
@@ -6761,6 +6776,77 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The chat's checkout, which tells a workspace-file link from a web one.
+    fn workspace_root(&self, cx: &gpui::App) -> Option<SharedString> {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row())
+            .and_then(|chat| chat.cwd.as_deref())
+            .map(SharedString::from)
+    }
+
+    /// A prompt's Markdown, rendered like a reply's at the bubble's size: its
+    /// own selection keys, links and fences. The canvas behind it records the
+    /// full height for the fold, as [`user_bubble_text`] does for plain text.
+    fn render_user_markdown(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        measured_h: Rc<Cell<f32>>,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_key: SharedString = format!("{row_id}:u").into();
+        let link = self.link_ui(cx);
+        let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+        let code = tree
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, top)| self.code_uis_for(&row_key, &top.block, ix, cx))
+            .flatten()
+            .collect::<HashMap<_, _>>();
+        let opts = RenderOptions {
+            tasks: None,
+            media: None,
+            row_key: row_key.clone(),
+            veil: None,
+            cache: None,
+            now: Instant::now(),
+            copy: Some(self.copy_ui_for(&row_key, cx)),
+            link,
+            workspace_root: self.workspace_root(cx),
+            code: (!code.is_empty()).then_some(code),
+            math: crate::settings::math_style(cx),
+        };
+        let highlight = self.code_highlight_for(&row_key, &tree, None, cx);
+        let entity_id = cx.entity_id();
+        div()
+            .relative()
+            .child(
+                canvas(
+                    move |bounds, _, _| bounds.size.height,
+                    move |_, height, _, cx| {
+                        // Passive geometry cache, like the plain bubble's.
+                        let height = f32::from(height);
+                        if (measured_h.get() - height).abs() > 0.5 {
+                            measured_h.set(height);
+                            cx.notify(entity_id);
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(render::render_tree(&tree, &opts, theme, window, &|ix| {
+                highlight.get(&ix).cloned().flatten()
+            }))
+            .into_any_element()
+    }
+
     /// `Message from [logo] Chat` over an agent-sent bubble, in the switch
     /// seam's caption style: the sending chat's provider mark and live title
     /// (the header's title for a chat this workspace doesn't list). A known
@@ -6802,33 +6888,8 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chat = chat_id.and_then(|id| {
-            self.state
-                .read(cx)
-                .chats
-                .iter()
-                .find(|chat| chat.id == id)
-        });
-        let known = chat.is_some();
-        let title: SharedString = chat
-            .and_then(|chat| chat.title.as_deref())
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map_or_else(
-                || {
-                    if chat.is_some() {
-                        // Listed but untitled: its short id, as the header says.
-                        chat_id.unwrap_or_default().chars().take(8).collect::<String>().into()
-                    } else {
-                        single_line(&fallback).into()
-                    }
-                },
-                |title| single_line(title).into(),
-            );
-        let mark = chat
-            .and_then(|chat| chat.config.as_ref())
-            .map(|config| crate::pickers::harness_brand_icon(config.harness))
-            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+        let ChatIdentity { title, mark, known } =
+            chat_identity(self.state.read(cx), chat_id, &fallback);
         let chat_id = chat_id.unwrap_or_default().to_owned();
         div()
             .w_full()
@@ -7661,117 +7722,117 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn, booting) =
-            if let Some(doc_id) = &self.doc_override {
-                // A subagent doc has no Session row — `indicator_for` would read
-                // the PARENT chat's live state into this tab. Liveness rides the
-                // doc itself instead: the sink's assistant entry streams until
-                // the subagent settles (run teardown finalizes abandoned sinks),
-                // and a trailing USER entry is a steer still awaiting its reply
-                // segment. Frozen snapshots never spin, whatever they claim.
-                if !self.doc_live {
-                    return None;
-                }
+        let (sending, queued, elapsed_secs, seed, turn, booting) = if let Some(doc_id) =
+            &self.doc_override
+        {
+            // A subagent doc has no Session row — `indicator_for` would read
+            // the PARENT chat's live state into this tab. Liveness rides the
+            // doc itself instead: the sink's assistant entry streams until
+            // the subagent settles (run teardown finalizes abandoned sinks),
+            // and a trailing USER entry is a steer still awaiting its reply
+            // segment. Frozen snapshots never spin, whatever they claim.
+            if !self.doc_live {
+                return None;
+            }
+            let state = self.state.read(cx);
+            let last = state.sub_transcript(doc_id).last()?;
+            let live =
+                last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
+            if !live {
+                return None;
+            }
+            let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
+            (
+                false,
+                false,
+                elapsed,
+                flavour_seed(doc_id),
+                last.created_at,
+                None,
+            )
+        } else {
+            let chat_id = self.chat_id.clone()?;
+            // Failed-send state first: past the grace window the trailer IS
+            // the retry affordance, whatever the indicator fell back to.
+            if self.state.read(cx).send_undelivered(&chat_id, now) {
+                let theme = Theme::of(cx).clone();
+                return Some(
+                    div()
+                        .id("undelivered-retry")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .pt(px(Theme::SPACE_LG))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                        .child(SharedString::from("Not delivered — click to retry"))
+                        .into_any_element(),
+                );
+            }
+            let (sending, queued, elapsed, turn, booting) = {
                 let state = self.state.read(cx);
-                let last = state.sub_transcript(doc_id).last()?;
-                let live =
-                    last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
-                if !live {
+                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
                 }
-                let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-                (
-                    false,
-                    false,
-                    elapsed,
-                    flavour_seed(doc_id),
-                    last.created_at,
-                    None,
-                )
-            } else {
-                let chat_id = self.chat_id.clone()?;
-                // Failed-send state first: past the grace window the trailer IS
-                // the retry affordance, whatever the indicator fell back to.
-                if self.state.read(cx).send_undelivered(&chat_id, now) {
-                    let theme = Theme::of(cx).clone();
-                    return Some(
-                        div()
-                            .id("undelivered-retry")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(Theme::SPACE_SM))
-                            .pt(px(Theme::SPACE_LG))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.danger)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                            .child(SharedString::from("Not delivered — click to retry"))
-                            .into_any_element(),
-                    );
-                }
-                let (sending, queued, elapsed, turn, booting) = {
-                    let state = self.state.read(cx);
-                    if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                        return None;
-                    }
-                    // The Cloud setup steps say what the send waits on; the
-                    // line under them is the turn's working word, timed from
-                    // the send — setting the machine up is part of the work —
-                    // and keyed on it, so neither restarts when the machine's
-                    // turn begins.
-                    if let Some(sent) = state.cloud_setup_turn_started() {
-                        let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
-                        (false, false, elapsed, sent, None)
+                // The Cloud setup steps say what the send waits on; the
+                // line under them is the turn's working word, timed from
+                // the send — setting the machine up is part of the work —
+                // and keyed on it, so neither restarts when the machine's
+                // turn begins.
+                if let Some(sent) = state.cloud_setup_turn_started() {
+                    let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
+                    (false, false, elapsed, sent, None)
+                } else {
+                    // During the send→turn window the session row's `started_at`
+                    // still belongs to the PREVIOUS turn — a timer based on the
+                    // send counted the round-trip and then restarted when the
+                    // turn actually began (user report). Bridge it as "Sending…"
+                    // with no timer instead; the word + timer start with the
+                    // turn.
+                    let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                    let send_started = state.pending_send_started(&chat_id, now);
+                    let sending = sending_bridge(send_started, turn_started);
+                    // A path that would hold the send: it is a durable local
+                    // write waiting on connectivity — say so instead of faking
+                    // progress. A syncing chat still delivers. (The overlay
+                    // holds while delivery is unconfirmed, so this line owns
+                    // the surface until the ack or the failed state.)
+                    let queued = sending && state.chat_link_at(&chat_id, now).send_would_queue();
+                    let elapsed = turn_started
+                        .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                        .unwrap_or(0);
+                    // While sending, the session row still carries the PREVIOUS
+                    // turn: the bridge keys on its own send instead, so it never
+                    // rolls out of that turn's word or an earlier send's.
+                    let turn = if sending { send_started } else { turn_started }
+                        .map_or(0, |t| t.timestamp_millis());
+                    // The send waits for the chat's own Cloud machine to come up.
+                    // (Past the beat in which this device's own send puts
+                    // up its setup chip, so the words never flash twice.)
+                    let booting = if sending
+                        && send_started.is_some_and(|t| {
+                            now.signed_duration_since(t).num_milliseconds()
+                                >= CLOUD_BOOT_WORD_AFTER_MS
+                        }) {
+                        state.cloud_machine_booting(&chat_id)
                     } else {
-                        // During the send→turn window the session row's `started_at`
-                        // still belongs to the PREVIOUS turn — a timer based on the
-                        // send counted the round-trip and then restarted when the
-                        // turn actually began (user report). Bridge it as "Sending…"
-                        // with no timer instead; the word + timer start with the
-                        // turn.
-                        let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                        let send_started = state.pending_send_started(&chat_id, now);
-                        let sending = sending_bridge(send_started, turn_started);
-                        // A path that would hold the send: it is a durable local
-                        // write waiting on connectivity — say so instead of faking
-                        // progress. A syncing chat still delivers. (The overlay
-                        // holds while delivery is unconfirmed, so this line owns
-                        // the surface until the ack or the failed state.)
-                        let queued =
-                            sending && state.chat_link_at(&chat_id, now).send_would_queue();
-                        let elapsed = turn_started
-                            .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                            .unwrap_or(0);
-                        // While sending, the session row still carries the PREVIOUS
-                        // turn: the bridge keys on its own send instead, so it never
-                        // rolls out of that turn's word or an earlier send's.
-                        let turn = if sending { send_started } else { turn_started }
-                            .map_or(0, |t| t.timestamp_millis());
-                        // The send waits for the chat's own Cloud machine to come up.
-                        // (Past the beat in which this device's own send puts
-                        // up its setup chip, so the words never flash twice.)
-                        let booting = if sending
-                            && send_started.is_some_and(|t| {
-                                now.signed_duration_since(t).num_milliseconds()
-                                    >= CLOUD_BOOT_WORD_AFTER_MS
-                            }) {
-                            state.cloud_machine_booting(&chat_id)
-                        } else {
-                            None
-                        };
-                        (sending, queued, elapsed, turn, booting)
-                    }
-                };
-                (
-                    sending,
-                    queued,
-                    elapsed,
-                    flavour_seed(&chat_id),
-                    turn,
-                    booting,
-                )
+                        None
+                    };
+                    (sending, queued, elapsed, turn, booting)
+                }
             };
+            (
+                sending,
+                queued,
+                elapsed,
+                flavour_seed(&chat_id),
+                turn,
+                booting,
+            )
+        };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -7866,15 +7927,7 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let workspace_root = {
-            let state = self.state.read(cx);
-            self.chat_id
-                .as_deref()
-                .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .or_else(|| state.selected_chat_row())
-                .and_then(|chat| chat.cwd.as_deref())
-                .map(SharedString::from)
-        };
+        let workspace_root = self.workspace_root(cx);
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
         // rests below the chrome it fades under. The right pane already pads
@@ -7909,6 +7962,7 @@ impl Transcript {
             RowKind::User {
                 text,
                 mentions,
+                markdown,
                 attachments,
                 badges,
                 sender,
@@ -7918,6 +7972,7 @@ impl Transcript {
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
+                let markdown = markdown.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
@@ -7975,7 +8030,7 @@ impl Transcript {
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
                                 .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
+                                    &row.id, ix, text, mentions, markdown, &theme, window, cx,
                                 )),
                         ),
                     );
@@ -7994,8 +8049,7 @@ impl Transcript {
                         .iter()
                         .map(|chat| (chat.id.as_str(), chat.title.as_deref()))
                         .collect();
-                    zeron_proto::agent_messages::resolve_chat_key(to, &chats)
-                        .map(str::to_owned)
+                    zeron_proto::agent_messages::resolve_chat_key(to, &chats).map(str::to_owned)
                 };
                 let lead = if *failed {
                     "Couldn't message"
@@ -9317,10 +9371,56 @@ pub struct AgentSender {
     pub title: SharedString,
 }
 
+/// How a chat between chats shows: chat `chat_id`'s live title and provider
+/// mark when this workspace lists it, else `fallback` (the title its header
+/// recorded).
+pub(crate) struct ChatIdentity {
+    pub title: SharedString,
+    pub mark: (&'static str, Option<gpui::Hsla>),
+    /// Whether the chat is listed, so it can open.
+    pub known: bool,
+}
+
+pub(crate) fn chat_identity(
+    state: &AppState,
+    chat_id: Option<&str>,
+    fallback: &str,
+) -> ChatIdentity {
+    let chat = chat_id.and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+    let title: SharedString = chat
+        .and_then(|chat| chat.title.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map_or_else(
+            || {
+                if chat.is_some() {
+                    // Listed but untitled: its short id, as the header says.
+                    chat_id
+                        .unwrap_or_default()
+                        .chars()
+                        .take(8)
+                        .collect::<String>()
+                        .into()
+                } else {
+                    single_line(fallback).into()
+                }
+            },
+            |title| single_line(title).into(),
+        );
+    ChatIdentity {
+        title,
+        mark: chat
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| crate::pickers::harness_brand_icon(config.harness))
+            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None)),
+        known: chat.is_some(),
+    }
+}
+
 /// Split the routing header (`[Message from Zeron chat …]`) off a message an
 /// agent sent: the agent keeps reading it in the stored prompt, while the
 /// transcript shows the sender above the bubble and only the body inside it.
-fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
+pub(crate) fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
     let (sender, body) = zeron_proto::agent_messages::agent_message_sender(text)?;
     Some((
         AgentSender {
@@ -9329,6 +9429,15 @@ fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
         },
         body,
     ))
+}
+
+/// Whether a prompt's Markdown is only unstyled paragraphs: it reads the same
+/// as typed, so the bubble keeps its plain text.
+fn plain_markdown(tree: &BlockTree) -> bool {
+    tree.blocks.iter().all(|top| match &top.block {
+        Block::Paragraph { runs } => runs.iter().all(|run| run.style == InlineStyle::default()),
+        _ => false,
+    })
 }
 
 /// The bubble text's runs: body text in the sans font, and chips as labels in
@@ -9765,7 +9874,7 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
 
 /// `[mark] Name` in a user-message caption: a provider's brand mark (or any
 /// glyph) beside its name. A side without a mark shows its name alone.
-fn caption_label(
+pub(crate) fn caption_label(
     name: SharedString,
     mark: Option<(&'static str, Option<gpui::Hsla>)>,
     color: gpui::Hsla,
@@ -12981,7 +13090,11 @@ mod tests {
             MessageStatus::Complete,
             vec![
                 tool_part("k0", "ls"),
-                send("k1", "send_message", serde_json::json!({ "chat": "Windows lane", "text": "Run it." })),
+                send(
+                    "k1",
+                    "send_message",
+                    serde_json::json!({ "chat": "Windows lane", "text": "Run it." }),
+                ),
                 send(
                     "k2",
                     "send_messages",
@@ -12993,18 +13106,28 @@ mod tests {
         // The ordinary tool keeps its fold; each message is its own row.
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
-        let RowKind::SentMessage { to, pending, failed } = &rows[1].kind else {
+        let RowKind::SentMessage {
+            to,
+            pending,
+            failed,
+        } = &rows[1].kind
+        else {
             panic!("expected a sent message");
         };
-        assert_eq!((to.as_ref(), *pending, *failed), ("Windows lane", true, false));
+        assert_eq!(
+            (to.as_ref(), *pending, *failed),
+            ("Windows lane", true, false)
+        );
         assert!(matches!(&rows[3].kind, RowKind::SentMessage { to, .. } if to.as_ref() == "b"));
         // Compact mode folds the whole turn, sends included: they show when
         // the work fold opens.
         let compact = rows_for_entry(&entry, false, true, &mut parse);
-        assert!(compact
-            .iter()
-            .filter(|row| matches!(row.kind, RowKind::SentMessage { .. }))
-            .all(|row| row.compact_fold.as_deref() == Some("a1#work")));
+        assert!(
+            compact
+                .iter()
+                .filter(|row| matches!(row.kind, RowKind::SentMessage { .. }))
+                .all(|row| row.compact_fold.as_deref() == Some("a1#work"))
+        );
     }
 
     #[test]
@@ -13039,6 +13162,33 @@ mod tests {
         assert_eq!((sender.title.as_ref(), body), ("cd27c5c2", "hi"));
         // A typed message that merely starts alike is left alone.
         assert!(agent_message_sender("[Message from Zeron chat x]\n\nhi").is_none());
+    }
+
+    #[test]
+    fn prompts_written_in_markdown_render_it() {
+        let markdown = |text: &str| {
+            let rows = rows_for_entry(&user_entry("u1", text), false, false, &mut parse);
+            let RowKind::User { markdown, .. } = &rows[0].kind else {
+                panic!("expected a user row");
+            };
+            markdown.clone()
+        };
+        let tree = markdown("Keep **this**\nand `that`\n\n- one\n- two").unwrap();
+        assert_eq!(tree.blocks.len(), 2);
+        // Typed newlines stay line breaks.
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(runs.iter().any(|run| run.text.contains('\n')));
+        // Prose reads the same as typed, so it keeps the plain bubble.
+        assert!(markdown("just a question\n\nand another").is_none());
+        // Chips paint over the plain text's layout, so a prompt with one
+        // stays plain.
+        let link = zeron_proto::attachment_mentions::attachment_mention_link(1, Some("notes.md"));
+        assert!(markdown(&format!("**read** {link}")).is_none());
+        // An agent's message renders its body, under the sender caption.
+        let routed = "[Message from Zeron chat cd27c5c2. Reply to it with the Zeron `send_message` tool, chat cd27c5c2-0000-4000-8000-000000000000.]\n\nRun `cargo test`.";
+        assert!(markdown(routed).is_some());
     }
 
     #[test]
