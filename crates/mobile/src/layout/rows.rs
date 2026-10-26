@@ -815,7 +815,7 @@ fn sender_chat(sender: &zeron_proto::agent_messages::AgentSender, workspace: Opt
 
 /// `Message from [mark] Chat`, the desktop's caption over an agent-sent
 /// bubble: the sending chat's provider mark (a chat glyph when unknown) and
-/// title, the whole line opening that chat when the workspace lists it.
+/// title, which opens that chat when the workspace lists it.
 fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSender, workspace: Option<&WorkspaceSnapshot>) -> PText {
     let (title, harness, known) = sender_chat(sender, workspace);
     let (size, lh) = TYPE.small;
@@ -827,11 +827,11 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
     let split = "Message from ".len();
     let spans = vec![
         zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
-        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 5.0, pad_end: 0.0, atomic: false, inline_box: None },
+        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
     ];
     let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
-    let link = known.then_some(0);
-    let paint = super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
+    // One link (one tap target, one accessibility element): the sender.
+    let paint = |link| super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
     let p = zeron_text::prepare(
         &ctx.typo.book,
         ctx.cache,
@@ -843,7 +843,7 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
         p,
         lh,
         base: super::style::baseline(lh, regular),
-        paints: vec![paint, paint],
+        paints: vec![paint(None), paint(known.then_some(0))],
         links: if known { vec![format!("{OPEN_CHAT_SCHEME}://open?id={}", sender.chat_id)] } else { Vec::new() },
         chip: (0.0, 0.0),
         badges: Vec::new(),
