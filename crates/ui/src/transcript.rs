@@ -1073,6 +1073,17 @@ pub enum RowKind {
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
+    /// A message this chat's agent sent another chat through Zeron's
+    /// `send_message`: the message, not the tool call, on the agent's side.
+    SentMessage {
+        /// The recipient as the call named it (id, id prefix, or title),
+        /// resolved against the chat list at render.
+        to: SharedString,
+        text: SharedString,
+        /// The call hasn't returned yet.
+        pending: bool,
+        failed: bool,
+    },
     /// One top-level markdown block of a completed message.
     Markdown {
         tree: Arc<BlockTree>,
@@ -1507,6 +1518,43 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // A message to another chat reads as the message it sent,
+                // one bubble per recipient, out of the tool fold (compact
+                // mode folds it with the rest of the work).
+                if !compact
+                    && let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call)
+                {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                    for (message_ix, message) in sent.into_iter().enumerate() {
+                        let version = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            (&message.chat, &message.text, *resolved, *is_error).hash(&mut h);
+                            h.finish()
+                        };
+                        rows.push(Row {
+                            id: format!("{}#{}.m{message_ix}", entry.id, part.id()).into(),
+                            version,
+                            turn_start: false,
+                            copy_text: Some(message.text.clone().into()),
+                            kind: RowKind::SentMessage {
+                                to: message.chat.into(),
+                                text: message.text.into(),
+                                pending: !*resolved,
+                                failed: *is_error,
+                            },
+                            entry_id: entry.id.clone().into(),
+                            timestamp: None,
+                            compact_fold: None,
+                        });
+                    }
+                    continue;
+                }
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
@@ -6522,33 +6570,72 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chat = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == sender.chat_id.as_ref());
+        self.render_chat_caption(
+            row_id,
+            "Message from",
+            Some(sender.chat_id.as_ref()),
+            sender.title.clone(),
+            true,
+            theme,
+            cx,
+        )
+    }
+
+    /// `{lead} [logo] Chat` over a message between chats: chat `chat_id`'s
+    /// provider mark and live title, `fallback` for one this workspace doesn't
+    /// list. A listed chat opens on click. `end` aligns it over a user bubble;
+    /// otherwise it sits over the agent's side.
+    #[allow(clippy::too_many_arguments)]
+    fn render_chat_caption(
+        &self,
+        row_id: &SharedString,
+        lead: &'static str,
+        chat_id: Option<&str>,
+        fallback: SharedString,
+        end: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat = chat_id.and_then(|id| {
+            self.state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|chat| chat.id == id)
+        });
         let known = chat.is_some();
         let title: SharedString = chat
             .and_then(|chat| chat.title.as_deref())
             .map(str::trim)
             .filter(|title| !title.is_empty())
-            .map_or_else(|| sender.title.clone(), |title| single_line(title).into());
+            .map_or_else(
+                || {
+                    if chat.is_some() {
+                        // Listed but untitled: its short id, as the header says.
+                        chat_id.unwrap_or_default().chars().take(8).collect::<String>().into()
+                    } else {
+                        single_line(&fallback).into()
+                    }
+                },
+                |title| single_line(title).into(),
+            );
         let mark = chat
             .and_then(|chat| chat.config.as_ref())
             .map(|config| crate::pickers::harness_brand_icon(config.harness))
             .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
-        let chat_id = sender.chat_id.to_string();
+        let chat_id = chat_id.unwrap_or_default().to_owned();
         div()
             .w_full()
             .min_w_0()
             .flex()
-            .justify_end()
+            .when(end, |el| el.justify_end())
+            .when(!end, |el| el.justify_start())
             .pb(px(USER_CAPTION_GAP))
             .child(
                 user_caption(theme)
-                    .id(SharedString::from(format!("{row_id}-sender")))
-                    .child(div().flex_none().child("Message from"))
+                    .id(SharedString::from(format!("{row_id}-chat")))
+                    .max_w(px(self.content_width * 0.8))
+                    .child(div().flex_none().child(lead))
                     .child(caption_label(title, Some(mark), theme.text_muted))
                     .when(known, |el| {
                         el.role(gpui::Role::Link)
@@ -7584,6 +7671,68 @@ impl Transcript {
                     );
                 }
                 column.into_any_element()
+            }
+            RowKind::SentMessage {
+                to,
+                text,
+                pending,
+                failed,
+            } => {
+                let chat = {
+                    let state = self.state.read(cx);
+                    let chats: Vec<(&str, Option<&str>)> = state
+                        .chats
+                        .iter()
+                        .map(|chat| (chat.id.as_str(), chat.title.as_deref()))
+                        .collect();
+                    zeron_proto::agent_messages::resolve_chat_key(to, &chats)
+                        .map(str::to_owned)
+                };
+                let lead = if *failed {
+                    "Couldn't message"
+                } else {
+                    "Message to"
+                };
+                let (text, pending, failed) = (text.clone(), *pending, *failed);
+                // The user bubble mirrored to the agent's side.
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_chat_caption(
+                        &row.id,
+                        lead,
+                        chat.as_deref(),
+                        to.clone(),
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .child(
+                        div().w_full().flex().justify_start().child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(self.content_width * 0.8))
+                                .bg(crate::theme::user_bubble_bg())
+                                .rounded(px(Theme::BUBBLE_RADIUS))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .text_size(crate::typography::ui_rems(14.0))
+                                .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+                                .text_color(if failed { theme.text_muted } else { theme.text })
+                                .when(pending, |el| el.opacity(0.65))
+                                .child(self.render_user_body(
+                                    &row.id,
+                                    ix,
+                                    text,
+                                    Arc::new(Vec::new()),
+                                    &theme,
+                                    window,
+                                    cx,
+                                )),
+                        ),
+                    )
+                    .into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
@@ -12232,6 +12381,58 @@ mod tests {
         let prompt = rows_for_entry(&user_entry("u1", "hi"), false, false, &mut parse);
         assert_eq!(top_gap_for(Some(&seam[0]), &prompt[0]), USER_CAPTION_GAP);
         assert_eq!(top_gap_for(None, &seam[0]), Theme::SPACE_LG);
+    }
+
+    #[test]
+    fn messages_the_agent_sent_read_as_messages_not_tools() {
+        let send = |id: &str, tool: &str, input: serde_json::Value| MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: Some(input),
+            },
+            is_error: false,
+            resolved: false,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("k0", "ls"),
+                send("k1", "send_message", serde_json::json!({ "chat": "Windows lane", "text": "Run it." })),
+                send(
+                    "k2",
+                    "send_messages",
+                    serde_json::json!({ "requests": [{ "chat": "a", "text": "one" }, { "chat": "b", "text": "two" }] }),
+                ),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        // The ordinary tool keeps its fold; each message is its own row.
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        let RowKind::SentMessage { to, text, pending, failed } = &rows[1].kind else {
+            panic!("expected a sent message");
+        };
+        assert_eq!((to.as_ref(), text.as_ref(), *pending, *failed), ("Windows lane", "Run it.", true, false));
+        assert!(matches!(&rows[3].kind, RowKind::SentMessage { to, .. } if to.as_ref() == "b"));
+        // Compact mode folds the whole turn, sends included: they show when
+        // the work fold opens.
+        let compact = rows_for_entry(&entry, false, true, &mut parse);
+        assert!(compact
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::SentMessage { .. }))
+            .all(|row| row.compact_fold.as_deref() == Some("a1#work")));
     }
 
     #[test]

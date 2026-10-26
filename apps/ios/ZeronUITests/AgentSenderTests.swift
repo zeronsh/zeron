@@ -34,4 +34,26 @@ final class AgentSenderTests: XCTestCase {
         XCTAssertTrue(reply.waitForExistence(timeout: 10), "the sending chat opened")
         snapshot(app, "sender-opened")
     }
+
+    func testSentMessageOpensTheRecipient() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-route", "chat:chat-side-easing"]
+        app.launch()
+
+        // The send_message call reads as the message it sent, not a tool.
+        let sent = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH 'Keeping the power curve'")).firstMatch
+        XCTAssertTrue(sent.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'send_message'")).firstMatch.exists)
+        snapshot(app, "sent-message")
+
+        let recipient = app.descendants(matching: .any)["Open chat"].firstMatch
+        XCTAssertTrue(recipient.exists)
+        recipient.tap()
+        let prompt = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH 'You: What EMA window'")).firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10), "the recipient chat opened")
+        snapshot(app, "recipient-opened")
+    }
 }
