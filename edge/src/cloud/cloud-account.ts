@@ -304,6 +304,10 @@ interface AccountRecord {
   /** Operator-set machine size for this account's new sessions
    * (`POST /admin/cloud/machine`), over `CLOUD_MACHINE`. */
   machine?: SandboxMachine;
+  /** Operator-set caps for this account (`POST /admin/cloud/limits`), over
+   * `CLOUD_MAX_AWAKE` / `CLOUD_MAX_SESSIONS`. */
+  maxAwake?: number;
+  maxSessions?: number;
   /** The last reconcile of every open row (the others read awake machines'). */
   lastFullReconcileAt?: number;
 }
@@ -497,7 +501,7 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   private maxAwake(): number {
-    return parseMaxAwake(this.env.CLOUD_MAX_AWAKE);
+    return this.acct.maxAwake ?? parseMaxAwake(this.env.CLOUD_MAX_AWAKE);
   }
 
   private ledger(event: LedgerEvent, s?: SessionRecord, extra: Omit<LedgerEntry, "at" | "event"> = {}): void {
@@ -846,8 +850,12 @@ export class CloudAccount extends DurableObject<Env> {
   /** The account delete completes once its last session is gone. */
   private async maybeFinishAccountDelete(): Promise<void> {
     if (this.acct.state !== "deleting" || this.sessions.size > 0) return;
-    const { generation, orgId, userId, deviceId, retiredDeviceIds = [] } = this.acct;
+    const { generation, orgId, userId, deviceId, retiredDeviceIds = [], machine, maxAwake, maxSessions } = this.acct;
     this.acct = freshAccount(generation, orgId && userId ? { orgId, userId } : undefined);
+    // Operator settings outlive turning Cloud off.
+    if (machine) this.acct.machine = machine;
+    if (maxAwake !== undefined) this.acct.maxAwake = maxAwake;
+    if (maxSessions !== undefined) this.acct.maxSessions = maxSessions;
     if (deviceId) this.acct.retiredDeviceIds = [...retiredDeviceIds, deviceId].slice(-RETIRED_DEVICES_KEPT);
     const sql = this.sql();
     const now = Date.now();
@@ -1705,6 +1713,20 @@ export class CloudAccount extends DurableObject<Env> {
     return { machine: this.acct.machine ?? null };
   }
 
+  /** Operator: this account's caps — machines awake at once and Cloud chats
+   * kept (`POST /admin/cloud/limits`; undefined = the server default). */
+  async setLimits(limits: {
+    readonly maxAwake?: number | null;
+    readonly maxSessions?: number | null;
+  }): Promise<{ readonly maxAwake: number; readonly maxSessions: number }> {
+    if (limits.maxAwake === null) delete this.acct.maxAwake;
+    else if (limits.maxAwake !== undefined) this.acct.maxAwake = limits.maxAwake;
+    if (limits.maxSessions === null) delete this.acct.maxSessions;
+    else if (limits.maxSessions !== undefined) this.acct.maxSessions = limits.maxSessions;
+    await this.saveAccount();
+    return { maxAwake: this.maxAwake(), maxSessions: this.maxSessions() };
+  }
+
   /** Operator grant (or correction, when negative): `POST /admin/cloud/credits`. */
   async grantCredits(credits: number, reason: string): Promise<{ readonly balance: number }> {
     addCredits(this.sql(), { at: Date.now(), credits, reason });
@@ -1867,6 +1889,7 @@ export class CloudAccount extends DurableObject<Env> {
   }
 
   private maxSessions(): number {
+    if (this.acct.maxSessions !== undefined) return this.acct.maxSessions;
     const n = Number(this.env.CLOUD_MAX_SESSIONS);
     return Number.isInteger(n) && n > 0 ? n : 50;
   }

@@ -45,6 +45,7 @@
  *   GET  /admin/cloud/usage             — ADMIN_TOKEN (operator export)
  *   POST /admin/cloud/credits           — ADMIN_TOKEN (grant a user credits)
  *   POST /admin/cloud/machine           — ADMIN_TOKEN (a user's machine size)
+ *   POST /admin/cloud/limits            — ADMIN_TOKEN (a user's awake/chat caps)
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  */
 import { authenticate } from "./auth";

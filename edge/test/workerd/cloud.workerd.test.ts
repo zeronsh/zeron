@@ -295,6 +295,18 @@ describe("credits", () => {
     const refused = await createSession(u, "chat-cap-50", spaceId);
     expect(refused.status).toBe(429);
     expect(await refused.json()).toMatchObject({ error: "too_many_sessions" });
+
+    // An operator lifts this account's caps; `null` puts the server's back.
+    const admin = "Bearer test-admin-token";
+    const limits = (body: Record<string, unknown>) =>
+      call("POST", "/admin/cloud/limits", admin, { orgId: u.orgId, userId: u.userId, ...body });
+    expect((await limits({ maxSessions: 0 })).status).toBe(400);
+    expect((await limits({ maxAwake: "lots" })).status).toBe(400);
+    expect(await (await limits({ maxAwake: "unlimited", maxSessions: "unlimited" })).json()).toEqual({ maxAwake: 1000, maxSessions: 1000 });
+    expect((await createSession(u, "chat-cap-50", spaceId)).status).toBeLessThan(300);
+    // Back to the server's caps (this test env runs CLOUD_MAX_AWAKE=2).
+    expect(await (await limits({ maxAwake: null, maxSessions: null })).json()).toEqual({ maxAwake: 2, maxSessions: 50 });
+    expect((await createSession(u, "chat-cap-51", spaceId)).status).toBe(429);
   });
 
   it("stops even a busy machine once credits run out", async () => {
