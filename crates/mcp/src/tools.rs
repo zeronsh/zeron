@@ -278,6 +278,10 @@ end\n\
 Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, and \
 button once) and returns the first error with its line; fix it and call again.\n\
 \n\
+The same script also works in a Markdown document as a ```zeron-visual fenced block, which Zeron's \
+Markdown preview runs (title it with a first line `--! title: ...`; fences can't use assets). Check a \
+document's visuals with `zeron visual check <file.md>`, which reports errors at the document's lines.\n\
+\n\
 Nodes are props tables: children are the array part, strings are plain text, nil and false children \
 are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.\n\
 - ui.column { gap = 8, align = \"start|center|end\", ... }, ui.row { gap = 12, align, justify = \

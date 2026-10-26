@@ -151,18 +151,54 @@ pub fn parse_full(source: &str) -> BlockTree {
     parse_at(source, 0)
 }
 
+/// A fenced code block with its opening line in the original source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FencedCodeBlock {
+    pub line: usize,
+    pub language: Option<String>,
+    pub code: String,
+}
+
+/// Extract fences using the same parser, options, and code normalization as
+/// [`parse_full`]. Container indentation and HTML follow Markdown semantics;
+/// indented code blocks are excluded.
+pub fn fenced_code_blocks(source: &str) -> Vec<FencedCodeBlock> {
+    let line_starts: Vec<_> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect();
+    walk_with(source, 0, options(), |cur| {
+        let mut fences = Vec::new();
+        while let Some((event, range)) = cur.peek() {
+            if matches!(
+                event,
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))
+            ) {
+                let line = line_starts.partition_point(|start| *start <= range.start);
+                for block in parse_started_block(cur) {
+                    if let Block::CodeBlock { language, code } = block {
+                        fences.push(FencedCodeBlock {
+                            line,
+                            language,
+                            code,
+                        });
+                    }
+                }
+            } else {
+                cur.bump();
+            }
+        }
+        fences
+    })
+    .unwrap_or_default()
+}
+
 fn parse_at(source: &str, offset: usize) -> BlockTree {
     parse_with(source, offset, options())
 }
 
 fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
-    // pulldown-cmark 0.12 can panic on some malformed input (a slice index
-    // in its first pass); a message must never take the app down with it.
     // Such a source renders as its plain text.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_rewritten(source, offset, options)
-    }))
-    .unwrap_or_else(|_| BlockTree {
+    walk_with(source, offset, options, top_blocks).unwrap_or_else(|| BlockTree {
         blocks: vec![Arc::new(TopBlock {
             range: offset..offset + source.len(),
             block: Block::Paragraph {
@@ -199,7 +235,28 @@ impl Skip {
 /// text, placed the way the innermost kept container takes children.
 const MAX_NESTING: usize = 32;
 
-fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
+/// Run `walk` over the parsed events of `source`, with the same rewrites,
+/// nesting limit, and original offsets as the block tree. `None` when
+/// pulldown-cmark 0.12 panics on malformed input (a slice index in its first
+/// pass): a message must never take the app down with it.
+fn walk_with<T>(
+    source: &str,
+    offset: usize,
+    options: Options,
+    walk: impl FnOnce(&mut Cursor<'_, '_>) -> T,
+) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_rewritten(source, offset, options, walk)
+    }))
+    .ok()
+}
+
+fn parse_rewritten<T>(
+    source: &str,
+    offset: usize,
+    options: Options,
+    walk: impl FnOnce(&mut Cursor<'_, '_>) -> T,
+) -> T {
     let mut skip = Skip::default();
     // Every rewrite is checked against the parse it produced: a dollar pair
     // or a `\(…\)` pair must come out as exactly one formula, a destination
@@ -264,7 +321,7 @@ fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
             failed_rewrites(&events, &formulas, &destinations, &links)
         };
         if failed.is_empty() {
-            return build_tree(events, source, offset);
+            return walk_tree(events, source, offset, walk);
         }
         // Each failure's innermost block (paragraph, heading, cell, item
         // text) stays literal next round — or, where no block holds it (a
@@ -367,9 +424,15 @@ fn failed_rewrites(
     failed
 }
 
-/// The block tree of `events` (ranges into `source`, which starts at document
-/// offset `offset`).
-fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -> BlockTree {
+/// Run `walk` over `events` (ranges into `source`, which starts at document
+/// offset `offset`) once they are cut to [`MAX_NESTING`] and task markers sit
+/// in their items.
+fn walk_tree<T>(
+    events: Vec<(Event, Range<usize>)>,
+    source: &str,
+    offset: usize,
+    walk: impl FnOnce(&mut Cursor<'_, '_>) -> T,
+) -> T {
     /// What a kept container expects its children to be.
     #[derive(Clone, Copy, PartialEq)]
     enum Holds {
@@ -488,6 +551,11 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
         source,
         offset,
     };
+    walk(&mut cur)
+}
+
+/// The top-level blocks of a document.
+fn top_blocks(cur: &mut Cursor<'_, '_>) -> BlockTree {
     let mut blocks = Vec::new();
     while let Some((event, range)) = cur.peek() {
         let range = range.clone();
@@ -500,7 +568,7 @@ fn build_tree(events: Vec<(Event, Range<usize>)>, source: &str, offset: usize) -
                 }));
             }
             Event::Start(_) => {
-                for block in parse_started_block(&mut cur) {
+                for block in parse_started_block(cur) {
                     blocks.push(Arc::new(TopBlock {
                         range: range.clone(),
                         block,
@@ -3014,6 +3082,19 @@ mod destination_rewrite_tests {
         let runs = paragraph("`[x](/tmp/a b.md)`");
         assert!(runs.iter().all(|run| run.style.link.is_none()));
         assert_eq!(text(&runs), "[x](/tmp/a b.md)");
+    }
+
+    #[test]
+    fn fenced_code_extraction_keeps_original_lines_and_normalized_code() {
+        let source = "[x](/tmp/Some Folder/x.md)\r\n\r\n- item\r\n\r\n\t~~~RuSt extra\r\n\tfirst()\r\n\t~~~\r\n";
+        assert_eq!(
+            fenced_code_blocks(source),
+            vec![FencedCodeBlock {
+                line: 5,
+                language: Some("RuSt".into()),
+                code: "first()".into(),
+            }]
+        );
     }
 
     #[test]
