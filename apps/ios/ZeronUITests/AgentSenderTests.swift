@@ -40,12 +40,15 @@ final class AgentSenderTests: XCTestCase {
         app.launchArguments = ["-demo", "-route", "chat:chat-side-easing"]
         app.launch()
 
-        // The send_message call reads as the message it sent, not a tool.
+        // The send_message call reads as one line naming the recipient: no
+        // tool, and no copy of the message.
         let sent = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH 'Keeping the power curve'")).firstMatch
+            .matching(NSPredicate(format: "label BEGINSWITH 'Message to'")).firstMatch
         XCTAssertTrue(sent.waitForExistence(timeout: 15))
         XCTAssertFalse(app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS 'send_message'")).firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'Keeping the power curve'")).firstMatch.exists)
         snapshot(app, "sent-message")
 
         let recipient = app.descendants(matching: .any)["Open chat"].firstMatch
