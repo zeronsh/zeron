@@ -4449,6 +4449,7 @@ impl Shell {
                 );
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
+            TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
         }
     }
 

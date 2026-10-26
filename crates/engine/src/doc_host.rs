@@ -5657,7 +5657,8 @@ impl DocHost {
                 // issued_at, clamped against clock skew) — not whenever this
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
-                // to a no-op.
+                // to a no-op. A provider switch's seam lands with it, above.
+                sessions.note_provider_switch(chat_id, harness, handle);
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,

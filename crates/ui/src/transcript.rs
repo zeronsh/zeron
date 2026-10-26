@@ -177,6 +177,9 @@ pub const USER_LINE_HEIGHT: f32 = 22.0;
 pub const USER_COLLAPSE_CHARS: usize = 400;
 /// Vertical separation before the plain expand/collapse link.
 const USER_TOGGLE_GAP: f32 = 8.0;
+/// Between a caption over a user bubble (provider switch, agent sender) and
+/// the bubble.
+const USER_CAPTION_GAP: f32 = 6.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
 /// shifting the virtualizer.
@@ -1064,6 +1067,9 @@ pub enum RowKind {
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// Context the prompt folded in as text, lifted back out by `badges`.
         badges: Arc<Vec<crate::badges::MessageBadge>>,
+        /// The chat that sent this message through Zeron's `send_message`,
+        /// lifted out of the routing header the receiving agent still reads.
+        sender: Option<AgentSender>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -1370,7 +1376,10 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let body = agent_message_display(&body);
+        let (sender, body) = match agent_message_sender(&body) {
+            Some((sender, body)) => (Some(sender), body.to_owned()),
+            None => (None, body),
+        };
         // Chips stand in for their attachments: those leave the strip, and a
         // chip carries its upload's path for its progress and, for an image,
         // a click opening it.
@@ -1408,6 +1417,7 @@ pub fn rows_for_entry(
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(attachments),
                 badges: Arc::new(badges),
+                sender,
                 pending,
             },
             entry_id,
@@ -2029,7 +2039,14 @@ fn part_prefix(id: &str) -> &str {
 /// part — matching the live row's internal spacing exactly, so the
 /// live→split handoff cannot shift a pixel. Tool groups get one larger global
 /// step on either boundary so their dense chip stack has room to breathe.
+/// A provider-switch seam is the caption of the message under it, so that
+/// message sits right below it.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
+    if matches!(row.kind, RowKind::User { .. })
+        && prev.is_some_and(|prev| matches!(prev.kind, RowKind::SwitchMarker { .. }))
+    {
+        return USER_CAPTION_GAP;
+    }
     if row.turn_start {
         return Theme::SPACE_LG;
     }
@@ -3483,6 +3500,8 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// An agent message's sender caption: open the chat that sent it.
+    OpenChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -5227,6 +5246,7 @@ impl Transcript {
                 for row in &self.rows[old_range.clone()] {
                     self.render_cache.borrow_mut().invalidate_row(&row.id);
                 }
+                let after = old_range.start + count;
                 if old_range.len() == count {
                     // In-place content change, same row count — notably the
                     // live→complete flip, where EVERY row of the streamed
@@ -5241,6 +5261,12 @@ impl Transcript {
                     self.list.remeasure_items(old_range);
                 } else {
                     self.list.splice(old_range, count);
+                }
+                // A row's top gap reads its predecessor, so the row after the
+                // splice can gain a new one (a switch seam landing over the
+                // message already shown under it).
+                if after < new_rows.len() {
+                    self.list.remeasure_items(after..after + 1);
                 }
                 self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
             }
@@ -6485,6 +6511,59 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// `Message from [logo] Chat` over an agent-sent bubble, in the switch
+    /// seam's caption style: the sending chat's provider mark and live title
+    /// (the header's title for a chat this workspace doesn't list). A known
+    /// chat opens on click.
+    fn render_agent_sender(
+        &self,
+        row_id: &SharedString,
+        sender: &AgentSender,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == sender.chat_id.as_ref());
+        let known = chat.is_some();
+        let title: SharedString = chat
+            .and_then(|chat| chat.title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map_or_else(|| sender.title.clone(), |title| single_line(title).into());
+        let mark = chat
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| crate::pickers::harness_brand_icon(config.harness))
+            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+        let chat_id = sender.chat_id.to_string();
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .justify_end()
+            .pb(px(USER_CAPTION_GAP))
+            .child(
+                user_caption(theme)
+                    .id(SharedString::from(format!("{row_id}-sender")))
+                    .child(div().flex_none().child("Message from"))
+                    .child(caption_label(title, Some(mark), theme.text_muted))
+                    .when(known, |el| {
+                        el.role(gpui::Role::Link)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                cx.emit(TranscriptEvent::OpenChat {
+                                    chat_id: chat_id.clone(),
+                                });
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// A plain text link aligned with the message's left edge, following the
     /// continuation ellipsis when collapsed. No pill, border, or button wash.
     fn render_user_expander(
@@ -7435,6 +7514,7 @@ impl Transcript {
                 mentions,
                 attachments,
                 badges,
+                sender,
                 pending,
             } => {
                 let attachments = attachments.clone();
@@ -7446,6 +7526,9 @@ impl Transcript {
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
                 let mut column = div().w_full().flex().flex_col();
+                if let Some(sender) = sender {
+                    column = column.child(self.render_agent_sender(&row.id, sender, &theme, cx));
+                }
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(
                         &row.id,
@@ -8790,31 +8873,40 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-/// Keep routing instructions in the stored prompt for agents, but show a
-/// concise attribution in the human transcript (including existing messages).
-fn agent_message_display(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
-        return text.to_owned();
-    };
-    let Some((header, body)) = rest.split_once("]\n\n") else {
-        return text.to_owned();
-    };
-    let Some((label, id)) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
-        return text.to_owned();
-    };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
-    format!("Message from {name}\n\n{body}")
+/// The chat an agent-to-agent message came from: its id, and its title as the
+/// sender's header recorded it (the live title wins when the chat is known).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSender {
+    pub chat_id: SharedString,
+    pub title: SharedString,
 }
 
-/// The bubble text's runs: body text in the sans font, chips as labels in it
-/// with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`], and an
-/// agent attribution's name in bold.
+/// Split the routing header (`[Message from Zeron chat …]`) off a message an
+/// agent sent: the agent keeps reading it in the stored prompt, while the
+/// transcript shows the sender above the bubble and only the body inside it.
+fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
+    let rest = text.strip_prefix("[Message from Zeron chat ")?;
+    let (header, body) = rest.split_once("]\n\n")?;
+    let (label, id) =
+        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")?;
+    let id = id.strip_suffix('.')?;
+    // The label is `Title (short-id)`, or the short id alone when untitled.
+    let title = label
+        .strip_suffix(')')
+        .and_then(|label| label.rsplit_once(" ("))
+        .filter(|(_, short)| !short.is_empty() && id.starts_with(short))
+        .map_or(label, |(title, _)| title);
+    Some((
+        AgentSender {
+            chat_id: id.to_owned().into(),
+            title: single_line(title).into(),
+        },
+        body,
+    ))
+}
+
+/// The bubble text's runs: body text in the sans font, and chips as labels in
+/// it with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`].
 fn user_bubble_runs(
     text: &str,
     mentions: &[crate::composer::SentMentionSpan],
@@ -8856,39 +8948,6 @@ fn user_bubble_runs(
     }
     if at < text.len() {
         runs.push(body_run(text.len() - at));
-    }
-    // Attribution names are bold sans text, never Markdown/italic. Split
-    // existing runs so file-mention styling and selection offsets stay intact.
-    if let Some(rest) = text.strip_prefix("Message from ")
-        && let Some((name, _)) = rest.split_once("\n\n")
-    {
-        let bold = "Message from ".len().."Message from ".len() + name.len();
-        let mut offset = 0;
-        runs = runs
-            .into_iter()
-            .flat_map(|run| {
-                let end = offset + run.len;
-                let mut pieces = Vec::new();
-                while offset < end {
-                    let in_name = bold.contains(&offset);
-                    let next = if offset < bold.start {
-                        end.min(bold.start)
-                    } else if in_name {
-                        end.min(bold.end)
-                    } else {
-                        end
-                    };
-                    let mut piece = run.clone();
-                    piece.len = next - offset;
-                    if in_name {
-                        piece.font.weight = gpui::FontWeight::BOLD;
-                    }
-                    pieces.push(piece);
-                    offset = next;
-                }
-                pieces
-            })
-            .collect();
     }
     runs
 }
@@ -9275,10 +9334,53 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The provider-switch seam: the fork divider's rule and caption over a
-/// centered `[logo] From → [logo] To`, each side in its provider's brand mark.
-/// A side without a known harness (a seam from a build that didn't record
-/// one) shows its name alone.
+/// `[mark] Name` in a user-message caption: a provider's brand mark (or any
+/// glyph) beside its name. A side without a mark shows its name alone.
+fn caption_label(
+    name: SharedString,
+    mark: Option<(&'static str, Option<gpui::Hsla>)>,
+    color: gpui::Hsla,
+) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .when_some(mark, |el, (path, tint)| {
+            el.child(
+                crate::icons::icon(path)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(tint.unwrap_or(color)),
+            )
+        })
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(name),
+        )
+}
+
+/// A muted one-line caption riding right-aligned over a user bubble: the
+/// provider-switch seam and an agent message's sender.
+fn user_caption(theme: &Theme) -> gpui::Div {
+    div()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted)
+}
+
+/// The provider-switch seam: `[logo] From → [logo] To`, each side in its
+/// provider's brand mark, right-aligned over the message that switched. A
+/// side without a known harness (a seam from a build that didn't record one)
+/// shows its name alone.
 fn switch_marker(
     from: SharedString,
     to: SharedString,
@@ -9286,75 +9388,22 @@ fn switch_marker(
     to_harness: Option<HarnessId>,
     theme: &Theme,
 ) -> AnyElement {
-    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
-    let provider = |name: SharedString, harness: Option<HarnessId>| {
-        div()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .when_some(
-                harness.map(crate::pickers::harness_brand_icon),
-                |el, (path, tint)| {
-                    el.child(
-                        crate::icons::icon(path)
-                            .size(px(15.0))
-                            .flex_none()
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    )
-                },
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child(name),
-            )
-    };
+    let mark = |harness: Option<HarnessId>| harness.map(crate::pickers::harness_brand_icon);
     div()
-        .py(px(14.0))
         .w_full()
         .min_w_0()
-        .overflow_hidden()
         .flex()
-        .flex_col()
-        .gap(px(8.0))
+        .justify_end()
         .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(rule())
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child("Switched provider"),
-                )
-                .child(rule()),
-        )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .child(provider(from, from_harness))
+            user_caption(theme)
+                .child(caption_label(from, mark(from_harness), theme.text_muted))
                 .child(
                     crate::icons::icon(crate::icons::ARROW_RIGHT)
-                        .size(px(13.0))
+                        .size(px(12.0))
                         .flex_none()
                         .text_color(theme.text_muted.opacity(0.7)),
                 )
-                .child(provider(to, to_harness)),
+                .child(caption_label(to, mark(to_harness), theme.text_muted)),
         )
         .into_any_element()
 }
@@ -12113,6 +12162,13 @@ mod tests {
         }
     }
 
+    fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            role: MessageRole::User,
+            ..assistant(id, MessageStatus::Complete, vec![text_part("t0", text)])
+        }
+    }
+
     fn switch_entry(from_harness: Option<&str>, to_harness: Option<&str>) -> SessionMessageEntry {
         SessionMessageEntry {
             id: "switch:1".into(),
@@ -12170,6 +12226,53 @@ mod tests {
             rows_for_entry(&switch_entry(from, Some("codex")), false, false, &mut parse)[0].version
         };
         assert_ne!(version(Some("claude-code")), version(Some("cursor")));
+    }
+
+    #[test]
+    fn provider_switch_seam_sits_close_over_the_message_it_switched() {
+        let seam = rows_for_entry(
+            &switch_entry(Some("claude-code"), Some("codex")),
+            false,
+            false,
+            &mut parse,
+        );
+        let prompt = rows_for_entry(&user_entry("u1", "hi"), false, false, &mut parse);
+        assert_eq!(top_gap_for(Some(&seam[0]), &prompt[0]), USER_CAPTION_GAP);
+        assert_eq!(top_gap_for(None, &seam[0]), Theme::SPACE_LG);
+    }
+
+    #[test]
+    fn agent_messages_show_their_sender_over_the_body() {
+        let id = "cd27c5c2-0000-4000-8000-000000000000";
+        let text = format!(
+            "[Message from Zeron chat zgui prod: Windows (WING-PC) (cd27c5c2). Reply to it with the Zeron `send_message` tool, chat {id}.]\n\nWindows lane: done."
+        );
+        let rows = rows_for_entry(&user_entry("u1", &text), false, false, &mut parse);
+        let RowKind::User {
+            text: shown,
+            sender,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert_eq!(shown.as_ref(), "Windows lane: done.");
+        assert_eq!(
+            sender.as_ref(),
+            Some(&AgentSender {
+                chat_id: id.into(),
+                // Only the trailing short id goes; a title's own parens stay.
+                title: "zgui prod: Windows (WING-PC)".into(),
+            })
+        );
+        // An untitled sender is labelled by its short id alone.
+        let untitled = format!(
+            "[Message from Zeron chat cd27c5c2. Reply to it with the Zeron `send_message` tool, chat {id}.]\n\nhi"
+        );
+        let (sender, body) = agent_message_sender(&untitled).unwrap();
+        assert_eq!((sender.title.as_ref(), body), ("cd27c5c2", "hi"));
+        // A typed message that merely starts alike is left alone.
+        assert!(agent_message_sender("[Message from Zeron chat x]\n\nhi").is_none());
     }
 
     #[test]
