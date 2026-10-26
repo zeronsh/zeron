@@ -233,6 +233,7 @@ fun InspectorPageContent(model: AppModel, shell: TabletShellState, chatId: Strin
             page.id,
             onBack = shell::pop,
             onOpenSideChat = { id -> shell.push(chatId, InspectorPage.SideChat(id)) },
+            onOpenChat = shell::select,
             onOpenTerminal = { chat, terminal -> shell.push(chatId, InspectorPage.Terminal(terminal, chat)) },
             onOpenSubagent = { parent, doc, title, running -> shell.push(chatId, InspectorPage.Subagent(parent, doc, title, running)) },
         )

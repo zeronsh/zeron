@@ -98,6 +98,8 @@ fun SessionScreen(
     onOpenVoice: () -> Unit = {},
     onVoiceSettings: () -> Unit = {},
     onOpenSideChat: (String) -> Unit = {},
+    /** An agent message's sender caption: the chat that sent it. */
+    onOpenChat: (String) -> Unit = {},
     onOpenTerminal: (chatId: String, terminalId: String?) -> Unit = { _, _ -> },
     onOpenSubagent: (parentId: String, docId: String, title: String, running: Boolean) -> Unit = { _, _, _, _ -> },
     /** Debug launch extra: open a companion once the session is up (`companions`, `terminal`, `side-chat:<id>`, `subagent:<tool id>`). */
@@ -173,6 +175,8 @@ fun SessionScreen(
                     "http", "https" -> CustomTabsIntent.Builder().build().launchUrl(context, uri)
                     // An image chip opens its upload full size, as its thumbnail did.
                     "zeron-preview" -> uri.getQueryParameter("ref")?.let(open)
+                    // A sender caption opens the chat that sent the message.
+                    "zeron-chat" -> uri.getQueryParameter("id")?.takeIf { it != chatId }?.let(onOpenChat)
                     else -> runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                 }
             },

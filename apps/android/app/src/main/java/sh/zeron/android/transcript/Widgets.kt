@@ -15,6 +15,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -69,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import sh.zeron.android.design.Geist
+import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import androidx.compose.foundation.border
@@ -250,8 +252,17 @@ fun elapsed(secs: Long): String = when {
 @Composable
 private fun AssetIcon(name: String, tint: Color) {
     val context = LocalContext.current
+    // `brand:<harness>`: a provider's logo (a sender caption's, a switch
+    // seam's); marks with a color of their own keep it.
+    if (name.startsWith("brand:")) {
+        return BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            HarnessMark(name.removePrefix("brand:"), minOf(maxWidth, maxHeight), tint = tint)
+        }
+    }
     when (name) {
         "square", "checkmark.square.fill" -> return TaskBox(name != "square", tint)
+        // A sender caption's chat whose provider isn't known.
+        "bubble.left" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
         "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)
         "exclamationmark.triangle" -> return ZIcon(ZIcons.Warning, null, Modifier.fillMaxSize(), tint = tint)
         "questionmark.bubble" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)

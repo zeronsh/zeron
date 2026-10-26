@@ -192,6 +192,9 @@ private fun MainNav(model: AppModel) {
             onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
             onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
             onOpenSideChat = { side -> if (beside) shell.push(id, InspectorPage.SideChat(side)) else nav.navigate(Routes.chat(side)) },
+            // On the phone the sender's chat goes over this one, so Back returns
+            // here; beside the sidebar it takes the main column (as on iPad).
+            onOpenChat = { chat -> if (beside) shell.select(chat) else nav.navigate(Routes.chat(chat)) },
             onOpenTerminal = { chat, terminal -> if (beside) shell.push(chat, InspectorPage.Terminal(terminal)) else nav.navigate(Routes.terminal(chat, terminal)) },
             onOpenSubagent = { parent, doc, title, running ->
                 if (beside) shell.push(id, InspectorPage.Subagent(parent, doc, title, running)) else nav.navigate(Routes.subagent(parent, doc, title, running))
