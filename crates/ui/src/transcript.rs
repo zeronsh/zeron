@@ -8885,21 +8885,11 @@ pub struct AgentSender {
 /// agent sent: the agent keeps reading it in the stored prompt, while the
 /// transcript shows the sender above the bubble and only the body inside it.
 fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
-    let rest = text.strip_prefix("[Message from Zeron chat ")?;
-    let (header, body) = rest.split_once("]\n\n")?;
-    let (label, id) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")?;
-    let id = id.strip_suffix('.')?;
-    // The label is `Title (short-id)`, or the short id alone when untitled.
-    let title = label
-        .strip_suffix(')')
-        .and_then(|label| label.rsplit_once(" ("))
-        .filter(|(_, short)| !short.is_empty() && id.starts_with(short))
-        .map_or(label, |(title, _)| title);
+    let (sender, body) = zeron_proto::agent_messages::agent_message_sender(text)?;
     Some((
         AgentSender {
-            chat_id: id.to_owned().into(),
-            title: single_line(title).into(),
+            chat_id: sender.chat_id.into(),
+            title: sender.title.into(),
         },
         body,
     ))

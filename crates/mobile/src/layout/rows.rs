@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use zeron_doc::parts::MessagePart;
 use zeron_doc::parts::MessageStatus;
+use zeron_client::workspace::WorkspaceSnapshot;
 use zeron_doc::schema::{MessageRole, SessionMessageEntry};
 use zeron_markdown::parser::{IncrementalParser, TopBlock};
 use zeron_text::WhiteSpace;
@@ -52,7 +53,13 @@ pub struct TranscriptInput {
     pub working: bool,
     pub working_since_ms: Option<i64>,
     pub streaming: bool,
+    /// The chats this workspace lists, for an agent message's sender: its
+    /// live title and provider, and whether it opens.
+    pub workspace: Option<Arc<zeron_client::workspace::WorkspaceSnapshot>>,
 }
+
+/// The link an agent message's sender caption opens: that chat.
+pub const OPEN_CHAT_SCHEME: &str = "zeron-chat";
 
 pub(crate) fn row_key(id: &str) -> u64 {
     // FNV-1a: stable across launches so platform caches may persist keys.
@@ -70,6 +77,9 @@ pub(crate) fn next_version() -> u64 {
 }
 
 pub(crate) struct UserBubble {
+    /// `Message from [mark] Chat` over the bubble, for a message another
+    /// chat sent through Zeron's `send_message`.
+    pub sender: Option<PText>,
     pub text: PText,
     pub images: Vec<String>,
     /// Non-image attachments (desktop-sent ZIPs, docs): icon asset + name.
@@ -150,6 +160,8 @@ pub(crate) mod geom {
     pub const BUBBLE_FOLD_SHOW: usize = 6;
     pub const THUMB: f32 = 76.0;
     pub const FILE_PILL: f32 = 32.0;
+    /// Between a caption over a user bubble (an agent sender) and the bubble.
+    pub const CAPTION_GAP: f32 = 6.0;
     pub const CHIP_LINE: f32 = 32.0;
     /// Error cards: inner padding, and their action button.
     pub const NOTICE_PAD: f32 = 12.0;
@@ -226,7 +238,7 @@ impl RowBuilder {
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role);
+            let sig = self.entry_sig(entry, first, prev_role, input.workspace.as_deref());
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -242,7 +254,7 @@ impl RowBuilder {
                     rows
                 }
                 None => {
-                    let rows = self.entry_rows(ctx, entry, first, prev_role, &mut live_parts);
+                    let rows = self.entry_rows(ctx, entry, first, prev_role, input.workspace.as_deref(), &mut live_parts);
                     self.entries.insert(
                         entry.id.clone(),
                         EntryState {
@@ -277,7 +289,7 @@ impl RowBuilder {
                 .filter(|(text, _)| *text == p.text)
                 .map(|(_, row)| row.clone());
             let core = cached.unwrap_or_else(|| {
-                let row = Arc::new(self.user_row(ctx, &p.id, &p.text, true));
+                let row = Arc::new(self.user_row(ctx, &p.id, &p.text, true, None));
                 self.pending.insert(p.id.clone(), (p.text.clone(), row.clone()));
                 row
             });
@@ -316,9 +328,24 @@ impl RowBuilder {
         self.pending.retain(|_, (_, row)| row.key != key);
     }
 
-    /// Context outside the entry that changes its rows (gaps only).
-    fn entry_sig(&self, _entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>) -> u64 {
-        (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1)
+    /// Context outside the entry that changes its rows: gaps, and an agent
+    /// message's sender as the workspace lists it (a rename, a provider).
+    fn entry_sig(&self, entry: &SessionMessageEntry, first: bool, prev: Option<MessageRole>, workspace: Option<&WorkspaceSnapshot>) -> u64 {
+        let gaps = (first as u64) | ((prev.map_or(0, |r| r as u64 + 1)) << 1);
+        if entry.role != MessageRole::User {
+            return gaps;
+        }
+        let Some(MessagePart::Text { text, .. }) = entry.parts.iter().find(|p| matches!(p, MessagePart::Text { .. })) else {
+            return gaps;
+        };
+        let Some((sender, _)) = zeron_proto::agent_messages::agent_message_sender(text) else {
+            return gaps;
+        };
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        gaps.hash(&mut h);
+        sender_chat(&sender, workspace).hash(&mut h);
+        h.finish()
     }
 
     fn entry_rows(
@@ -327,6 +354,7 @@ impl RowBuilder {
         entry: &SessionMessageEntry,
         first: bool,
         prev: Option<MessageRole>,
+        workspace: Option<&WorkspaceSnapshot>,
         live_parts: &mut HashSet<String>,
     ) -> Vec<Placed> {
         let mut rows: Vec<Placed> = Vec::new();
@@ -356,7 +384,7 @@ impl RowBuilder {
                 .collect::<Vec<_>>()
                 .join("\n");
             let gap = if first { Gap::First } else { Gap::Turn };
-            rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false)), gap });
+            rows.push(Placed { core: Arc::new(self.user_row(ctx, &entry.id, &text, false, workspace)), gap });
             return rows;
         }
         let streaming = entry.status == Some(MessageStatus::Streaming);
@@ -522,8 +550,14 @@ impl RowBuilder {
         next
     }
 
-    fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool) -> RowCore {
+    fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool, workspace: Option<&WorkspaceSnapshot>) -> RowCore {
         let key = row_key(&format!("{id}#u"));
+        // An agent's message: its sender rides over the bubble, and only the
+        // body under the routing header goes in it.
+        let (sender, content) = match zeron_proto::agent_messages::agent_message_sender(content) {
+            Some((sender, body)) => (Some(sender_caption(ctx, &sender, workspace)), body),
+            None => (None, content),
+        };
         // Shared parser: strips the image trailer *and* hidden Appshot context.
         let parsed = zeron_client::attachments::parse_user_message(content);
         let (size, lh) = TYPE.body;
@@ -576,6 +610,7 @@ impl RowBuilder {
             kind: RowKind::User,
             entry_id: Arc::from(id),
             content: Content::User(UserBubble {
+                sender,
                 text,
                 images,
                 files,
@@ -762,6 +797,58 @@ fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str) -> Ro
             action,
         }),
         copy_text: message.to_owned(),
+    }
+}
+
+/// An agent message's sender as this workspace lists it: its live title
+/// (the header's for an untitled or unlisted chat), its provider, and
+/// whether it is listed (and so opens).
+fn sender_chat(sender: &zeron_proto::agent_messages::AgentSender, workspace: Option<&WorkspaceSnapshot>) -> (String, Option<String>, bool) {
+    let row = workspace.and_then(|ws| ws.session(&sender.chat_id));
+    let title = row
+        .filter(|row| row.has_title)
+        .map(|row| row.title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| sender.title.clone());
+    (title, row.and_then(|row| row.harness.clone()).filter(|h| !h.is_empty()), row.is_some())
+}
+
+/// `Message from [mark] Chat`, the desktop's caption over an agent-sent
+/// bubble: the sending chat's provider mark (a chat glyph when unknown) and
+/// title, the whole line opening that chat when the workspace lists it.
+fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSender, workspace: Option<&WorkspaceSnapshot>) -> PText {
+    let (title, harness, known) = sender_chat(sender, workspace);
+    let (size, lh) = TYPE.small;
+    let regular = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
+    let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
+    let lh = ctx.typo.px(lh);
+    let mark = ctx.typo.px(14.0);
+    let text = format!("Message from {title}");
+    let split = "Message from ".len();
+    let spans = vec![
+        zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
+        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 5.0, pad_end: 0.0, atomic: false, inline_box: None },
+    ];
+    let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
+    let link = known.then_some(0);
+    let paint = super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
+    let p = zeron_text::prepare(
+        &ctx.typo.book,
+        ctx.cache,
+        &text,
+        &spans,
+        &zeron_text::PrepareOptions { white_space: WhiteSpace::Pre, ..Default::default() },
+    );
+    PText {
+        p,
+        lh,
+        base: super::style::baseline(lh, regular),
+        paints: vec![paint, paint],
+        links: if known { vec![format!("{OPEN_CHAT_SCHEME}://open?id={}", sender.chat_id)] } else { Vec::new() },
+        chip: (0.0, 0.0),
+        badges: Vec::new(),
+        marks: vec![(1, icon)],
+        math: Vec::new(),
     }
 }
 
@@ -982,8 +1069,15 @@ fn place_user(u: &UserBubble, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut 
     let files_y = if u.images.is_empty() { 0.0 } else { side + gap };
     let attach_h = (files_y + u.files.len() as f32 * (pill_h + gap) - gap).max(0.0);
     let thumbs_h = if attach_h > 0.0 { attach_h + if bubble_h > 0.0 { px.v(8.0) } else { 0.0 } } else { 0.0 };
-    let h = thumbs_h + bubble_h;
+    let caption_h = u.sender.as_ref().map_or(0.0, |c| c.lh + px.v(CAPTION_GAP));
+    let h = caption_h + thumbs_h + bubble_h;
     let Some(out) = out else { return h };
+    // The sender caption, right-aligned over everything; a long title fades.
+    if let Some(caption) = &u.sender {
+        let cw_caption = caption.p.max_content_width().ceil().min(max_w);
+        place_text_lines(caption, x + cw - cw_caption, y, cw_caption, 1, px, out);
+    }
+    let y = y + caption_h;
     // Thumbnails right-aligned above the bubble.
     let mut tx = x + cw - side;
     for img in u.images.iter().rev() {
@@ -1051,7 +1145,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
     }
     match content {
         Content::Block(b) => block(b),
-        Content::User(u) => u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
+        Content::User(u) => u.sender.as_ref().map_or(0, |c| c.p.heap_bytes()) + u.text.p.heap_bytes() + u.more.p.heap_bytes() + u.files.iter().map(|(_, n)| n.p.heap_bytes()).sum::<usize>(),
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Notice(n) => n.text.p.heap_bytes(),

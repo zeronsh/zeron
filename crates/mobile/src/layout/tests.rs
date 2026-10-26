@@ -121,6 +121,28 @@ fn streaming_converges_to_full_parse() {
     }
 }
 
+#[test]
+fn agent_messages_show_their_sender_over_the_bubble() {
+    let mut w = worker(390.0);
+    let id = "cd27c5c2-0000-4000-8000-000000000000";
+    let text = zeron_proto::agent_messages::agent_message("Windows lane (cd27c5c2)", id, "Windows lane: done.");
+    w.input = debug_input(vec![DebugEntry { id: "u".into(), user: true, text, streaming: false }], false);
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.starts_with("Message from Windows lane"), "{}", d.text);
+    assert!(d.text.contains("Windows lane: done."), "{}", d.text);
+    assert!(!d.text.contains("send_message") && !d.text.contains("cd27c5c2"), "{}", d.text);
+    assert_eq!(frame.message_text(0).as_deref(), Some("Windows lane: done."));
+    // The sender's mark (a chat glyph: the workspace doesn't list it), and
+    // no link to a chat that doesn't open.
+    assert!(d.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "bubble.left")));
+    assert!(d.links.is_empty());
+    // The caption sits over the bubble: its runs end above the bubble's fill.
+    let bubble = d.boxes.iter().find(|b| b.color == display::ColorRole::UserBubble).unwrap();
+    let caption = d.runs.first().unwrap();
+    assert!(caption.baseline < bubble.y, "{caption:?} {bubble:?}");
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
@@ -446,7 +468,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();

@@ -101,6 +101,17 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return }
             self.presentCompanion(SubagentViewController(app: self.app, parentId: self.chatId, docId: doc, title: title, running: running))
         }
+        list.onOpenChat = { [weak self] id in
+            guard let self, id != self.chatId else { return }
+            // On the phone the sender's chat pushes over this one, so Back
+            // returns here; beside the iPad sidebar it takes the detail.
+            if self.mainShell != nil, let nav = self.navigationController {
+                guard let session = SessionViewController(app: self.app, chatId: id) else { return }
+                nav.pushViewController(session, animated: true)
+            } else {
+                self.router?.openSession(id)
+            }
+        }
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
             self.setJumpVisible(d > 140 && !self.list.following)

@@ -1363,10 +1363,7 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
-        format!(
-            "[Message from Zeron chat {label}. Reply to it with the Zeron `send_message` tool, chat {}.]\n\n{text}",
-            origin_id
-        )
+        zeron_proto::agent_messages::agent_message(&label, origin_id, text)
     }
 
     /// Pick and perform the delivery the composer would.

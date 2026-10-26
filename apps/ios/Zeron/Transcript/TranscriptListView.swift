@@ -123,6 +123,8 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onAction: ((String) -> Void)?
     /// A subagent card was tapped (doc id, title, still running).
     var onSubagent: ((String, String, Bool) -> Void)?
+    /// An agent message's sender caption was tapped (the sending chat's id).
+    var onOpenChat: ((String) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
@@ -703,6 +705,14 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
                 vc.present(ImageViewer(image: image, source: view), animated: true)
             }
+            return
+        }
+        // A sender caption opens the chat that sent the message.
+        if url.scheme == "zeron-chat" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            onOpenChat?(id)
             return
         }
         if url.scheme == "http" || url.scheme == "https" {

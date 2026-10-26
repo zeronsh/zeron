@@ -388,6 +388,7 @@ impl zeron_client::SubagentSink for SubagentInput {
             working: live,
             working_since_ms: None,
             streaming: live,
+            workspace: None,
         };
         let _ = self.0.lock().unwrap().send(Msg::Input(input));
     }
@@ -450,6 +451,8 @@ impl TranscriptView {
             return false;
         };
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
+        // Agent messages' senders, by their live titles (read per snapshot).
+        let workspace = client.clone();
         let guard = handle.watch(move |snap| {
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
@@ -464,6 +467,7 @@ impl TranscriptView {
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
+                workspace: Some(workspace.client().workspace()),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -571,6 +575,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working,
         working_since_ms: None,
         streaming: working,
+        workspace: None,
     }
 }
 
