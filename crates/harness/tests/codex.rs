@@ -14,8 +14,8 @@ use zeron_harness::{
     CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
-    TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
+    TodoItem, TodoStatus, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 fn fixture_path() -> PathBuf {
@@ -632,6 +632,7 @@ async fn approvals_round_trip_as_input_requests() {
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     let asked = asked.lock().unwrap();
@@ -666,9 +667,135 @@ async fn approval_no_answer_becomes_decline() {
     let (controls, _steer, _token) = controls("No");
     let mut req = request("scenario:decline");
     req.auto_approve = false;
+    req.access = AccessMode::Supervised;
     let events = run_to_end(&harness(), req, controls).await;
 
     // The fake only completes the turn after seeing the decline decision.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// Controls whose `request_input` answers `answer_label` and records what
+/// it was asked.
+fn recording_controls(
+    answer_label: &'static str,
+) -> (
+    RunControls,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+    mpsc::Sender<SteerMessage>,
+) {
+    let (mut controls, steer, _token) = controls(answer_label);
+    let asked: Arc<Mutex<Vec<UserInputQuestion>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    controls.request_input = Box::new(move |questions| {
+        seen.lock().unwrap().extend(questions.iter().cloned());
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(
+            questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec![answer_label.into()],
+                })
+                .collect(),
+        );
+        rx
+    });
+    (controls, asked, steer)
+}
+
+#[tokio::test]
+async fn auto_accept_edits_applies_file_changes_and_asks_before_the_rest() {
+    let (controls, asked, _steer) = recording_controls("No");
+    let mut req = request("scenario:auto-edits");
+    req.auto_approve = false;
+    req.access = AccessMode::AutoAcceptEdits;
+    let events = run_to_end(&harness(), req, controls).await;
+
+    // The fake checks the on-request / workspace-write wire and completes
+    // only after the file change is accepted and the rest declined.
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap();
+    let headers: Vec<&str> = asked.iter().map(|q| q.header.as_str()).collect();
+    assert_eq!(headers, ["Approve command", "Approve permissions"]);
+    assert_eq!(asked[0].question, "Codex wants to run `git push`. Allow it?");
+}
+
+#[tokio::test]
+async fn plan_mode_rides_each_turn_and_leaving_it_is_explicit() {
+    let (controls, asked, steer) = recording_controls("Yes");
+    let mut req = request("scenario:plan");
+    req.plan = true;
+    let mut stream = harness().run(req, controls).await.expect("run starts");
+    // Leaving plan for supervised applies in place, from the next turn; a
+    // plain follow-up keeps naming the default mode.
+    let mut build = request("");
+    build.auto_approve = false;
+    build.access = AccessMode::Supervised;
+    let mut steers = vec![
+        SteerMessage {
+            config: Some(Box::new(build)),
+            ..SteerMessage::text("build it")
+        },
+        SteerMessage::text("plain"),
+    ]
+    .into_iter();
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("event in time")
+            .expect("stream open")
+            .expect("stream event");
+        if let AgentEvent::Done { status, error, .. } = &event {
+            assert_eq!(*status, DoneStatus::Completed, "{error:?}");
+            completed += 1;
+            if let Some(next) = steers.next() {
+                steer.send(next).await.unwrap();
+            }
+        }
+        events.push(event);
+    }
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        "Here is the plan.\n\n# Plan\n\n1. Read\n2. Change\n\nbuild itplain"
+    );
+    assert!(asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_resumed_thread_left_in_plan_mode_is_taken_out_of_it() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:leave-plan");
+    req.resume = Some("resume-in-plan".into());
+    req.model = None;
+    req.reasoning = None;
+    let events = run_to_end(&harness(), req, controls).await;
     assert!(
         matches!(
             events.last(),

@@ -14,20 +14,29 @@
 //! - `thread/start` (or `thread/resume`, unarchiving an archived thread; only
 //!   a conversation that is gone falls back to a fresh thread, with a visible
 //!   notice) → `SessionStarted`; `turn/start` carries the prompt, model,
-//!   effort, `sandboxPolicy`, and approval policy.
+//!   effort, `sandboxPolicy`, approval policy and (plan mode) the
+//!   `collaborationMode`.
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
 //!   An `error` Codex will retry is progress, not an error; a final one is
 //!   reported once, by the turn's Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
-//!   `item/commandExecution/requestApproval`,
+//! - Approvals + sandbox follow the run's [`AccessMode`], on every
+//!   `turn/start` (so a change applies from the next turn in place): full
+//!   access is `"never"` + `danger-full-access`, as every run was before
+//!   modes; auto-accept edits is `"on-request"` + `workspace-write`;
+//!   supervised is `"untrusted"` + `read-only`. A title run stays `"never"`
+//!   + `read-only`. `item/commandExecution/requestApproval`,
 //!   `item/fileChange/requestApproval` and `item/permissions/requestApproval`
-//!   still round-trip through [`RunControls::request_input`] as a synthesized
-//!   yes/no question. MCP elicitations (sent whatever the policy) are asked
-//!   when they are a flat form and declined otherwise.
+//!   the mode does not cover round-trip through
+//!   [`RunControls::request_input`] as a yes/no question (a refusal
+//!   declines); auto-accept edits accepts file changes outright. MCP
+//!   elicitations (sent whatever the policy) are asked when they are a flat
+//!   form and declined otherwise.
+//! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
+//!   (across a resume too), so once a thread has planned every turn names
+//!   its mode. The proposed plan arrives as its own `plan` item, rendered
+//!   as reply text.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -70,8 +79,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputAnswer,
+    UserInputQuestion,
 };
 
 use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
@@ -144,8 +154,9 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         (key("command"), mcp.command.clone().into()),
         (key("args"), json!(mcp.args)),
         (key("env"), json!(mcp.env)),
-        // `never` forbids approval prompts; explicitly approve our injected
-        // server's tools so Codex does not reject calls that need approval.
+        // Our injected server's tools are Zeron's own: approve them in every
+        // access mode, so Codex neither rejects a call under `never` nor
+        // asks about one under the others.
         (key("default_tools_approval_mode"), "approve".into()),
     ]
 }
@@ -386,6 +397,45 @@ fn service_tier(request: &RunRequest) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|t| *t != "default")
         .map(str::to_owned)
+}
+
+/// What a request may do without asking: `auto_approve` still means full
+/// access.
+fn run_access(request: &RunRequest) -> AccessMode {
+    if request.auto_approve {
+        AccessMode::FullAccess
+    } else {
+        request.access
+    }
+}
+
+/// The approval policy and sandbox a run's thread and turns get. Full access
+/// is codex's `--dangerously-bypass-approvals-and-sandbox`, as every run was
+/// before modes; auto-accept edits writes the workspace and asks to step
+/// outside it; supervised asks before anything but codex's known-safe reads.
+/// A title run never asks and never writes, whatever its chat's mode.
+fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
+    match access {
+        _ if title_only => ("never", SandboxLevel::ReadOnly),
+        AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
+        AccessMode::AutoAcceptEdits => ("on-request", SandboxLevel::WorkspaceWrite),
+        AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
+    }
+}
+
+/// `turn/start`'s `collaborationMode` (`plan` or `default`). Its settings
+/// take precedence over the turn's model and effort, so they repeat them;
+/// a null `developer_instructions` keeps the mode's built-in ones (0.164.0
+/// schema).
+fn collaboration_mode(plan: bool, model: &str, effort: Option<&str>) -> Value {
+    json!({
+        "mode": if plan { "plan" } else { "default" },
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": null,
+        },
+    })
 }
 
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
@@ -652,22 +702,32 @@ impl Harness for CodexHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
-    /// What the app-server launch and its turns read: the sandbox is forced
-    /// to full access, and `serviceTier` is the only model option used.
+    /// Supervised asks before what codex does not know to be safe, and
+    /// auto-accept edits before stepping outside the workspace sandbox.
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    /// Codex's own `plan` collaboration mode.
+    fn supports_plan(&self) -> bool {
+        true
+    }
+    /// What the app-server launch and its turns read: the sandbox follows
+    /// the access mode, and `serviceTier` is the only model option used.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
-            && live.auto_approve == next.auto_approve
+            && run_access(live) == run_access(next)
+            && live.plan == next.plan
     }
-    /// `turn/start` carries model, effort and service tier, and each sticks
-    /// for later turns — so a change applies from the next turn without a
-    /// new app-server. Clearing one back to the default cannot be expressed
-    /// that way (an omitted parameter keeps the previous value).
+    /// `turn/start` carries model, effort, service tier, approval policy,
+    /// sandbox and collaboration mode, and each sticks for later turns — so
+    /// a change applies from the next turn without a new app-server.
+    /// Clearing a model, effort or tier back to the default cannot be
+    /// expressed that way (an omitted parameter keeps the previous value).
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
-            && live.auto_approve == next.auto_approve
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -755,7 +815,10 @@ impl Harness for CodexHarness {
         request.attachments.clear();
         request.mcp = None;
         request.model_options.clear();
+        // Its policy never asks; anything that still would is the person's.
         request.auto_approve = false;
+        request.access = AccessMode::Supervised;
+        request.plan = false;
         self.run_with_mode(request, controls, true, false).await
     }
 }
@@ -800,18 +863,9 @@ impl CodexHarness {
                     .flatten();
             check_codex_version(version.as_ref())?;
         }
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
-        request.sandbox = if title_only {
-            zeron_proto::SandboxLevel::ReadOnly
-        } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
-        };
+        // The sandbox is the access mode's (see [`permissions`]), never the
+        // request's own level.
+        request.sandbox = permissions(run_access(&request), title_only).1;
         let AppServer {
             child,
             client,
@@ -1260,6 +1314,15 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
 }
 
+/// What `thread/start` / `thread/resume` reports the thread runs with: the
+/// model and effort a collaboration mode falls back to when the request
+/// names none, and whether a resumed thread is still in plan mode.
+struct ThreadMode {
+    model: String,
+    effort: Option<String>,
+    plan: bool,
+}
+
 /// The per-run event loop: one task multiplexing app-server messages, the
 /// steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
@@ -1288,14 +1351,12 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // The access mode's approval policy and sandbox (see [`permissions`]).
+    // A mode that asks routes its approvals to the person explicitly: a
+    // configured `approvals_reviewer` could otherwise hand them to an AI
+    // reviewer instead.
+    let (approval_policy, sandbox) = permissions(run_access(&request), title_only);
+    let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
     let start_tier = service_tier(&request);
 
     let start_params = {
@@ -1344,7 +1405,10 @@ async fn run_session(session: Session) {
             }
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
+        p.insert("sandbox".into(), sandbox_mode(sandbox).into());
+        if asks_person(&request) {
+            p.insert("approvalsReviewer".into(), "user".into());
+        }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
@@ -1538,9 +1602,14 @@ async fn run_session(session: Session) {
             cwd: thread["cwd"].as_str().unwrap_or(&request.cwd).to_owned(),
             model_provider: thread["modelProvider"].as_str().map(str::to_owned),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice))
+        let thread_mode = ThreadMode {
+            model: thread["model"].as_str().unwrap_or_default().to_owned(),
+            effort: thread["reasoningEffort"].as_str().map(str::to_owned),
+            plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
+        };
+        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice, thread_mode))
     };
-    let (thread_id, mut children, voice_context, restore_notice) = tokio::select! {
+    let (thread_id, mut children, voice_context, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1573,16 +1642,25 @@ async fn run_session(session: Session) {
         }
     };
 
-    // Model, effort and service tier ride every `turn/start` (each sticks
-    // for later turns): a steer's in-place `config` takes effect from the
-    // next turn the runtime starts.
+    // Model, effort, service tier, access and plan ride every `turn/start`
+    // (each sticks for later turns): a steer's in-place `config` takes
+    // effect from the next turn the runtime starts.
     let mut live = request.clone();
-    let turn_params = |live: &RunRequest, text: &str| -> Value {
+    // Plan mode sticks to the thread, across a resume too (live, 0.164.0).
+    // Once this runtime has asked for it, or the resumed thread is in it,
+    // every turn names its mode so that leaving plan is explicit; a thread
+    // that never planned is sent none, as before modes.
+    let mut names_mode = thread_mode.plan;
+    let mut turn_params = |live: &RunRequest, text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
+        let (approval_policy, sandbox) = permissions(run_access(live), title_only);
         p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandboxPolicy".into(), sandbox_policy_value(live.sandbox));
+        p.insert("sandboxPolicy".into(), sandbox_policy_value(sandbox));
+        if asks_person(live) {
+            p.insert("approvalsReviewer".into(), "user".into());
+        }
         // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
         // when asked for — without this codex "thinks" in silence for minutes:
         // nothing renders and the UI's 45s staleness gate flips Working off
@@ -1596,6 +1674,22 @@ async fn run_session(session: Session) {
         }
         if let Some(tier) = service_tier(live) {
             p.insert("serviceTier".into(), Value::String(tier));
+        }
+        names_mode |= live.plan;
+        if names_mode {
+            let model = live.model.as_deref().unwrap_or(&thread_mode.model);
+            let effort = to_effort(live.reasoning).or(thread_mode.effort.as_deref());
+            if model.is_empty() {
+                tracing::warn!(
+                    target: "zeron_harness::codex",
+                    "no model to name the collaboration mode with; leaving it unchanged"
+                );
+            } else {
+                p.insert(
+                    "collaborationMode".into(),
+                    collaboration_mode(live.plan, model, effort),
+                );
+            }
         }
         Value::Object(p)
     };
@@ -1828,12 +1922,21 @@ async fn run_session(session: Session) {
                         }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
-                                "exitedReviewMode" => item.get("review").and_then(Value::as_str),
-                                "contextCompaction" => Some("Context compacted."),
+                                "exitedReviewMode" => {
+                                    item.get("review").and_then(Value::as_str).map(str::to_owned)
+                                }
+                                "contextCompaction" => Some("Context compacted.".to_owned()),
+                                // Plan mode's proposed plan: Codex lifts it
+                                // out of the agent message into its own item
+                                // (the completed one is authoritative, its
+                                // `item/plan/delta`s may not add up to it).
+                                "plan" => item.get("text").and_then(Value::as_str)
+                                    .filter(|text| !text.trim().is_empty())
+                                    .map(|text| format!("{}\n\n", text.trim_end())),
                                 _ => None,
                             };
                             if let Some(text) = output
-                                && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
+                                && !send(&event_tx, AgentEvent::TextDelta { text }).await
                             { break 'main; }
                         }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
@@ -2130,7 +2233,7 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
+                        run_access(&live),
                         &request_input,
                         &request_slots,
                     );
@@ -2518,19 +2621,30 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one server→client request. Approval requests round-trip through
-/// `request_input` as a synthesized yes/no question (in a subtask so the
-/// message loop keeps flowing); with `auto_approve` they're accepted outright
-/// (belt to the wire-level `approvalPolicy: "never"`). MCP elicitations are
-/// asked or declined. Anything else is rejected as unsupported so the server
-/// never wedges awaiting a reply. At most [`MAX_PENDING_SERVER_REQUESTS`]
-/// wait on a person at once; the rest are refused as overloaded.
+/// What an approval request asks to do, for
+/// [`crate::approval::allowed_without_asking`].
+fn approval_action(method: &str) -> crate::approval::Action {
+    if method == "item/fileChange/requestApproval" {
+        crate::approval::Action::Edit
+    } else {
+        crate::approval::Action::Other
+    }
+}
+
+/// Serve one server→client request. An approval the run's `access` covers
+/// is accepted outright (full access: belt to the wire-level `"never"`;
+/// auto-accept edits: file changes); any other round-trips through
+/// `request_input` as a yes/no question (in a subtask so the message loop
+/// keeps flowing), a refusal declining. MCP elicitations are asked or
+/// declined. Anything else is rejected as unsupported so the server never
+/// wedges awaiting a reply. At most [`MAX_PENDING_SERVER_REQUESTS`] wait on
+/// a person at once; the rest are refused as overloaded.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
-    auto_approve: bool,
+    access: AccessMode,
     request_input: &Arc<RequestInputFn>,
     slots: &Arc<tokio::sync::Semaphore>,
 ) {
@@ -2621,7 +2735,7 @@ fn handle_server_request(
             return;
         }
     };
-    if auto_approve {
+    if crate::approval::allowed_without_asking(access, approval_action(method)) {
         client.respond(&id, reply(params, true));
         return;
     }
@@ -2643,9 +2757,7 @@ fn handle_server_request(
         let answers = (request_input)(vec![question.clone()])
             .await
             .unwrap_or_default();
-        let accept = answers.iter().any(|a| {
-            a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-        });
+        let accept = crate::approval::approved(&question, &answers);
         client.respond(&id, reply(&params, accept));
     });
 }
@@ -2710,9 +2822,11 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
         .collect()
 }
 
-/// Synthesize the yes/no question an approval request surfaces to the user.
+/// Synthesize the yes/no question an approval request surfaces to the user
+/// (the shared [`crate::approval`] wording; permissions spell out what
+/// they grant).
 fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
-    let (header, question) = if method.contains("commandExecution") {
+    if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -2722,14 +2836,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
                 .join(" "),
             _ => String::new(),
         };
-        (
-            "Approve command".to_owned(),
-            if command.is_empty() {
-                "Codex wants to run a command. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to run `{command}`. Allow it?")
-            },
-        )
+        crate::approval::command("Codex", &command)
     } else if method.contains("permissions") {
         let permissions = &params["permissions"];
         let mut asks = Vec::new();
@@ -2766,8 +2873,8 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             .filter(|r| !r.is_empty())
             .map(|r| format!(" ({r})"))
             .unwrap_or_default();
-        (
-            "Approve permissions".to_owned(),
+        crate::approval::question(
+            "Approve permissions",
             format!("Codex wants {what}{why}. Allow it?"),
         )
     } else {
@@ -2779,23 +2886,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             .iter()
             .filter_map(|c| c.get("path").and_then(Value::as_str))
             .collect();
-        (
-            "Approve file change".to_owned(),
-            if paths.is_empty() {
-                "Codex wants to modify files. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to modify {}. Allow it?", paths.join(", "))
-            },
-        )
-    };
-    UserInputQuestion {
-        id: new_message_id(),
-        header,
-        question,
-        options: vec!["Yes".into(), "No".into()],
-        prefill: None,
-        multiline: false,
-        multi_select: false,
+        crate::approval::edit("Codex", &paths)
     }
 }
 
@@ -2824,6 +2915,116 @@ mod tests {
         assert!(!legacy_model_page(&json!({"data":[]})));
     }
 
+    fn run_request(access: AccessMode, plan: bool) -> RunRequest {
+        RunRequest {
+            mcp: None,
+            prompt: String::new(),
+            harness: None,
+            model: Some("gpt-5.6-sol".into()),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/repo".into(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access,
+            plan,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn each_access_mode_has_its_own_policy_and_sandbox() {
+        let wire = |access, title_only| {
+            let (policy, sandbox) = permissions(access, title_only);
+            (policy, sandbox_mode(sandbox), sandbox_policy_value(sandbox))
+        };
+        assert_eq!(
+            wire(AccessMode::FullAccess, false),
+            ("never", "danger-full-access", json!({"type": "dangerFullAccess"}))
+        );
+        assert_eq!(
+            wire(AccessMode::AutoAcceptEdits, false),
+            (
+                "on-request",
+                "workspace-write",
+                json!({"type": "workspaceWrite", "networkAccess": true})
+            )
+        );
+        assert_eq!(
+            wire(AccessMode::Supervised, false),
+            ("untrusted", "read-only", json!({"type": "readOnly"}))
+        );
+        for access in AccessMode::ALL {
+            assert_eq!(
+                wire(access, true),
+                ("never", "read-only", json!({"type": "readOnly"}))
+            );
+        }
+        // `auto_approve` still means full access, whatever the mode says.
+        let mut request = run_request(AccessMode::Supervised, false);
+        assert_eq!(run_access(&request), AccessMode::Supervised);
+        request.auto_approve = true;
+        assert_eq!(run_access(&request), AccessMode::FullAccess);
+    }
+
+    #[test]
+    fn auto_accept_edits_accepts_file_changes_and_asks_the_rest() {
+        use crate::approval::allowed_without_asking;
+        let methods = [
+            "item/fileChange/requestApproval",
+            "item/commandExecution/requestApproval",
+            "item/permissions/requestApproval",
+        ];
+        let allowed = |access| {
+            methods.map(|method| allowed_without_asking(access, approval_action(method)))
+        };
+        assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
+        assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
+        assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
+    }
+
+    #[test]
+    fn access_and_plan_changes_apply_in_place() {
+        let harness = CodexHarness::new();
+        let live = run_request(AccessMode::FullAccess, false);
+        for next in [
+            run_request(AccessMode::Supervised, false),
+            run_request(AccessMode::AutoAcceptEdits, false),
+            run_request(AccessMode::FullAccess, true),
+        ] {
+            assert!(!harness.same_runtime(&live, &next), "{next:?}");
+            assert!(harness.reconfigures_in_place(&live, &next), "{next:?}");
+        }
+        // A request that auto-approves is the same full-access runtime.
+        let mut auto = run_request(AccessMode::Supervised, false);
+        auto.auto_approve = true;
+        assert!(harness.same_runtime(&live, &auto));
+        let mut moved = run_request(AccessMode::Supervised, false);
+        moved.cwd = "/elsewhere".into();
+        assert!(!harness.reconfigures_in_place(&live, &moved));
+        assert_eq!(harness.access_modes(), &AccessMode::ALL);
+        assert!(harness.supports_plan());
+    }
+
+    #[test]
+    fn collaboration_modes_repeat_the_turn_model_and_effort() {
+        assert_eq!(
+            collaboration_mode(true, "gpt-5.6-sol", Some("high")),
+            json!({"mode": "plan", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": "high", "developer_instructions": null,
+            }})
+        );
+        assert_eq!(
+            collaboration_mode(false, "gpt-5.6-sol", None),
+            json!({"mode": "default", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": null, "developer_instructions": null,
+            }})
+        );
+    }
+
     #[test]
     fn approval_questions_are_yes_no() {
         let q = approval_question(
@@ -2831,7 +3032,7 @@ mod tests {
             &json!({"itemId": "c1", "command": "rm -rf /tmp/x"}),
         );
         assert_eq!(q.header, "Approve command");
-        assert!(q.question.contains("rm -rf /tmp/x"));
+        assert_eq!(q.question, "Codex wants to run `rm -rf /tmp/x`. Allow it?");
         assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
         assert!(!q.multi_select);
 

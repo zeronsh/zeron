@@ -53,10 +53,9 @@ pub(crate) fn sandbox_policy_type(sandbox: SandboxLevel) -> &'static str {
     }
 }
 
-/// `turn/start`'s full `sandboxPolicy` object. Workspace-write keeps network
-/// access: zeron agents fetch deps and hit APIs unattended, and with the
-/// approval policy pinned to "never" a network-less sandbox would fail those
-/// commands with no escalation path.
+/// `turn/start`'s full `sandboxPolicy` object. Workspace-write (auto-accept
+/// edits) keeps network access: zeron agents fetch deps and hit APIs, and a
+/// network-less sandbox would ask before every one of those commands.
 pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {
     let mut policy = serde_json::Map::new();
     policy.insert("type".into(), sandbox_policy_type(sandbox).into());
