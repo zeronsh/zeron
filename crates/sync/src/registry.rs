@@ -110,6 +110,9 @@ enum ServerFrame {
         rows: Vec<RegistryRow>,
         #[serde(default)]
         presence: HashMap<String, i64>,
+        /// Each present device's protocol (docs/compat.md); absent = 0.
+        #[serde(rename = "presenceProto", default)]
+        presence_proto: HashMap<String, u32>,
     },
     Rows {
         seq: u64,
@@ -124,6 +127,8 @@ enum ServerFrame {
     Presence {
         device: String,
         at: i64,
+        #[serde(default)]
+        proto: u32,
     },
     #[serde(rename = "probe-ok")]
     ProbeOk {
@@ -167,7 +172,7 @@ impl TextConnector for WsTextConnector {
             let url = provider.url().await?;
             let ws = crate::dial::connect_ws(&url)
                 .await
-                .map_err(|e| SyncError::WebSocket(e.to_string()))?;
+                .map_err(crate::compat::dial_error)?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
             tokio::spawn(crate::socket::pump(
@@ -268,6 +273,7 @@ pub struct RegistryClient {
     redial: mpsc::Sender<()>,
     presence_out: mpsc::Sender<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    protocols: Arc<Mutex<HashMap<String, u32>>>,
     stats: Arc<Stats>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -343,6 +349,7 @@ impl RegistryClient {
         let (redial_tx, redial_rx) = mpsc::channel(1);
         let (presence_tx, presence_rx) = mpsc::channel(4);
         let presence = Arc::new(Mutex::new(HashMap::new()));
+        let protocols = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(Stats::default());
 
         let actor = Actor {
@@ -357,6 +364,7 @@ impl RegistryClient {
             redial_rx,
             presence_rx,
             presence: presence.clone(),
+            protocols: protocols.clone(),
             stats: stats.clone(),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -373,6 +381,7 @@ impl RegistryClient {
                 redial: redial_tx,
                 presence_out: presence_tx,
                 presence,
+                protocols,
                 stats,
                 task: Some(task),
             }),
@@ -414,6 +423,13 @@ impl RegistryClient {
             .filter(|(_, (_, seen))| now.duration_since(*seen) < PRESENCE_TTL)
             .map(|(device, (at, _))| (device.clone(), *at))
             .collect()
+    }
+
+    /// The protocol each device announced with its latest beat (absent = 0,
+    /// a build from before protocols). A device above
+    /// [`crate::compat::PROTOCOL`] is online but newer than this build.
+    pub fn presence_protocols(&self) -> HashMap<String, u32> {
+        lock(&self.protocols).clone()
     }
 
     /// Liveness hint: probe the room now (deadline-checked).
@@ -473,6 +489,7 @@ struct Actor {
     redial_rx: mpsc::Receiver<()>,
     presence_rx: mpsc::Receiver<i64>,
     presence: Arc<Mutex<HashMap<String, (i64, tokio::time::Instant)>>>,
+    protocols: Arc<Mutex<HashMap<String, u32>>>,
     stats: Arc<Stats>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn RegistryTransport>>,
@@ -532,6 +549,18 @@ impl Actor {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
+                    }
+                    if let SyncError::UpdateRequired(refusal) = err {
+                        // `compat::app_update_required` now tells the UI.
+                        tracing::warn!(?refusal, attempt, "registry refused this build; update Zeron");
+                        self.note_failure("update Zeron".into());
+                        let _ = self.events.send(RegistryEvent::Disconnected);
+                        let mut shutdown = self.shutdown.clone();
+                        tokio::select! {
+                            _ = shutdown.wait_for(|stop| *stop) => return,
+                            _ = tokio::time::sleep(crate::compat::REFUSED_RETRY) => {}
+                        }
+                        continue;
                     }
                     tracing::warn!(error = %err, attempt, "registry dial failed; backing off");
                     self.note_failure(format!("dial failed: {err}"));
@@ -699,6 +728,7 @@ impl Actor {
             gc_floor,
             rows,
             presence,
+            presence_proto,
         })) = state
         else {
             tracing::warn!("registry: no state frame within deadline");
@@ -720,12 +750,14 @@ impl Actor {
             for (device, at) in presence {
                 map.insert(device, (at, now));
             }
+            lock(&self.protocols).extend(presence_proto);
         }
         self.stats.connected.store(true, Relaxed);
         self.stats.synced.store(true, Relaxed);
         self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
         self.stats.retry_at_ms.store(0, Relaxed);
         *lock(&self.stats.last_failure) = None;
+        crate::compat::clear_app_refusal();
         if ready.is_none() {
             self.stats.rejoins.fetch_add(1, Relaxed);
         }
@@ -833,6 +865,7 @@ impl Actor {
         let doc = self.doc.clone();
         let events = self.events.clone();
         let presence = self.presence.clone();
+        let protocols = self.protocols.clone();
         let stats = self.stats.clone();
         let busy = self.sync_busy.clone();
         tokio::spawn(async move {
@@ -892,6 +925,8 @@ impl Actor {
                         rows: Vec<RegistryRow>,
                         #[serde(default)]
                         presence: HashMap<String, i64>,
+                        #[serde(default)]
+                        presence_proto: HashMap<String, u32>,
                     }
                     match serde_json::from_str::<PullBody>(&body) {
                         Ok(pull) => {
@@ -904,6 +939,7 @@ impl Actor {
                                 map.insert(device, (at, now));
                             }
                             drop(map);
+                            lock(&protocols).extend(pull.presence_proto);
                             stats.synced.store(true, Relaxed);
                             stats.last_pushed_ms.store(epoch_ms(), Relaxed);
                             let _ = events.send(RegistryEvent::Applied);
@@ -964,7 +1000,8 @@ impl Actor {
                 self.stats.last_ack_ms.store(epoch_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
-            ServerFrame::Presence { device, at } => {
+            ServerFrame::Presence { device, at, proto } => {
+                lock(&self.protocols).insert(device.clone(), proto);
                 lock(&self.presence).insert(device, (at, tokio::time::Instant::now()));
                 let _ = self.events.send(RegistryEvent::Presence);
             }
@@ -977,6 +1014,7 @@ impl Actor {
                 gc_floor,
                 rows,
                 presence,
+                presence_proto,
             } => {
                 // Servers only send state as a hello answer, but applying a
                 // late duplicate is harmless and simpler than special-casing.
@@ -988,6 +1026,7 @@ impl Actor {
                 for (device, at) in presence {
                     map.insert(device, (at, now));
                 }
+                lock(&self.protocols).extend(presence_proto);
                 let _ = self.events.send(RegistryEvent::Applied);
             }
             ServerFrame::Error { code, message } => {

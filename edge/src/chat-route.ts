@@ -7,7 +7,10 @@ import { AUTH_USER_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVIC
 const ROUTES: Record<string, Record<string, string[]>> = {
   chat2: {
     checkpoint: ["GET", "POST"], rows: ["GET", "POST"],
-    tail: ["GET", "PUT"], diff: ["GET", "PUT"], stats: ["GET"], reset: ["POST"]
+    tail: ["GET", "PUT"], diff: ["GET", "PUT"], stats: ["GET"], reset: ["POST"],
+    // A chat3 chat's host marks its old chat2 room moved: from then on the
+    // room refuses the older builds that still dial it (docs/compat.md).
+    moved: ["POST"]
   },
   chat3: {
     checkpoint: ["GET", "POST"], rows: ["GET", "POST"], items: ["GET", "POST"],
@@ -46,9 +49,11 @@ export function chatRoute(request: Request, env: Pick<Env, "CHAT_ROOMS">, userId
     }
     const device = url.searchParams.get("device") ?? "";
     const host = url.searchParams.get("hostDevice");
+    const proto = url.searchParams.get("proto");
     url.search = "";
     if (id.test(device)) url.searchParams.set("device", device);
     if (host !== null) url.searchParams.set("hostDevice", host);
+    if (proto !== null && /^\d{1,6}$/.test(proto)) url.searchParams.set("proto", proto);
   } else {
     if (!routes[route]?.includes(request.method)) return new Response("not found", { status: 404 });
   }

@@ -55,7 +55,13 @@ pub struct TranscriptInput {
     /// gen 3 (docs/chat3-sync.md): older history exists in the room; the
     /// first row offers to load it.
     pub history_more: bool,
+    /// This build is too old for the chat (docs/compat.md): the first row
+    /// says so.
+    pub update_required: bool,
 }
+
+/// The first row of a chat this build is too old for.
+pub const UPDATE_REQUIRED_TEXT: &str = "This chat needs a newer version of Zeron. Update the app to see it.";
 
 /// The "Load earlier messages" row's action (the platform asks its session
 /// source to page older history in).
@@ -209,6 +215,7 @@ pub(crate) struct RowBuilder {
     pending: HashMap<String, (String, Arc<RowCore>)>,
     working: Option<Arc<RowCore>>,
     earlier: Option<Arc<RowCore>>,
+    update_notice: Option<Arc<RowCore>>,
     pub expanded: HashSet<u64>,
     pub collapsed: HashSet<u64>,
     /// Per-tool inline detail overrides (row detail key → open).
@@ -232,6 +239,13 @@ impl RowBuilder {
     /// Rows for `input`, reusing every row whose source is unchanged.
     pub fn build(&mut self, ctx: &mut Ctx, input: &TranscriptInput) -> Vec<Placed> {
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
+        if input.update_required {
+            let core = self
+                .update_notice
+                .get_or_insert_with(|| Arc::new(notice_row(ctx, "#update", "notice", UPDATE_REQUIRED_TEXT)))
+                .clone();
+            out.push(Placed { core, gap: Gap::First });
+        }
         if input.history_more && !input.entries.is_empty() {
             let core = self
                 .earlier

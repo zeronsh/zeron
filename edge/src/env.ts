@@ -107,6 +107,10 @@ export interface Env {
   RUNNER_JWT_PUBLIC_KEY?: string;
   /** Operator bearer for /admin/cloud/usage (secret). Unset ⇒ route 404s. */
   ADMIN_TOKEN?: string;
+  /** Lowest client protocol the sync routes accept (docs/compat.md; unset =
+   * 0, everyone). Raising it refuses older apps with an "update Zeron"
+   * answer: only builds from protocol 1 on can show it. */
+  MIN_CLIENT_PROTOCOL?: string;
 }
 
 /** APNs settings, when push is set up for this deployment. */

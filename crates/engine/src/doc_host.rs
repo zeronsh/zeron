@@ -206,6 +206,27 @@ impl EdgeConfig {
     }
 }
 
+/// Every edge HTTP request announces this build's protocol (docs/compat.md):
+/// the edge decides from it whose presence a caller sees and whether it is
+/// still supported.
+pub(crate) fn edge_protocol_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        zeron_sync::compat::PROTO_HEADER,
+        reqwest::header::HeaderValue::from(zeron_sync::compat::PROTOCOL),
+    );
+    headers
+}
+
+/// An edge refusal (docs/compat.md) as `Err(UpdateRequired)`.
+pub(crate) fn edge_refused(response: &reqwest::Response) -> Result<(), zeron_sync::SyncError> {
+    let header = response
+        .headers()
+        .get(zeron_sync::compat::UPDATE_HEADER)
+        .and_then(|v| v.to_str().ok());
+    zeron_sync::compat::check_http(response.status().as_u16(), header)
+}
+
 struct EdgeRoomUrl {
     base: String,
     token: Arc<dyn zeron_rpc::TokenSource>,
@@ -1096,6 +1117,7 @@ impl DocHost {
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
+                    .default_headers(edge_protocol_headers())
                     .pool_max_idle_per_host(2)
                     .pool_idle_timeout(std::time::Duration::from_secs(10))
                     .connect_timeout(std::time::Duration::from_secs(15))
@@ -3563,6 +3585,7 @@ impl DocHost {
             retry_at_ms,
             last_failure,
             chats,
+            update_required: zeron_sync::compat::app_update_required(),
         }
     }
 
@@ -3587,6 +3610,18 @@ impl DocHost {
         }
         if self.inner.config.edge.is_none() {
             return S::Local;
+        }
+        if snapshot.stats.is_some_and(|stats| stats.update_required) {
+            return S::UpdateRequired;
+        }
+        // A generation newer than this build opens read-only (as gen 1).
+        if handle.room_gen < 2
+            && self
+                .workspace()
+                .and_then(|w| w.chat(&handle.chat_id).ok().flatten())
+                .is_some_and(|chat| chat.needs_newer_app())
+        {
+            return S::UpdateRequired;
         }
         if !snapshot.sync_started {
             return if snapshot.sync_requested {

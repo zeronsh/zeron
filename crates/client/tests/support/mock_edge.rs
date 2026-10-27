@@ -193,7 +193,15 @@ impl MockEdge {
                         ["device", device, "ws"] => {
                             serve_relay(ws, device.to_string(), query, shared).await
                         }
-                        ["registry", _, "ws"] => proxy(ws, &registry_url).await,
+                        // Like the edge: the caller's protocol decides whose
+                        // presence it sees (docs/compat.md).
+                        ["registry", _, "ws"] => {
+                            let upstream = match query.get("proto") {
+                                Some(proto) => format!("{registry_url}/?proto={proto}"),
+                                None => registry_url.clone(),
+                            };
+                            proxy(ws, &upstream).await
+                        }
                         ["chat2", chat, "ws"] => {
                             if *shared.refuse_chat.lock().unwrap() {
                                 return;

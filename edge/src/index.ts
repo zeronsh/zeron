@@ -61,6 +61,7 @@ import { previewRoute } from "./preview-route";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
+import { clientProtocol, registrySearch, syncGate } from "./compat";
 import { ChatRoom } from "./chat-room";
 import { CloudAccount } from "./cloud/cloud-account";
 import { CloudIndex } from "./cloud/cloud-index";
@@ -228,6 +229,11 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
+    // Sync routes refuse clients older than the operator's minimum protocol
+    // with an answer protocol-aware clients show as "update Zeron".
+    const tooOld = syncGate(env, request, url);
+    if (tooOld) return tooOld;
+
     if ((parts[0] === "chat2" || parts[0] === "chat3") && parts[1] && ID_RE.test(parts[1])) {
       // A Cloud runner reaches only the chats its device hosts.
       const notHost = await runnerChatGate(env, auth, parts[1]);
@@ -316,7 +322,7 @@ export default {
           request,
           auth,
           "/ws",
-          `?${deviceParam(url).replace(/^&/, "")}`
+          registrySearch(request, url, deviceParam(url).replace(/^&/, ""))
         );
       }
       if (parts[2] === "stats" && request.method === "GET") {
@@ -327,7 +333,8 @@ export default {
       // One round trip on any network that passes HTTPS at all, where the
       // WS upgrade needs 4 and a cooperative middlebox.
       if (parts[2] === "rows" && request.method === "GET") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth, "/rows", url.search);
+        // The caller's protocol decides whose presence it sees.
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/rows", registrySearch(request, url));
       }
       // Push over plain HTTPS — the WS push's fallback twin (LWW clocks
       // make replays no-ops, so at-least-once delivery is safe).
@@ -372,7 +379,7 @@ export default {
           request,
           auth,
           "/ws",
-          `?role=${role}&connId=${encodeURIComponent(connId)}`
+          `?role=${role}&connId=${encodeURIComponent(connId)}&proto=${clientProtocol(request, url)}`
         );
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {

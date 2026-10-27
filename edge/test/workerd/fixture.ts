@@ -1,4 +1,5 @@
 import { chatRoute } from "../../src/chat-route";
+import { clientProtocol, registrySearch, syncGate } from "../../src/compat";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
 import { handleAdminRoute } from "../../src/cloud/billing";
@@ -124,6 +125,8 @@ export default {
     if (vault) return vault;
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
+    const tooOld = syncGate(env, request, url);
+    if (tooOld) return tooOld;
     const parts = url.pathname.split("/").filter(Boolean);
     const id = /^[A-Za-z0-9_-]{1,128}$/;
     if (parts[0] === "device" && parts[1] && id.test(parts[1])) {
@@ -135,7 +138,7 @@ export default {
       }
       if (parts[2] === "ws") {
         const role = url.searchParams.get("role") === "host" ? "host" : "client";
-        return forward(env.DEVICE_ROOMS, room, request, auth, "/ws", `?role=${role}&connId=${crypto.randomUUID()}`);
+        return forward(env.DEVICE_ROOMS, room, request, auth, "/ws", `?role=${role}&connId=${crypto.randomUUID()}&proto=${clientProtocol(request, url)}`);
       }
       if (parts[2] === "nudge" && request.method === "POST") {
         autoWakeCloudDevice(env, ctx, auth, deviceId);
@@ -146,8 +149,11 @@ export default {
     }
     if (parts[0] === "registry" && parts[1] === auth.orgId) {
       const room = `reg1/${parts[1]}/${auth.userId}`;
-      if (parts[2] === "ws") return forward(env.REGISTRY_ROOMS, room, request, auth, "/ws", `?${deviceParam(url).replace(/^&/, "")}`);
-      if (parts[2] === "rows" || parts[2] === "push" || parts[2] === "stats") {
+      if (parts[2] === "ws") {
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/ws", registrySearch(request, url, deviceParam(url).replace(/^&/, "")));
+      }
+      if (parts[2] === "rows") return forward(env.REGISTRY_ROOMS, room, request, auth, "/rows", registrySearch(request, url));
+      if (parts[2] === "push" || parts[2] === "stats") {
         return forward(env.REGISTRY_ROOMS, room, request, auth, `/${parts[2]}`, url.search);
       }
     }

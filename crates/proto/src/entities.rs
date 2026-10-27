@@ -1583,6 +1583,10 @@ pub struct Connectivity {
     /// fall back to the global state).
     #[serde(default)]
     pub chats: Vec<ChatConnectivity>,
+    /// The edge refused this build as a whole (docs/compat.md): show
+    /// "update Zeron" instead of a reconnect countdown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub update_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1608,6 +1612,10 @@ pub enum ChatSyncState {
     Synced,
     Offline,
     StorageError,
+    /// This build is too old for the chat: its room refused us, or the chat
+    /// is on a generation this build can't open (docs/compat.md). Show
+    /// "update Zeron", not a connection problem. Older peers read `Unknown`.
+    UpdateRequired,
     #[default]
     #[serde(other)]
     Unknown,

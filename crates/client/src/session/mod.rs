@@ -461,6 +461,13 @@ impl SessionCore {
                 && !workspace.device(&row.device_id).is_some_and(|d| d.online)
         });
         drop(workspace);
+        // Read before the state lock (the room locks its own slot).
+        let update_required = client
+            .workspace
+            .chat(&self.chat_id)
+            .is_some_and(|chat| chat.needs_newer_app())
+            || self.room().is_some_and(|room| room.update_required())
+            || zeron_sync::compat::app_update_required();
         let mut transcript_event = None;
         let send_before;
         let send_after;
@@ -490,6 +497,7 @@ impl SessionCore {
                 working_since_ms,
                 history_more: self.doc.is_split()
                     && zeron_doc::transcript_plane::Reader::cursor(&self.doc).more_before,
+                update_required,
                 cloud_booting,
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
@@ -497,6 +505,7 @@ impl SessionCore {
                 || previous.working_since_ms != live.working_since_ms
                 || previous.hydrated != st.hydrated
                 || previous.history_more != live.history_more
+                || previous.update_required != live.update_required
                 || placeholder_changed;
             if change.is_some()
                 || echoes_changed
@@ -863,6 +872,7 @@ struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
     history_more: bool,
+    update_required: bool,
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
@@ -977,6 +987,7 @@ fn build_snapshot(
         context_usage: st.context_usage,
         hydrated: st.hydrated,
         history_more: live.history_more,
+        update_required: live.update_required,
         delta: SnapshotDelta::default(),
         index: Arc::new(index),
     };

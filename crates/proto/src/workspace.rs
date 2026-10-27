@@ -31,6 +31,11 @@ pub mod capabilities {
     /// Older hosts resume the chat's one stored session whatever the
     /// provider, so a switch there hands one provider another's session id.
     pub const PROVIDER_SWITCH_V1: &str = "provider-switch-v1";
+    /// The host hosts gen-3 chats (docs/chat3-sync.md): it publishes their
+    /// transcript plane. Older hosts read gen 3 as chat2 and write the
+    /// transcript to a room nobody else reads, so chats are only born gen 3
+    /// on a host that advertises this.
+    pub const CHAT3_V1: &str = "chat3-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -43,6 +48,7 @@ pub mod capabilities {
         PROJECTLESS_SCRATCH_V1,
         SIDEBAR_SECTION_ORDER_V1,
         PROVIDER_SWITCH_V1,
+        CHAT3_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -127,6 +133,7 @@ mod tests {
                     "projectless-scratch-v1",
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
+                    "chat3-v1",
                     "voice-client-media-v1"
                 ],
             })

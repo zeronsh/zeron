@@ -132,6 +132,15 @@ fn http_err(err: reqwest::Error) -> SyncError {
     SyncError::WebSocket(err.to_string())
 }
 
+/// An edge refusal (docs/compat.md) as `Err(UpdateRequired)`.
+pub(crate) fn refused(response: &reqwest::Response) -> Result<(), SyncError> {
+    let header = response
+        .headers()
+        .get(zeron_sync::compat::UPDATE_HEADER)
+        .and_then(|v| v.to_str().ok());
+    zeron_sync::compat::check_http(response.status().as_u16(), header)
+}
+
 impl RegistryTransport for RegistryHttp {
     fn fetch(&self, since: u64) -> BoxFuture<'static, std::result::Result<String, SyncError>> {
         let bearer = self.bearer.clone();
@@ -144,6 +153,7 @@ impl RegistryTransport for RegistryHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            refused(&response)?;
             if !response.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "registry pull http {}",
@@ -167,6 +177,7 @@ impl RegistryTransport for RegistryHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            refused(&response)?;
             if !response.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "registry push http {}",
@@ -574,7 +585,8 @@ pub(crate) mod b64 {
         Some(out)
     }
 
-    #[cfg(test)]
+    
+#[cfg(test)]
     mod tests {
         #[test]
         fn round_trips() {

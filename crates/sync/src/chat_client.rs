@@ -242,7 +242,7 @@ impl BinConnector for WsBinConnector {
             let url = provider.url().await?;
             let ws = crate::dial::connect_ws(&url).await.map_err(|e| {
                 crate::budget::shared().observe_error(&e);
-                SyncError::WebSocket(e.to_string())
+                crate::compat::dial_error(e)
             })?;
             drop(dial_permit);
             let (out_tx, out_rx) = mpsc::channel(64);
@@ -440,6 +440,9 @@ pub struct ChatStatsSnapshot {
     /// Times a hello found the server behind our cursor (room reset/wiped).
     /// Nonzero means the host owes the room a re-seed checkpoint.
     pub server_resets: u64,
+    /// The edge refused this build for this room (docs/compat.md): show
+    /// "update Zeron", not a connection error. Cleared by the next join.
+    pub update_required: bool,
 }
 
 fn retry_jitter(max: Duration) -> Duration {
@@ -481,6 +484,7 @@ struct Flags {
     /// Monotonic dial-attempt counter; each attempt's number is its trace id
     /// in logs, so an incident reads as one numbered sequence.
     dial_seq: std::sync::atomic::AtomicU64,
+    update_required: std::sync::atomic::AtomicBool,
 }
 
 impl ChatClient {
@@ -809,6 +813,7 @@ impl ChatClient {
             disconnects: self.flags.disconnects.load(Relaxed),
             rejected: self.flags.rejected.load(Relaxed),
             server_resets: self.flags.server_resets.load(Relaxed),
+            update_required: self.flags.update_required.load(Relaxed),
         }
     }
 
@@ -926,11 +931,31 @@ impl Actor {
                 _ = self.shutdown.changed() => return,
             };
             let pipe = match dial {
-                Ok(Ok(pipe)) => pipe,
+                Ok(Ok(pipe)) => {
+                    self.flags
+                        .update_required
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    pipe
+                }
                 Ok(Err(err)) => {
                     if let Some(ready) = ready.take() {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
+                    }
+                    if let SyncError::UpdateRequired(refusal) = err {
+                        // Redialing (or the HTTPS fallback) at the normal
+                        // cadence would only be refused again.
+                        tracing::warn!(?refusal, attempt, "chat2 room refused this build; update Zeron");
+                        self.flags
+                            .update_required
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = self.events.send(ChatEvent::Disconnected);
+                        let mut shutdown = self.shutdown.clone();
+                        tokio::select! {
+                            _ = shutdown.wait_for(|stop| *stop) => return,
+                            _ = tokio::time::sleep(crate::compat::REFUSED_RETRY) => {}
+                        }
+                        continue;
                     }
                     tracing::warn!(error = %err, attempt, "chat2 dial failed; backing off");
                     self.spawn_offline_sync();

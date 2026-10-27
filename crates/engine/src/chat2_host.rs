@@ -346,6 +346,7 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
                 if seq.is_some() {
                     seen_seq = seq;
                 }
+                crate::doc_host::edge_refused(&res)?;
                 match res.status().as_u16() {
                     200 => got.clear(),
                     206 => {}
@@ -452,6 +453,7 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
                 .send()
                 .await
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))?;
+            crate::doc_host::edge_refused(&res)?;
             if !res.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "chat pull http {}",
@@ -492,6 +494,7 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
                 .send()
                 .await
                 .map_err(|e| SyncError::WebSocket(describe_http_error(e)))?;
+            crate::doc_host::edge_refused(&res)?;
             if !res.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "chat push http {}",

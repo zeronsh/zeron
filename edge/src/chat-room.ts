@@ -16,6 +16,7 @@
  * Hibernation discipline: ZERO wall-clock timers; ping/pong rides the
  * auto-response pair; alarms retry accepted rows' host wakes and back up to R2.
  */
+import { UPDATE_CLOSE_CODE, updateRequired } from "./compat";
 import { createBlobStore, type BlobStore } from "./blobs";
 import {
   appendRow,
@@ -149,6 +150,28 @@ export class ChatRoom implements DurableObject {
 
     const sql = this.sql;
     const owner = getMeta(sql, "owner");
+
+    // A chat3 chat's old chat2 room (docs/compat.md): only older builds,
+    // which read every newer generation as chat2, still dial it. Refuse them
+    // rather than relay into a room no host reads. Idempotent for the host.
+    if (url.pathname === "/moved" && request.method === "POST") {
+      if (owner && owner !== userId) return json({ error: "forbidden" }, 403);
+      if (!owner) setMeta(sql, "owner", userId);
+      if (getMeta(sql, "moved") !== "1") {
+        setMeta(sql, "moved", "1");
+        for (const socket of this.ctx.getWebSockets()) {
+          try {
+            socket.close(UPDATE_CLOSE_CODE, "update Zeron");
+          } catch {
+            // already closing
+          }
+        }
+      }
+      return json({ ok: true });
+    }
+    if (getMeta(sql, "moved") === "1") {
+      return updateRequired("room", "This chat uses a newer version of Zeron. Update to view it.");
+    }
 
     if (url.pathname === "/ws") {
       // Claim-on-first-join ownership, then owner-only forever (the s2

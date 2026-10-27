@@ -149,10 +149,11 @@ Tool *inputs* keep their existing `sanitize_tool_call` strip.
   parent chat's); if the row later disagrees, the handle is replaced on the row's
   generation and an empty assumed-generation doc is set aside with a rollback copy.
 - **Old apps read `roomGen >= 2` as chat2.** This release makes every client exact about
-  the generations it knows (`MAX_KNOWN_ROOM_GEN = 3`) and opens newer ones read-only from
-  local state instead of dialing the wrong room. Enable the flag for a user only once all
-  their apps run this release, or an old app will dial an empty chat2 room for a gen-3
-  chat.
+  the generations it knows (`MAX_KNOWN_ROOM_GEN = 3`) and opens newer ones read-only.
+  Builds from before it are kept away from gen-3 chats by the edge (docs/compat.md):
+  updated devices read offline to them, a gen-3 chat's host marks its old `chat2/{id}`
+  room moved so it refuses them, and chats are born gen 3 only on hosts that advertise
+  `chat3-v1`.
 - No migration of existing chats in this change. gen-2 chats keep working untouched.
 
 ## Edge

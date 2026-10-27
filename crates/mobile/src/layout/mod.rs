@@ -443,6 +443,7 @@ impl TranscriptView {
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
                 history_more: snap.history_more,
+                update_required: snap.update_required,
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -533,6 +534,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working_since_ms: None,
         streaming: working,
         history_more: false,
+        update_required: false,
     }
 }
 

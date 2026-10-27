@@ -446,7 +446,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, history_more: false };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, history_more: false, update_required: false };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();
@@ -1330,3 +1330,26 @@ fn a_chat3_transcript_with_older_history_offers_to_load_it_first() {
     let first = frame.display(0).unwrap();
     assert!(!first.widgets.iter().any(|w| matches!(w.kind, display::WidgetKind::Action { .. })));
 }
+
+#[test]
+fn a_chat_this_build_is_too_old_for_says_so_first() {
+    let mut w = worker(390.0);
+    let mut input = transcript_one("whatever was stored locally");
+    input.update_required = true;
+    input.history_more = true;
+    w.input = input;
+    let frame = w.pass();
+    let first = frame.display(0).unwrap();
+    let text = &first.text;
+    assert!(text.contains("newer version of Zeron"), "{text}");
+    // The load-earlier row follows it.
+    let second = frame.display(1).unwrap();
+    assert!(second.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Action { action, .. } if action == super::rows::LOAD_EARLIER_ACTION)));
+
+    // Even an empty chat (nothing local) shows it instead of a blank page.
+    let mut w = worker(390.0);
+    w.input = TranscriptInput { update_required: true, ..Default::default() };
+    let frame = w.pass();
+    assert!(frame.display(0).is_some());
+}
+

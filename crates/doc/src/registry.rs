@@ -1588,9 +1588,25 @@ impl RegistryDoc {
         Ok(true)
     }
 
-    /// The room generation a chat minted now is born on.
-    pub fn new_chat_room_gen(&self) -> u32 {
+    /// The room generation this user's labs flag names: 3 with `chat3` on.
+    /// What a device assumes for a chat whose row it hasn't seen yet.
+    pub fn labs_room_gen(&self) -> u32 {
         if self.labs_flag("chat3") { 3 } else { 2 }
+    }
+
+    /// The room generation a chat minted now on `host_device_id` is born on:
+    /// the flag's, but gen 3 only on a host that advertises
+    /// [`zeron_proto::capabilities::CHAT3_V1`] (an older host would publish
+    /// its transcript where no other device reads). Unknown hosts get gen 2.
+    pub fn new_chat_room_gen(&self, host_device_id: &str) -> u32 {
+        let labs = self.labs_room_gen();
+        if labs < 3 {
+            return labs;
+        }
+        let capable = self.read_devices().ok().into_iter().flatten().any(|device| {
+            device.id == host_device_id && device.supports(zeron_proto::capabilities::CHAT3_V1)
+        });
+        if capable { labs } else { 2 }
     }
 
     // ── whole-doc read ──────────────────────────────────────────────────────

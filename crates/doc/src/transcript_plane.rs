@@ -1029,7 +1029,7 @@ mod tests {
         let mut now = 0;
         let mut total_stores = 0;
         let mut total_lives = 0;
-        let mut tick = |host: &Host, room: &mut Room, viewer: &mut SessionDoc, reader: &mut Reader, now: i64| {
+        let tick = |host: &Host, room: &mut Room, viewer: &mut SessionDoc, reader: &mut Reader, now: i64| {
             let out = host.collect(now);
             let (stored, lives) = room.take(&out);
             reader.apply_feed(viewer, &stored, None, false).unwrap();

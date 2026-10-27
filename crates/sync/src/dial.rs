@@ -39,7 +39,9 @@ pub type WsStream = crate::socket::Connection<MaybeTlsStream<crate::socket::Prog
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
     // Bound DNS, all TCP attempts, TLS and HTTP upgrade together. Some
     // callers (notably the host relay) have no outer connection deadline.
-    tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(url))
+    // Every edge dial announces this build's protocol (docs/compat.md).
+    let url = crate::compat::with_protocol(url);
+    tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(&url))
         .await
         .map_err(|_| {
             WsError::Io(io::Error::new(

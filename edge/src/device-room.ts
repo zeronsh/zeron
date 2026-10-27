@@ -14,6 +14,7 @@
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
  */
+import { clientProtocol, UPDATE_CLOSE_CODE, updateRequired } from "./compat";
 import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE } from "./device-nudges";
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
@@ -54,6 +55,8 @@ interface SocketState {
   joinedAt?: number;
   nudgeAck?: boolean;
   nudgeInflight?: string[];
+  /** The socket's announced protocol (docs/compat.md); absent = 0. */
+  proto?: number;
 }
 
 const HOST_TAG = "host";
@@ -125,6 +128,12 @@ export class DeviceRoom implements DurableObject {
    * `exclude` drops the socket a close is being handled for — the runtime
    * still lists it during `webSocketClose`, and counting it as live would
    * suppress the very `host_closed` that close is supposed to announce. */
+  /** The live host socket's announced protocol (0 when none is live). */
+  private hostProto(): number {
+    const host = this.liveHost();
+    return (host?.deserializeAttachment() as SocketState | null)?.proto ?? 0;
+  }
+
   private liveHost(exclude?: WebSocket): WebSocket | undefined {
     return pickLiveHost(
       this.ctx.getWebSockets(HOST_TAG).map((ws) => ({
@@ -159,6 +168,12 @@ export class DeviceRoom implements DurableObject {
         if (!owner || owner !== userId) return new Response("forbidden", { status: 403 });
       }
       const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
+      const proto = clientProtocol(request, url);
+      // A build from before protocols sees protocol-aware hosts as offline
+      // (docs/compat.md): its peer links can't reach one either.
+      if (role === "client" && proto === 0 && this.hostProto() > 0) {
+        return updateRequired("room", "Update Zeron to reach this device.");
+      }
       const pair = new WebSocketPair();
       if (role === "host") {
         // One live host socket: close any predecessor (backend restart).
@@ -170,11 +185,25 @@ export class DeviceRoom implements DurableObject {
           }
         }
         this.ctx.acceptWebSocket(pair[1], [HOST_TAG]);
+        if (proto > 0) {
+          for (const client of this.ctx.getWebSockets()) {
+            const peer = client.deserializeAttachment() as SocketState | null;
+            if (peer?.role !== "client" || (peer.proto ?? 0) > 0) continue;
+            try {
+              client.close(UPDATE_CLOSE_CODE, "update Zeron");
+            } catch {
+              /* already gone */
+            }
+          }
+        }
 
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
       }
-      const state: SocketState = { userId, role, connId, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [] };
+      const state: SocketState = {
+        userId, role, connId, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [],
+        ...(proto > 0 ? { proto } : {})
+      };
       pair[1].serializeAttachment(state);
       if (role === "host") this.replayNudges(pair[1]);
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -200,8 +229,11 @@ export class DeviceRoom implements DurableObject {
       // `hostSockets` counts corpses too — the gap between it and
       // `hostConnected` is the only externally visible signal that a device's
       // room is accumulating silently-dead host sockets.
+      // Older engines probe this when registry presence goes quiet; a
+      // protocol-aware host stays offline to them, as it does there.
+      const hidden = clientProtocol(request, url) === 0 && this.hostProto() > 0;
       return json({
-        hostConnected: this.liveHost() !== undefined,
+        hostConnected: !hidden && this.liveHost() !== undefined,
         hostSockets: this.ctx.getWebSockets(HOST_TAG).length
       });
     }

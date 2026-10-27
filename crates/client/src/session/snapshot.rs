@@ -110,6 +110,10 @@ pub struct SessionSnapshot {
     /// gen 3: older history exists in the room (docs/chat3-sync.md). Offer
     /// "Load earlier messages" ([`super::SessionHandle::load_earlier`]).
     pub history_more: bool,
+    /// This build is too old for the chat (docs/compat.md): it is on a
+    /// generation this build can't open, or the edge refused this build.
+    /// The transcript says "update Zeron" instead of looking empty.
+    pub update_required: bool,
     pub delta: SnapshotDelta,
     pub(crate) index: Arc<HashMap<String, usize>>,
 }

@@ -29,7 +29,7 @@ impl DocHost {
         {
             return if row.needs_newer_app() { 1 } else { row.room_generation().max(2) };
         }
-        self.workspace().map_or(2, |w| w.new_chat_room_gen())
+        self.workspace().map_or(2, |w| w.labs_room_gen())
     }
 
     /// Whether this device publishes a gen-3 doc's transcript. A subagent doc
@@ -168,6 +168,9 @@ impl DocHost {
     ) {
         let Some(chat3) = handle.chat3.clone() else { return };
         chat3.set_host(self.plane_host(&handle.chat_id));
+        if chat3.is_host() {
+            self.spawn_chat2_moved_mark(edge.clone(), &handle.chat_id, cancel.clone());
+        }
         let transport = Arc::new(
             EdgeTranscriptTransport::new(
                 self.inner.http.clone(),
@@ -236,6 +239,46 @@ impl DocHost {
                 tokio::select! {
                     _ = chat3.upload.notified() => {}
                     _ = tokio::time::sleep(RETRY_CAP) => {}
+                }
+            }
+        });
+    }
+
+    /// Mark the chat's old `chat2/{id}` room moved (docs/compat.md). Builds
+    /// from before protocols read every newer generation as chat2 and dial
+    /// that room; once marked it refuses them, so nothing they send lands
+    /// where no host reads. Once per chat per process, retried until it lands.
+    fn spawn_chat2_moved_mark(&self, edge: EdgeConfig, chat_id: &str, cancel: CancellationToken) {
+        static MARKED: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+        let marked = MARKED.get_or_init(Default::default);
+        if !lock(marked).insert(chat_id.to_owned()) {
+            return;
+        }
+        /// A mark that never landed (cancelled first) is retried next time.
+        struct Pending<'a>(&'a Mutex<HashSet<String>>, String, bool);
+        impl Drop for Pending<'_> {
+            fn drop(&mut self) {
+                if !self.2 {
+                    lock(self.0).remove(&self.1);
+                }
+            }
+        }
+        let http = self.inner.http.clone();
+        let chat_id = chat_id.to_owned();
+        self.spawn_sync_worker(cancel, async move {
+            let mut pending = Pending(marked, chat_id.clone(), false);
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match mark_chat2_moved(&http, &edge, &chat_id).await {
+                    Ok(()) => {
+                        pending.2 = true;
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::debug!(chat = %chat_id, error = %err, "chat2 moved mark failed; retrying");
+                        tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()).await;
+                        backoff = (backoff * 2).min(RETRY_CAP);
+                    }
                 }
             }
         });
@@ -324,10 +367,76 @@ impl DocHost {
     }
 }
 
+/// `POST /chat2/{id}/moved`. A room another user claimed (403) is not this
+/// chat's: nothing to mark.
+async fn mark_chat2_moved(http: &reqwest::Client, edge: &EdgeConfig, chat_id: &str) -> Result<(), String> {
+    let bearer = edge.bearer().await.map_err(|e| e.to_string())?;
+    let url = format!("{}/chat2/{chat_id}/moved", edge.url.trim_end_matches('/'));
+    let response = http
+        .post(&url)
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        403 => {
+            tracing::warn!(chat = %chat_id, "chat2 room belongs to someone else; not marking it moved");
+            Ok(())
+        }
+        status => Err(format!("HTTP {status}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+
+    /// One canned HTTP answer; returns the request line and headers.
+    async fn answer_once(listener: tokio::net::TcpListener, status: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
+        while !request.windows(4).any(|b| b == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&buf[..n]);
+        }
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}");
+        stream.write_all(reply.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_host_marks_the_old_chat2_room_moved_with_its_protocol() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge = EdgeConfig::with_static_token(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let http = reqwest::Client::builder()
+            .default_headers(crate::doc_host::edge_protocol_headers())
+            .build()
+            .unwrap();
+        let server = tokio::spawn(answer_once(listener, "200 OK"));
+        mark_chat2_moved(&http, &edge, "chat-1").await.unwrap();
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("post /chat2/chat-1/moved "), "{request}");
+        assert!(request.contains("authorization: bearer tok"), "{request}");
+        assert!(request.contains(&format!("x-zeron-proto: {}", zeron_sync::compat::PROTOCOL)), "{request}");
+
+        // Someone else's room: settled, not retried.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge = EdgeConfig::with_static_token(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let server = tokio::spawn(answer_once(listener, "403 Forbidden"));
+        assert!(mark_chat2_moved(&http, &edge, "chat-1").await.is_ok());
+        server.await.unwrap();
+        // A failure is retried.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge = EdgeConfig::with_static_token(format!("http://{}", listener.local_addr().unwrap()), "tok");
+        let server = tokio::spawn(answer_once(listener, "503 Service Unavailable"));
+        assert!(mark_chat2_moved(&http, &edge, "chat-1").await.is_err());
+        server.await.unwrap();
+    }
 
     fn host_over(store: Arc<DocsStore>) -> DocHost {
         DocHost::new(

@@ -149,9 +149,20 @@ pub(crate) fn http() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
+            .default_headers(protocol_headers())
             .build()
             .expect("reqwest client")
     })
+}
+
+/// Every edge request announces this build's protocol (docs/compat.md).
+fn protocol_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        zeron_sync::compat::PROTO_HEADER,
+        reqwest::header::HeaderValue::from(zeron_sync::compat::PROTOCOL),
+    );
+    headers
 }
 
 fn endpoint(edge_url: &str, path: &str) -> String {

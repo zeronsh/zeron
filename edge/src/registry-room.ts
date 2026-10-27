@@ -56,7 +56,15 @@ interface SocketState {
   runner?: string;
   /** The runner's account (logical Cloud device; JWT `cld`). */
   runnerAccount?: string;
+  /** The client's announced protocol (docs/compat.md); absent = 0. */
+  proto?: number;
 }
+
+/** The `proto=` the Worker stamped from the caller (docs/compat.md). */
+const protoParam = (url: URL): number => {
+  const value = Number(url.searchParams.get("proto") ?? "0");
+  return Number.isInteger(value) && value > 0 && value < 1_000_000 ? value : 0;
+};
 
 /** An op a runner pushed that it does not own — skipped, not fatal. */
 interface RejectedOp {
@@ -105,6 +113,8 @@ export class RegistryRoom implements DurableObject {
   private readonly env: Env;
   /** device → last presence beat (epoch ms). Memory-only. */
   private readonly presence = new Map<string, number>();
+  /** device → the protocol its latest beat announced (docs/compat.md). */
+  private readonly presenceProto = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -276,13 +286,15 @@ export class RegistryRoom implements DurableObject {
     if (url.pathname === "/ws") {
       // A runner's device identity is the verified one, never self-declared.
       const device = runner ?? url.searchParams.get("device") ?? "";
+      const proto = protoParam(url);
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = {
         userId,
         device,
         ...(runner ? { runner } : {}),
-        ...(runnerAccount ? { runnerAccount } : {})
+        ...(runnerAccount ? { runnerAccount } : {}),
+        ...(proto > 0 ? { proto } : {})
       };
       pair[1].serializeAttachment(state);
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -353,14 +365,9 @@ export class RegistryRoom implements DurableObject {
       const sinceNum = sinceRaw === null ? NaN : Number(sinceRaw);
       const cursor = Number.isInteger(sinceNum) && sinceNum >= 0 ? sinceNum : null;
       const device = runner ?? url.searchParams.get("device") ?? "";
+      const proto = protoParam(url);
       if (device !== "" && url.searchParams.get("beat") === "1") {
-        const at = Date.now();
-        this.presence.set(device, at);
-        for (const socket of this.ctx.getWebSockets()) {
-          const socketState = socket.deserializeAttachment() as SocketState | null;
-          if (!socketState?.ready) continue;
-          send(socket, { t: "presence", device, at });
-        }
+        this.beat(device, Date.now(), proto);
       }
       const seq = this.seq();
       const gcFloor = this.gcFloor();
@@ -370,7 +377,7 @@ export class RegistryRoom implements DurableObject {
         full,
         gcFloor,
         rows: this.visible(full ? this.rowsSince(0) : this.rowsSince(cursor), runner, runnerAccount),
-        presence: Object.fromEntries(this.presence)
+        ...this.presenceView(proto)
       });
     }
 
@@ -511,7 +518,7 @@ export class RegistryRoom implements DurableObject {
       full,
       gcFloor,
       rows,
-      presence: Object.fromEntries(this.presence)
+      ...this.presenceView(state.proto ?? 0)
     });
   }
 
@@ -707,13 +714,35 @@ export class RegistryRoom implements DurableObject {
   private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
     if (!state.ready || state.device === "") return;
     const at = typeof frame.at === "number" ? frame.at : Date.now();
-    this.presence.set(state.device, at);
+    this.beat(state.device, at, state.proto ?? 0, ws);
+  }
+
+  /** Record a beat and relay it to every socket allowed to see it: a
+   * protocol-0 build never hears a newer device (it reads as offline), and
+   * only protocol-aware sockets hear protocols (docs/compat.md). */
+  private beat(device: string, at: number, proto: number, from?: WebSocket): void {
+    this.presence.set(device, at);
+    this.presenceProto.set(device, proto);
     for (const socket of this.ctx.getWebSockets()) {
-      if (socket === ws) continue;
+      if (socket === from) continue;
       const socketState = socket.deserializeAttachment() as SocketState | null;
       if (!socketState?.ready) continue;
-      send(socket, { t: "presence", device: state.device, at });
+      const viewer = socketState.proto ?? 0;
+      if (viewer === 0 && proto > 0) continue;
+      send(socket, viewer > 0 ? { t: "presence", device, at, proto } : { t: "presence", device, at });
     }
+  }
+
+  /** The presence a client announcing `viewer` may see. */
+  private presenceView(viewer: number): { presence: Record<string, number>; presenceProto?: Record<string, number> } {
+    if (viewer > 0) {
+      return { presence: Object.fromEntries(this.presence), presenceProto: Object.fromEntries(this.presenceProto) };
+    }
+    const presence: Record<string, number> = {};
+    for (const [device, at] of this.presence) {
+      if ((this.presenceProto.get(device) ?? 0) === 0) presence[device] = at;
+    }
+    return { presence };
   }
 
   private recordPush(device: string, ok: boolean): void {

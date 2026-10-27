@@ -26,6 +26,8 @@ struct Shared {
     seq: u64,
     gc_floor: u64,
     presence: HashMap<String, i64>,
+    /// Each beating device's announced protocol (docs/compat.md).
+    protocols: HashMap<String, u32>,
     /// Pushes accepted per device (assertion surface for tests).
     pushes: HashMap<String, u64>,
 }
@@ -53,10 +55,24 @@ impl MockRegistryServer {
                 let state = accept_state.clone();
                 let bcast = accept_tx.clone();
                 tokio::spawn(async move {
-                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                    // The dial's `proto=` (absent = a protocol-0 build).
+                    let mut proto = 0;
+                    let callback = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                    response| {
+                        proto = request
+                            .uri()
+                            .query()
+                            .unwrap_or("")
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("proto="))
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        Ok(response)
+                    };
+                    let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await else {
                         return;
                     };
-                    serve(ws, state, bcast).await;
+                    serve(ws, state, bcast, proto).await;
                 });
             }
         });
@@ -110,6 +126,7 @@ async fn serve(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     state: Arc<Mutex<Shared>>,
     bcast: broadcast::Sender<String>,
+    proto: u32,
 ) {
     let (mut sink, mut stream) = ws.split();
     let mut rx = bcast.subscribe();
@@ -152,13 +169,17 @@ async fn serve(
                                 .values()
                                 .filter(|r| full || r.seq > cursor.unwrap_or(0))
                                 .collect();
+                            // Like the edge: a protocol-0 socket sees only
+                            // protocol-0 devices, and no protocols.
+                            let (presence, protocols) = visible_presence(&state, proto);
                             json!({
                                 "t": "state",
                                 "seq": state.seq,
                                 "full": full,
                                 "gcFloor": state.gc_floor,
                                 "rows": rows,
-                                "presence": state.presence,
+                                "presence": presence,
+                                "presenceProto": protocols,
                             })
                             .to_string()
                         };
@@ -239,9 +260,13 @@ async fn serve(
                     }
                     Some("presence") if ready => {
                         let at = frame.get("at").and_then(Value::as_i64).unwrap_or(0);
-                        lock(&state).presence.insert(device.clone(), at);
+                        {
+                            let mut state = lock(&state);
+                            state.presence.insert(device.clone(), at);
+                            state.protocols.insert(device.clone(), proto);
+                        }
                         let _ = bcast.send(
-                            json!({"t":"presence","device":device,"at":at}).to_string(),
+                            json!({"t":"presence","device":device,"at":at,"proto":proto}).to_string(),
                         );
                     }
                     Some("probe") => {
@@ -269,6 +294,7 @@ async fn serve(
             text = rx.recv() => {
                 match text {
                     Ok(text) => {
+                        let Some(text) = presence_for(text, proto) else { continue };
                         if ready && sink.send(WsMessage::Text(text)).await.is_err() {
                             return;
                         }
@@ -279,4 +305,38 @@ async fn serve(
             }
         }
     }
+}
+
+/// The presence a socket announcing `proto` may see (edge/src/registry-room.ts).
+fn visible_presence(state: &Shared, proto: u32) -> (HashMap<String, i64>, HashMap<String, u32>) {
+    let device_proto = |device: &str| state.protocols.get(device).copied().unwrap_or(0);
+    let presence = state
+        .presence
+        .iter()
+        .filter(|(device, _)| proto > 0 || device_proto(device) == 0)
+        .map(|(device, at)| (device.clone(), *at))
+        .collect();
+    let protocols = if proto > 0 { state.protocols.clone() } else { HashMap::new() };
+    (presence, protocols)
+}
+
+/// A broadcast frame as a socket announcing `proto` sees it: a protocol-0
+/// socket never hears a newer device's beat, nor anyone's protocol.
+fn presence_for(text: String, proto: u32) -> Option<String> {
+    if proto > 0 || !text.contains("\"presence\"") {
+        return Some(text);
+    }
+    let Ok(mut frame) = serde_json::from_str::<Value>(&text) else {
+        return Some(text);
+    };
+    if frame.get("t").and_then(Value::as_str) != Some("presence") {
+        return Some(text);
+    }
+    if frame.get("proto").and_then(Value::as_u64).unwrap_or(0) > 0 {
+        return None;
+    }
+    if let Some(object) = frame.as_object_mut() {
+        object.remove("proto");
+    }
+    Some(frame.to_string())
 }

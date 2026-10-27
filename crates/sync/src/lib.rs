@@ -12,6 +12,7 @@
 
 pub mod budget;
 pub mod chat_client;
+pub mod compat;
 pub mod chat3;
 pub mod chat_frames;
 pub mod dial;

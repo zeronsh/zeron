@@ -2623,7 +2623,7 @@ impl RpcService for EngineRpc {
                 chat.harness_session_cwd = None;
                 // The fork's doc opens below before its row exists, so its
                 // generation is the one an absent row assumes: the flag's.
-                chat.room_gen = Some(self.workspace.new_chat_room_gen());
+                chat.room_gen = Some(self.workspace.labs_room_gen());
                 // Persist history before publishing the registry row so a
                 // crash cannot leave a discoverable empty fork.
                 let target = self.doc_host.open(&chat.id).map_err(failed)?;

@@ -448,6 +448,7 @@ impl CheckpointFetcher for ChatHttp {
                 if seq.is_some() {
                     seen_seq = seq;
                 }
+                crate::live::refused(&response)?;
                 match response.status().as_u16() {
                     200 => got.clear(),
                     206 => {}
@@ -490,6 +491,7 @@ impl ChatTransport for ChatHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            crate::live::refused(&response)?;
             if !response.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "chat pull http {}",
@@ -523,6 +525,7 @@ impl ChatTransport for ChatHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            crate::live::refused(&response)?;
             if !response.status().is_success() {
                 return Err(SyncError::Protocol(format!(
                     "chat push http {}",
@@ -556,6 +559,7 @@ impl TranscriptTransport for ChatHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            crate::live::refused(&response)?;
             if !response.status().is_success() {
                 return Err(SyncError::Protocol(format!("chat3 items http {}", response.status())));
             }
@@ -579,6 +583,7 @@ impl TranscriptTransport for ChatHttp {
                 .send()
                 .await
                 .map_err(http_err)?;
+            crate::live::refused(&response)?;
             match response.status().as_u16() {
                 404 => Ok(None),
                 200..=299 => Ok(Some(response.bytes().await.map_err(http_err)?.to_vec())),
@@ -597,6 +602,8 @@ pub(crate) struct RoomStatus {
     /// Next scheduled join attempt while the first join keeps failing.
     pub retry_at_ms: AtomicI64,
     pub last_failure: Mutex<Option<String>>,
+    /// The edge refused this build for this room (docs/compat.md).
+    pub update_required: AtomicBool,
 }
 
 /// One live chat room. Dropping it stops the client and flushes the doc.
@@ -749,6 +756,7 @@ impl Room {
         let device_id = deps.device_id.clone();
         let on_status = deps.on_status.clone();
         let on_applied = deps.on_applied.clone();
+        let room_chat = self.chat_id.clone();
         crate::runtime::shared().spawn(async move {
             let mut backoff = JOIN_RETRY_BASE;
             let client = loop {
@@ -771,7 +779,19 @@ impl Room {
                 match result {
                     Ok(Ok(client)) => {
                         status.retry_at_ms.store(0, Ordering::Release);
+                        status.update_required.store(false, Ordering::Release);
                         break client;
+                    }
+                    Ok(Err(SyncError::UpdateRequired(refusal))) => {
+                        // Redialing at the join cadence would only be refused.
+                        tracing::warn!(chat = %room_chat, ?refusal, "room refused this build; update Zeron");
+                        status.update_required.store(true, Ordering::Release);
+                        status.retry_at_ms.store(0, Ordering::Release);
+                        on_status();
+                        if !super::wait_backoff(&cancel, zeron_sync::compat::REFUSED_RETRY).await {
+                            return;
+                        }
+                        continue;
                     }
                     Ok(Err(err)) => *lock(&status.last_failure) = Some(err.to_string()),
                     Err(_) => *lock(&status.last_failure) = Some("join timed out".into()),
@@ -873,6 +893,15 @@ impl Room {
                 .client
                 .as_ref()
                 .is_some_and(|c| c.stats().pending_pushes > 0)
+    }
+
+    /// The edge refused this build for this room, at join or since.
+    pub(crate) fn update_required(&self) -> bool {
+        self.status.update_required.load(Ordering::Acquire)
+            || lock(&self.slot)
+                .client
+                .as_ref()
+                .is_some_and(|c| c.stats().update_required)
     }
 
     pub(crate) fn retry_at_ms(&self) -> Option<i64> {

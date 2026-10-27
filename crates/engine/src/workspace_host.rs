@@ -715,10 +715,11 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.chat(chat_id))?)
     }
 
-    /// The room generation a chat minted now is born on: 3 when this user's
-    /// `chat3` labs flag is on (docs/chat3-sync.md), else 2.
-    pub fn new_chat_room_gen(&self) -> u32 {
-        self.read(|doc| doc.new_chat_room_gen())
+    /// The room generation this user's `chat3` labs flag names
+    /// (docs/chat3-sync.md): what this engine mints for chats it hosts
+    /// itself, and assumes for a chat whose registry row it hasn't seen.
+    pub fn labs_room_gen(&self) -> u32 {
+        self.read(|doc| doc.labs_room_gen())
     }
 
     pub fn labs_flag(&self, flag: &str) -> bool {
@@ -1086,6 +1087,7 @@ impl WorkspaceHost {
             }
             None => cwd.unwrap_or_default(),
         };
+        let doc_device = self.inner.config.device_id.clone();
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
@@ -1101,11 +1103,16 @@ impl WorkspaceHost {
                 last_message_at: None,
                 created_at: Utc::now(),
                 harness_session_id: None,
-                // Born on chat2 (or chat3 under the labs flag): a brand-new
-                // chat has an empty doc — nothing to seed, no migration race
-                // to lose. Only pre-existing chats go through the seed+flip
+                // Born on chat2 (or chat3 under the labs flag, on a host
+                // that advertises it; this engine does): a brand-new chat
+                // has an empty doc — nothing to seed, no migration race to
+                // lose. Only pre-existing chats go through the seed+flip
                 // path (the host migration sweep).
-                room_gen: Some(doc.new_chat_room_gen()),
+                room_gen: Some(if host_device == doc_device {
+                    doc.labs_room_gen()
+                } else {
+                    doc.new_chat_room_gen(&host_device)
+                }),
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
@@ -1722,7 +1729,11 @@ async fn relay_probe_task(weak: Weak<WorkspaceHostInner>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(RELAY_PROBE_INTERVAL_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
-    let client = reqwest::Client::new();
+    // The edge hides a newer host from a caller that announces no protocol.
+    let client = reqwest::Client::builder()
+        .default_headers(crate::doc_host::edge_protocol_headers())
+        .build()
+        .unwrap_or_default();
     loop {
         tick.tick().await;
         let Some(inner) = weak.upgrade() else { return };
@@ -1871,7 +1882,11 @@ impl WsDerivedRegistryTransport {
     fn new(url: Arc<dyn zeron_sync::UrlProvider>) -> Self {
         Self {
             url,
-            client: reqwest::Client::new(),
+            // Its pulls' presence depends on the protocol it announces.
+            client: reqwest::Client::builder()
+                .default_headers(crate::doc_host::edge_protocol_headers())
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -1932,6 +1947,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
                 .send()
                 .await
                 .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
+            crate::doc_host::edge_refused(&resp)?;
             if !resp.status().is_success() {
                 return Err(zeron_sync::SyncError::Protocol(format!(
                     "registry pull http {}",
@@ -1963,6 +1979,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
                 .send()
                 .await
                 .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
+            crate::doc_host::edge_refused(&resp)?;
             if !resp.status().is_success() {
                 return Err(zeron_sync::SyncError::Protocol(format!(
                     "registry push http {}",

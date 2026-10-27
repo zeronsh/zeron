@@ -2380,13 +2380,35 @@ fn a_deleted_device_row_reads_as_deleted_not_unknown() {
 fn labs_flags_switch_new_chats_onto_chat3_and_refuse_unknown_names() {
     let mut doc = RegistryDoc::new("dev-a");
     assert!(!doc.labs_flag("chat3"));
-    assert_eq!(doc.new_chat_room_gen(), 2);
+    assert_eq!(doc.labs_room_gen(), 2);
     assert!(doc.set_labs_flag("chat3", true).unwrap());
     assert!(doc.labs_flag("chat3"));
-    assert_eq!(doc.new_chat_room_gen(), 3);
+    assert_eq!(doc.labs_room_gen(), 3);
     // Idempotent: no second write for the same value.
     assert!(!doc.set_labs_flag("chat3", true).unwrap());
     assert!(doc.set_labs_flag("chat3", false).unwrap());
-    assert_eq!(doc.new_chat_room_gen(), 2);
+    assert_eq!(doc.labs_room_gen(), 2);
     assert!(doc.set_labs_flag("chat33", true).is_err());
+}
+
+#[test]
+fn chats_are_born_on_chat3_only_on_hosts_that_advertise_it() {
+    let mut doc = RegistryDoc::new("phone");
+    let host = |id: &str, capabilities: &[&str]| Device {
+        id: id.into(),
+        name: id.into(),
+        platform: "macos".into(),
+        last_seen_at: None,
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: capabilities.iter().map(|c| (*c).to_string()).collect(),
+    };
+    doc.upsert_device(&host("new-mac", &[zeron_proto::capabilities::CHAT3_V1])).unwrap();
+    doc.upsert_device(&host("old-mac", &[])).unwrap();
+    assert_eq!(doc.new_chat_room_gen("new-mac"), 2, "flag off: chat2 everywhere");
+    doc.set_labs_flag("chat3", true).unwrap();
+    assert_eq!(doc.new_chat_room_gen("new-mac"), 3);
+    assert_eq!(doc.new_chat_room_gen("old-mac"), 2, "an older host would strand the transcript");
+    assert_eq!(doc.new_chat_room_gen("unknown"), 2);
 }

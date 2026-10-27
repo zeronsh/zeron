@@ -9551,15 +9551,25 @@ impl Shell {
             .iter()
             .find(|c| Some(c.chat_id.as_str()) == selected);
         let chat_state = chat.map(|c| c.sync_state);
+        let warning_dot = || {
+            div()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(theme.warning)
+                .into_any_element()
+        };
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                warning_dot(),
             ),
+            // The edge refused this build (docs/compat.md): no countdown or
+            // spinner can fix that, only updating.
+            _ if chat_state == Some(zeron_proto::ChatSyncState::UpdateRequired) => (
+                "Update Zeron to open this chat".into(),
+                warning_dot(),
+            ),
+            _ if conn.update_required => ("Update Zeron to keep syncing".into(), warning_dot()),
             S::Disabled => return None,
             S::Connected => {
                 let caption = chat_sync_pill_caption(chat?)?;

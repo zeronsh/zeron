@@ -532,6 +532,7 @@ impl TranscriptTransport for EdgeTranscriptTransport {
                 .send()
                 .await
                 .map_err(transport_error)?;
+            crate::doc_host::edge_refused(&res)?;
             if !res.status().is_success() {
                 return Err(SyncError::Protocol(format!("chat3 items http {}", res.status())));
             }
@@ -546,6 +547,7 @@ impl TranscriptTransport for EdgeTranscriptTransport {
             let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
             let res = http.get(&url).bearer_auth(&bearer).send().await.map_err(transport_error)?;
+            crate::doc_host::edge_refused(&res)?;
             if !res.status().is_success() {
                 return Err(SyncError::Protocol(format!("chat3 items http {}", res.status())));
             }
@@ -569,6 +571,7 @@ impl TranscriptTransport for EdgeTranscriptTransport {
                 .send()
                 .await
                 .map_err(transport_error)?;
+            crate::doc_host::edge_refused(&res)?;
             match res.status().as_u16() {
                 200..=299 => Ok(()),
                 // Can never be accepted: dropped rather than retried forever.
@@ -588,6 +591,7 @@ impl TranscriptTransport for EdgeTranscriptTransport {
             let _permit = zeron_sync::budget::shared().http(priority).await?;
             let bearer = edge.bearer().await.map_err(SyncError::from)?;
             let res = http.get(&url).bearer_auth(&bearer).send().await.map_err(transport_error)?;
+            crate::doc_host::edge_refused(&res)?;
             match res.status().as_u16() {
                 404 => Ok(None),
                 200..=299 => Ok(Some(res.bytes().await.map_err(transport_error)?.to_vec())),

@@ -24,6 +24,9 @@ pub enum SyncError {
     TemporarilyUnavailable(String),
     #[error("client is shut down")]
     Closed,
+    /// The edge refused this build (docs/compat.md).
+    #[error("update Zeron: the server needs a newer version ({0:?})")]
+    UpdateRequired(crate::compat::Refusal),
 }
 
 /// Per-dial WebSocket URL provider — consulted before EVERY connection attempt,

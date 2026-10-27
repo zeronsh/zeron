@@ -693,7 +693,7 @@ impl Client {
         };
         self.inner.registry_write(|doc| {
             // Born on the generation the user's labs flag names (chat3 when on).
-            chat.room_gen = Some(doc.new_chat_room_gen());
+            chat.room_gen = Some(doc.new_chat_room_gen(&chat.device_id));
             doc.upsert_chat(&chat)
         })?;
         Ok(chat_id)

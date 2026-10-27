@@ -336,6 +336,44 @@ async fn presence_beats_reach_peers() {
 }
 
 #[tokio::test]
+async fn beats_carry_the_protocol_and_older_builds_never_see_newer_devices() {
+    let server = MockRegistryServer::start().await;
+    let client_a = RegistryClient::connect(&server.url(), new_doc("dev-a"), "dev-a")
+        .await
+        .expect("a connects");
+    let client_b = RegistryClient::connect(&server.url(), new_doc("dev-b"), "dev-b")
+        .await
+        .expect("b connects");
+    client_a.set_presence(1_000);
+    wait_until(|| client_b.presence_protocols().get("dev-a") == Some(&zeron_sync::compat::PROTOCOL)).await;
+
+    // A build from before protocols dials without `proto=`: it gets the
+    // late-joiner state and live beats, minus every protocol-aware device.
+    let (mut old, _) = tokio_tungstenite::connect_async(server.url()).await.expect("old build dials");
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    old.send(Message::Text(r#"{"t":"hello","device":"dev-old"}"#.into())).await.unwrap();
+    let state = old.next().await.unwrap().unwrap().into_text().unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["t"], "state");
+    assert_eq!(state["presence"], serde_json::json!({}), "the updated device reads offline");
+    old.send(Message::Text(r#"{"t":"presence","at":5}"#.into())).await.unwrap();
+    client_a.set_presence(2_000);
+    // The old build's own beat still reaches updated devices (protocol 0).
+    wait_until(|| client_b.presence().get("dev-old") == Some(&5)).await;
+    assert_eq!(client_b.presence_protocols().get("dev-old"), Some(&0));
+    // (The mock echoes a socket's own beat; the edge doesn't.)
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, old.next()).await {
+        let text = frame.into_text().unwrap();
+        assert!(!text.contains("dev-a"), "a newer device's beat reached the old build: {text}");
+        assert!(!text.contains("proto"), "protocols stay hidden from the old build: {text}");
+    }
+    client_a.shutdown().await;
+    client_b.shutdown().await;
+}
+
+#[tokio::test]
 async fn probe_answers_and_stats_flow() {
     let server = MockRegistryServer::start().await;
     let doc = new_doc("dev-a");
@@ -575,4 +613,47 @@ async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
     assert!(!stats.connected, "no WS session ever joined");
 
     client.shutdown().await;
+}
+
+/// One HTTP answer to whatever dials: the edge's refusal of an old build.
+async fn refuse_once(scope: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/registry/org/ws?device=dev-a", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
+        while !request.windows(4).any(|b| b == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).await.unwrap();
+            request.extend_from_slice(&buf[..n]);
+        }
+        let body = r#"{"error":"update_required"}"#;
+        let reply = format!(
+            "HTTP/1.1 426 Upgrade Required\r\n{}: {scope}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            zeron_sync::compat::UPDATE_HEADER,
+            body.len()
+        );
+        stream.write_all(reply.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+    (url, task)
+}
+
+#[tokio::test]
+async fn an_edge_refusal_reads_as_update_required_not_a_connection_error() {
+    let (url, server) = refuse_once("app").await;
+    let err = RegistryClient::connect(&url, new_doc("dev-a"), "dev-a").await.err().expect("refused");
+    assert!(
+        matches!(err, zeron_sync::SyncError::UpdateRequired(zeron_sync::compat::Refusal::App)),
+        "{err:?}"
+    );
+    // (The app-wide latch is process-global; tests here join in parallel,
+    // so its semantics are covered by compat's unit test.)
+    let request = server.await.unwrap();
+    assert!(
+        request.lines().next().unwrap().contains(&format!("proto={}", zeron_sync::compat::PROTOCOL)),
+        "the dial announced its protocol: {request}"
+    );
+
 }
