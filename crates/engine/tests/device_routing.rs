@@ -2098,6 +2098,33 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         .await
         .unwrap();
     let project = projects["projects"][0]["id"].as_str().unwrap();
+    // Projects are added only where the chat runs: A neither asks B through
+    // MCP nor forwards a raw AddProject aimed at B.
+    let refused = tools
+        .call(
+            "add_project",
+            json!({"device":"device-b", "path": folder.to_str().unwrap()}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("create a chat there"), "{refused}");
+    let raw = zeron_rpc::memory_client(a.rpc_service())
+        .call(
+            zeron_rpc::methods::ADD_PROJECT,
+            json!({"path": folder.to_str().unwrap(), "targetDeviceId": "device-b"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        raw.to_string()
+            .contains("only adds projects on this device"),
+        "{raw}"
+    );
+    assert_eq!(
+        b.workspace.read_spaces().unwrap().len(),
+        1,
+        "nothing added on B"
+    );
     tools
         .call(
             "list_models",

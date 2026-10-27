@@ -990,6 +990,9 @@ pub struct AppState {
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
+    /// Projects an agent just added (MCP `add_project`), waiting for the
+    /// shell to say so with an Undo toast.
+    agent_added_spaces: Vec<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's pending-message queue — what was typed while the
@@ -1224,6 +1227,7 @@ impl AppState {
             spaces_synced: false,
             pending_deep_link: None,
             deep_link_notice: None,
+            agent_added_spaces: Vec::new(),
         }
     }
 
@@ -1487,6 +1491,18 @@ impl AppState {
         sort_spaces(&mut spaces);
         let previous_selection = self.selected_space.clone();
         let mut changed = false;
+        if self.spaces_synced {
+            // Only rows that appear while we watch, and only fresh ones: a
+            // replica catching up after boot must not replay old additions.
+            let fresh = Utc::now() - chrono::Duration::minutes(10);
+            let added = spaces.iter().filter(|space| {
+                space.created_by_chat_id.is_some()
+                    && space.created_at > fresh
+                    && !self.spaces.iter().any(|known| known.id == space.id)
+            });
+            self.agent_added_spaces
+                .extend(added.map(|space| space.id.clone()));
+        }
         if !self.spaces_synced || self.spaces != spaces {
             changed = true;
             self.spaces = spaces;
@@ -2603,6 +2619,15 @@ impl AppState {
             .collect();
         sort_tabs(&mut chats);
         chats
+    }
+
+    /// How many chats removing `space_id` deletes: every row in it, archived
+    /// and side chats included — the registry cascade spares none.
+    pub fn chats_deleted_with_space(&self, space_id: &str) -> usize {
+        self.chats
+            .iter()
+            .filter(|c| c.space_id.as_deref() == Some(space_id))
+            .count()
     }
 
     pub fn device_name(&self, device_id: &str) -> Option<&str> {
@@ -4162,6 +4187,10 @@ impl AppState {
         self.deep_link_notice.take()
     }
 
+    pub fn take_agent_added_spaces(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.agent_added_spaces)
+    }
+
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
     /// dropping the old task drops its stream receiver, which cancels the doc
     /// watch server-side. Selecting a chat also lands in its space and marks it
@@ -5580,6 +5609,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            created_by_chat_id: None,
             created_at: base + TimeDelta::minutes(created_min),
         }
     }
@@ -6854,6 +6884,34 @@ mod tests {
     }
 
     #[test]
+    fn agent_added_spaces_are_announced_once_while_watching() {
+        let agent_space = |id: &str, created_at: DateTime<Utc>| Space {
+            created_by_chat_id: Some("chat-1".into()),
+            created_at,
+            ..space(id, "dev", &format!("/{id}"), 0)
+        };
+        let mut state = AppState::new();
+        // The first frame is history, however fresh.
+        state.apply_spaces(vec![agent_space("boot", Utc::now())]);
+        assert!(state.take_agent_added_spaces().is_empty());
+
+        state.apply_spaces(vec![
+            agent_space("boot", Utc::now()),
+            agent_space("new", Utc::now()),
+            // A replica catching up on an old addition stays quiet.
+            agent_space("old", Utc::now() - TimeDelta::hours(1)),
+            // A person's project is not announced.
+            space("picked", "dev", "/picked", 0),
+        ]);
+        assert_eq!(state.take_agent_added_spaces(), ["new"]);
+        state.apply_spaces(vec![
+            agent_space("boot", Utc::now()),
+            agent_space("new", Utc::now()),
+        ]);
+        assert!(state.take_agent_added_spaces().is_empty(), "announced once");
+    }
+
+    #[test]
     fn file_link_roots_order_chat_parent_then_projects() {
         use crate::workspace_links::FileLinkRoot;
         let mut state = AppState::new();
@@ -7081,6 +7139,24 @@ mod tests {
             assert!(state.selected_space.is_none());
             assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
         });
+    }
+
+    #[test]
+    fn removing_a_space_counts_archived_and_side_chats() {
+        let mut state = AppState::new();
+        let mut side = chat("side", 0, None);
+        side.space_id = Some("s1".into());
+        side.parent_chat_id = Some("elsewhere".into());
+        let mut archived = chat("archived", 1, None);
+        archived.space_id = Some("s1".into());
+        archived.archived = true;
+        let mut other = chat("other", 2, None);
+        other.space_id = Some("s2".into());
+        state.apply_chats(vec![side, archived, other]);
+        // Neither shows in the project's list, yet both die with it.
+        assert!(state.chats_in_space("s1").is_empty());
+        assert_eq!(state.chats_deleted_with_space("s1"), 2);
+        assert_eq!(state.chats_deleted_with_space("empty"), 0);
     }
 
     #[test]

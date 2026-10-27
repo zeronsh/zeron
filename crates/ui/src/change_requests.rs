@@ -479,6 +479,7 @@ mod tests {
             checkout_id: Some("checkout".into()),
             repository_id: None,
             github_repo: None,
+            created_by_chat_id: None,
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
         }
     }

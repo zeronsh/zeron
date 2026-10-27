@@ -582,6 +582,7 @@ impl Client {
                 repo_full_name,
             )),
             github_repo: Some(repo_full_name.to_owned()),
+            created_by_chat_id: None,
             created_at: Utc::now(),
         };
         let id = space.id.clone();

@@ -8043,6 +8043,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: repo.map(str::to_string),
+            created_by_chat_id: None,
             created_at: chrono::Utc::now(),
         };
         let cloud_on = |credits: f64| zeron_proto::CloudStatus {
@@ -8221,6 +8222,7 @@ mod tests {
                 checkout_id: None,
                 repository_id: None,
                 github_repo: None,
+                created_by_chat_id: None,
                 created_at: chrono::Utc::now(),
             }]);
             state
@@ -8265,6 +8267,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            created_by_chat_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -8571,6 +8574,7 @@ mod tests {
             checkout_id: None,
             repository_id: repository.map(str::to_string),
             github_repo: None,
+            created_by_chat_id: None,
             created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH
                 + chrono::TimeDelta::minutes(minutes),
         };

@@ -291,6 +291,7 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
         checkout_id: None,
         repository_id: None,
         github_repo: None,
+        created_by_chat_id: None,
         created_at: ts(1_500),
     }
 }
