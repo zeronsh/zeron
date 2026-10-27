@@ -3865,7 +3865,10 @@ impl Pickers {
         let below = (self.title.is_some() || self.state.read(cx).selected_chat.is_none())
             && matches!(
                 kind,
-                PickerKind::HarnessModel | PickerKind::Branch | PickerKind::Checkout
+                PickerKind::HarnessModel
+                    | PickerKind::Branch
+                    | PickerKind::Checkout
+                    | PickerKind::Access
             );
         gpui::canvas(
             move |bounds, window, cx| {
