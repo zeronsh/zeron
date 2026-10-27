@@ -520,9 +520,18 @@ impl Shell {
                 let agents = task.agents.clone();
                 rows.push(self.render_task_row(task, open, view, theme, cx));
                 if open {
+                    // The task's agents, grouped in a recess beneath it.
+                    let mut group = div()
+                        .flex()
+                        .flex_col()
+                        .mb(px(4.0))
+                        .py(px(2.0))
+                        .rounded(px(popover::MENU_ITEM_RADIUS))
+                        .bg(crate::theme::ink(0.03));
                     for agent in agents {
-                        rows.push(self.render_task_agent_row(agent, view, theme, cx));
+                        group = group.child(self.render_task_agent_row(agent, view, theme, cx));
                     }
+                    rows.push(group.into_any_element());
                 }
             }
             rows.push(popover::picker_divider().into_any_element());
@@ -682,8 +691,7 @@ impl Shell {
             )
             .child(row_title(format!("{key}-title"), task.title.clone()))
             .child(task_status_slot(format!("{key}-status"), task.status, view, theme, cx))
-            // Open, the rows beneath name them.
-            .when(!avatars.is_empty() && !open, |row| {
+            .when(!avatars.is_empty(), |row| {
                 row.child(crate::chat_avatars::stack(
                     &avatars,
                     TASK_AVATAR_SIZE,
@@ -718,9 +726,9 @@ impl Shell {
                         }))
                         .child(
                             icon(if open {
-                                icons::ALT_ARROW_DOWN
+                                icons::ALT_ARROW_UP
                             } else {
-                                icons::ALT_ARROW_RIGHT
+                                icons::ALT_ARROW_DOWN
                             })
                             .size(px(12.0))
                             .text_color(theme.text_muted),
@@ -730,8 +738,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// An agent under its open task: its mark under the task's name, its
-    /// name, and how it's doing in the chevron's column. Opens the agent.
+    /// An agent under its open task: its mark under the lead's, its name
+    /// under the task's, and how it's doing in the chevron's column. Opens
+    /// the agent.
     fn render_task_agent_row(
         &mut self,
         row: ChildChatRow,
@@ -745,7 +754,6 @@ impl Shell {
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key.clone()))
             .aria_label(SharedString::from(format!("Open agent {}", row.title)))
-            .pl(px(8.0 + TASK_LEAD_SIZE + 8.0))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.close_session_info_overlay(cx);
@@ -764,15 +772,25 @@ impl Shell {
                     cx.notify();
                 }),
             )
+            // On the task's grid: the tile centered under the lead's, the
+            // name under the task's.
             .child(
-                crate::chat_avatars::tile(TASK_AVATAR_SIZE, theme)
-                    .child(crate::chat_avatars::mark(row.harness, TASK_AVATAR_SIZE, theme)),
+                div()
+                    .w(px(TASK_LEAD_SIZE))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        crate::chat_avatars::tile(TASK_AVATAR_SIZE, theme)
+                            .child(crate::chat_avatars::mark(row.harness, TASK_AVATAR_SIZE, theme)),
+                    ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_color(theme.text.opacity(0.85))
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .text_color(theme.text_muted)
                     .child(row_title(format!("{key}-title"), row.title.clone())),
             )
             .child(task_status_slot(format!("{key}-status"), row.status, view, theme, cx))

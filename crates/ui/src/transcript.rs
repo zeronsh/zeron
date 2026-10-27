@@ -118,14 +118,20 @@ const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
-/// A task card's header, and the squircles in it: the lead's, and its
-/// agents'.
-const TASK_HEADER_HEIGHT: f32 = 36.0;
-const TASK_LEAD_SIZE: f32 = 20.0;
-const TASK_AVATAR_SIZE: f32 = 18.0;
-const TASK_AGENT_ROW_HEIGHT: f32 = 30.0;
-/// A side chat chip's mark tile.
-const CHIP_TILE_SIZE: f32 = 20.0;
+/// The cards for chats this one started (a task, side chats): one grid.
+/// Leads sit in a [`CARD_LEAD`] tile at [`CARD_PAD`] from the edge, names
+/// start after it, and statuses and the chevron share a trailing column
+/// [`CARD_TRAIL`] wide, [`CARD_PAD`] from the right.
+const CARD_PAD: f32 = 12.0;
+const CARD_RADIUS: f32 = 12.0;
+const CARD_LEAD: f32 = 28.0;
+const CARD_GAP: f32 = 10.0;
+const CARD_TRAIL: f32 = 24.0;
+/// An agent's tile in an open task, centered under the lead's.
+const CARD_ROW_TILE: f32 = 20.0;
+const CARD_ROW_HEIGHT: f32 = 34.0;
+/// The agents' marks in a task's header.
+const CARD_AVATAR: f32 = 20.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
@@ -7174,8 +7180,9 @@ impl Transcript {
         children
     }
 
-    /// One chip per side chat a call started: the subagent chip's card,
-    /// opening the chat beside this one.
+    /// The chats a `create_chat(s)` call started, as one card: a row each,
+    /// its mark, its name, what it is, and how it's doing. A row opens its
+    /// chat beside this one.
     fn render_side_chips(
         &mut self,
         row_id: &SharedString,
@@ -7184,8 +7191,9 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use zeron_proto::ChatIndicator;
         // In a coordinator's transcript, the chats it starts are its agents.
-        let label = if self
+        let kind = if self
             .chat_id
             .as_deref()
             .and_then(|id| self.launched_state(Some(id), cx))
@@ -7196,82 +7204,66 @@ impl Transcript {
             "Side chat"
         };
         let view = cx.entity_id();
-        let mut column = div().w_full().flex().flex_col();
+        let mut card = launch_card(row_id);
         for (ix, chat) in chats.iter().enumerate() {
             let id = self.resolve_launched(chat, cx);
             let live = self.launched_state(id.as_deref(), cx);
-            column = column.child(self.launched_chip(
-                format!("{row_id}.{ix}").into(),
-                label,
-                chat,
-                live,
-                pending,
-                theme,
-                view,
-                cx,
-            ));
+            let title: SharedString = live
+                .as_ref()
+                .and_then(|(c, _)| c.title.clone())
+                .map(SharedString::from)
+                .unwrap_or_else(|| chat.title.clone());
+            let harness = live
+                .as_ref()
+                .and_then(|(c, _)| c.config.as_ref().map(|config| config.harness))
+                .or(chat.harness);
+            let status = match &live {
+                Some((_, ChatIndicator::Idle)) => ChatIndicator::Completed,
+                Some((_, status)) => *status,
+                None if pending => ChatIndicator::Working,
+                None => ChatIndicator::Errored,
+            };
+            let key: SharedString = format!("{row_id}.{ix}").into();
+            let chat_id = live.as_ref().map(|(c, _)| c.id.clone());
+            let row = div()
+                .id(key.clone())
+                .px(px(CARD_PAD))
+                .py(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(CARD_GAP))
+                .when(ix > 0, |row| {
+                    row.border_t_1().border_color(crate::theme::hairline(0.06))
+                })
+                .when_some(chat_id, |row, chat_id| {
+                    row.cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.025)))
+                        .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                            cx.emit(TranscriptEvent::OpenSideChat {
+                                chat_id: chat_id.clone(),
+                            });
+                        }))
+                })
+                .child(card_lead(
+                    harness,
+                    title,
+                    card_subline(theme).child(kind),
+                    theme,
+                ))
+                .child(status_trail(format!("{key}-state"), status, theme, view, cx));
+            card = card.child(row);
         }
-        column.into_any_element()
-    }
-
-    /// A launched chat's chip: provider mark, role label, title, and its
-    /// live status; the whole card opens the chat.
-    #[allow(clippy::too_many_arguments)]
-    fn launched_chip(
-        &self,
-        id: SharedString,
-        label: &'static str,
-        chat: &LaunchedChat,
-        live: Option<(zeron_proto::Chat, zeron_proto::ChatIndicator)>,
-        pending: bool,
-        theme: &Theme,
-        view: gpui::EntityId,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        use zeron_proto::ChatIndicator;
-        let title: SharedString = live
-            .as_ref()
-            .and_then(|(c, _)| c.title.clone())
-            .map(SharedString::from)
-            .unwrap_or_else(|| chat.title.clone());
-        let harness = live
-            .as_ref()
-            .and_then(|(c, _)| c.config.as_ref().map(|config| config.harness))
-            .or(chat.harness);
-        let status = match &live {
-            Some((_, status)) => *status,
-            None if pending => ChatIndicator::Working,
-            None => ChatIndicator::Errored,
-        };
-        let failed = status == ChatIndicator::Errored;
-        let chat_id = live.as_ref().map(|(c, _)| c.id.clone());
-        let opens = chat_id.is_some();
-        chip_card(
-            id.clone(),
-            opens,
-            cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                if let Some(chat_id) = chat_id.clone() {
-                    cx.emit(TranscriptEvent::OpenSideChat { chat_id });
-                }
-            }),
-            launched_header(
-                id,
-                label,
-                title,
-                harness,
-                status,
-                failed,
-                theme,
-                view,
-                cx,
-            ),
-        )
-        .into_any_element()
+        div()
+            .w_full()
+            .py(px(CARD_MARGIN))
+            .child(card)
+            .into_any_element()
     }
 
     /// The card for a task a `create_task` call started: the coordinator's
-    /// mark, the task's name, how it's doing and who's on it. The card opens
-    /// the coordinator; its chevron lists the agents inside the card.
+    /// mark, the task's name and how it's going, its agents' marks, and the
+    /// chevron that lists them. The header opens the coordinator; each
+    /// agent's row opens the agent.
     fn render_task_card(
         &mut self,
         row_id: &SharedString,
@@ -7335,73 +7327,57 @@ impl Transcript {
             // Its agents are through; the coordinator is checking their work.
             ChatIndicator::Working if done == agents.len() => "Wrapping up".into(),
             ChatIndicator::Working => format!("{done} of {} done", agents.len()).into(),
-            ChatIndicator::AwaitingInput => "Needs input".into(),
+            ChatIndicator::AwaitingInput => "Needs your input".into(),
             ChatIndicator::Errored => "Failed".into(),
             _ => "Done".into(),
         };
+        let subline = card_subline(theme)
+            .child("Task")
+            .child(div().text_color(theme.text_faint.opacity(0.6)).child("·"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_color(match status {
+                        ChatIndicator::AwaitingInput => theme.accent,
+                        ChatIndicator::Errored => theme.danger,
+                        _ => theme.text_faint,
+                    })
+                    .when(status == ChatIndicator::Working, |el| {
+                        el.child(status_glyph(
+                            format!("{row_id}-working"),
+                            status,
+                            theme,
+                            view,
+                            cx,
+                        ))
+                    })
+                    .child(progress),
+            );
         let chat_id = live.as_ref().map(|(c, _)| c.id.clone());
-        let opens = chat_id.is_some();
         let toggle_row = row_id.clone();
         let header = div()
             .id(SharedString::from(format!("{row_id}-lead")))
-            .h(px(TASK_HEADER_HEIGHT))
-            .flex_none()
+            .px(px(CARD_PAD))
+            .py(px(10.0))
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .pl(px(8.0))
-            .pr(px(6.0))
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
-            .when(opens, |el| {
+            .gap(px(CARD_GAP))
+            .when_some(chat_id, |el, chat_id| {
                 el.cursor_pointer()
                     .hover(|s| s.bg(crate::theme::ink(0.025)))
                     .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = chat_id.clone() {
-                            cx.emit(TranscriptEvent::OpenSideChat { chat_id });
-                        }
+                        cx.emit(TranscriptEvent::OpenSideChat {
+                            chat_id: chat_id.clone(),
+                        });
                     }))
             })
-            .child(
-                crate::chat_avatars::tile(TASK_LEAD_SIZE, theme)
-                    .child(crate::chat_avatars::mark(harness, TASK_LEAD_SIZE, theme)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted)
-                            .child("Task"),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text.opacity(0.9))
-                            .child(title),
-                    ),
-            )
-            .child(task_state(
-                format!("{row_id}-state"),
-                status,
-                progress,
-                theme,
-                view,
-                cx,
-            ))
-            // Open, the list beneath names them.
-            .when(!avatars.is_empty() && !open, |row| {
+            .child(card_lead(harness, title, subline, theme))
+            .when(!avatars.is_empty(), |row| {
                 row.child(crate::chat_avatars::stack(
                     &avatars,
-                    TASK_AVATAR_SIZE,
+                    CARD_AVATAR,
                     theme.surface_card,
                     theme,
                 ))
@@ -7410,12 +7386,12 @@ impl Transcript {
                 row.child(
                     div()
                         .id(SharedString::from(format!("{row_id}-agents")))
-                        .size(px(22.0))
+                        .size(px(CARD_TRAIL))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(6.0))
+                        .rounded(px(7.0))
                         .cursor_pointer()
                         .hover(|s| s.bg(crate::theme::ink(0.07)))
                         .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
@@ -7424,32 +7400,21 @@ impl Transcript {
                         }))
                         .child(
                             crate::icons::icon(if open {
-                                crate::icons::ALT_ARROW_DOWN
+                                crate::icons::ALT_ARROW_UP
                             } else {
-                                crate::icons::ALT_ARROW_RIGHT
+                                crate::icons::ALT_ARROW_DOWN
                             })
                             .size(px(12.0))
                             .text_color(theme.text_muted),
                         ),
                 )
             });
-        let mut card = div()
-            .debug_selector(|| row_id.to_string())
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(crate::theme::hairline(0.07))
-            .bg(crate::theme::ink(0.03))
-            .child(header);
+        let mut card = launch_card(row_id).child(header);
         if open {
             let mut list = div()
                 .flex()
                 .flex_col()
-                .py(px(4.0))
+                .py(px(6.0))
                 .border_t_1()
                 .border_color(crate::theme::hairline(0.06));
             for (ix, (agent, status)) in agents.iter().enumerate() {
@@ -7466,13 +7431,14 @@ impl Transcript {
         }
         div()
             .w_full()
-            .py(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
+            .py(px(CARD_MARGIN))
             .child(card)
             .into_any_element()
     }
 
-    /// An agent's line in an open task card, under the task's name: its
-    /// mark, its name, and how it's doing; the line opens its chat.
+    /// An agent's row in an open task, on the header's grid: its tile
+    /// centered under the lead's, its name under the task's, its status in
+    /// the chevron's column. The row opens the agent.
     fn task_agent_row(
         &self,
         id: SharedString,
@@ -7483,29 +7449,20 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use zeron_proto::ChatIndicator;
-        // Done is the quiet state: only work and trouble get a word.
-        let word: Option<SharedString> = match status {
-            ChatIndicator::Working => Some("Working".into()),
-            ChatIndicator::AwaitingInput => Some("Needs input".into()),
-            ChatIndicator::Errored => Some("Failed".into()),
-            ChatIndicator::Completed | ChatIndicator::Idle => None,
-        };
         let harness = agent.config.as_ref().map(|c| c.harness);
         let chat_id = agent.id.clone();
+        // The hover wash is inset from the card's edge; the padding makes up
+        // the difference, so the grid holds.
+        const INSET: f32 = 6.0;
         div()
             .id(id.clone())
-            .h(px(TASK_AGENT_ROW_HEIGHT))
-            .mx(px(4.0))
-            // The agent's tile sits under the task's "Task" label, its status
-            // in the chevron's column.
-            .pl(px(4.0 + TASK_LEAD_SIZE + 10.0))
-            .pr(px(2.0))
+            .h(px(CARD_ROW_HEIGHT))
+            .mx(px(INSET))
+            .px(px(CARD_PAD - INSET))
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .rounded(px(7.0))
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+            .gap(px(CARD_GAP))
+            .rounded(px(8.0))
             .cursor_pointer()
             .hover(|s| s.bg(crate::theme::ink(0.04)))
             .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
@@ -7514,41 +7471,31 @@ impl Transcript {
                 });
             }))
             .child(
-                crate::chat_avatars::tile(TASK_AVATAR_SIZE, theme)
-                    .child(crate::chat_avatars::mark(harness, TASK_AVATAR_SIZE, theme)),
+                div()
+                    .w(px(CARD_LEAD))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        crate::chat_avatars::tile(CARD_ROW_TILE, theme)
+                            .child(crate::chat_avatars::mark(harness, CARD_ROW_TILE, theme)),
+                    ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
                     .text_color(if status == ChatIndicator::Errored {
                         theme.danger
                     } else {
-                        theme.text.opacity(0.85)
+                        theme.text.opacity(0.82)
                     })
                     .child(agent.title.clone().unwrap_or_else(|| "Agent".into())),
             )
-            .children(word.map(|word| {
-                div()
-                    .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(match status {
-                        ChatIndicator::AwaitingInput => theme.accent,
-                        ChatIndicator::Errored => theme.danger,
-                        _ => theme.text_faint,
-                    })
-                    .child(word)
-            }))
-            .child(
-                div()
-                    .size(px(22.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(status_glyph(format!("{id}-state"), status, theme, view, cx)),
-            )
+            .child(status_trail(format!("{id}-state"), status, theme, view, cx))
             .into_any_element()
     }
 
@@ -7573,7 +7520,6 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const SHOWN: usize = 3;
         let mut caption = user_caption(theme)
             .text_size(crate::typography::ui_rems(12.5))
             .max_w(px(self.content_width))
@@ -7584,63 +7530,112 @@ impl Transcript {
                     .flex_none()
                     .text_color(theme.text_faint),
             );
-        for (ix, event) in events.iter().take(SHOWN).enumerate() {
-            if ix > 0 {
+        // One phrase per kind of news, what needs someone first: a single
+        // chat by name, several as their marks and a count.
+        let order = [
+            EventKind::TaskQuestion,
+            EventKind::NeedsInput,
+            EventKind::TaskBlocked,
+            EventKind::Failed,
+            EventKind::TaskDone,
+            EventKind::Finished,
+        ];
+        let coordinator = self
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.launched_state(Some(id), cx))
+            .is_some_and(|(chat, _)| chat.is_coordinator());
+        let mut first = true;
+        for kind in order {
+            let group: Vec<&EventRef> = events.iter().filter(|e| e.kind == kind).collect();
+            if group.is_empty() {
+                continue;
+            }
+            if !std::mem::take(&mut first) {
                 caption = caption.child(div().flex_none().text_color(theme.text_faint).child("·"));
             }
-            let live = self.launched_state(Some(&event.chat_id), cx);
-            let title: SharedString = live
-                .as_ref()
-                .and_then(|(c, _)| c.title.clone())
-                .map(|t| single_line(&t))
-                .unwrap_or_else(|| single_line(&event.title))
-                .into();
-            let mark = live
-                .as_ref()
-                .and_then(|(c, _)| c.config.as_ref())
-                .map(|config| crate::pickers::harness_brand_icon(config.harness))
-                .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
-            let chat_id = event.chat_id.clone();
+            let tone = match kind {
+                EventKind::NeedsInput | EventKind::TaskQuestion => theme.accent,
+                EventKind::Failed | EventKind::TaskBlocked => theme.danger,
+                _ => theme.text_faint,
+            };
+            if let [event] = group.as_slice() {
+                let live = self.launched_state(Some(&event.chat_id), cx);
+                let title: SharedString = live
+                    .as_ref()
+                    .and_then(|(c, _)| c.title.clone())
+                    .map(|t| single_line(&t))
+                    .unwrap_or_else(|| single_line(&event.title))
+                    .into();
+                let mark = live
+                    .as_ref()
+                    .and_then(|(c, _)| c.config.as_ref())
+                    .map(|config| crate::pickers::harness_brand_icon(config.harness))
+                    .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+                let chat_id = event.chat_id.clone();
+                caption = caption.child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-event-{}", event.chat_id)))
+                                .min_w_0()
+                                .child(caption_label(title, Some(mark), theme.text_muted))
+                                .when(live.is_some(), |el| {
+                                    el.role(gpui::Role::Link)
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text))
+                                        .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                            cx.emit(TranscriptEvent::OpenSideChat {
+                                                chat_id: chat_id.clone(),
+                                            });
+                                        }))
+                                }),
+                        )
+                        .child(div().flex_none().text_color(tone).child(event_verb(kind))),
+                );
+                continue;
+            }
+            let avatars: Vec<crate::chat_avatars::Avatar> = group
+                .iter()
+                .map(|event| crate::chat_avatars::Avatar {
+                    harness: self
+                        .launched_state(Some(&event.chat_id), cx)
+                        .and_then(|(c, _)| c.config.map(|config| config.harness)),
+                    status: zeron_proto::ChatIndicator::Completed,
+                })
+                .collect();
+            let noun = match kind {
+                EventKind::TaskDone | EventKind::TaskQuestion | EventKind::TaskBlocked => "tasks",
+                _ if coordinator => "agents",
+                _ => "side chats",
+            };
+            let names: Vec<String> = group
+                .iter()
+                .map(|event| {
+                    self.launched_state(Some(&event.chat_id), cx)
+                        .and_then(|(c, _)| c.title)
+                        .unwrap_or_else(|| event.title.clone())
+                })
+                .collect();
             caption = caption.child(
                 div()
-                    .min_w_0()
+                    .id(SharedString::from(format!("{row_id}-events-{kind:?}")))
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
+                    .tooltip(crate::settings::widgets::text_tooltip(names.join(", ")))
+                    .child(crate::chat_avatars::stack(&avatars, 16.0, theme.surface_card, theme))
                     .child(
                         div()
-                            .id(SharedString::from(format!("{row_id}-event{ix}")))
-                            .min_w_0()
-                            .child(caption_label(title, Some(mark), theme.text_muted))
-                            .when(live.is_some(), |el| {
-                                el.role(gpui::Role::Link)
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(theme.text))
-                                    .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                                        cx.emit(TranscriptEvent::OpenSideChat {
-                                            chat_id: chat_id.clone(),
-                                        });
-                                    }))
-                            }),
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(SharedString::from(format!("{} {noun}", group.len()))),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(match event.kind {
-                                EventKind::NeedsInput | EventKind::TaskQuestion => theme.accent,
-                                EventKind::Failed | EventKind::TaskBlocked => theme.danger,
-                                _ => theme.text_faint,
-                            })
-                            .child(event_verb(event.kind)),
-                    ),
-            );
-        }
-        if events.len() > SHOWN {
-            caption = caption.child(
-                div()
-                    .flex_none()
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(format!("+{} more", events.len() - SHOWN))),
+                    .child(div().text_color(tone).child(events_verb(kind))),
             );
         }
         div().w_full().child(caption).into_any_element()
@@ -7736,13 +7731,15 @@ impl Transcript {
                 .take_while(|top| top.range.end <= SHOWN_CHARS)
                 .count()
                 .max(1);
-            // Not a lead-in ("Changes:") to what stays hidden.
-            while shown > 1
-                && shown < tree.blocks.len()
-                && message
-                    .get(tree.blocks[shown - 1].range.clone())
-                    .is_some_and(|text| text.trim_end().ends_with(':'))
-            {
+            // Never end on a lead-in to what stays hidden: a heading, a
+            // "Changes:", a short label line.
+            while shown > 1 && shown < tree.blocks.len() && {
+                let top = &tree.blocks[shown - 1];
+                let text = message.get(top.range.clone()).unwrap_or_default().trim();
+                matches!(top.block, Block::Heading { .. })
+                    || text.ends_with(':')
+                    || (text.len() < 40 && !text.ends_with('.'))
+            } {
                 shown -= 1;
             }
             let long = tree.blocks.len() > shown;
@@ -11008,8 +11005,18 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// `[mark] Name` in a user-message caption: a provider's brand mark (or any
-/// glyph) beside its name. A side without a mark shows its name alone.
+/// What several chats' events of `kind` say about them, after their count.
+fn events_verb(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Finished => "finished",
+        EventKind::Failed => "failed",
+        EventKind::NeedsInput => "have questions",
+        EventKind::TaskDone => "are done",
+        EventKind::TaskQuestion => "need decisions",
+        EventKind::TaskBlocked => "are blocked",
+    }
+}
+
 /// What a chat's event says about it, after its name.
 fn event_verb(kind: EventKind) -> &'static str {
     match kind {
@@ -11022,40 +11029,113 @@ fn event_verb(kind: EventKind) -> &'static str {
     }
 }
 
-/// A launched chat's chip card: the subagent chip's (hairline card, the
-/// whole card a link).
-fn chip_card(
-    id: SharedString,
-    opens: bool,
-    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-    header: impl IntoElement,
-) -> gpui::Stateful<gpui::Div> {
-    let card = div()
-        .debug_selector(|| id.to_string())
-        .id(id)
-        .h(px(CHIP_CARD_HEIGHT))
+/// Vertical breathing room around a launch card in the transcript.
+const CARD_MARGIN: f32 = 6.0;
+
+/// The card a launch draws in: hairline, soft fill, rounded.
+fn launch_card(id: &SharedString) -> gpui::Div {
+    let key = id.to_string();
+    div()
+        .debug_selector(move || key.clone())
         .w_full()
         .min_w_0()
         .flex()
-        .items_center()
+        .flex_col()
         .overflow_hidden()
-        .rounded(px(9.0))
+        .rounded(px(CARD_RADIUS))
         .border_1()
-        .border_color(crate::theme::hairline(0.07))
-        .bg(crate::theme::ink(0.03));
-    let card = if opens {
-        card.cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
-            .on_click(on_open)
-    } else {
-        card
+        .border_color(crate::theme::hairline(0.08))
+        .bg(crate::theme::ink(0.03))
+}
+
+/// A card's lead: the chat's mark in a squircle, its name, and beneath it a
+/// quiet line saying what it is.
+fn card_lead(
+    harness: Option<HarnessId>,
+    title: SharedString,
+    subline: gpui::Div,
+    theme: &Theme,
+) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(CARD_GAP))
+        .child(
+            crate::chat_avatars::tile(CARD_LEAD, theme)
+                .child(crate::chat_avatars::mark(harness, CARD_LEAD, theme)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.0))
+                        .line_height(px(18.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text.opacity(0.92))
+                        .child(title),
+                )
+                .child(subline),
+        )
+}
+
+/// The line under a card's name.
+fn card_subline(theme: &Theme) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(px(11.5))
+        .line_height(px(15.0))
+        .text_color(theme.text_faint)
+}
+
+/// How a row is doing, at its right: a word while it works or needs
+/// someone, then its glyph in the trailing column. Done is just the check.
+fn status_trail(
+    key: String,
+    status: zeron_proto::ChatIndicator,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    use zeron_proto::ChatIndicator;
+    let word = match status {
+        ChatIndicator::Working => Some("Working"),
+        ChatIndicator::AwaitingInput => Some("Needs input"),
+        ChatIndicator::Errored => Some("Failed"),
+        ChatIndicator::Completed | ChatIndicator::Idle => None,
     };
     div()
-        .id(SharedString::from("chip-row"))
-        .w_full()
         .flex_none()
-        .py(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
-        .child(card.child(header))
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.5))
+        .text_color(match status {
+            ChatIndicator::AwaitingInput => theme.accent,
+            ChatIndicator::Errored => theme.danger,
+            _ => theme.text_faint,
+        })
+        .children(word)
+        .child(
+            div()
+                .size(px(CARD_TRAIL))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(status_glyph(key, status, theme, view, cx)),
+        )
 }
 
 /// How a task is doing, from its coordinator's state and its agents': what
@@ -11100,7 +11180,7 @@ fn status_glyph(
     };
     match status {
         ChatIndicator::Working => {
-            crate::loaders::mini_glyph_spinner(key, 2.0, theme.glyph, view, cx).into_any_element()
+            crate::loaders::mini_glyph_spinner(key, 2.5, theme.glyph, view, cx).into_any_element()
         }
         ChatIndicator::AwaitingInput => dot(theme.accent),
         ChatIndicator::Errored => dot(theme.danger),
@@ -11143,75 +11223,8 @@ fn task_state(
         .when(!text.is_empty(), |el| el.child(text))
 }
 
-/// A launched chat's header: the subagent chip's row — mark tile, label,
-/// title, model, status — ending in the open arrow.
-#[allow(clippy::too_many_arguments)]
-fn launched_header(
-    id: SharedString,
-    label: &'static str,
-    title: SharedString,
-    harness: Option<HarnessId>,
-    status: zeron_proto::ChatIndicator,
-    failed: bool,
-    theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
-) -> gpui::Div {
-    use zeron_proto::ChatIndicator;
-    // Done is the quiet state: a check, no word.
-    let word: SharedString = match status {
-        ChatIndicator::Working => "Working",
-        ChatIndicator::AwaitingInput => "Needs input",
-        ChatIndicator::Errored => "Failed",
-        ChatIndicator::Completed | ChatIndicator::Idle => "",
-    }
-    .into();
-    div()
-        .h(px(CHIP_HEADER_HEIGHT))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(4.0))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
-        .child(
-            crate::chat_avatars::tile(CHIP_TILE_SIZE, theme)
-                .child(crate::chat_avatars::mark(harness, CHIP_TILE_SIZE, theme)),
-        )
-        .child(
-            div()
-                .flex_none()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(if failed { theme.danger } else { theme.text_muted })
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_color(theme.text.opacity(0.85))
-                .child(title),
-        )
-        .child(task_state(format!("launched-{id}"), status, word, theme, view, cx))
-        .child(
-            div()
-                .size(px(20.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                        .size(px(11.0))
-                        .text_color(theme.text_faint),
-                ),
-        )
-}
-
+/// `[mark] Name` in a user-message caption: a provider's brand mark (or any
+/// glyph) beside its name. A side without a mark shows its name alone.
 pub(crate) fn caption_label(
     name: SharedString,
     mark: Option<(&'static str, Option<gpui::Hsla>)>,
