@@ -25,7 +25,8 @@ use gpui::{
 
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    AccessMode, ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel,
+    Space,
 };
 use zeron_rpc::methods;
 
@@ -103,6 +104,9 @@ pub struct DraftConfig {
     pub branch: Option<String>,
     /// Where the new session runs (the t3code env-mode).
     pub checkout: CheckoutKind,
+    /// The picked access mode; `None` = the remembered one.
+    pub access: Option<AccessMode>,
+    pub plan: bool,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -148,6 +152,9 @@ pub struct ResolvedRunConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
+    /// Always one the harness honors (see [`resolve_access`]).
+    pub access: AccessMode,
+    pub plan: bool,
 }
 
 impl ResolvedRunConfig {
@@ -159,9 +166,38 @@ impl ResolvedRunConfig {
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
-            access: Default::default(),
-            plan: false,
+            access: self.access,
+            plan: self.plan,
         })
+    }
+}
+
+/// The mode a run gets when `wanted` is not among those the harness
+/// `offered`: the most trusting offered mode that still asks at least as
+/// much, so a fallback never grants more than was picked. Nothing offered
+/// (an engine predating modes) runs as before, with full access.
+pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode {
+    if offered.is_empty() {
+        return AccessMode::FullAccess;
+    }
+    if offered.contains(&wanted) {
+        return wanted;
+    }
+    let rank = |mode: AccessMode| AccessMode::ALL.iter().position(|m| *m == mode);
+    offered
+        .iter()
+        .copied()
+        .filter(|mode| rank(*mode) <= rank(wanted))
+        .max_by_key(|mode| rank(*mode))
+        .unwrap_or(offered[0])
+}
+
+/// The access chip's glyph per mode.
+pub fn access_icon(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::Supervised => crate::icons::LOCK_KEYHOLE,
+        AccessMode::AutoAcceptEdits => crate::icons::PEN,
+        AccessMode::FullAccess => crate::icons::LOCK_KEYHOLE_UNLOCKED,
     }
 }
 
@@ -803,6 +839,9 @@ pub enum PickerKind {
     /// The checkout-kind dropdown in the composer footer (Current
     /// checkout/worktree | New worktree).
     Checkout,
+    /// The access-mode menu beside the model chip, with the plan-mode
+    /// switch when the harness has one.
+    Access,
     /// The combined agent/model/traits popover: harness tabs across the top,
     /// the tab's model list beneath the search, and the pinned traits tray
     /// (reasoning ladder + model options) at the bottom — one trigger, one
@@ -1197,7 +1236,7 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
-        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch` boots
+        // Dev/testing knob: `ZERON_OPEN_PICKER=model|traits|repo|branch|access` boots
         // with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
         let boot_open = match std::env::var("ZERON_OPEN_PICKER").ok().as_deref() {
@@ -1206,6 +1245,7 @@ impl Pickers {
             Some("traits") => Some(PickerKind::HarnessModel),
             Some("branch") => Some(PickerKind::Branch),
             Some("checkout") => Some(PickerKind::Checkout),
+            Some("access") => Some(PickerKind::Access),
             Some("project") => Some(PickerKind::Space),
             Some("device") => Some(PickerKind::Device),
             _ => None,
@@ -1629,6 +1669,8 @@ impl Pickers {
                 model: self.effective_model_id(cx).map(str::to_string),
                 reasoning: self.explicit_reasoning(cx),
                 model_options: self.explicit_options(cx),
+                access: self.effective_access(cx),
+                plan: self.effective_plan(cx),
             };
         }
         ResolvedRunConfig {
@@ -1640,7 +1682,77 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
+            access: self.effective_access(cx),
+            plan: self.effective_plan(cx),
         }
+    }
+
+    /// The effective harness's descriptor, once its catalog is loaded.
+    fn effective_descriptor<'a>(&'a self, cx: &App) -> Option<&'a HarnessDescriptor> {
+        let harness = self.effective_harness(cx)?;
+        self.harnesses
+            .ready()
+            .and_then(|list| list.iter().find(|d| d.id == harness))
+    }
+
+    /// The access modes the effective harness honors; empty while its
+    /// catalog loads, or from an engine predating modes.
+    fn offered_access(&self, cx: &App) -> Vec<AccessMode> {
+        self.effective_descriptor(cx)
+            .map(|d| d.access_modes.clone())
+            .unwrap_or_default()
+    }
+
+    fn plan_offered(&self, cx: &App) -> bool {
+        self.effective_descriptor(cx).is_some_and(|d| d.supports_plan)
+    }
+
+    /// The chat's mode, else the draft's pick, else the remembered one —
+    /// narrowed to what the harness honors. Before the catalog loads the
+    /// pick is sent as-is: the host narrows it the same way.
+    fn effective_access(&self, cx: &App) -> AccessMode {
+        let wanted = match self.state.read(cx).selected_chat_row() {
+            Some(chat) => chat.config.as_ref().map(|c| c.access).unwrap_or_default(),
+            None => self
+                .config
+                .access
+                .or(self.defaults.access)
+                .unwrap_or_default(),
+        };
+        if self.effective_descriptor(cx).is_none() {
+            return wanted;
+        }
+        resolve_access(wanted, &self.offered_access(cx))
+    }
+
+    fn effective_plan(&self, cx: &App) -> bool {
+        let wanted = match self.state.read(cx).selected_chat_row() {
+            Some(chat) => chat.config.as_ref().is_some_and(|c| c.plan),
+            None => self.config.plan,
+        };
+        wanted && (self.effective_descriptor(cx).is_none() || self.plan_offered(cx))
+    }
+
+    fn pick_access(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_some() {
+            self.update_chat_config(cx, move |config| config.access = mode);
+        } else {
+            self.config.access = Some(mode);
+            self.defaults.access = Some(mode);
+            self.save_defaults();
+        }
+        self.animate_close(cx);
+        cx.notify();
+    }
+
+    fn toggle_plan(&mut self, cx: &mut Context<Self>) {
+        let plan = !self.effective_plan(cx);
+        if self.state.read(cx).selected_chat.is_some() {
+            self.update_chat_config(cx, move |config| config.plan = plan);
+        } else {
+            self.config.plan = plan;
+        }
+        cx.notify();
     }
 
     // ---- open/close ----
@@ -1789,6 +1901,13 @@ impl Pickers {
                 .iter()
                 .position(|(kind, _, _)| *kind == self.config.checkout)
                 .unwrap_or(0),
+            PickerKind::Access => {
+                let current = self.effective_access(cx);
+                self.offered_access(cx)
+                    .iter()
+                    .position(|mode| *mode == current)
+                    .unwrap_or(0)
+            }
             PickerKind::Branch => self.selected_ref_index(cx),
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_project_index(cx),
@@ -1858,7 +1977,7 @@ impl Pickers {
                 self.prefetch_models(true, cx);
             }
             // Projects and devices are already synced state — nothing to load.
-            PickerKind::Space | PickerKind::Device => {}
+            PickerKind::Space | PickerKind::Device | PickerKind::Access => {}
         }
         cx.notify();
     }
@@ -3671,6 +3790,9 @@ impl Pickers {
                 let count = match self.open_kind() {
                     Some(PickerKind::Branch) => self.filtered_ref_rows(cx).len().min(MAX_REF_ROWS),
                     Some(PickerKind::Checkout) => self.checkout_options(cx).len(),
+                    Some(PickerKind::Access) => {
+                        self.offered_access(cx).len() + usize::from(self.plan_offered(cx))
+                    }
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
@@ -3708,6 +3830,11 @@ impl Pickers {
                         .get(self.active)
                         .map_or(CheckoutKind::Local, |(kind, _, _)| *kind);
                     self.pick_checkout(kind, cx);
+                } else if self.open_kind() == Some(PickerKind::Access) {
+                    match self.offered_access(cx).get(self.active).copied() {
+                        Some(mode) => self.pick_access(mode, cx),
+                        None => self.toggle_plan(cx),
+                    }
                 } else {
                     self.on_search_submit(cx);
                 }
@@ -3865,6 +3992,7 @@ impl Pickers {
         let base = match kind {
             PickerKind::Branch => "picker-branch",
             PickerKind::Checkout => "picker-checkout",
+            PickerKind::Access => "picker-access",
             PickerKind::HarnessModel => "picker-model",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
@@ -4560,7 +4688,7 @@ impl Pickers {
                             this.ensure_harnesses(false, cx);
                         }
                         // Projects/devices load nothing; no retry surface exists.
-                        PickerKind::Space | PickerKind::Device => {}
+                        PickerKind::Space | PickerKind::Device | PickerKind::Access => {}
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -4788,6 +4916,95 @@ impl Pickers {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The access modes the harness honors, each with what it allows, then
+    /// the plan-mode switch when the harness has one.
+    fn render_access_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let modes = self.offered_access(cx);
+        let current = self.effective_access(cx);
+        let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
+        let active = self.active;
+        let plan_row = plan.map(|on| {
+            let ix = modes.len();
+            popover::menu_row_nav(&theme, false, ix == active, "access-row-plan")
+                .id("access-row-plan")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_plan(cx)))
+                .child(
+                    crate::icons::icon(crate::icons::CHECKLIST)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(access_row_text(
+                    "Plan mode",
+                    "Explore and propose a plan before changing anything.",
+                    &theme,
+                ))
+                .child(crate::settings::widgets::toggle_switch(
+                    &theme,
+                    on,
+                    "access-plan-switch",
+                ))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(modes.into_iter().enumerate().map(|(ix, mode)| {
+                let selected = mode == current;
+                popover::menu_row_nav(&theme, selected, ix == active, format!("access-row-{ix}"))
+                    .id(("access-row", ix))
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_access(mode, cx)))
+                    .child(
+                        crate::icons::icon(access_icon(mode))
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(access_row_text(mode.label(), mode.description(), &theme))
+                    .when(selected, |row| {
+                        row.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                    })
+            }))
+            .when_some(plan_row, |menu, row| {
+                menu.child(popover::menu_separator()).child(row)
+            })
+            .into_any_element()
+    }
+
+    /// The access chip beside the model chip: the mode's glyph and name,
+    /// "Plan" in the accent when plan mode is on. None when the harness
+    /// offers no choice (one mode and no plan mode, or an older engine).
+    fn access_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        if self.title.is_some() {
+            return None;
+        }
+        let modes = self.offered_access(cx);
+        if modes.len() < 2 && !self.plan_offered(cx) {
+            return None;
+        }
+        let mode = self.effective_access(cx);
+        let plan = self
+            .effective_plan(cx)
+            .then(|| (SharedString::from("Plan"), Some(theme.accent)));
+        Some(self.trigger_chip(
+            PickerKind::Access,
+            mode.label().into(),
+            !mode.is_full_access(),
+            Some((access_icon(mode), None)),
+            false,
+            false,
+            plan,
+            theme,
+            cx,
+        ))
     }
 
     /// Model picker with favorites and harness tabs above a scoped search.
@@ -6871,6 +7088,10 @@ impl Render for Pickers {
             | Some(PickerKind::Checkout)
             | Some(PickerKind::Space)
             | Some(PickerKind::Device) => None,
+            Some(PickerKind::Access) => {
+                let content = self.render_access_popover(cx);
+                Some((PickerKind::Access, self.popover_frame(288.0, content, cx)))
+            }
             Some(PickerKind::HarnessModel) => {
                 let menu = if self.compact_model_picker(cx) {
                     self.render_compact_menu(window, cx)
@@ -6941,6 +7162,9 @@ impl Render for Pickers {
                 ))
             });
         let model_chip = model_chip.w(px(chip_width));
+        let access_chip = self.access_chip(&theme, cx).map(|chip| {
+            attach_overlay_end(chip, &mut overlay, PickerKind::Access, "access-popover", closing)
+        });
         // Both presentations align to the chip's trailing edge beside Send.
         let model_chip = attach_overlay_end(
             model_chip,
@@ -6960,14 +7184,47 @@ impl Render for Pickers {
             // instead of truncating (user report).
             .min_w_0()
             .gap(px(4.0))
+            .children(access_chip)
             .child(model_chip)
     }
+}
+
+/// A mode's name over what it allows, in the access menu.
+fn access_row_text(label: &'static str, description: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(div().truncate().child(SharedString::from(label)))
+        .child(
+            div()
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(SharedString::from(description)),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn an_unoffered_access_mode_never_falls_back_to_more_access() {
+        use AccessMode::*;
+        assert_eq!(resolve_access(AutoAcceptEdits, &ALL_MODES), AutoAcceptEdits);
+        // Muse: supervised or full access.
+        let muse = [Supervised, FullAccess];
+        assert_eq!(resolve_access(AutoAcceptEdits, &muse), Supervised);
+        assert_eq!(resolve_access(FullAccess, &muse), FullAccess);
+        // Only full access offered: nothing safer to fall back to.
+        assert_eq!(resolve_access(Supervised, &[FullAccess]), FullAccess);
+        // An engine predating modes runs everything as before.
+        assert_eq!(resolve_access(Supervised, &[]), FullAccess);
+    }
+
+    const ALL_MODES: [AccessMode; 3] = AccessMode::ALL;
 
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,

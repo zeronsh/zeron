@@ -73,6 +73,10 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub access_modes: Vec<zeron_proto::AccessMode>,
+    #[serde(default)]
+    pub supports_plan: bool,
     /// Whether a login for this harness is present on the device, from
     /// `ListAgentAccounts`. `None` = not asked or not answerable. Advisory:
     /// detection does not see every credential source (an API key in the

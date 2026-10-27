@@ -707,8 +707,6 @@ impl HarnessRegistry {
                         installed,
                         ..
                     }) => HarnessDescriptor {
-                        access_modes: Vec::new(),
-                        supports_plan: false,
                         installed: installed(),
                         ..descriptor.clone()
                     },
@@ -838,8 +836,8 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: Vec::new(),
-            supports_plan: false,
+            access_modes: AccessMode::ALL.to_vec(),
+            supports_plan: true,
         },
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
@@ -1003,7 +1001,7 @@ fn full_registry() -> HarnessRegistry {
             installed: true,
             can_install: false,
             enabled: None,
-            access_modes: Vec::new(),
+            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
             supports_plan: false,
         },
         Box::new(|| zeron_harness::MuseHarness::new().installed()),
@@ -1077,6 +1075,23 @@ mod tests {
         );
         assert!(registry.resolve(HarnessId::Mock).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The composer offers what the catalog lists before any harness has
+    /// resolved, so each lazy descriptor must offer the modes its harness
+    /// honors once it does.
+    #[test]
+    fn lazy_descriptors_offer_the_modes_their_harness_honors() {
+        let registry = default_registry();
+        for described in registry.descriptors() {
+            let harness = registry.resolve(described.id).unwrap();
+            assert_eq!(
+                (described.access_modes.as_slice(), described.supports_plan),
+                (harness.access_modes(), harness.supports_plan()),
+                "{:?}",
+                described.id
+            );
+        }
     }
 
     #[test]

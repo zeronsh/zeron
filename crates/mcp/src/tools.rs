@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
 use zeron_proto::{
-    Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
+    AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
 
@@ -130,6 +130,8 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "default": "full-access", "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses)." },
+                    "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -577,6 +579,9 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    access: Option<String>,
+    #[serde(default)]
+    plan: bool,
     title: Option<String>,
     branch: Option<String>,
     cwd: Option<String>,
@@ -881,6 +886,8 @@ impl Tools {
                 "installed": h.installed,
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
+                "accessModes": h.access_modes,
+                "supportsPlan": h.supports_plan,
             })).collect::<Vec<_>>()
         }))
     }
@@ -1061,14 +1068,33 @@ impl Tools {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
+        let access: AccessMode = match args.access.as_deref() {
+            Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
+            None => AccessMode::FullAccess,
+        };
+        // A Cloud machine's catalog is checked when it runs, not here; an
+        // engine predating modes lists none and runs with full access.
+        if let Some(info) = harnesses.iter().find(|h| h.id == harness).filter(|_| !args.cloud) {
+            let modes = &info.access_modes;
+            anyhow::ensure!(
+                access.is_full_access() || modes.contains(&access),
+                "{harness:?} on device {device_id} cannot run {:?} (accessModes: {})",
+                access.label(),
+                modes.iter().map(|m| m.label()).collect::<Vec<_>>().join(", ")
+            );
+            anyhow::ensure!(
+                !args.plan || info.supports_plan,
+                "{harness:?} on device {device_id} has no plan mode"
+            );
+        }
         let config = ChatConfig {
             harness,
             model: args.model.clone(),
             reasoning,
             model_options: Default::default(),
             sandbox,
-            access: Default::default(),
-            plan: false,
+            access,
+            plan: args.plan,
         };
 
         let chat_id = uuid::Uuid::new_v4().to_string();
@@ -1518,8 +1544,8 @@ impl Tools {
                         .map(|c| c.sandbox)
                         .unwrap_or(SandboxLevel::WorkspaceWrite),
                     auto_approve: false,
-                    access: Default::default(),
-                    plan: false,
+                    access: config.as_ref().map(|c| c.access).unwrap_or_default(),
+                    plan: config.as_ref().is_some_and(|c| c.plan),
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,
