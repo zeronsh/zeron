@@ -24,7 +24,9 @@ sorted (path, object id) list. The ids come from `git ls-tree` on the checked
 out commit: no file needs to be read except the Rust sources that are scanned.
 
 Which passes count: a pull request trusts its own earlier runs and main's;
-main and the merge queue trust only main's. (A pull request could forge a pass
+main trusts only main's; the merge queue, the last gate before main, reuses
+nothing. If a pull request changes a Rust build file no selected suite's
+fingerprint covers, nothing is reused either (fail closed). (A pull request could forge a pass
 in its own runs, as it could edit its own workflows, but no other ref sees it.)
 The `ci:full` label and manual runs reuse nothing.
 """
@@ -42,7 +44,7 @@ import tomllib
 VERSION = "v1"
 
 COMMON = [
-    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/ci.yml",
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/**", ".github/workflows/ci.yml",
     ".github/actions/**", "scripts/ci/**",
 ]
 
@@ -77,8 +79,13 @@ SUITE_PACKAGES: dict[str, list[str]] = {
     "android": ["zeron-mobile"],
 }
 
-# A ../ path that names something (a bare "../.." names no file).
-RELATIVE_PATH = re.compile(r'"((?:\.\./)+[^"\\\n{}./][^"\\\n{}]*)"')
+# A ../ path that names something (a bare "../.." names no file); "/../x" as in
+# concat!(env!("CARGO_MANIFEST_DIR"), "/../x") too.
+RELATIVE_PATH = re.compile(r'"/?((?:\.\./)+[^"\\\n{}./][^"\\\n{}]*)"')
+# Paths the scan cannot follow: the package directory's parent reached in code.
+# A suite whose sources do this reads the whole workspace (fail closed).
+UNFOLLOWABLE = re.compile(r'CARGO_MANIFEST_DIR[^;]{0,200}?(?:\.parent\(\)|\.ancestors\(\)|join\(\s*"\.\.")')
+EVERYTHING = ["crates/**", "apps/**", "scripts/**", "dist/**", "edge/**"]
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
 
@@ -163,7 +170,7 @@ class Workspace:
         found: set[str] = set()
         for top in dirs:
             for target in self._named_paths(top, index):
-                if not any(target == d or target.startswith(d + "/") for d in dirs):
+                if target == "*" or not any(target == d or target.startswith(d + "/") for d in dirs):
                     found.add(target)
         return found
 
@@ -180,6 +187,8 @@ class Workspace:
                     continue
                 with open(os.path.join(walk_dir, name), encoding="utf-8", errors="replace") as f:
                     text = f.read()
+                if UNFOLLOWABLE.search(text):
+                    named.add("*")
                 for literal in RELATIVE_PATH.findall(text):
                     # include_str!/include_bytes! resolve from the file, CARGO_MANIFEST_DIR from the package.
                     for base in (rel_dir, top):
@@ -208,22 +217,42 @@ def fingerprint(suite: str, index: dict[str, str], patterns: list[str], dirs: se
     return digest.hexdigest()[:40]
 
 
-def suite_keys(suites: list[str], root: str = ".") -> tuple[dict[str, str], dict[str, list[str]]]:
-    """Cache key prefix per suite, and the paths outside its packages each Rust suite reads."""
+def suite_keys(suites: list[str], root: str = ".") -> tuple[dict[str, str], dict[str, list[str]],
+                                                             dict[str, tuple[list[str], set[str]]]]:
+    """Per suite: cache key prefix, the paths outside its packages it reads, and its inputs."""
     index = tree_index(root)
     workspace = Workspace(root)
     keys: dict[str, str] = {}
     extra: dict[str, list[str]] = {}
+    inputs: dict[str, tuple[list[str], set[str]]] = {}
     for suite in suites:
+        patterns = COMMON + SUITE_INPUTS[suite]
         dirs: set[str] = set()
         if suite in SUITE_PACKAGES:
             dirs = workspace.closure(SUITE_PACKAGES[suite])
             refs = workspace.references(dirs, index)
-            extra[suite] = sorted(refs)
+            extra[suite] = sorted(r if r != "*" else "the whole workspace (a path built from "
+                                  "CARGO_MANIFEST_DIR's parent)" for r in refs)
+            if "*" in refs:
+                patterns = patterns + EVERYTHING
+                refs.discard("*")
             dirs |= refs
-        fp = fingerprint(suite, index, COMMON + SUITE_INPUTS[suite], dirs)
-        keys[suite] = f"ci-pass-{VERSION}-{suite}-{fp}"
-    return keys, extra
+        keys[suite] = f"ci-pass-{VERSION}-{suite}-{fingerprint(suite, index, patterns, dirs)}"
+        inputs[suite] = (patterns, dirs)
+    return keys, extra, inputs
+
+
+def covered(path: str, inputs: dict[str, tuple[list[str], set[str]]]) -> bool:
+    """Whether some suite's fingerprint includes `path`."""
+    for patterns, dirs in inputs.values():
+        if path in dirs or any(path.startswith(d.rstrip("/") + "/") for d in dirs) or matches(path, patterns):
+            return True
+    return False
+
+
+# Changed files here that no fingerprint covers mean the inputs are not understood:
+# nothing is reused (fail closed).
+BUILD_PATHS = ["crates/**", "apps/zeron/**", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml"]
 
 
 def passed_jobs(api, repo: str, key: str, trusted_refs: set[str]) -> set[str]:

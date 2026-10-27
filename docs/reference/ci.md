@@ -73,16 +73,25 @@ Which recorded passes count:
 | Run | Reuses passes from |
 |---|---|
 | Pull request | its own earlier runs, and `main` |
-| `main`, merge queue | `main` only |
-| `ci:full` label, manual run | nothing |
+| `main` | `main` only |
+| Merge queue (the last gate before `main`), `ci:full` label, manual run | nothing |
+
+Reuse fails closed:
+
+- If a pull request changes a Rust build file (`crates/`, `apps/zeron`,
+  `Cargo.*`, `.cargo/`) that no selected suite's fingerprint covers, nothing is
+  reused.
+- If a suite's sources build a path from the package directory's parent in
+  code (`.parent()`, `.ancestors()`, `join("..")`), the scan can't follow it.
+  That suite then counts the whole workspace as its input.
 
 A pull request could fake a pass in its own runs, but it could just as well
 edit its own workflows. No other ref ever sees those entries.
 
 Limits:
 
-- A path built in pieces (`.join("..").join("ui")`) is not found by the scan.
-  Write such references as one `../` literal, or add the path to the suite's
+- A path assembled from variables is not found by the scan. Write such
+  references as one `../` literal, or add the path to the suite's
   `SUITE_INPUTS`.
 - A test that depends on the network or on timing and passed by luck stays
   passed until its inputs change. Re-run with `ci:full` to check everything

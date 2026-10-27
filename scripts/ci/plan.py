@@ -303,7 +303,7 @@ def main() -> int:
             trusted = {"refs/heads/main"}
             files = compare_files(repo, payload.get("before", ""), payload.get("after", ""))
         elif event == "merge_group":
-            trusted = {"refs/heads/main"}
+            # The last gate before main: run everything selected, reuse nothing.
             group = payload["merge_group"]
             files = compare_files(repo, group["base_sha"], group["head_sha"])
         # workflow_dispatch and anything else: everything, nothing reused.
@@ -316,7 +316,13 @@ def main() -> int:
     extra: dict[str, list[str]] = {}
     passed: dict[str, set[str]] = {}
     try:
-        keys, extra = reuse.suite_keys([suite for suite, on in selected.items() if on])
+        keys, extra, inputs = reuse.suite_keys([suite for suite, on in selected.items() if on])
+        uncovered = sorted(f["filename"] for f in files or []
+                           if matches(f["filename"], reuse.BUILD_PATHS) and not reuse.covered(f["filename"], inputs))
+        if trusted and uncovered:
+            print(f"::notice::nothing reused: no suite fingerprint covers {', '.join(uncovered[:5])}")
+            why = (why + "; " if why else "") + "nothing reused (changed build files outside every fingerprint)"
+            trusted = set()
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         print(f"::warning::could not fingerprint the suites ({error}); nothing is reused or recorded")
     if trusted:

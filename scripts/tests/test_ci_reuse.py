@@ -64,7 +64,7 @@ class FakeRepo:
         reuse.SUITE_INPUTS.clear()
         reuse.SUITE_INPUTS.update({suite: [] for suite in packages})
         try:
-            return reuse.suite_keys(list(packages), self.root)
+            return reuse.suite_keys(list(packages), self.root)[:2]
         finally:
             reuse.SUITE_PACKAGES.clear()
             reuse.SUITE_PACKAGES.update(old[0])
@@ -114,6 +114,19 @@ class FingerprintTests(unittest.TestCase):
     def test_unrelated_files_change_nothing(self):
         self.assertEqual(self.changed_after("docs/notes.md", "hi\n"), set())
 
+    def test_concat_paths_count(self):
+        write(self.repo.root, "crates/b/src/fonts.rs",
+              'const F: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../c/assets/icons.json");\n')
+        self.repo.commit()
+        _, extra = self.repo.keys(self.suites)
+        self.assertIn("crates/c/assets/icons.json", extra["b"])
+
+    def test_paths_the_scan_cannot_follow_make_the_suite_read_everything(self):
+        write(self.repo.root, "crates/b/tests/walk.rs",
+              'fn f() { let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(); }\n')
+        self.repo.commit()
+        self.assertIn("b", self.changed_after("docs/../scripts/other.txt", "y\n"))
+
     def test_keys_are_stable(self):
         self.assertEqual(self.repo.keys(self.suites), self.repo.keys(self.suites))
 
@@ -132,7 +145,7 @@ class RealWorkspaceTests(unittest.TestCase):
         self.assertIn("crates/ui", ws.closure(reuse.SUITE_PACKAGES["windows"]))
 
     def test_mobile_reads_the_ui_icons_and_fonts(self):
-        _, extra = reuse.suite_keys(["ios"], str(ROOT))
+        _, extra, _ = reuse.suite_keys(["ios"], str(ROOT))
         self.assertIn("crates/ui/src/file-icons.json", extra["ios"])
 
     def test_every_rust_suite_has_packages_that_exist(self):
@@ -184,13 +197,13 @@ class ReusePlanTests(unittest.TestCase):
 class PlanMainTests(unittest.TestCase):
     """plan.py end to end on a fake repository and API."""
 
-    def run_plan(self, event, payload, caches, labels=()):
+    def run_plan(self, event, payload, caches, labels=(), files=None):
         repo = FakeRepo()
         self.addCleanup(repo.dir.cleanup)
         out = pathlib.Path(repo.root, "out")
         event_path = pathlib.Path(repo.root, "event.json")
         event_path.write_text(json.dumps(payload))
-        files = [{"filename": "crates/b/src/lib.rs", "patch": "+x"}]
+        files = files or [{"filename": "crates/b/src/lib.rs", "patch": "+x"}]
 
         def fake_api(path):
             if "/actions/caches" in path:
@@ -238,6 +251,21 @@ class PlanMainTests(unittest.TestCase):
         self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests"]})
         self.assertLess(int(second["reservation"].split()[0].split("=")[1]),
                         int(first["reservation"].split()[0].split("=")[1]))
+
+    def test_the_merge_queue_reuses_nothing(self):
+        first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/heads/main"}]
+        group = self.run_plan("merge_group", {"merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}, caches)
+        self.assertTrue(json.loads(group["suites"])["core"])
+
+    def test_a_build_file_no_fingerprint_covers_disables_reuse(self):
+        first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
+        # crates/c is in no selected suite (core reads crates/b, ui crates/a and b).
+        again = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches,
+                              files=[{"filename": "crates/b/src/lib.rs", "patch": "+x"},
+                                     {"filename": "crates/c/src/lib.rs", "patch": "+x"}])
+        self.assertTrue(json.loads(again["suites"])["core"])
 
     def test_ci_full_and_main_do_not_trust_pull_request_passes(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
