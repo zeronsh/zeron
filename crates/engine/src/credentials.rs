@@ -1437,9 +1437,13 @@ async fn configure_git_identity(home: &Path, identity: &GitIdentity) {
     // exists. An XDG_CONFIG_HOME outside `home` belongs to another home (this
     // process's own, when `home` is a sandbox or a test directory), so `home`'s is
     // used instead; otherwise the identity lands in that other user's config.
+    // When `home` is this process's own, its XDG_CONFIG_HOME is the user's
+    // wherever it lives: replacing it would hide an identity kept there, and
+    // ~/.gitconfig (which wins over it) would get the machine's.
+    let own_home = std::env::var_os("HOME").is_some_and(|own| Path::new(&own) == home);
     let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .filter(|dir| dir.starts_with(home))
+        .filter(|dir| own_home || dir.starts_with(home))
         .unwrap_or_else(|| home.join(".config"));
     let git = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new("git");
