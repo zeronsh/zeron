@@ -37,6 +37,7 @@ pub(crate) fn render_comment_adder<T: 'static>(
             cx.stop_propagation();
             open(this, window, cx);
         }))
+        .tooltip(crate::settings::widgets::text_tooltip("Add comment"))
         .child(
             crate::icons::icon(crate::icons::PLUS)
                 .size(px(11.0))

@@ -15,6 +15,9 @@
 //! (the RPC layer supplies the cwd roots). Workspace files must be supported
 //! image types, as in zeron; files in the uploads dir read back whatever their
 //! type, so a queued message can restore them for editing.
+//!
+//! `read_chat_image_chunk` serves the images an agent's reply names in
+//! Markdown, under a narrower jail: one chat's working folder only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -338,36 +341,11 @@ impl Uploads {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let roots: Vec<&PathBuf> = std::iter::once(&self.inner.dir)
-            .chain(read_roots.iter())
-            .chain(extra_roots.iter())
+        let roots: Vec<&Path> = std::iter::once(self.inner.dir.as_path())
+            .chain(read_roots.iter().map(PathBuf::as_path))
+            .chain(extra_roots.iter().map(PathBuf::as_path))
             .collect();
-        // Jail lexically BEFORE any filesystem call: tool chips send paths an
-        // agent printed, and merely opening `\\host\share\a.png` (or an autofs
-        // `/net/host/…`) reaches out to that host — on Windows with the
-        // user's NTLM credentials. Roots match in raw and canonical form
-        // (`/var` vs `/private/var`, symlinked cwds).
-        let requested = lexical_components(Path::new(path)).ok_or_else(outside)?;
-        let lexically_allowed = roots.iter().any(|root| {
-            let canonical = std::fs::canonicalize(root).ok();
-            [Some(root.as_path()), canonical.as_deref()]
-                .into_iter()
-                .flatten()
-                .filter_map(lexical_components)
-                .any(|root| requested.len() > root.len() && requested.starts_with(&root))
-        });
-        if !lexically_allowed {
-            return Err(outside());
-        }
-        // Canonicalize BOTH sides so symlinks can't escape.
-        let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;
-        let allowed = roots
-            .iter()
-            .filter_map(|root| std::fs::canonicalize(root).ok())
-            .any(|root| resolved.starts_with(&root) && resolved != root);
-        if !allowed {
-            return Err(outside());
-        }
+        let resolved = jail(path, &roots).ok_or_else(outside)?;
         let meta = std::fs::metadata(&resolved)?;
         if !meta.is_file() {
             return Err(EngineError::Other("Attachment is not a file".into()));
@@ -407,6 +385,151 @@ struct InspectedFile {
     name: String,
     mime_type: String,
     size: u64,
+}
+
+/// `path` canonicalized, when it lies strictly inside one of `roots`.
+///
+/// Jailed lexically BEFORE any filesystem call: tool chips and replies send
+/// paths an agent printed, and merely opening `\\host\share\a.png` (or an
+/// autofs `/net/host/…`) reaches out to that host — on Windows with the
+/// user's NTLM credentials. Roots match in raw and canonical form (`/var` vs
+/// `/private/var`, symlinked cwds). Then BOTH sides are canonicalized, so
+/// symlinks can't escape.
+fn jail(path: &str, roots: &[&Path]) -> Option<PathBuf> {
+    let requested = lexical_components(Path::new(path))?;
+    let lexically_allowed = roots.iter().any(|root| {
+        let canonical = std::fs::canonicalize(root).ok();
+        [Some(*root), canonical.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(lexical_components)
+            .any(|root| requested.len() > root.len() && requested.starts_with(&root))
+    });
+    if !lexically_allowed {
+        return None;
+    }
+    let resolved = std::fs::canonicalize(path).ok()?;
+    roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| resolved.starts_with(&root) && resolved != root)
+        .then_some(resolved)
+}
+
+/// [`jail`] for one root, without following a single link below it: each
+/// component under the root is `lstat`ed before anything resolves the path,
+/// and a symlink (a Windows junction counts) refuses it unfollowed. So a link
+/// a repository planted can't send the read anywhere, not even to look: a
+/// junction to `\\host\share` would reach that host with the user's
+/// credentials. The root itself may sit behind links (`/tmp` →
+/// `/private/tmp`): a path matches it raw or canonical. Links swapped in
+/// after the walk aren't guarded: only the user's own processes could, and
+/// they can read all this already.
+fn jail_without_links(path: &str, root: &Path) -> Option<PathBuf> {
+    let requested = lexical_components(Path::new(path))?;
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let depth = [root, canonical_root.as_path()]
+        .into_iter()
+        .filter_map(lexical_components)
+        .find(|root| requested.len() > root.len() && requested.starts_with(root))?
+        .len();
+    let mut walked = canonical_root.clone();
+    for name in &requested[depth..] {
+        #[cfg(windows)]
+        if is_windows_device_name(name) {
+            return None;
+        }
+        walked.push(name);
+        if std::fs::symlink_metadata(&walked)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
+            return None;
+        }
+    }
+    let resolved = std::fs::canonicalize(&walked).ok()?;
+    (resolved.starts_with(&canonical_root) && resolved != canonical_root).then_some(resolved)
+}
+
+/// A name Windows opens as a device in any folder and with any extension
+/// (`NUL.png`, `com1.jpg`, `CONIN$`), reaching a port or the console instead
+/// of a file.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_windows_device_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    let stem = name
+        .split(['.', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ');
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|n| {
+            let mut chars = n.chars();
+            chars
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || matches!(c, '¹' | '²' | '³'))
+                && chars.next().is_none()
+        })
+    };
+    matches!(stem, "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || numbered("COM")
+        || numbered("LPT")
+}
+
+/// One chunk of an image an agent's reply names in Markdown (`![alt](path)`),
+/// read from strictly inside `root`, the chat's working folder as configured
+/// (the RPC layer resolves it and refuses home and anything above it), with
+/// no link on the way ([`jail_without_links`]). Only a PNG, JPEG, WebP, or
+/// GIF by its extension AND its first bytes, of at most
+/// [`zeron_proto::IMAGE_MAX_BYTES`]: not the uploads dir, not another chat's
+/// folder, not any other file type.
+pub fn read_chat_image_chunk(
+    path: &str,
+    offset: u64,
+    root: &Path,
+) -> Result<AttachmentChunk, EngineError> {
+    use std::io::{Read, Seek};
+    let refused = |why: &str| EngineError::Other(why.into());
+    let resolved = jail_without_links(path, root)
+        .ok_or_else(|| refused("Image is outside the chat's folder, or behind a link"))?;
+    let meta = std::fs::metadata(&resolved)?;
+    if !meta.is_file() {
+        return Err(refused("Image is not a file"));
+    }
+    if meta.len() > zeron_proto::IMAGE_MAX_BYTES as u64 {
+        return Err(refused("Image is too large"));
+    }
+    let mime_type = mime_by_ext(&resolved)
+        .filter(|mime| {
+            matches!(
+                *mime,
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            )
+        })
+        .ok_or_else(|| refused("Not a PNG, JPEG, WebP, or GIF image"))?;
+    let mut file = std::fs::File::open(&resolved)?;
+    let mut head = Vec::with_capacity(12);
+    (&mut file).take(12).read_to_end(&mut head)?;
+    if raster_signature(&head).map(|(_, mime)| mime) != Some(mime_type) {
+        return Err(refused("Image content doesn't match its name"));
+    }
+    let size = meta.len();
+    let start = offset.min(size);
+    let next_offset = (start + READ_CHUNK_BYTES).min(size);
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity((next_offset - start) as usize);
+    file.take(next_offset - start).read_to_end(&mut buf)?;
+    Ok(AttachmentChunk {
+        name: resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image".into()),
+        mime_type: mime_type.to_string(),
+        data: BASE64.encode(&buf),
+        next_offset,
+        done: next_offset >= size,
+    })
 }
 
 /// An absolute local path's components with `.`/`..` resolved WITHOUT
@@ -545,6 +668,53 @@ mod tests {
         assert_eq!(std::fs::read(format!("{stem}-asset-sky.hdr")).unwrap(), b"hdr");
         uploads.remove_visual("v:abc");
         assert_eq!(std::fs::read_dir(uploads.dir()).unwrap().count(), 0);
+    }
+
+    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(width, height)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn shown_images_are_sniffed_and_stored_under_their_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let png = encoded(3, 2, image::ImageFormat::Png);
+        let image = uploads
+            .store_shown_image("img:abc", "../shots/before fold.png", &png)
+            .unwrap();
+        assert!(image.path.ends_with("img_abc-image.png"), "{}", image.path);
+        assert_eq!(std::fs::read(&image.path).unwrap(), png);
+        assert_eq!(image.name, "before_fold.png");
+        assert_eq!(image.mime_type, "image/png");
+        // A JPEG named .png is stored as what it is.
+        let jpeg = uploads
+            .store_shown_image(
+                "img:def",
+                "photo.png",
+                &encoded(3, 2, image::ImageFormat::Jpeg),
+            )
+            .unwrap();
+        assert!(jpeg.path.ends_with("-image.jpg") && jpeg.mime_type == "image/jpeg");
+        let refuse = |bytes: &[u8]| {
+            uploads
+                .store_shown_image("img:ghi", "notes.png", bytes)
+                .unwrap_err()
+                .to_string()
+        };
+        let error = refuse(b"plain text");
+        assert!(error.contains("not a PNG"), "{error}");
+        let error = refuse(b"\x89PNG\r\n\x1a\ntruncated");
+        assert!(error.contains("unreadable png image"), "{error}");
+        let error = refuse(&encoded(4097, 1, image::ImageFormat::Png));
+        assert!(
+            error.contains("a 4097x1 image") && error.contains("downscale"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(uploads.dir()).unwrap().count(), 2);
     }
 
     #[test]
@@ -726,6 +896,153 @@ mod tests {
                 error.to_string().contains("outside the upload cache"),
                 "{path:?}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn chat_images_read_only_raster_files_inside_the_chat_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let png = encoded(3, 2, image::ImageFormat::Png);
+        std::fs::create_dir(folder.path().join("shots")).unwrap();
+        let inside = folder.path().join("shots").join("before.png");
+        std::fs::write(&inside, &png).unwrap();
+        let chunk = read_chat_image_chunk(inside.to_str().unwrap(), 0, folder.path()).unwrap();
+        assert_eq!(BASE64.decode(&chunk.data).unwrap(), png);
+        assert!(chunk.done && chunk.mime_type == "image/png" && chunk.name == "before.png");
+
+        // A long file arrives in chunks that concatenate to it.
+        let mut long = png.clone();
+        long.resize(100_000, 7);
+        std::fs::write(folder.path().join("long.png"), &long).unwrap();
+        let long_path = folder.path().join("long.png");
+        let (mut offset, mut read) = (0, Vec::new());
+        loop {
+            let chunk =
+                read_chat_image_chunk(long_path.to_str().unwrap(), offset, folder.path()).unwrap();
+            read.extend(BASE64.decode(&chunk.data).unwrap());
+            if chunk.done {
+                break;
+            }
+            offset = chunk.next_offset;
+        }
+        assert_eq!(read, long);
+
+        std::fs::write(elsewhere.path().join("x.png"), &png).unwrap();
+        std::fs::write(folder.path().join("notes.txt"), b"secret").unwrap();
+        std::fs::write(folder.path().join("fake.png"), b"secret, not a png").unwrap();
+        std::fs::write(
+            folder.path().join("photo.png"),
+            encoded(3, 2, image::ImageFormat::Jpeg),
+        )
+        .unwrap();
+        std::fs::write(folder.path().join("logo.svg"), b"<svg/>").unwrap();
+        let big = folder.path().join("big.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(zeron_proto::IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        let escape = folder
+            .path()
+            .join("..")
+            .join(elsewhere.path().file_name().unwrap())
+            .join("x.png");
+        let mut refused = vec![
+            (elsewhere.path().join("x.png"), "outside the chat's folder"),
+            (escape, "outside the chat's folder"),
+            (folder.path().to_path_buf(), "outside the chat's folder"),
+            (PathBuf::from("before.png"), "outside the chat's folder"),
+            (
+                PathBuf::from(r"\\host\share\x.png"),
+                "outside the chat's folder",
+            ),
+            (
+                PathBuf::from("//host/share/x.png"),
+                "outside the chat's folder",
+            ),
+            (folder.path().join("shots"), "not a file"),
+            (folder.path().join("notes.txt"), "Not a PNG"),
+            (folder.path().join("logo.svg"), "Not a PNG"),
+            (folder.path().join("fake.png"), "doesn't match its name"),
+            (folder.path().join("photo.png"), "doesn't match its name"),
+            (big, "too large"),
+        ];
+        // No link is followed, even one that stays inside; a FIFO is never
+        // opened (it would block the read).
+        #[cfg(unix)]
+        {
+            let link = |target: &Path, name: &str| {
+                let link = folder.path().join(name);
+                std::os::unix::fs::symlink(target, &link).unwrap();
+                link
+            };
+            refused.extend([
+                (
+                    link(&elsewhere.path().join("x.png"), "out.png"),
+                    "behind a link",
+                ),
+                (link(&inside, "alias.png"), "behind a link"),
+                (
+                    link(&folder.path().join("shots"), "linked").join("before.png"),
+                    "behind a link",
+                ),
+            ]);
+            let fifo = folder.path().join("pipe.png");
+            if std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                refused.push((fifo, "not a file"));
+            }
+        }
+        for (path, why) in refused {
+            let error = read_chat_image_chunk(&path.to_string_lossy(), 0, folder.path())
+                .expect_err(&format!("read {path:?}"))
+                .to_string();
+            assert!(error.contains(why), "{path:?}: {error}");
+        }
+
+        // A folder reached through a link of its own (`/tmp` on macOS)
+        // serves its images by either name.
+        #[cfg(unix)]
+        {
+            let via = elsewhere.path().join("chat-folder");
+            std::os::unix::fs::symlink(folder.path(), &via).unwrap();
+            for path in [via.join("shots").join("before.png"), inside.clone()] {
+                let chunk = read_chat_image_chunk(path.to_str().unwrap(), 0, &via)
+                    .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+                assert_eq!(BASE64.decode(&chunk.data).unwrap(), png);
+            }
+        }
+    }
+
+    #[test]
+    fn windows_device_names_are_recognized_whatever_their_extension() {
+        let device = |name: &str| is_windows_device_name(std::ffi::OsStr::new(name));
+        for name in [
+            "CON",
+            "nul.png",
+            "Aux.jpg",
+            "prn .gif",
+            "com1.png",
+            "LPT9.webp",
+            "com¹.png",
+            "conin$.png",
+            "CONOUT$",
+            "con:x.png",
+        ] {
+            assert!(device(name), "{name}");
+        }
+        for name in [
+            "console.png",
+            "com10.png",
+            "lpt.png",
+            "nul2.png",
+            "before.png",
+            "aux_",
+        ] {
+            assert!(!device(name), "{name}");
         }
     }
 
@@ -966,6 +1283,55 @@ impl Uploads {
             }
         }
         let _ = std::fs::remove_file(manifest);
+    }
+
+    /// Store an image an agent shows with `show_image` as `{id}-image.{ext}`
+    /// (the file it came from may change or vanish). The bytes must be a PNG,
+    /// JPEG, WebP, or GIF the desktop can preview; `name` is the file name
+    /// shown with it.
+    pub fn store_shown_image(
+        &self,
+        id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<ImportedImage, EngineError> {
+        use std::io::Write;
+        use zeron_proto::{IMAGE_MAX_BYTES, IMAGE_MAX_SIDE};
+        let (ext, mime) = raster_signature(bytes)
+            .ok_or_else(|| EngineError::Other("not a PNG, JPEG, WebP, or GIF image".into()))?;
+        if bytes.len() > IMAGE_MAX_BYTES {
+            return Err(EngineError::Other(format!(
+                "an image is at most {} MB",
+                IMAGE_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+        // From the header alone: refused here, not "unavailable" in the chat.
+        let (width, height) = image::ImageReader::with_format(
+            std::io::Cursor::new(bytes),
+            image::ImageFormat::from_extension(ext).expect("a sniffed raster format"),
+        )
+        .into_dimensions()
+        .map_err(|e| EngineError::Other(format!("unreadable {ext} image: {e}")))?;
+        if width.max(height) > IMAGE_MAX_SIDE {
+            return Err(EngineError::Other(format!(
+                "a {width}x{height} image; images show at most {IMAGE_MAX_SIDE} pixels on a \
+                 side, so downscale it first"
+            )));
+        }
+        std::fs::create_dir_all(self.dir())?;
+        let destination = self.dir().join(format!("{}-image.{ext}", sanitize(id)));
+        let mut temporary = tempfile::NamedTempFile::new_in(self.dir())?;
+        temporary.write_all(bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&destination)
+            .map_err(|e| EngineError::Io(e.error))?;
+        Ok(ImportedImage {
+            path: destination.to_string_lossy().into_owned(),
+            name: sanitize(name),
+            mime_type: mime.into(),
+            size: bytes.len() as u64,
+        })
     }
 
     /// Copy a Codex-owned raster into the active profile without exposing the

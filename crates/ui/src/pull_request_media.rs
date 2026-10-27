@@ -1,4 +1,5 @@
-//! GitHub description media is opt-in; transcript Markdown keeps its existing policy.
+//! GitHub description media is opt-in. Transcript Markdown draws only local
+//! images inside the chat's folder (`reply_images.rs`).
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*, px};
@@ -409,11 +410,14 @@ pub(super) fn media(
     }
 }
 
-/// Types the image closure for [`MediaUi::image`].
+/// Types the image closure for [`MediaUi::image`]; a description draws every
+/// image it names (or a placeholder in its place).
 fn image_renderer(
     render: impl Fn(&InlineImage, SharedString, &Theme) -> AnyElement + 'static,
-) -> Option<Rc<dyn Fn(&InlineImage, SharedString, &Theme) -> AnyElement>> {
-    Some(Rc::new(render))
+) -> Option<markdown::render::ImageUi> {
+    Some(Rc::new(move |image, id, theme| {
+        Some(render(image, id, theme))
+    }))
 }
 
 /// Screenshot tables become wrapping media cards instead of tall table cells.
@@ -491,7 +495,7 @@ pub(super) fn render_description(
                             "{}-gallery-{block_index}-{cell_index}-{index}",
                             options.row_key
                         );
-                        card = card.child(image_ui(image, id.into(), theme));
+                        card = card.children(image_ui(image, id.into(), theme));
                     }
                 }
                 grid = grid.child(card);

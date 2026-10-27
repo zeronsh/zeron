@@ -404,6 +404,20 @@ pub struct McpServer {
     pub env: std::collections::BTreeMap<String, String>,
 }
 
+impl McpServer {
+    /// Set to `1` on Zeron's own server when its host turned the provider's
+    /// native subagents off (Settings → Providers) and the chat has no
+    /// parent: the agent delegates through this server's side chats instead,
+    /// and the driver launches it without its subagent tools.
+    pub const SIDE_CHATS_ONLY_ENV: &'static str = "ZERON_SIDE_CHATS_ONLY";
+
+    pub fn side_chats_only(&self) -> bool {
+        self.env
+            .get(Self::SIDE_CHATS_ONLY_ENV)
+            .is_some_and(|value| value == "1")
+    }
+}
+
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
 /// by the HOST while draining the queued Run — not by the sender over a
 /// blocking CreateWorktree RPC — so the send path stays durable: a lost relay
@@ -567,6 +581,14 @@ const _: () = assert!(
     VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
 );
 
+/// Largest image file an agent may show with `show_image` (it rides one
+/// WebSocket message, base64-encoded, like a visual's assets).
+pub const IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+/// Longest side, in pixels, of an image the desktop decodes for a preview;
+/// `show_image` refuses larger ones rather than publish an unviewable part.
+pub const IMAGE_MAX_SIDE: u32 = 4096;
+const _: () = assert!(IMAGE_MAX_BYTES.div_ceil(3) * 4 + 64 * 1024 < 16 * 1024 * 1024);
+
 /// Whether `name` can name a visual's asset: a plain file name.
 pub fn valid_visual_asset_name(name: &str) -> bool {
     !name.is_empty()
@@ -725,7 +747,9 @@ pub enum AgentEvent {
     TextDelta {
         text: String,
     },
-    /// A generated raster asset. The engine materializes this path before publication.
+    /// A raster image in the reply: one a harness generated (the engine
+    /// materializes this path before publication) or one an agent showed with
+    /// Zeron's `show_image` MCP tool (already stored in uploads).
     #[serde(rename_all = "camelCase")]
     GeneratedImage {
         id: String,
@@ -807,6 +831,12 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,
+        /// What the person answered, exactly as the run received it. Empty
+        /// when the questions closed without an answer (dismissed, or the run
+        /// stopped waiting). Absent on events written before answers were
+        /// recorded — nothing is known about them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<UserInputAnswer>>,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.
@@ -837,9 +867,12 @@ pub enum AgentEvent {
     /// the spawning tool call (`parent_tool_use_id` = the parent-feed
     /// `ToolCall::id` that launched it). Never folded into the parent chat
     /// doc — the engine routes these to the subagent's own doc; the parent
-    /// keeps only the spawn chip. Additive: old consumers that don't match
-    /// this variant drop the nested traffic, which is the pre-subagent-viz
-    /// behavior.
+    /// keeps only the spawn chip. The spawn `ToolCall` must come first: the
+    /// engine opens that doc only for an id that already names one of the
+    /// chat's spawn chips ([`ToolCall::is_subagent_spawn`]), and keeps
+    /// traffic tagged with any other id in the run journal only. Additive:
+    /// old consumers that don't match this variant drop the nested traffic,
+    /// which is the pre-subagent-viz behavior.
     #[serde(rename_all = "camelCase")]
     Subagent {
         parent_tool_use_id: String,

@@ -93,6 +93,9 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    /// Harnesses the user turned native subagents off for: their runs
+    /// delegate through side chats only.
+    native_subagents_off: Vec<HarnessId>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -107,6 +110,16 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// Per-device native subagent preferences (Settings → Providers).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeSubagentSettings {
+    /// Registered harnesses whose native subagents can be turned off.
+    pub switchable: Vec<HarnessId>,
+    /// The ones turned off: their runs delegate through side chats only.
+    pub off: Vec<HarnessId>,
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -583,6 +596,43 @@ impl HarnessRegistry {
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
         self.prefs().titles = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    /// Whether runs of `id` keep the provider's own subagent tools. Off only
+    /// by the user's choice, for a driver that can launch without them.
+    pub fn native_subagents(&self, id: HarnessId) -> bool {
+        !(zeron_harness::switches_native_subagents(id)
+            && self.prefs().native_subagents_off.contains(&id))
+    }
+
+    pub fn native_subagent_settings(&self) -> NativeSubagentSettings {
+        let registered: Vec<HarnessId> = self.order().iter().copied().collect();
+        NativeSubagentSettings {
+            switchable: registered
+                .into_iter()
+                .filter(|id| zeron_harness::switches_native_subagents(*id))
+                .collect(),
+            off: self.prefs().native_subagents_off.clone(),
+        }
+    }
+
+    /// Turn `id`'s native subagents on or off and persist. Each chat picks
+    /// the change up at its next turn once its background work is done: a
+    /// parked session still holding some is kept as it started.
+    pub fn set_native_subagents(&self, id: HarnessId, on: bool) -> Result<(), String> {
+        if !zeron_harness::switches_native_subagents(id) {
+            return Err(format!("{id:?} has no native subagents to turn off"));
+        }
+        {
+            let mut prefs = self.prefs();
+            match (on, prefs.native_subagents_off.contains(&id)) {
+                (true, true) => prefs.native_subagents_off.retain(|h| *h != id),
+                (false, false) => prefs.native_subagents_off.push(id),
+                _ => return Ok(()),
+            }
+        }
         self.persist_prefs();
         Ok(())
     }
@@ -1405,6 +1455,56 @@ mod tests {
         assert_eq!(before.steering_mode, after.steering_mode);
         assert_eq!(before.reasoning_levels, after.reasoning_levels);
     }
+
+    #[test]
+    fn native_subagents_switch_off_per_harness_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, true);
+        test_slot(&registry, HarnessId::Codex, true);
+        test_slot(&registry, HarnessId::Opencode, true);
+        assert!(registry.native_subagents(HarnessId::ClaudeCode));
+        assert_eq!(
+            registry.native_subagent_settings().switchable,
+            vec![HarnessId::ClaudeCode]
+        );
+        // A Codex thread keeps the mode it ran with: no switch to undo.
+        assert!(
+            registry
+                .set_native_subagents(HarnessId::Codex, false)
+                .is_err()
+        );
+
+        registry
+            .set_native_subagents(HarnessId::ClaudeCode, false)
+            .unwrap();
+        registry
+            .set_native_subagents(HarnessId::ClaudeCode, false)
+            .unwrap();
+        assert!(
+            registry
+                .set_native_subagents(HarnessId::Opencode, false)
+                .is_err()
+        );
+        assert!(!registry.native_subagents(HarnessId::ClaudeCode));
+        assert!(registry.native_subagents(HarnessId::Codex));
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(
+            reloaded.native_subagent_settings().off,
+            vec![HarnessId::ClaudeCode]
+        );
+        reloaded
+            .set_native_subagents(HarnessId::ClaudeCode, true)
+            .unwrap();
+        assert!(reloaded.native_subagents(HarnessId::ClaudeCode));
+
+        // Only a driver that can launch without them ever runs without them.
+        *reloaded.prefs() = serde_json::from_str(r#"{"nativeSubagentsOff":["opencode"]}"#).unwrap();
+        assert!(reloaded.native_subagents(HarnessId::Opencode));
+    }
 }
 
 #[cfg(test)]
@@ -1456,6 +1556,7 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+        assert!(prefs.native_subagents_off.is_empty());
     }
 }
 

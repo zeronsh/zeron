@@ -2890,6 +2890,7 @@ impl FilesSurface {
                 .justify_center();
             if let Some(comment) = comments_by_line.get(&row.line) {
                 let id = comment.id.clone();
+                let open = self.preview.active_comment.as_deref() == Some(comment.id.as_str());
                 overlays.push(
                     cell.bg(theme.surface_card)
                         .cursor_pointer()
@@ -2898,6 +2899,11 @@ impl FilesSurface {
                         .hover(|style| style.bg(crate::theme::wash(0.08)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_editor_comment(id.clone(), cx)
+                        }))
+                        .tooltip(crate::settings::widgets::text_tooltip(if open {
+                            "Hide comment"
+                        } else {
+                            "Show comment"
                         }))
                         .child(
                             icon(icons::CHAT_ROUND_LINE)
@@ -2918,6 +2924,7 @@ impl FilesSurface {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_editor_comment_draft(target.clone(), line, window, cx)
                         }))
+                        .tooltip(crate::settings::widgets::text_tooltip("Add comment"))
                         .child(
                             div()
                                 .size(px(comments::COMMENT_ADDER_SIZE))

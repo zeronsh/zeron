@@ -645,6 +645,11 @@ impl BillingPage {
                     delta: i32,
                     cx: &mut Context<Self>| {
             let accent = theme.accent;
+            let label = if delta < 0 {
+                "Fewer packs"
+            } else {
+                "More packs"
+            };
             div()
                 .id(id)
                 .flex_none()
@@ -655,11 +660,8 @@ impl BillingPage {
                 .rounded(px(8.0))
                 .tab_index(0)
                 .role(gpui::Role::Button)
-                .aria_label(if delta < 0 {
-                    "Fewer packs"
-                } else {
-                    "More packs"
-                })
+                .aria_label(label)
+                .tooltip(widgets::text_tooltip(label))
                 .focus_visible(move |s| s.border_2().border_color(accent))
                 .when(!enabled, |el| el.opacity(0.35))
                 .when(enabled, |el| {

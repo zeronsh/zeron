@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -93,6 +94,14 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
         )
     }
 
+    // No answers at all is the decline: the run reads its harness's own
+    // "dismissed", and the chip records the questions closed.
+    fun dismiss() {
+        if (submitted) return
+        submitted = true
+        onSubmit(emptyList())
+    }
+
     fun pick(q: UserInputQuestion, option: String) {
         haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
         val set = picks[q.id].orEmpty()
@@ -112,57 +121,72 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp).testTag("question-panel"),
     ) {
-        AnimatedContent(page, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "question") { index ->
-            val q = items.getOrNull(index) ?: return@AnimatedContent
-            Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
-                val header = q.header.ifEmpty { "Question" }
-                Text(
-                    if (items.size > 1) "$header · ${index + 1} of ${items.size}" else header,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(6.dp))
-                Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
-                    Text(q.question, style = MaterialTheme.typography.titleMediumEmphasized)
-                    Spacer(Modifier.height(14.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val chosen = picks[q.id].orEmpty()
-                        q.options.forEachIndexed { i, option ->
-                            OptionRow(i, option, option in chosen, q.multiSelect) { pick(q, option) }
-                        }
-                    }
-                    if (q.options.isNotEmpty()) Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = custom[q.id].orEmpty(),
-                        onValueChange = { custom[q.id] = it },
-                        placeholder = { Text(if (q.multiline) "Write your answer" else "Other…") },
-                        singleLine = !q.multiline,
-                        minLines = if (q.multiline) 5 else 1,
-                        maxLines = if (q.multiline) 10 else 1,
-                        shape = RoundedCornerShape(16.dp),
-                        keyboardOptions = KeyboardOptions(imeAction = if (q.multiline) ImeAction.Default else ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { advance() }),
-                        modifier = Modifier.fillMaxWidth().testTag(if (q.multiline) "question-editor" else "question-other"),
+        Box {
+            AnimatedContent(page, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "question") { index ->
+                val q = items.getOrNull(index) ?: return@AnimatedContent
+                Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
+                    val header = q.header.ifEmpty { "Question" }
+                    // Header and question wrap clear of the corner close (8dp in, 36dp wide).
+                    Text(
+                        if (items.size > 1) "$header · ${index + 1} of ${items.size}" else header,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 32.dp),
                     )
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (index > 0) TextButton(onClick = { page-- }) { Text("Back") }
-                    Spacer(Modifier.weight(1f))
-                    Button(
-                        onClick = ::advance,
-                        enabled = answered(current) && !submitted,
-                        shapes = ButtonDefaults.shapes(),
-                        modifier = Modifier.testTag("question-next"),
-                    ) {
-                        Text(if (index == items.size - 1) "Submit" else "Next")
-                        if (index == items.size - 1) {
-                            Spacer(Modifier.width(8.dp))
-                            ZIcon(ZIcons.Send, null, Modifier.size(18.dp))
+                    Spacer(Modifier.height(6.dp))
+                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                        Text(q.question, style = MaterialTheme.typography.titleMediumEmphasized, modifier = Modifier.padding(end = 32.dp))
+                        Spacer(Modifier.height(14.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val chosen = picks[q.id].orEmpty()
+                            q.options.forEachIndexed { i, option ->
+                                OptionRow(i, option, option in chosen, q.multiSelect) { pick(q, option) }
+                            }
+                        }
+                        if (q.options.isNotEmpty()) Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = custom[q.id].orEmpty(),
+                            onValueChange = { custom[q.id] = it },
+                            placeholder = { Text(if (q.multiline) "Write your answer" else "Other…") },
+                            singleLine = !q.multiline,
+                            minLines = if (q.multiline) 5 else 1,
+                            maxLines = if (q.multiline) 10 else 1,
+                            shape = RoundedCornerShape(16.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = if (q.multiline) ImeAction.Default else ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { advance() }),
+                            modifier = Modifier.fillMaxWidth().testTag(if (q.multiline) "question-editor" else "question-other"),
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (index > 0) TextButton(onClick = { page-- }) { Text("Back") }
+                        Spacer(Modifier.weight(1f))
+                        Button(
+                            onClick = ::advance,
+                            enabled = answered(current) && !submitted,
+                            shapes = ButtonDefaults.shapes(),
+                            modifier = Modifier.testTag("question-next"),
+                        ) {
+                            Text(if (index == items.size - 1) "Submit" else "Next")
+                            if (index == items.size - 1) {
+                                Spacer(Modifier.width(8.dp))
+                                ZIcon(ZIcons.Send, null, Modifier.size(18.dp))
+                            }
                         }
                     }
                 }
             }
+            // The model picker's close, pinned 8dp in so it is concentric with the
+            // card's corner: answers nothing, and the agent reads that the questions
+            // went unanswered.
+            TonalCircleButton(
+                ZIcons.Close,
+                "Close without answering",
+                onClick = ::dismiss,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).testTag("question-close"),
+                size = 36.dp,
+                container = MaterialTheme.colorScheme.surfaceContainerHighest,
+            )
         }
     }
 }

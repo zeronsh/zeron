@@ -98,22 +98,30 @@ pub(crate) mod spaces;
 mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
+use tabs::NewSessionTarget;
 mod voice_stage;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
-/// `connected` already includes the engine's degradation grace. A brief
-/// focus-triggered dial needs no sidebar status; queued changes or a sustained
-/// outage still deserve one.
-fn chat_sync_pill_caption(chat: &zeron_proto::ChatConnectivity) -> Option<&'static str> {
-    use zeron_proto::ChatSyncState as S;
-    let sustained_or_queued = !chat.connected || chat.pending_pushes > 0;
-    match chat.sync_state {
-        S::Waiting if sustained_or_queued => Some("Sync queued — changes are saved"),
-        S::Connecting if sustained_or_queued => Some("Syncing…"),
-        S::Offline if !chat.connected => Some("Offline — changes are saved"),
-        _ => None,
+/// The sidebar line speaks for the whole connection, and whether its glyph
+/// is the amber dot (else the reconnect spinner). One chat's sync reads in
+/// its own composer and transcript, so the two never tell different
+/// stories. A failed local save is the exception, whichever chat it hit:
+/// it outranks the network.
+fn connection_pill_caption(conn: &zeron_proto::Connectivity) -> Option<(&'static str, bool)> {
+    use zeron_proto::{ChatSyncState, ConnectivityState as S};
+    if conn
+        .chats
+        .iter()
+        .any(|chat| chat.sync_state == ChatSyncState::StorageError)
+    {
+        return Some(("Changes could not be saved", true));
+    }
+    match conn.state {
+        S::Disabled | S::Connected => None,
+        S::Offline => Some(("Offline — sends are saved", true)),
+        S::Reconnecting => Some(("Reconnecting…", false)),
     }
 }
 
@@ -2087,7 +2095,6 @@ pub struct Shell {
     subagent_seq: u64,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
-    side_chat_creating: bool,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2196,6 +2203,8 @@ pub struct Shell {
     chat_hover_resync: bool,
     /// The sidebar row whose hover card shows (or waits out its dwell).
     session_hover_card: session_hover_card::SessionHoverCard,
+    /// Draws that card in gpui's tooltip layer.
+    session_card_view: Entity<session_hover_card::SessionCardView>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
     /// In-flight reorder for the pinned section only.
@@ -2649,7 +2658,6 @@ impl Shell {
             subagent_seq: 0,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
-            side_chat_creating: false,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -2722,6 +2730,10 @@ impl Shell {
             chat_status_hover: None,
             chat_hover_resync: false,
             session_hover_card: Default::default(),
+            session_card_view: {
+                let shell = cx.weak_entity();
+                cx.new(|_| session_hover_card::SessionCardView::new(shell))
+            },
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
@@ -2909,7 +2921,6 @@ impl Shell {
         self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
-            self.side_chat_creating = false;
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
@@ -8141,6 +8152,7 @@ impl Shell {
                     match button {
                         gpui::WindowButton::Minimize => linux_caption_button(
                             "window-minimize",
+                            "Minimize",
                             icons::WINDOW_MINIMIZE,
                             false,
                             theme,
@@ -8148,18 +8160,24 @@ impl Shell {
                         )
                         .into_any_element(),
                         gpui::WindowButton::Maximize => {
-                            let (id, icon_path) = if is_maximized {
-                                ("window-restore", icons::WINDOW_RESTORE)
+                            let (id, label, icon_path) = if is_maximized {
+                                ("window-restore", "Restore", icons::WINDOW_RESTORE)
                             } else {
-                                ("window-maximize", icons::WINDOW_MAXIMIZE)
+                                ("window-maximize", "Maximize", icons::WINDOW_MAXIMIZE)
                             };
-                            linux_caption_button(id, icon_path, false, theme, |_, window, _| {
-                                window.zoom_window()
-                            })
+                            linux_caption_button(
+                                id,
+                                label,
+                                icon_path,
+                                false,
+                                theme,
+                                |_, window, _| window.zoom_window(),
+                            )
                             .into_any_element()
                         }
                         gpui::WindowButton::Close => linux_caption_button(
                             "window-close",
+                            "Close",
                             icons::CLOSE,
                             true,
                             theme,
@@ -9009,14 +9027,7 @@ impl Shell {
             && !preview
             && rename_input.is_none()
             && self.session_hover_card.shown() == Some(id.as_str()))
-        .then(|| {
-            self.render_session_hover_card(
-                &id,
-                time_ago.clone(),
-                cx,
-            )
-        })
-        .flatten();
+        .then(|| self.render_session_hover_card(&id, time_ago.clone(), cx));
         let card_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
         // the wash and the title brighten ride the same 150ms blend.
@@ -9568,64 +9579,29 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
-    /// Global connection health, with selected-chat queue and storage status.
-    /// Persistence failures take precedence even when the network is offline.
-    /// No surface,
+    /// Global connection health and any chat's storage failure (see
+    /// [`connection_pill_caption`]). No surface,
     /// no border (v0.2.12 feedback): a bare spinner + faint caption while
     /// reconnecting; an amber dot only when the OS says offline. The
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use zeron_proto::ConnectivityState as S;
-        let conn = self.state.read(cx).connectivity.clone();
-        let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn
-            .chats
-            .iter()
-            .find(|c| Some(c.chat_id.as_str()) == selected);
-        let chat_state = chat.map(|c| c.sync_state);
-        let (label, glyph): (SharedString, AnyElement) = match conn.state {
-            _ if chat_state == Some(zeron_proto::ChatSyncState::StorageError) => (
-                "Changes could not be saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
-            ),
-            S::Disabled => return None,
-            S::Connected => {
-                let caption = chat_sync_pill_caption(chat?)?;
-                (
-                    caption.into(),
-                    loaders::mini_mono_spinner(
-                        "chat-sync-spinner",
-                        2.0,
-                        theme.text_muted,
-                        self.sidebar_pane.entity_id(),
-                        cx,
-                    )
-                    .into_any_element(),
-                )
-            }
-            S::Offline => (
-                "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
-            ),
-            S::Reconnecting => (
-                "Reconnecting…".into(),
-                loaders::mini_mono_spinner(
-                    "connection-spinner",
-                    2.0,
-                    theme.text_muted,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
-            ),
+        let (caption, warning) = connection_pill_caption(&self.state.read(cx).connectivity)?;
+        let label: SharedString = caption.into();
+        let glyph = if warning {
+            div()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(theme.warning)
+                .into_any_element()
+        } else {
+            loaders::mini_mono_spinner(
+                "connection-spinner",
+                2.0,
+                theme.text_muted,
+                self.sidebar_pane.entity_id(),
+                cx,
+            )
+            .into_any_element()
         };
         Some(
             crate::motion::fade_in(
@@ -12690,9 +12666,11 @@ impl Shell {
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     let chat_id = match surface {
+                        // A pending fork has no chat to act on yet.
                         RightSurface::SideChat(id) => this
                             .side_chats
                             .get(&id)
+                            .filter(|tab| tab.fork.is_none())
                             .and_then(|tab| tab.state.read(cx).selected_chat.clone())
                             .unwrap_or_default(),
                         _ => String::new(),
@@ -13346,6 +13324,7 @@ fn windows_caption_button(
 /// of the drag strip's event surface (see [`window_control_button`]).
 fn linux_caption_button(
     id: &'static str,
+    label: &'static str,
     icon_path: &'static str,
     close: bool,
     theme: &Theme,
@@ -13370,6 +13349,9 @@ fn linux_caption_button(
         .rounded(px(6.0))
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
@@ -13884,7 +13866,10 @@ impl Render for Shell {
                         this.open_add_space_on_device(&action.device, cx);
                         return;
                     }
-                    this.open_new_session(Some(action.project_id.clone()), cx);
+                    this.open_new_session(
+                        Some(NewSessionTarget::Project(action.project_id.clone())),
+                        cx,
+                    );
                     // Stage after the composer has swapped to the new
                     // session's draft, which runs on the state observation
                     // `open_new_session` just queued. A draft already waiting
@@ -14489,48 +14474,50 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
-        use zeron_proto::{ChatConnectivity, ChatSyncState as S};
+    fn connection_pill_is_global_only() {
+        use zeron_proto::{ChatConnectivity, ChatSyncState as S, Connectivity, ConnectivityState};
 
-        let mut chat = ChatConnectivity {
-            chat_id: "remote".into(),
-            sync_state: S::Local,
+        let chat = |chat_id: &str, sync_state| ChatConnectivity {
+            chat_id: chat_id.into(),
+            sync_state,
             connected: false,
             delivery_live: false,
-            pending_pushes: 0,
+            pending_pushes: 3,
         };
-        assert_eq!(chat_sync_pill_caption(&chat), None);
-
-        for state in [S::Waiting, S::Connecting, S::Offline] {
-            chat.sync_state = state;
-            chat.connected = true;
-            assert_eq!(chat_sync_pill_caption(&chat), None, "transient {state:?}");
+        // A slow open or a sustained per-chat stall reads in that chat's own
+        // composer and transcript; the sidebar line stays quiet.
+        let mut conn = Connectivity {
+            state: ConnectivityState::Connected,
+            chats: [S::Waiting, S::Connecting, S::Offline, S::Unknown, S::Local]
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| chat(&format!("chat-{i}"), state))
+                .collect(),
+            ..Connectivity::default()
+        };
+        assert_eq!(connection_pill_caption(&conn), None);
+        conn.state = ConnectivityState::Disabled;
+        assert_eq!(connection_pill_caption(&conn), None);
+        conn.state = ConnectivityState::Reconnecting;
+        assert_eq!(
+            connection_pill_caption(&conn),
+            Some(("Reconnecting…", false))
+        );
+        conn.state = ConnectivityState::Offline;
+        assert_eq!(
+            connection_pill_caption(&conn),
+            Some(("Offline — sends are saved", true))
+        );
+        // A failed local save outranks the network, whichever chat it hit
+        // (not only the selected one).
+        conn.chats.push(chat("background", S::StorageError));
+        for state in [ConnectivityState::Offline, ConnectivityState::Connected] {
+            conn.state = state;
+            assert_eq!(
+                connection_pill_caption(&conn),
+                Some(("Changes could not be saved", true))
+            );
         }
-
-        chat.sync_state = S::Waiting;
-        chat.connected = false;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-        chat.sync_state = S::Offline;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Offline — changes are saved")
-        );
-
-        // Real pending pushes remain visible even with a live room.
-        chat.connected = true;
-        chat.pending_pushes = 1;
-        chat.sync_state = S::Waiting;
-        assert_eq!(
-            chat_sync_pill_caption(&chat),
-            Some("Sync queued — changes are saved")
-        );
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
     }
 
     #[test]
@@ -17640,15 +17627,79 @@ mod exit_regressions {
                     state.apply_spaces(vec![space("one"), space("two")]);
                 });
                 shell.settings.space_filter = None;
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 let state = shell.state.read(cx);
                 assert!(state.selected_chat.is_none());
                 assert_eq!(state.selected_space.as_deref(), Some("two"));
 
                 // The explicit project wins over a standing filter.
                 shell.settings.space_filter = Some("one".into());
-                shell.open_new_session(Some("two".into()), cx);
+                shell.open_new_session(Some(NewSessionTarget::Project("two".into())), cx);
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("two"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn new_session_without_a_project_homes_the_canvas_on_that_device(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![zeron_proto::Space {
+                        id: "repo".into(),
+                        device_id: "local".into(),
+                        path: "/repo".into(),
+                        name: None,
+                        git_detected: false,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        repository_id: None,
+                        github_repo: None,
+                        created_at: Utc::now(),
+                    }]);
+                    state.select_space(Some("repo".into()), cx);
+                });
+                // The opt-out wins over a standing filter, which the shell
+                // then drops so the first send stays visible.
+                shell.settings.space_filter = Some("repo".into());
+                shell.open_new_session(Some(NewSessionTarget::NoProject("remote".into())), cx);
+                let state = shell.state.read(cx);
+                assert!(state.selected_chat.is_none());
+                assert!(state.no_project);
+                assert!(state.selected_space.is_none());
+                assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert!(shell.settings.space_filter.is_none());
             })
             .unwrap();
     }
@@ -18989,6 +19040,18 @@ impl Shell {
     }
     pub fn fixture_transcript(&self) -> Entity<crate::transcript::Transcript> {
         self.transcript.clone()
+    }
+    /// A session row's click in the sidebar.
+    pub fn fixture_open_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.open_chat(chat_id.to_owned(), cx);
+    }
+    /// A side chat's row under its parent.
+    pub fn fixture_open_side_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        self.open_child_chat_tab(chat_id, cx);
+    }
+    /// The session card's "Fork chat".
+    pub fn fixture_fork_chat(&mut self, cx: &mut Context<Self>) {
+        self.create_side_chat(cx);
     }
 }
 

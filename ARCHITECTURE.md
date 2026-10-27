@@ -218,8 +218,8 @@ feature spec `docs/research/feature-inventory.md` §1.
 - **Composer**: hand-rolled gpui text input (start from Zed's `examples/input.rs`: IME, selection,
   clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
   Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
-  images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
-  is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
+  images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance, a corner close / Escape that
+  answers nothing) replacing the composer while input is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height

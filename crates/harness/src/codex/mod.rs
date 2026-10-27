@@ -118,6 +118,24 @@ fn plain_executable(path: PathBuf) -> PathBuf {
     path
 }
 
+/// `thread/start` / `thread/resume` config keys that, set to false, take the
+/// agent tools away (title runs, side-chats-only runs). The app-server merges
+/// that `config` into its `-c` overrides (openai/codex rust-v0.153.4,
+/// codex-rs/app-server/src/config_manager.rs `load_with_cli_overrides`), and
+/// "Setting `agents.enabled=false` disables agent tools"
+/// (docs/research/codex-subagents.md). An enabled `features.multi_agent_v2`
+/// takes precedence over `agents.enabled` (codex-rs/core/config.schema.json).
+const AGENT_TOOLS: [&str; 3] = [
+    "features.multi_agent",
+    "features.multi_agent_v2",
+    "agents.enabled",
+];
+
+/// [`AGENT_TOOLS`] as config overrides that switch them off.
+fn agent_tools_off() -> [(String, Value); 3] {
+    AGENT_TOOLS.map(|key| (key.to_owned(), Value::Bool(false)))
+}
+
 /// Dotted `thread/start` config overrides that add an injected MCP server
 /// to the user's `mcp_servers` table.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
@@ -1289,24 +1307,23 @@ async fn run_session(session: Session) {
                 crate::TITLE_INSTRUCTIONS.into(),
             );
             p.insert("ephemeral".into(), true.into());
-            p.insert(
-                "config".into(),
-                json!({
-                    "project_doc_max_bytes": 0,
-                    "web_search": "disabled",
-                    "features.shell_tool": false,
-                    "features.apply_patch_freeform": false,
-                    "features.multi_agent": false,
-                    "features.apps": false,
-                    "features.multi_agent_v2": false,
-                    "agents.enabled": false,
-                    "features.browser_use": false,
-                    "features.computer_use": false,
-                    "features.js_repl": false,
-                    "features.image_generation": false,
-                    "features.memories": false
-                }),
-            );
+            let mut config = json!({
+                "project_doc_max_bytes": 0,
+                "web_search": "disabled",
+                "features.shell_tool": false,
+                "features.apply_patch_freeform": false,
+                "features.apps": false,
+                "features.browser_use": false,
+                "features.computer_use": false,
+                "features.js_repl": false,
+                "features.image_generation": false,
+                "features.memories": false
+            });
+            config
+                .as_object_mut()
+                .expect("title config overrides are an object")
+                .extend(agent_tools_off());
+            p.insert("config".into(), config);
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
         if let Some(mcp) = request.mcp.as_ref().filter(|_| !title_only) {
@@ -1319,6 +1336,12 @@ async fn run_session(session: Session) {
                 .as_object_mut()
                 .expect("thread/start config overrides are an object");
             overrides.extend(codex_mcp_overrides(mcp));
+            // Delegation goes through that server's side chats only. The
+            // engine doesn't ask this of Codex yet: see
+            // `crate::switches_native_subagents`.
+            if mcp.side_chats_only() {
+                overrides.extend(agent_tools_off());
+            }
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());

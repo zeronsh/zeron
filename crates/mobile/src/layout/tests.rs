@@ -145,8 +145,99 @@ fn agent_messages_show_their_sender_over_the_bubble() {
     assert!(d.runs.iter().filter(|r| r.baseline < bubble.y).all(|r| r.x >= bubble.x - 0.5), "{:?} {bubble:?}", d.runs);
 }
 
+#[test]
+fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
+    let tool = |id: &str, name: &str, input: serde_json::Value| MessagePart::Tool {
+        id: id.into(),
+        call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: name.into(), input: Some(input) },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+    };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                tool("k1", "list_chats", serde_json::json!({})),
+                tool("k2", "send_message", serde_json::json!({ "chat": "Windows lane", "text": "Run the matrix." })),
+                tool("k3", "send_messages", serde_json::json!({ "requests": [{ "chat": "a", "text": "one" }, { "chat": "b", "text": "two" }] })),
+            ],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    // The ordinary tool keeps its group; each message is its own row.
+    assert_eq!(frame.row_count(), 4);
+    assert_eq!(frame.placement(1).unwrap().kind, RowKind::Markdown);
+    let d = frame.display(1).unwrap();
+    // Just the recipient: no bubble, no message text.
+    assert_eq!(d.text, "Message to \u{2060} Windows lane");
+    assert!(d.boxes.iter().all(|b| b.color != display::ColorRole::UserBubble));
+    // Left-aligned at the column's edge.
+    assert!(d.runs.first().unwrap().x < 40.0);
+    assert!(frame.display(3).unwrap().text.ends_with(" b"));
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
+}
+
+/// The question chip says what was answered, one `label → answer` line per
+/// question; a chip from before answers were recorded keeps its old text.
+#[test]
+fn question_chip_reads_what_was_answered() {
+    let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
+        id: id.into(),
+        header: header.into(),
+        question: format!("{header}?"),
+        options: vec!["Deep dive".into(), "Table".into()],
+        multi_select: false,
+        prefill: None,
+        multiline: false,
+    };
+    let chip = |questions: Vec<zeron_proto::UserInputQuestion>, resolved: bool, answers: Option<Vec<zeron_proto::UserInputAnswer>>| {
+        let mut w = worker(390.0);
+        w.input = TranscriptInput {
+            entries: vec![Arc::new(SessionMessageEntry {
+                id: "a".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input { id: "r1".into(), request_id: "r1".into(), questions, resolved, answers }],
+                created_at: 0,
+                device_id: String::new(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })],
+            ..Default::default()
+        };
+        let frame = w.pass();
+        let row = frame.display(0).unwrap();
+        (row.copy_text, row.height)
+    };
+    let picked = |id: &str, label: &str| zeron_proto::UserInputAnswer { question_id: id.into(), labels: vec![label.into()] };
+    assert_eq!(chip(vec![question("q", "Recherche")], true, None).0, "Answered a question");
+    let (closed, one_line) = chip(vec![question("q", "Recherche")], true, Some(vec![]));
+    assert_eq!(closed, "Recherche → Not answered");
+    let (answered, two_lines) = chip(vec![question("a", "Recherche"), question("b", "Format")], true, Some(vec![picked("a", "Deep dive"), picked("b", "Charts")]));
+    assert_eq!(answered, "Recherche → Deep dive\nFormat → “Charts”");
+    // Short enough to share a line at this width: only a kept break makes
+    // the second answer its own line.
+    assert!(two_lines > one_line, "{two_lines} vs {one_line}");
 }
 
 #[test]

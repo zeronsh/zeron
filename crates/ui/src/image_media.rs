@@ -258,8 +258,8 @@ pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<Me
 /// decoder allocation.
 pub(crate) fn raster_limits() -> image::Limits {
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
+    limits.max_image_width = Some(zeron_proto::IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(zeron_proto::IMAGE_MAX_SIDE);
     limits.max_alloc = Some(64 * 1024 * 1024);
     limits
 }

@@ -2506,6 +2506,7 @@ impl Render for PullRequestsPage {
                                                 .id("pull-requests-clear-search")
                                                 .role(gpui::Role::Button)
                                                 .aria_label("Clear search")
+                                                .tooltip(widgets::text_tooltip("Clear search"))
                                                 .tab_index(0)
                                                 .size(px(24.0))
                                                 .flex()

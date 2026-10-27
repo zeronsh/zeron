@@ -2,7 +2,8 @@ import UIKit
 
 /// Replaces the composer while the agent asks questions: one glass card per
 /// question, large option rows, "Other…" free text, and a single-select
-/// auto-advance (220ms) so a 3-question form is three taps.
+/// auto-advance (220ms) so a 3-question form is three taps. A corner close
+/// answers nothing: the agent reads that the questions went unanswered.
 final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     var onSubmit: (([(questionId: String, labels: [String])]) -> Void)?
     var onHeightChange: (() -> Void)?
@@ -15,6 +16,7 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
     private let editor = UITextView()
     private let back = UIButton(type: .system)
     private let nextButton = UIButton(type: .system)
+    private let close = UIButton(type: .system)
     private var items: [SessionChrome.Question] = []
     private var page = 0
     private var picks: [String: Set<String>] = [:]
@@ -66,16 +68,43 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         nextButton.configuration = nextConfig
         nextButton.accessibilityIdentifier = "question-next"
         nextButton.addAction(UIAction { [weak self] _ in self?.advance() }, for: .touchUpInside)
+        // The model picker's close: a 36pt glass capsule, 13pt semibold xmark.
+        var closeConfig = UIButton.Configuration.glass()
+        closeConfig.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+        closeConfig.baseForegroundColor = Palette.secondary
+        closeConfig.cornerStyle = .capsule
+        close.configuration = closeConfig
+        close.accessibilityLabel = "Close without answering"
+        close.accessibilityIdentifier = "question-close"
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.addAction(UIAction { [weak self] _ in self?.dismissUnanswered() }, for: .touchUpInside)
 
         let buttons = UIStackView(arrangedSubviews: [back, UIView(), nextButton])
         buttons.axis = .horizontal
-        let stack = UIStackView(arrangedSubviews: [header, question, options, other, editor, buttons])
+        // The header and question wrap clear of the corner close (8pt in, 36pt wide).
+        func clearOfClose(_ label: UILabel) -> UIView {
+            let row = UIView()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            row.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.topAnchor.constraint(equalTo: row.topAnchor),
+                label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                label.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -36),
+                label.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            ])
+            return row
+        }
+        let questionRow = clearOfClose(question)
+        let stack = UIStackView(arrangedSubviews: [clearOfClose(header), questionRow, options, other, editor, buttons])
         stack.axis = .vertical
         stack.spacing = 10
-        stack.setCustomSpacing(14, after: question)
+        stack.setCustomSpacing(14, after: questionRow)
         stack.setCustomSpacing(14, after: other)
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.contentView.addSubview(stack)
+        // Pinned over the header's empty corner so the card keeps its layout,
+        // 8pt in so it is concentric with the card's 26pt radius.
+        card.contentView.addSubview(close)
         NSLayoutConstraint.activate([
             card.topAnchor.constraint(equalTo: topAnchor),
             card.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -85,6 +114,10 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
             stack.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16),
             stack.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -12),
+            close.topAnchor.constraint(equalTo: card.contentView.topAnchor, constant: 8),
+            close.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -8),
+            close.widthAnchor.constraint(equalToConstant: 36),
+            close.heightAnchor.constraint(equalToConstant: 36),
         ])
     }
 
@@ -211,6 +244,14 @@ final class QuestionPanel: UIView, UITextFieldDelegate, UITextViewDelegate {
         submitted = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         onSubmit?(answers)
+    }
+
+    /// No answers at all is the decline: the run reads its harness's own
+    /// "dismissed", and the chip records the questions closed.
+    private func dismissUnanswered() {
+        guard !submitted else { return }
+        submitted = true
+        onSubmit?([])
     }
 }
 

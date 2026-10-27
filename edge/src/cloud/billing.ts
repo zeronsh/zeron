@@ -135,16 +135,14 @@ export const usageCsv = (data: UsageExport): string => {
   return `${lines.join("\n")}\n`;
 };
 
-/** `/admin/cloud/usage`, `/admin/cloud/credits` and `/admin/cloud/machine`
- * — undefined when not one of them. */
+/** `/admin/cloud/usage`, `/admin/cloud/credits`, `/admin/cloud/machine` and
+ * `/admin/cloud/limits` — undefined when not one of them. */
 export const handleAdminRoute = async (
   request: Request,
   env: BillingEnv,
   url: URL
 ): Promise<Response | undefined> => {
-  if (url.pathname !== "/admin/cloud/usage" && url.pathname !== "/admin/cloud/credits" && url.pathname !== "/admin/cloud/machine") {
-    return undefined;
-  }
+  if (!ADMIN_PATHS.has(url.pathname)) return undefined;
   if (!env.ADMIN_TOKEN) return json({ error: "not_found" }, 404);
   // Header only (never `?token=`: query strings end up in logs).
   const header = request.headers.get("authorization") ?? "";
@@ -156,6 +154,7 @@ export const handleAdminRoute = async (
   }
   if (url.pathname === "/admin/cloud/credits") return grantCredits(request, env);
   if (url.pathname === "/admin/cloud/machine") return setMachine(request, env);
+  if (url.pathname === "/admin/cloud/limits") return setLimits(request, env);
   if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
   const month = url.searchParams.get("month") ?? monthKey(Date.now());
   if (!isMonthKey(month)) return jsonError(400, "bad_request", "month must be YYYY-MM.");
@@ -172,6 +171,49 @@ export const handleAdminRoute = async (
 };
 
 const ADMIN_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+const ADMIN_PATHS = new Set(["/admin/cloud/usage", "/admin/cloud/credits", "/admin/cloud/machine", "/admin/cloud/limits"]);
+
+/** "No limit" for an account: high enough never to bind, still a number
+ * (the status view reports it, and JSON has no Infinity). */
+export const UNLIMITED = 1000;
+
+/** A cap from the admin body: a positive integer, `"unlimited"`, `null`
+ * (back to the server default) or absent (unchanged). `false` = invalid. */
+const parseCap = (raw: unknown): number | null | undefined | false => {
+  if (raw === undefined || raw === null) return raw;
+  if (raw === "unlimited") return UNLIMITED;
+  return typeof raw === "number" && Number.isInteger(raw) && raw > 0 && raw <= UNLIMITED ? raw : false;
+};
+
+/** `POST /admin/cloud/limits {orgId, userId, maxAwake?, maxSessions?}`: an
+ * account's caps on machines awake at once and Cloud chats kept — a number,
+ * `"unlimited"`, or `null` for the server's default. Answers the caps now in
+ * effect. */
+const setLimits = async (request: Request, env: BillingEnv): Promise<Response> => {
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  if (!env.CLOUD_ACCOUNTS) return jsonError(503, "unavailable", "Cloud is not configured.");
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return jsonError(400, "bad_request", "Expected a JSON body.");
+  }
+  const { orgId, userId } = body;
+  const maxAwake = parseCap(body.maxAwake);
+  const maxSessions = parseCap(body.maxSessions);
+  if (
+    typeof orgId !== "string" ||
+    !ADMIN_ID_RE.test(orgId) ||
+    typeof userId !== "string" ||
+    !ADMIN_ID_RE.test(userId) ||
+    maxAwake === false ||
+    maxSessions === false
+  ) {
+    return jsonError(400, "bad_request", 'Expected {orgId, userId, maxAwake?, maxSessions?}: each a positive integer, "unlimited" or null.');
+  }
+  return json(await deviceStub(env, orgId, userId).setLimits({ maxAwake, maxSessions }));
+};
 
 /** `POST /admin/cloud/machine {orgId, userId, machine}`: the machine size a
  * user's new Cloud sessions start on (`small` · `default` · `large` ·

@@ -47,6 +47,9 @@ fff-search.workspace = true
 
 same-file = "1"
 tempfile.workspace = true
+# `show_image` reads a shown image's size from its header (already in the
+# tree with these decoders via zeron-ui).
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"

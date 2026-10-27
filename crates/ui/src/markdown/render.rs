@@ -110,11 +110,16 @@ pub struct TaskUi {
     pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
 }
 
+/// Draws one inline image in place of its text, or declines it (`None`).
+pub type ImageUi =
+    Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> Option<AnyElement>>;
+
 #[derive(Clone)]
 pub struct MediaUi {
     pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
-    /// `None` keeps inline images in their ordinary text rendering.
-    pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
+    /// `None` keeps inline images in their ordinary text rendering; so does
+    /// the closure, per image, by returning `None`.
+    pub image: Option<ImageUi>,
 }
 
 /// How a Mermaid fence presents itself on the owning surface.
@@ -2156,31 +2161,34 @@ fn text_element(
     window: &Window,
 ) -> AnyElement {
     if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
-        if runs.iter().any(|run| run.style.image.is_some()) {
+        // The images the host draws; the ones it declines stay text.
+        let drawn: Vec<(usize, AnyElement)> = runs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, run)| {
+                let id = format!("{}-image-{ix}-{index}", opts.row_key).into();
+                Some((index, image_ui(run.style.image.as_ref()?, id, theme)?))
+            })
+            .collect();
+        if !drawn.is_empty() {
             let mut elements = Vec::new();
             let mut start = 0;
-            for (index, run) in runs.iter().enumerate() {
-                if let Some(image) = &run.style.image {
-                    if start < index {
-                        elements.push(text_element(
-                            &runs[start..index],
-                            size,
-                            line_height,
-                            bold_default,
-                            top_ix,
-                            ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                            opts,
-                            theme,
-                            window,
-                        ));
-                    }
-                    elements.push(image_ui(
-                        image,
-                        format!("{}-image-{ix}-{index}", opts.row_key).into(),
+            for (index, image) in drawn {
+                if start < index {
+                    elements.push(text_element(
+                        &runs[start..index],
+                        size,
+                        line_height,
+                        bold_default,
+                        top_ix,
+                        ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                        opts,
                         theme,
+                        window,
                     ));
-                    start = index + 1;
                 }
+                elements.push(image);
+                start = index + 1;
             }
             if start < runs.len() {
                 elements.push(text_element(

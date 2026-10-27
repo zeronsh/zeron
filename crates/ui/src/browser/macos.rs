@@ -488,7 +488,7 @@ impl NativePage {
         self.0.clone()
     }
     pub fn focus_chrome(&self) {
-        let _ = self.0.borrow().web.focus_parent();
+        self.0.borrow().focus_chrome();
     }
     pub fn set_shortcuts(&self, shortcuts: Vec<String>) {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
@@ -685,14 +685,20 @@ impl Host {
         }
         self.update_visibility();
     }
+    /// Return the keyboard to GPUI if the page holds it.
+    pub fn focus_chrome(&self) {
+        if has_focus(&self.view) {
+            let _ = self.web.focus_parent();
+        }
+    }
     fn update_visibility(&self) {
         let visible = self.presentation != Presentation::Hidden
             && self.observer.ivars().error.borrow().is_none()
             && self
                 .visible_bounds
                 .is_some_and(|b| f32::from(b.size.width) > 0. && f32::from(b.size.height) > 0.);
-        if (!visible || self.presentation == Presentation::Passthrough) && has_focus(&self.view) {
-            let _ = self.web.focus_parent();
+        if !visible || self.presentation == Presentation::Passthrough {
+            self.focus_chrome();
         }
         if self.view.isHidden() == visible {
             #[cfg(feature = "browser-fixture")]
@@ -714,9 +720,7 @@ impl Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
-        if has_focus(&self.view) {
-            let _ = self.web.focus_parent();
-        }
+        self.focus_chrome();
         unsafe {
             if let Some(monitor) = self.monitor.take() {
                 NSEvent::removeMonitor(&monitor);

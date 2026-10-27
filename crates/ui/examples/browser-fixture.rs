@@ -365,6 +365,15 @@ fn main() -> anyhow::Result<()> {
                     while !first.read_with(cx, |b,_| b.page.title == "Unexpected page click") {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
                     }
+                    // That click made the page AppKit's first responder. A click on
+                    // GPUI content must take it back, or keys keep reaching the page
+                    // before the focused GPUI input.
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "page click did not take keyboard focus");
+                    first.read_with(cx, |b,_| b.fixture_click((left*0.5) as f64,(top+150.) as f64));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while first.read_with(cx, |b,_| b.fixture_focused()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "page kept keyboard focus after a click on GPUI content"); pause(cx,50).await;
+                    }
                     first.read_with(cx, |b,_| b.fixture_eval("document.title = 'Fieldnotes'"));
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -528,6 +537,12 @@ fn main() -> anyhow::Result<()> {
                 let before = first.read_with(cx, |b, _| b.page.url.clone());
                 window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("javascript:alert(1)", w, cx)))?;
                 anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "unsupported address navigated");
+                // A local path says where files open instead of loading a made-up host.
+                window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("/Users/me/Documents/mockup.html", w, cx)))?;
+                anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "local path navigated");
+                pause(cx, 300).await; capture_frame(window, &output, "browser-local-file-light", cx).await?;
+                cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Dark, cx));
+                pause(cx, 600).await; capture_frame(window, &output, "browser-local-file-dark", cx).await?;
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");

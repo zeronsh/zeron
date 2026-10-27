@@ -270,6 +270,20 @@ what it checked and anything it printed.",
             "required": ["script"]
         }),
     });
+    tools.push(ToolDef {
+        name: SHOW_IMAGE,
+        description: SHOW_IMAGE_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The image file on this machine, absolute or relative to your working directory."
+                }
+            },
+            "required": ["path"]
+        }),
+    });
     tools
 }
 
@@ -281,11 +295,23 @@ const CHECK_VISUAL: &str = "check_visual";
 /// Offered only with `show_visual`: without it they draw nothing.
 const VISUAL_TOOLS: [&str; 3] = [SHOW_VISUAL, READ_VISUAL_DOCS, CHECK_VISUAL];
 
+/// Shows an image file in the CALLING chat; offered like `show_visual`.
+const SHOW_IMAGE: &str = "show_image";
+
+const SHOW_IMAGE_DESCRIPTION: &str = "\
+Show an image file (a screenshot, a rendered chart or diagram, a photo) inline in this chat, above \
+your final text reply; call it before writing that reply, once per image, in the order they should \
+appear. PNG, JPEG, WebP, or GIF, at most 10 MB and 4096 pixels on a side. Zeron copies the file \
+into the chat, so it stays visible after the file changes or is deleted. The reader \
+already sees the image, so the reply should not announce or describe it: add only what the image \
+doesn't show.";
+
 const SHOW_VISUAL_DESCRIPTION: &str = "\
 Show an interactive visual (chart, table, dashboard, diagram, simulation, 3D view) inline in this \
 chat, above your final text reply; call it before writing that reply. Use it when a visual says more \
 than prose. The reader already sees it, so the reply should not announce, locate, or restate it: add \
-only what the visual doesn't say.\n\
+only what the visual doesn't say. To show an image file as it is (a screenshot, a photo), use \
+show_image instead.\n\
 \n\
 A visual is a Luau script that Zeron renders with its own native interface. Call read_visual_docs \
 once before your first visual in a chat: it is the script API and the style rules Zeron enforces. \
@@ -500,7 +526,39 @@ async fn read_visual_assets(
     Ok(out)
 }
 
+/// Read `show_image`'s file (a path relative to the agent's working
+/// directory), bounded however the file changes (or lies about its size).
+async fn read_image(path: &str) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    use zeron_proto::IMAGE_MAX_BYTES;
+    let too_large = || anyhow::anyhow!("{path} is over {} MB", IMAGE_MAX_BYTES / (1024 * 1024));
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("can't read {path}"))?;
+    anyhow::ensure!(metadata.is_file(), "{path} is not a file");
+    if metadata.len() > IMAGE_MAX_BYTES as u64 {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("can't read {path}"))?
+        .take(IMAGE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("can't read {path}"))?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
 // ---- argument shapes ---------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ShowImageArgs {
+    path: String,
+}
 
 #[derive(Deserialize)]
 struct ShowVisualArgs {
@@ -728,11 +786,19 @@ impl Tools {
         }
     }
 
+    /// Whether the host launched this server's agent without its own
+    /// subagent tools, so `initialize` says to delegate through chats.
+    pub fn side_chats_only(&self) -> bool {
+        self.zeron.origin().side_chats_only
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
         catalog()
             .into_iter()
-            .filter(|tool| in_chat || !VISUAL_TOOLS.contains(&tool.name))
+            .filter(|tool| {
+                in_chat || !(VISUAL_TOOLS.contains(&tool.name) || tool.name == SHOW_IMAGE)
+            })
             .collect()
     }
 
@@ -763,6 +829,7 @@ impl Tools {
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             READ_VISUAL_DOCS => Ok(Value::String(VISUAL_DOCS.to_owned())),
             CHECK_VISUAL => self.check_visual(parse(args)?).await,
+            SHOW_IMAGE => self.show_image(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))
@@ -1377,6 +1444,36 @@ impl Tools {
         }))
     }
 
+    async fn show_image(&self, args: ShowImageArgs) -> anyhow::Result<Value> {
+        use base64::Engine as _;
+        let chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("show_image only works from an agent Zeron launched in a chat")?;
+        let bytes = read_image(&args.path).await?;
+        let name = std::path::Path::new(&args.path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        let shown = self
+            .zeron
+            .call(
+                zeron_rpc::methods::PUBLISH_IMAGE,
+                json!({
+                    "chatId": chat_id,
+                    "name": name,
+                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "image": shown,
+            "message": "Shown to the reader above your reply. Don't mention or describe the image; reply with only what it doesn't already show.",
+        }))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -1810,6 +1907,13 @@ mod tests {
                         .push((method.to_owned(), params.clone()));
                     RpcReply::Value(json!({ "id": "v:1", "title": params["title"] }))
                 }
+                methods::PUBLISH_IMAGE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({ "id": "img:1", "name": params["name"] }))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     // A Cloud chat gets a machine of its own from the engine.
                     let cloud_create = method == methods::MUTATE
@@ -1890,6 +1994,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: Some("dev-local".into()),
+                ..Default::default()
             },
         );
         for name in VISUAL_TOOLS {
@@ -1942,6 +2047,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_image_sends_the_file_only_from_inside_a_chat() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("before.png");
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let world = Arc::new(World::default());
+        let outside = tools(world.clone(), Origin::default());
+        assert!(!outside.has("show_image"));
+        assert!(
+            outside
+                .call("show_image", json!({ "path": path }))
+                .await
+                .is_err()
+        );
+
+        let inside = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+                ..Default::default()
+            },
+        );
+        assert!(inside.has("show_image"));
+        let shown = inside
+            .call("show_image", json!({ "path": path }))
+            .await
+            .unwrap();
+        assert_eq!(shown["image"]["name"], "before.png");
+        {
+            let writes = world.writes.lock().unwrap();
+            let (method, params) = writes.last().unwrap();
+            assert_eq!(method, methods::PUBLISH_IMAGE);
+            assert_eq!(params["chatId"], "chat-alpha-1");
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(params["data"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(data, b"\x89PNG\r\n\x1a\nfixture");
+        }
+
+        let missing = inside
+            .call("show_image", json!({ "path": "/nonexistent/shot.png" }))
+            .await
+            .unwrap_err();
+        assert!(
+            missing.contains("can't read /nonexistent/shot.png"),
+            "{missing}"
+        );
+        let huge = dir.path().join("huge.png");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(zeron_proto::IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        let error = inside
+            .call("show_image", json!({ "path": huge.to_string_lossy() }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("over 10 MB"), "{error}");
+        assert_eq!(
+            world.writes.lock().unwrap().len(),
+            1,
+            "nothing else was sent"
+        );
+    }
+
+    #[tokio::test]
     async fn list_and_read_chats() {
         let world = Arc::new(World::default());
         let tools = tools(world, Origin::default());
@@ -1976,6 +2148,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-beta-2".into()),
                 device_id: Some("dev-local".into()),
+                ..Default::default()
             },
         );
         let err = tools
@@ -2030,6 +2203,7 @@ mod tests {
             Origin {
                 chat_id: Some(second.into()),
                 device_id: None,
+                ..Default::default()
             },
         );
         let error = orchestrator
@@ -2067,6 +2241,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ..Default::default()
             },
         );
         worker
@@ -2162,6 +2337,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-beta-2".into()),
                 device_id: None,
+                ..Default::default()
             },
         );
         let created = tools
@@ -2302,6 +2478,7 @@ mod tests {
         Origin {
             chat_id: Some(chat.into()),
             device_id: None,
+            ..Default::default()
         }
     }
 
@@ -2532,6 +2709,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ..Default::default()
             },
         );
         for (args, kind, parent) in [
@@ -2726,6 +2904,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ..Default::default()
             },
         );
         let result = tools
@@ -3044,6 +3223,24 @@ mod tests {
     #[tokio::test]
     async fn initialize_and_list_over_jsonrpc() {
         let world = Arc::new(World::default());
+        // A server whose agent launched without its own subagent tools
+        // tells it to delegate through chats; any other doesn't.
+        let rule = "with `create_chats` (or `create_chat`).";
+        for side_chats_only in [true, false] {
+            let origin = Origin {
+                side_chats_only,
+                ..Default::default()
+            };
+            let init = crate::jsonrpc::handle_request(
+                &tools(world.clone(), origin),
+                json!(1),
+                "initialize",
+                json!({}),
+            )
+            .await;
+            let instructions = init["result"]["instructions"].as_str().unwrap();
+            assert_eq!(instructions.ends_with(rule), side_chats_only);
+        }
         let tools = tools(world, Origin::default());
         let init = crate::jsonrpc::handle_request(
             &tools,

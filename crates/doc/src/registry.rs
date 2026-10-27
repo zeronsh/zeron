@@ -1329,6 +1329,14 @@ impl RegistryDoc {
             .map(Chat::from))
     }
 
+    /// Whether `chat_id`'s row has recorded its parent: `createChat` writes
+    /// `parentChatId` either way (a null for none), a claimed row
+    /// ([`Self::claim_chat`]) doesn't.
+    pub fn chat_parent_recorded(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id)
+            .is_some_and(|row| row.clocks.contains_key("parentChatId"))
+    }
+
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
         let mut chats: Vec<Chat> = self
             .read_kind::<crate::workspace::RawChat>(KIND_CHATS)

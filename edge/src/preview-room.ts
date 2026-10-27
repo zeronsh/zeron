@@ -18,6 +18,20 @@ type Attachment = {
 
 /** Set by the Worker for runner bearers (stripped from every request first). */
 export const PREVIEW_PUBLISHER_HEADER = "x-zeron-preview-publisher";
+/** Set by the Worker when a user's device joins to finish a provider sign-in. */
+export const PREVIEW_SIGN_IN_HEADER = "x-zeron-preview-sign-in";
+/** Devices one user keeps in the room at once. */
+const DEVICE_LIMIT = 16;
+/** A sign-in's callback rides this room, so it gets in past
+ * DEVICE_LIMIT (a user's idle Cloud machines and phones fill it) up to
+ * this ceiling, which only bounds the object's resources. */
+const SIGN_IN_DEVICE_LIMIT = 64;
+
+/** Whether a device may join a room holding `connected` sockets. Its own
+ * reconnect replaces its old socket and always gets in. */
+export function previewAdmits(connected: number, reconnecting: boolean, signIn: boolean): boolean {
+  return reconnecting || connected < (signIn ? SIGN_IN_DEVICE_LIMIT : DEVICE_LIMIT);
+}
 type Service = Record<string, string | number | boolean>;
 
 export function previewCatalog(value: unknown, device: string): Service[] | undefined {
@@ -64,7 +78,8 @@ export class PreviewRoom {
     const device = new URL(request.url).searchParams.get("device") ?? "";
     if (!ID.test(device)) return new Response("Invalid device", { status: 400 });
     const existing = this.sockets().find(ws => this.info(ws).device === device);
-    if (!existing && this.sockets().length >= 16) return new Response("Device limit reached", { status: 429 });
+    const signIn = request.headers.get(PREVIEW_SIGN_IN_HEADER) === "1";
+    if (!previewAdmits(this.sockets().length, !!existing, signIn)) return new Response("Device limit reached", { status: 429 });
     if (existing) { existing.serializeAttachment({ ...this.info(existing), device: "" }); existing.close(1000, "Device reconnected"); }
     this.state.storage.sql.exec("DELETE FROM preview_catalog WHERE device = ?", device);
     const pair = new WebSocketPair();

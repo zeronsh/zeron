@@ -42,6 +42,8 @@ use crate::theme::Theme;
 
 #[path = "completion.rs"]
 mod completion;
+#[path = "delegation.rs"]
+mod delegation;
 
 /// Left inset of an expanded provider's details: the header trigger's
 /// padding, brand tile and gap, so the details start on the title's edge.
@@ -248,6 +250,13 @@ pub struct HarnessesPage {
     /// The device switcher moved on and its rows are on the way: the old
     /// rows stay, dimmed and inert, so the block never blanks out.
     switching: bool,
+    /// The target device's native subagent preferences; an error (an engine
+    /// predating them, say) is what the Delegation section shows instead.
+    native_subagents: Loadable<zeron_engine::registry::NativeSubagentSettings>,
+    native_subagents_task: Option<Task<()>>,
+    native_subagents_toggle: Option<Task<()>>,
+    /// A switch is on its way to the device: further flips wait for it.
+    native_subagents_saving: bool,
 }
 
 impl HarnessesPage {
@@ -276,6 +285,10 @@ impl HarnessesPage {
             checking_updates: false,
             embedded: false,
             switching: false,
+            native_subagents: Loadable::Idle,
+            native_subagents_task: None,
+            native_subagents_toggle: None,
+            native_subagents_saving: false,
         };
         page.load(cx);
         page
@@ -343,6 +356,7 @@ impl HarnessesPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label("Check for agents and updates")
+            .tooltip(widgets::text_tooltip("Check for agents and updates"))
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .cursor_pointer()
             .hover(|style| style.bg(crate::theme::ink(0.05)))
@@ -449,6 +463,7 @@ impl HarnessesPage {
             .flex_col()
             .gap(px(20.0))
             .child(self.render_completion_for(harness, theme, cx))
+            .children(self.render_native_subagents_for(harness, theme, cx))
             .children(self.render_updates_for(harness, theme, cx))
             .when_some(accounts, |details, accounts| details.child(accounts));
         if motion::reduced_motion(cx) {
@@ -591,6 +606,9 @@ impl HarnessesPage {
         self.updates = Loadable::Idle;
         self.update_task = None;
         self.update_action_task = None;
+        self.native_subagents = Loadable::Idle;
+        self.native_subagents_toggle = None;
+        self.native_subagents_saving = false;
         self.load(cx);
         if let Some(painted) = painted.filter(|_| matches!(self.harnesses, Loadable::Loading)) {
             self.harnesses = painted;
@@ -608,6 +626,7 @@ impl HarnessesPage {
         let params = self.with_target(serde_json::json!({}));
         let update_params = params.clone();
         let supports_updates = self.supports_updates(cx);
+        self.request_native_subagents(None, cx);
 
         self.harnesses = Loadable::Loading;
         self.updates = if supports_updates {

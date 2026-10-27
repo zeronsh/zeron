@@ -4,7 +4,40 @@ pub(super) struct SideChatTab {
     pub state: Entity<AppState>,
     transcript: Entity<Transcript>,
     pub(super) composer: Entity<Composer>,
+    /// A fork its host has yet to make (see [`Shell::fork_chat`]). The tab
+    /// shows its progress, or why it failed, in place of a composer whose
+    /// first send would mint the chat a second way.
+    pub(super) fork: Option<PendingFork>,
     _events: Vec<Subscription>,
+}
+
+pub(super) struct PendingFork {
+    /// The request as sent. Retry replays it unchanged: forking is
+    /// idempotent per chat id.
+    params: serde_json::Value,
+    /// The remote host doing the work, named while it does.
+    host: Option<SharedString>,
+    error: Option<SharedString>,
+    /// Its request is in flight. Per tab: one fork never waits on another.
+    running: bool,
+}
+
+/// The row of a chat about to exist under `parent_id`, on `from`'s device
+/// with its checkout and configuration.
+fn draft_child_row(from: &zeron_proto::Chat, parent_id: String) -> zeron_proto::Chat {
+    let mut chat = from.clone();
+    chat.id = uuid::Uuid::new_v4().to_string();
+    chat.parent_chat_id = Some(parent_id);
+    chat.title = None;
+    chat.archived = false;
+    chat.created_at = Utc::now();
+    chat.last_message_at = None;
+    chat.last_message_preview = None;
+    chat.last_seen_at = None;
+    chat.harness_session_id = None;
+    chat.harness_session_cwd = None;
+    chat.room_gen = Some(2);
+    chat
 }
 
 impl Shell {
@@ -46,52 +79,110 @@ impl Shell {
     /// hanging under `parent_id`, and open it in the right pane. A side
     /// chat's own fork button passes its parent so the copy lists as a
     /// sibling; the picker passes the source itself.
+    ///
+    /// The tab opens at once: a remote host can take a while to answer, and
+    /// the tab says what it waits on — or, failing, why, with a retry.
     pub(super) fn fork_chat(
         &mut self,
         source: zeron_proto::Chat,
         parent_id: String,
         cx: &mut Context<Self>,
     ) {
-        if self.side_chat_creating {
+        if self.state.read(cx).engine().is_none() {
             return;
         }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let key = self.panel_key(cx);
-        self.side_chat_creating = true;
+        let chat = draft_child_row(&source, parent_id.clone());
         let params = serde_json::json!({
-            "chatId": uuid::Uuid::new_v4().to_string(),
+            "chatId": chat.id,
             "sourceChatId": source.id,
             "parentChatId": parent_id,
             "targetDeviceId": source.device_id,
         });
+        let host = {
+            let state = self.state.read(cx);
+            (state.local_device_id.as_deref() != Some(source.device_id.as_str()))
+                .then(|| state.device_name(&source.device_id))
+                .flatten()
+                .map(|name| SharedString::from(name.to_owned()))
+        };
+        let key = self.panel_key(cx);
+        let id = self.open_side_chat_tab(chat, key, true, cx);
+        if let Some(tab) = self.side_chats.get_mut(&id) {
+            tab.fork = Some(PendingFork {
+                params,
+                host,
+                error: None,
+                running: false,
+            });
+        }
+        self.run_fork(id, cx);
+    }
+
+    /// Ask the host for the fork side chat tab `id` is waiting on, unless
+    /// that request is already in flight.
+    fn run_fork(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(fork) = self
+            .side_chats
+            .get_mut(&id)
+            .and_then(|tab| tab.fork.as_mut())
+            .filter(|fork| !fork.running)
+        else {
+            return;
+        };
+        fork.error = None;
+        fork.running = true;
+        let params = fork.params.clone();
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call_as::<zeron_proto::Chat>(methods::FORK_SIDE_CHAT, params)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.side_chat_creating = false;
-                match result {
-                    Ok(chat) => {
-                        if this
-                            .state
-                            .read(cx)
-                            .chats
-                            .iter()
-                            .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref())
-                        {
-                            this.open_side_chat(chat, key, cx);
+                match (result, this.side_chats.get_mut(&id)) {
+                    (Ok(chat), Some(tab)) if tab.fork.is_some() => this.finish_fork(id, chat, cx),
+                    (Err(error), Some(tab)) => {
+                        if let Some(fork) = &mut tab.fork {
+                            fork.running = false;
+                            fork.error = Some(error.to_string().into());
                         }
                     }
-                    Err(error) => this.show_side_chat_error(error.to_string(), cx),
+                    // Closed while forking: the fork still lists under its
+                    // parent, and nothing reopens the tab.
+                    (Err(error), None) => this.show_side_chat_error(error.to_string(), cx),
+                    // Done already: its row opened the chat in this tab.
+                    (Ok(_), _) => {}
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn retry_fork(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.run_fork(id, cx);
+    }
+
+    /// The host made the fork: its tab becomes the side chat, in place.
+    fn finish_fork(&mut self, id: u64, chat: zeron_proto::Chat, cx: &mut Context<Self>) {
+        let parent_listed = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|c| Some(&c.id) == chat.parent_chat_id.as_ref());
+        if parent_listed {
+            let tab = self.new_side_chat_tab(chat, false, cx);
+            self.side_chats.insert(id, tab);
+        } else if let Some(tab) = self.side_chats.get(&id) {
+            // The parent went away meanwhile: close as a deleted side chat.
+            tab.state
+                .clone()
+                .update(cx, |state, cx| state.select_chat(None, cx));
+        }
     }
 
     /// A fresh, empty side chat under `parent_id` (the active chat when
@@ -111,18 +202,7 @@ impl Shell {
             return;
         };
         let key = self.panel_key(cx);
-        let mut chat = parent.clone();
-        chat.id = uuid::Uuid::new_v4().to_string();
-        chat.parent_chat_id = Some(parent.id.clone());
-        chat.title = None;
-        chat.archived = false;
-        chat.created_at = Utc::now();
-        chat.last_message_at = None;
-        chat.last_message_preview = None;
-        chat.last_seen_at = None;
-        chat.harness_session_id = None;
-        chat.harness_session_cwd = None;
-        chat.room_gen = Some(2);
+        let chat = draft_child_row(&parent, parent.id.clone());
         self.open_side_chat_tab(chat, key, true, cx);
     }
 
@@ -168,22 +248,28 @@ impl Shell {
     }
 
     /// `unsaved`: `chat` is only minted here, and its first send creates it.
+    /// Returns the tab, reused when one already shows `chat`.
     fn open_side_chat_tab(
         &mut self,
         chat: zeron_proto::Chat,
         key: String,
         unsaved: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
         // A footer row or header button may land while the surface host is
         // closed (explorer-only pane, or hidden with its tabs kept): open it
         // beside the explorer first, for an existing tab too.
         self.open_surfaces_for(&key, cx);
-        if let Some((&id, _)) = self
+        if let Some((&id, tab)) = self
             .side_chats
             .iter()
             .find(|(_, tab)| tab.state.read(cx).selected_chat.as_deref() == Some(&chat.id))
         {
+            // A fork's row can land before its host answers, or after the
+            // answer timed out: the row is the chat, so its tab becomes it.
+            if !unsaved && tab.fork.is_some() {
+                self.finish_fork(id, chat, cx);
+            }
             // A closed tab kept for its draft is detached: re-attach it.
             let tabs = self.right_tabs.entry(key.clone()).or_default();
             if !tabs.contains(&RightSurface::SideChat(id)) {
@@ -196,8 +282,29 @@ impl Shell {
                     .update(&key, |p| p.right_active = RightSurface::SideChat(id));
             }
             cx.notify();
-            return;
+            return id;
         }
+        let tab = self.new_side_chat_tab(chat, unsaved, cx);
+        self.side_chat_seq += 1;
+        let id = self.side_chat_seq;
+        self.side_chats.insert(id, tab);
+        self.right_tabs
+            .entry(key.clone())
+            .or_default()
+            .push(RightSurface::SideChat(id));
+        self.panels
+            .update(&key, |p| p.right_active = RightSurface::SideChat(id));
+        cx.notify();
+        id
+    }
+
+    /// A side chat's own state, transcript and composer over `chat`.
+    fn new_side_chat_tab(
+        &mut self,
+        chat: zeron_proto::Chat,
+        unsaved: bool,
+        cx: &mut Context<Self>,
+    ) -> SideChatTab {
         let chat_id = chat.id.clone();
         let parent = self.state.clone();
         let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
@@ -250,24 +357,13 @@ impl Shell {
                 cx.notify();
             }),
         ];
-        self.side_chat_seq += 1;
-        let id = self.side_chat_seq;
-        self.side_chats.insert(
-            id,
-            SideChatTab {
-                state,
-                transcript,
-                composer,
-                _events: events,
-            },
-        );
-        self.right_tabs
-            .entry(key.clone())
-            .or_default()
-            .push(RightSurface::SideChat(id));
-        self.panels
-            .update(&key, |p| p.right_active = RightSurface::SideChat(id));
-        cx.notify();
+        SideChatTab {
+            state,
+            transcript,
+            composer,
+            fork: None,
+            _events: events,
+        }
     }
 
     fn remove_deleted_side_chats(&mut self, cx: &mut Context<Self>) {
@@ -313,6 +409,10 @@ impl Shell {
         else {
             return self.render_surface_picker(cx);
         };
+        if let Some(fork) = &tab.fork {
+            let (host, error) = (fork.host.clone(), fork.error.clone());
+            return self.render_pending_fork(id, host, error, cx);
+        }
         let transcript = tab.transcript.clone();
         let composer = tab.composer.clone();
         // Share the main chat's docked width cap and responsive padding. Size
@@ -366,6 +466,73 @@ impl Shell {
             .child(Self::attachment_drop_overlay(Theme::of(cx)))
             .child(Self::mention_drop_overlay(Theme::of(cx)))
             .into_any_element()
+    }
+
+    /// A fork its host has yet to make: what it waits on, or why it failed
+    /// and a retry.
+    fn render_pending_fork(
+        &mut self,
+        id: u64,
+        host: Option<SharedString>,
+        error: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let body = match error {
+            None => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(8.0))
+                .child(loaders::ring_spinner(
+                    format!("pending-fork-loader-{id}"),
+                    20.0,
+                    theme.text_muted,
+                ))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .child(match host {
+                            Some(host) => SharedString::from(format!("Forking on {host}…")),
+                            None => SharedString::from("Forking…"),
+                        }),
+                )
+                .into_any_element(),
+            // An empty state, not an alarm: the engine's reason is the
+            // detail under a plain title, and Retry is the pane's one action.
+            Some(error) => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .max_w(px(420.0))
+                .text_center()
+                .child(super::command_palette::palette_empty(
+                    &theme,
+                    match host {
+                        Some(host) => SharedString::from(format!("Couldn't fork on {host}")),
+                        None => SharedString::from("Couldn't fork this chat"),
+                    },
+                    error,
+                ))
+                .child(
+                    popover::btn_ghost(&theme, "Retry", format!("pending-fork-retry-{id}"))
+                        .id(("pending-fork-retry", id))
+                        .on_click(cx.listener(move |this, _, _, cx| this.retry_fork(id, cx))),
+                )
+                .into_any_element(),
+        };
+        crate::motion::fade_in(
+            ("pending-fork", id),
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(Theme::SPACE_LG))
+                .child(body),
+        )
+        .into_any_element()
     }
 }
 
@@ -672,6 +839,333 @@ mod tests {
                 let other = shell.side_chat_seq;
                 shell.close_right_surface(RightSurface::SideChat(other), window, cx);
                 assert!(!shell.side_chats.contains_key(&other));
+            })
+            .unwrap();
+    }
+
+    /// The engine end of a fork: its requests, and the replies the test
+    /// gives them.
+    struct ForkEngine {
+        requests: tokio::sync::mpsc::Receiver<String>,
+        replies: tokio::sync::mpsc::Sender<String>,
+    }
+
+    impl ForkEngine {
+        /// The next fork request; the tabs' standing watches go unanswered.
+        fn fork_request(&mut self, cx: &mut TestAppContext) -> Option<serde_json::Value> {
+            cx.run_until_parked();
+            while let Ok(request) = self.requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                if request["method"] == methods::FORK_SIDE_CHAT {
+                    return Some(request);
+                }
+            }
+            None
+        }
+
+        fn reply(
+            &self,
+            runtime: &tokio::runtime::Runtime,
+            request: &serde_json::Value,
+            mut reply: serde_json::Value,
+            cx: &mut TestAppContext,
+        ) {
+            reply["id"] = request["id"].clone();
+            runtime.block_on(async {
+                self.replies.send(reply.to_string()).await.unwrap();
+                while self.replies.capacity() < self.replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    /// A shell on "main", a conversation on the remote host omarchy, with
+    /// the right pane open. Forks go to the returned engine.
+    fn fork_shell(
+        dir: &std::path::Path,
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<Shell>,
+        tokio::runtime::Runtime,
+        ForkEngine,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (out, requests) = tokio::sync::mpsc::channel(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel(256);
+        let engine = {
+            let _guard = runtime.enter();
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound))
+        };
+        let window = shell_window(dir, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "main".into();
+                let main: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": "main", "deviceId": "omarchy", "cwd": "/srv/main",
+                    "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap();
+                shell.state.update(cx, |state, _| {
+                    state.local_device_id = Some("local".into());
+                    state.devices = vec![zeron_proto::Device {
+                        id: "omarchy".into(),
+                        name: "omarchy".into(),
+                        platform: "linux".into(),
+                        last_seen_at: Some(Utc::now()),
+                        created_at: None,
+                        version: None,
+                        cursor_sdk_version: None,
+                        capabilities: Vec::new(),
+                    }];
+                    state.chats = vec![main];
+                    state.selected_chat = Some("main".into());
+                    state.set_test_engine(engine);
+                });
+                shell.toggle_right_pane(cx);
+            })
+            .unwrap();
+        (window, runtime, ForkEngine { requests, replies })
+    }
+
+    fn pending_fork(shell: &Shell) -> Option<(&PendingFork, u64)> {
+        let id = shell.side_chat_seq;
+        shell
+            .side_chats
+            .get(&id)?
+            .fork
+            .as_ref()
+            .map(|fork| (fork, id))
+    }
+
+    /// On a slow host the fork used to show nothing until it answered (the
+    /// button only dimmed). Its tab opens at once and says what it waits on,
+    /// then becomes the side chat in place.
+    #[gpui::test]
+    fn fork_opens_a_progress_tab_before_the_host_answers(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (window, runtime, mut engine) = fork_shell(dir.path(), cx);
+        let _guard = runtime.enter();
+        let (tab, fork_id) = window
+            .update(cx, |shell, _, cx| {
+                shell.create_side_chat(cx);
+                let (fork, tab) = pending_fork(shell).expect("the tab opens before any answer");
+                assert_eq!(fork.host.as_deref(), Some("omarchy"));
+                assert!(fork.error.is_none());
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::SideChat(tab));
+                let state = shell.side_chats[&tab].state.read(cx);
+                assert!(
+                    state.side_chat_unsaved(),
+                    "nothing to open until the host made it"
+                );
+                (tab, state.selected_chat.clone().unwrap())
+            })
+            .unwrap();
+        let request = engine.fork_request(cx).expect("fork sent");
+        assert_eq!(request["params"]["chatId"], fork_id);
+        assert_eq!(request["params"]["parentChatId"], "main");
+        assert_eq!(request["params"]["targetDeviceId"], "omarchy");
+        let fork = serde_json::json!({
+            "id": fork_id, "parentChatId": "main", "deviceId": "omarchy", "cwd": "/srv/main",
+            "archived": false, "createdAt": Utc::now(),
+        });
+        engine.reply(&runtime, &request, serde_json::json!({ "ok": fork }), cx);
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.side_chats.len(), 1);
+                let side = &shell.side_chats[&tab];
+                assert!(side.fork.is_none());
+                let state = side.state.read(cx);
+                assert!(!state.side_chat_unsaved());
+                assert_eq!(state.selected_chat.as_deref(), Some(fork_id.as_str()));
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::SideChat(tab));
+            })
+            .unwrap();
+    }
+
+    /// A failed fork says why in its own tab, not in the conversation's
+    /// composer, and retries the same chat (forking is idempotent per id).
+    #[gpui::test]
+    fn fork_failure_stays_in_its_tab(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (window, runtime, mut engine) = fork_shell(dir.path(), cx);
+        let _guard = runtime.enter();
+        window
+            .update(cx, |shell, _, cx| shell.create_side_chat(cx))
+            .unwrap();
+        let first = engine.fork_request(cx).expect("fork sent");
+        engine.reply(
+            &runtime,
+            &first,
+            serde_json::json!({ "err": "device omarchy is offline" }),
+            cx,
+        );
+        let tab = window
+            .update(cx, |shell, _, cx| {
+                let (fork, tab) = pending_fork(shell).expect("the failure stays in its tab");
+                assert_eq!(fork.error.as_deref(), Some("device omarchy is offline"));
+                assert!(shell.composer.read(cx).failure().is_none());
+                assert!(!fork.running);
+                tab
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| shell.retry_fork(tab, cx))
+            .unwrap();
+        let retry = engine.fork_request(cx).expect("retried");
+        assert_eq!(
+            retry["params"], first["params"],
+            "the same fork, not a second one"
+        );
+        window
+            .update(cx, |shell, _, _| {
+                let (fork, _) = pending_fork(shell).unwrap();
+                assert!(fork.error.is_none(), "retrying clears the failure");
+            })
+            .unwrap();
+    }
+
+    /// Closing the tab while the host works is final: its answer reopens
+    /// nothing (the fork still lists under its parent).
+    #[gpui::test]
+    fn closing_a_pending_fork_keeps_it_closed(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (window, runtime, mut engine) = fork_shell(dir.path(), cx);
+        let _guard = runtime.enter();
+        let fork_id = window
+            .update(cx, |shell, window, cx| {
+                shell.create_side_chat(cx);
+                let (_, tab) = pending_fork(shell).unwrap();
+                let fork_id = shell.side_chats[&tab].state.read(cx).selected_chat.clone();
+                shell.close_right_surface(RightSurface::SideChat(tab), window, cx);
+                assert!(shell.side_chats.is_empty());
+                fork_id.unwrap()
+            })
+            .unwrap();
+        let request = engine.fork_request(cx).expect("fork sent");
+        let fork = serde_json::json!({
+            "id": fork_id, "parentChatId": "main", "deviceId": "omarchy",
+            "archived": false, "createdAt": Utc::now(),
+        });
+        engine.reply(&runtime, &request, serde_json::json!({ "ok": fork }), cx);
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.side_chats.is_empty());
+                assert!(shell.right_surface_rows(cx).is_empty());
+            })
+            .unwrap();
+        // A failure after closing has no tab to land in: it says so where
+        // the fork was asked for.
+        window
+            .update(cx, |shell, window, cx| {
+                shell.create_side_chat(cx);
+                let (_, tab) = pending_fork(shell).unwrap();
+                shell.close_right_surface(RightSurface::SideChat(tab), window, cx);
+            })
+            .unwrap();
+        let request = engine.fork_request(cx).expect("second fork sent");
+        engine.reply(
+            &runtime,
+            &request,
+            serde_json::json!({ "err": "fork failed" }),
+            cx,
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.side_chats.is_empty());
+                assert_eq!(
+                    shell.composer.read(cx).failure().map(|f| f.as_ref()),
+                    Some("fork failed")
+                );
+            })
+            .unwrap();
+    }
+
+    /// Each fork is its own: retrying one never waits on another in flight,
+    /// and a retry already in flight is not sent twice.
+    #[gpui::test]
+    fn retrying_a_fork_never_waits_on_another(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (window, runtime, mut engine) = fork_shell(dir.path(), cx);
+        let _guard = runtime.enter();
+        window
+            .update(cx, |shell, _, cx| shell.create_side_chat(cx))
+            .unwrap();
+        let first = engine.fork_request(cx).expect("fork sent");
+        engine.reply(
+            &runtime,
+            &first,
+            serde_json::json!({ "err": "device omarchy is offline" }),
+            cx,
+        );
+        let failed = window
+            .update(cx, |shell, _, _| pending_fork(shell).unwrap().1)
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| shell.create_side_chat(cx))
+            .unwrap();
+        let second = engine
+            .fork_request(cx)
+            .expect("a second fork, left in flight");
+        assert_ne!(second["params"]["chatId"], first["params"]["chatId"]);
+        window
+            .update(cx, |shell, _, cx| shell.retry_fork(failed, cx))
+            .unwrap();
+        let retry = engine.fork_request(cx).expect("the retry goes out at once");
+        assert_eq!(retry["params"], first["params"]);
+        window
+            .update(cx, |shell, _, cx| shell.retry_fork(failed, cx))
+            .unwrap();
+        assert!(engine.fork_request(cx).is_none(), "one request per fork");
+    }
+
+    /// The host writes the fork's row before it answers, and the answer can
+    /// time out after the fork exists: opening the row opens the chat in the
+    /// fork's tab, and a late failure changes nothing.
+    #[gpui::test]
+    fn opening_a_pending_forks_row_opens_the_chat(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (window, runtime, mut engine) = fork_shell(dir.path(), cx);
+        let _guard = runtime.enter();
+        let (tab, fork_id) = window
+            .update(cx, |shell, _, cx| {
+                shell.create_side_chat(cx);
+                let (_, tab) = pending_fork(shell).unwrap();
+                let fork_id = shell.side_chats[&tab].state.read(cx).selected_chat.clone();
+                (tab, fork_id.unwrap())
+            })
+            .unwrap();
+        let request = engine.fork_request(cx).expect("fork sent");
+        window
+            .update(cx, |shell, _, cx| {
+                let row: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                    "id": fork_id, "parentChatId": "main", "deviceId": "omarchy",
+                    "cwd": "/srv/main", "archived": false, "createdAt": Utc::now(),
+                }))
+                .unwrap();
+                shell.state.update(cx, |state, _| state.chats.push(row));
+                shell.open_child_chat_tab(&fork_id, cx);
+                assert_eq!(shell.side_chats.len(), 1);
+                let side = &shell.side_chats[&tab];
+                assert!(side.fork.is_none(), "the row opens the chat, not the wait");
+                assert!(!side.state.read(cx).side_chat_unsaved());
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::SideChat(tab));
+            })
+            .unwrap();
+        engine.reply(
+            &runtime,
+            &request,
+            serde_json::json!({ "err": "relay deadline elapsed" }),
+            cx,
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.side_chats[&tab].fork.is_none());
+                assert!(shell.composer.read(cx).failure().is_none());
             })
             .unwrap();
     }

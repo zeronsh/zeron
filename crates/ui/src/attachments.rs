@@ -638,25 +638,39 @@ pub(crate) async fn read_attachment_bytes(
     path: &str,
     expected_raster_mime: Option<&str>,
 ) -> Option<(String, String, Vec<u8>)> {
+    read_chunks(
+        engine,
+        executor,
+        target_device_id,
+        methods::READ_ATTACHMENT_CHUNK,
+        serde_json::json!({ "path": path }),
+        expected_raster_mime,
+    )
+    .await
+}
+
+/// The chunk loop behind [`read_attachment_bytes`], for any method that
+/// answers `{name, mimeType, data, nextOffset, done}` at an `offset`.
+async fn read_chunks(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    method: &str,
+    request: serde_json::Value,
+    expected_raster_mime: Option<&str>,
+) -> Option<(String, String, Vec<u8>)> {
     let mut name = String::new();
     let mut mime = String::new();
     let mut b64 = String::new();
     let mut offset = 0u64;
     let mut done = false;
     for _ in 0..MAX_READ_CHUNKS {
-        let params = with_target(
-            serde_json::json!({ "path": path, "offset": offset }),
-            target_device_id,
-        );
-        let chunk = call_with_timeout(
-            engine,
-            executor,
-            methods::READ_ATTACHMENT_CHUNK,
-            params,
-            READ_CHUNK_TIMEOUT,
-        )
-        .await
-        .ok()?;
+        let mut params = request.clone();
+        params["offset"] = offset.into();
+        let params = with_target(params, target_device_id);
+        let chunk = call_with_timeout(engine, executor, method, params, READ_CHUNK_TIMEOUT)
+            .await
+            .ok()?;
         name = chunk.get("name")?.as_str()?.to_string();
         mime = chunk.get("mimeType")?.as_str()?.to_string();
         if expected_raster_mime.is_some_and(|expected| expected != mime) {
@@ -722,26 +736,7 @@ pub async fn read_attachment_image(
         return None;
     }
     let image = if let Some(expected) = expected_raster_mime {
-        if expected != mime
-            || !matches!(
-                mime.as_str(),
-                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-            )
-        {
-            return None;
-        }
-        let expected = expected.to_owned();
-        executor
-            .spawn(async move {
-                crate::image_media::decode_generated_image(
-                    bytes,
-                    &expected,
-                    MAX_ATTACHMENT_BYTES as usize,
-                )
-                .ok()
-                .map(|media| media.image)
-            })
-            .await?
+        decode_raster(executor, bytes, &mime, expected).await?
     } else {
         let format = ImageFormat::from_mime_type(&mime).unwrap_or(ImageFormat::Png);
         Arc::new(Image::from_bytes(format, bytes))
@@ -754,6 +749,85 @@ pub async fn read_attachment_image(
         },
         image,
     })
+}
+
+/// An image an agent's reply names in Markdown, through
+/// `ReadChatImageChunk`: the host serves it only from inside `chat_id`'s
+/// working folder, and only a raster of the `expected` type, decoded here
+/// within the shared limits. `None` when refused or unreadable.
+pub(crate) async fn read_chat_image(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    chat_id: &str,
+    path: &str,
+    expected: &str,
+) -> Option<LoadedAttachmentImage> {
+    let (name, mime, bytes) =
+        read_chat_image_bytes(engine, executor, target_device_id, chat_id, path, expected).await?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(LoadedAttachmentImage {
+        image: decode_raster(executor, bytes, &mime, expected).await?,
+        name: if name.is_empty() {
+            name_from_path(path)
+        } else {
+            name
+        },
+    })
+}
+
+/// The original bytes of a reply's Markdown image (`{name, mimeType, bytes}`),
+/// under the same jail as [`read_chat_image`]: what Copy image puts on the
+/// clipboard, not the downscaled preview.
+pub(crate) async fn read_chat_image_bytes(
+    engine: &EngineHandle,
+    executor: &BackgroundExecutor,
+    target_device_id: Option<&str>,
+    chat_id: &str,
+    path: &str,
+    expected: &str,
+) -> Option<(String, String, Vec<u8>)> {
+    read_chunks(
+        engine,
+        executor,
+        target_device_id,
+        methods::READ_CHAT_IMAGE_CHUNK,
+        serde_json::json!({ "chatId": chat_id, "path": path }),
+        Some(expected),
+    )
+    .await
+}
+
+/// PNG, JPEG, WebP, or GIF bytes of the `expected` type, decoded off the UI
+/// thread by the bounded decoder (GPUI's own would decode without limits).
+async fn decode_raster(
+    executor: &BackgroundExecutor,
+    bytes: Vec<u8>,
+    mime: &str,
+    expected: &str,
+) -> Option<Arc<Image>> {
+    if expected != mime
+        || !matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+    {
+        return None;
+    }
+    let expected = expected.to_owned();
+    executor
+        .spawn(async move {
+            crate::image_media::decode_generated_image(
+                bytes,
+                &expected,
+                MAX_ATTACHMENT_BYTES as usize,
+            )
+            .ok()
+            .map(|media| media.image)
+        })
+        .await
 }
 
 /// Decode with a fixed allocation budget and retain only a small queue image.
@@ -829,6 +903,10 @@ pub(crate) struct AttachmentKey {
     device: String,
     path: String,
     raster_mime: Option<String>,
+    /// The chat a reply's Markdown image was read for: the host checked the
+    /// path against THAT chat's folder, so the image never answers another
+    /// chat's lookup of the same path.
+    chat: Option<String>,
 }
 
 impl AttachmentKey {
@@ -837,6 +915,15 @@ impl AttachmentKey {
             device: device.into(),
             path: path.into(),
             raster_mime: mime.map(str::to_owned),
+            chat: None,
+        }
+    }
+
+    /// An image a reply in `chat` names in Markdown (`ReadChatImageChunk`).
+    pub(crate) fn chat_image(device: &str, chat: &str, path: &str, mime: &str) -> Self {
+        Self {
+            chat: Some(chat.into()),
+            ..Self::new(device, path, Some(mime))
         }
     }
 }

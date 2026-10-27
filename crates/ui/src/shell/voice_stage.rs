@@ -246,6 +246,9 @@ impl Shell {
                         cx.stop_propagation();
                         this.voice.update(cx, |voice, cx| voice.dismiss_reason(cx));
                     }))
+                    .role(gpui::Role::Button)
+                    .aria_label("Dismiss")
+                    .tooltip(stage_tooltip("Dismiss"))
                     .child(
                         icon(icons::CLOSE)
                             .size(px(14.0))

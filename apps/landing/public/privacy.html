@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Privacy Policy — Zeron</title>
+<meta name="description" content="What Zeron collects, why, who it is shared with, and how to delete it." />
+<link rel="icon" href="/assets/zeron-favicon-v3.png" type="image/png" sizes="128x128" />
+<style>
+  @font-face {
+    font-family: "Geist";
+    src: url("/assets/geist-latin.woff2") format("woff2");
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "Geist Mono";
+    src: url("/assets/geist-mono-latin.woff2") format("woff2");
+    font-weight: 100 900;
+    font-display: swap;
+  }
+  /* same palette as the landing page */
+  :root {
+    --bg: #06040a;
+    --ink: #ece7f7;
+    --dim: #9c92b5;
+    --faint: #5d5178;
+    --line: #241c36;
+    --line-soft: #1a1428;
+    --purple: #8b5cf6;
+    --purple-hi: #b79df9;
+    --purple-deep: #5b34b8;
+    --sans: "Geist", system-ui, -apple-system, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { background: var(--bg); scrollbar-width: thin; scrollbar-color: #2a2140 transparent; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--purple-deep); color: #fff; }
+  a { color: inherit; text-decoration: none; }
+  a:focus-visible { outline: 2px solid var(--purple); outline-offset: 4px; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 32px; }
+
+  nav .wrap { display: flex; align-items: center; height: 64px; }
+  .logo { display: flex; align-items: center; gap: 9px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .logo img { display: block; width: 30px; height: 30px; }
+
+  main { padding: 72px 0 96px; }
+  h1 { font-size: clamp(28px, 3.8vw, 36px); font-weight: 600; letter-spacing: -0.03em; }
+  .updated { margin-top: 10px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.02em; color: var(--faint); }
+  h2 {
+    margin-top: 56px;
+    padding-top: 28px;
+    border-top: 1px solid var(--line-soft);
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  h3 { margin-top: 28px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  p, li { font-size: 14.5px; line-height: 1.7; color: var(--dim); }
+  p { margin-top: 14px; }
+  ul { margin-top: 12px; padding-left: 20px; }
+  li + li { margin-top: 6px; }
+  li::marker { color: var(--faint); }
+  strong { color: var(--ink); font-weight: 500; }
+  main a { color: var(--purple-hi); text-decoration: underline; text-decoration-color: var(--purple-deep); text-underline-offset: 3px; }
+  main a:hover { text-decoration-color: var(--purple-hi); }
+  code { font-family: var(--mono); font-size: 0.9em; color: var(--ink); }
+  .lede { margin-top: 28px; font-size: 16px; color: var(--ink); }
+  .table-scroll { margin-top: 16px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; line-height: 1.6; }
+  th, td { padding: 10px 14px 10px 0; text-align: left; vertical-align: top; border-top: 1px solid var(--line-soft); }
+  th { color: var(--ink); font-weight: 500; white-space: nowrap; }
+  td { color: var(--dim); }
+  thead th { border-top: 0; font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em; color: var(--faint); font-weight: 400; }
+
+  footer { padding: 28px 0 40px; }
+  footer .wrap { display: flex; gap: 20px; flex-wrap: wrap; font-size: 12.5px; color: var(--faint); }
+  footer a:hover { color: var(--dim); }
+  footer .right { margin-left: auto; }
+  @media (max-width: 640px) {
+    .wrap { padding: 0 20px; }
+    main { padding: 48px 0 72px; }
+  }
+</style>
+</head>
+<body>
+
+  <nav>
+    <div class="wrap">
+      <a class="logo" href="/" aria-label="Zeron home">
+        <img src="/assets/zeron-app-icon.png" width="128" height="128" alt="" />
+        <span>Zeron</span>
+      </a>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <h1>Privacy Policy</h1>
+    <p class="updated">Effective October 26, 2026</p>
+
+    <p class="lede">
+      This policy covers the Zeron website (zeron.sh), the Zeron desktop app,
+      the Zeron apps for iOS and Android, and Zeron Cloud. Zeron is operated by
+      1499487 B.C. LTD. (“Zeron”, “we”, “us”).
+    </p>
+
+    <h2>The short version</h2>
+    <ul>
+      <li>We collect what we need to sign you in and to sync your chats and workspace between your devices.</li>
+      <li>Your chats are stored on our servers so they can sync between your devices. They are encrypted in transit and at rest, but <strong>not end-to-end encrypted</strong>, so our systems can technically read them.</li>
+      <li>Our apps contain no advertising, analytics or crash-reporting SDKs. We don’t sell your data or use it for advertising, and we don’t train AI models on it.</li>
+      <li>The coding agents you run (Claude Code, Codex and others) send your prompts and code to their own providers under your own accounts. Those providers’ privacy policies apply to that data.</li>
+    </ul>
+
+    <h2>What we collect</h2>
+
+    <h3>Your account</h3>
+    <p>
+      Sign-in is handled by WorkOS. When you sign in we receive your name, email
+      address, a user ID, and the name and ID of your organization. The apps
+      keep this on your device so they can show who is signed in.
+    </p>
+
+    <h3>Chats and workspace</h3>
+    <p>To keep your devices in sync, our servers store:</p>
+    <ul>
+      <li>chat transcripts: your messages, agent replies, tool output and diffs, and transcripts of voice calls;</li>
+      <li>chat titles, message previews and status;</li>
+      <li>your projects: name, folder path on your machine, branch and linked GitHub repository;</li>
+      <li>your devices: a random device ID, device name, platform, app version and when it was last online.</li>
+    </ul>
+    <p>
+      Files, images and terminal sessions you open from another device are
+      relayed between your own devices. We do not keep a copy. Where possible,
+      terminals connect directly between your devices.
+    </p>
+
+    <h3>Voice</h3>
+    <p>
+      The mobile apps use the microphone only during a voice call you start.
+      The call’s audio streams to OpenAI’s Realtime service through the ChatGPT
+      account signed in to Codex on your computer. The resulting transcript is
+      saved in the chat like any other message. We don’t record call audio.
+      Dictation in the desktop app runs entirely on your computer, and its audio
+      never leaves the computer.
+    </p>
+
+    <h3>Zeron Cloud</h3>
+    <p>If you use Zeron Cloud, we also process:</p>
+    <ul>
+      <li><strong>Connected accounts.</strong> The sign-ins or API keys you connect for Claude, ChatGPT/Codex, Anthropic, OpenAI and GitHub, along with the account’s email, name and plan. Credentials are encrypted with AES-256-GCM before they are stored. They are only handed to cloud machines that you start.</li>
+      <li><strong>Cloud machines.</strong> A cloud machine holds a clone of the repository you choose, the agent sessions you run on it, and short-lived access tokens. Deleting the session deletes the machine. The chat transcript stays until you delete it.</li>
+      <li><strong>GitHub.</strong> Through the Zeron GitHub App we access only the repositories you grant: their contents, pull requests and workflows (read and write) and metadata (read). We request no permissions on your GitHub account itself.</li>
+      <li><strong>Usage and billing.</strong> Machine time, usage and credit records. Payments are processed by Stripe. We never see your card number. We receive a Stripe customer ID and your subscription and invoice status.</li>
+    </ul>
+
+    <h3>Notifications</h3>
+    <p>
+      If you allow notifications on iPhone or iPad, we store your device’s push
+      token. A notification contains the chat title and a short status such as
+      “Run finished”, and is delivered through Apple Push Notification service.
+      The Android app shows only notifications generated on the device.
+    </p>
+
+    <h3>Website</h3>
+    <p>
+      The zeron.sh homepage counts page views and download clicks with PostHog.
+      Each page load gets a random ID. No cookies or local storage are used, IP
+      addresses and location are not recorded, and nothing is sent if your
+      browser signals Global Privacy Control or Do Not Track.
+    </p>
+
+    <h3>Logs</h3>
+    <p>
+      Like any web service, our servers see your IP address when you connect.
+      Our hosting provider keeps operational logs for a limited time. We use
+      them only to run, debug and secure the service.
+    </p>
+
+    <h2>What stays on your device</h2>
+    <p>
+      The apps cache your chats, drafts and settings locally so they open
+      quickly and work offline. On Android, sign-in tokens are encrypted with a
+      key held in the Android Keystore, and app data is excluded from device
+      backups. On iOS, credentials are stored in the Keychain. Signing out
+      clears the local chat cache.
+    </p>
+
+    <h2>How we use it</h2>
+    <ul>
+      <li>to provide Zeron: sign-in, syncing chats between your devices, relaying commands to your machines, and running cloud machines;</li>
+      <li>to bill for Zeron Cloud;</li>
+      <li>to keep the service secure, prevent abuse and fix problems;</li>
+      <li>to contact you about your account or important changes.</li>
+    </ul>
+
+    <h2>Who we share it with</h2>
+    <p>
+      We share data only with the providers that run parts of Zeron for us, and
+      only what each needs:
+    </p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Provider</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><th>Cloudflare</th><td>Hosting: servers, storage and backups for everything described above</td></tr>
+          <tr><th>WorkOS</th><td>Sign-in and organizations</td></tr>
+          <tr><th>Stripe</th><td>Payments for Zeron Cloud</td></tr>
+          <tr><th>Boat</th><td>Hosting for Zeron Cloud machines</td></tr>
+          <tr><th>GitHub</th><td>Repository access you grant to Zeron Cloud</td></tr>
+          <tr><th>OpenAI</th><td>Voice calls, through your own ChatGPT account</td></tr>
+          <tr><th>Anthropic, OpenAI</th><td>Refreshing and checking usage of the agent accounts you connect to Zeron Cloud</td></tr>
+          <tr><th>Apple</th><td>Push notifications on iPhone and iPad</td></tr>
+          <tr><th>Google</th><td>STUN servers that help your devices connect directly. They see your IP address</td></tr>
+          <tr><th>PostHog</th><td>Anonymous page-view counts on zeron.sh</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      We may also disclose information when required by law, to protect the
+      rights and safety of our users or the public, or as part of a merger or
+      acquisition. If that happens, this policy continues to apply to your data.
+    </p>
+    <p>
+      These providers may process data in the United States, Canada and other
+      countries where they operate.
+    </p>
+
+    <h2>How long we keep it</h2>
+    <p>
+      We keep your account and workspace data while your account is active.
+      Chats and projects you delete are removed from the live service within 30
+      days. When you <a href="#delete-account">ask us to delete your account</a>, we delete your account data,
+      chats and backups within 30 days. The exception is billing records, which
+      we keep as long as tax and accounting law requires.
+    </p>
+
+    <h2>Your choices and rights</h2>
+    <ul>
+      <li>Delete individual chats and projects in the app.</li>
+      <li>Disconnect agent accounts and GitHub, or turn off Zeron Cloud, in Settings.</li>
+      <li>Turn off microphone and notification access in your device settings at any time.</li>
+      <li>Ask us for a copy of your data, or to correct it. Email <a href="mailto:sina@zeron.sh">sina@zeron.sh</a> from the address you sign in with.</li>
+    </ul>
+    <p>
+      Depending on where you live, you may have further rights under laws such
+      as Canada’s PIPEDA, the GDPR or the CCPA, including the right to complain
+      to your data protection authority. We will honour these requests whatever
+      your location.
+    </p>
+
+    <h2 id="delete-account">Deleting your account</h2>
+    <p>
+      To delete your Zeron account and its data, email
+      <a href="mailto:sina@zeron.sh?subject=Delete%20my%20Zeron%20account">sina@zeron.sh</a>
+      from the address you sign in with, with the subject “Delete my Zeron
+      account”. We will confirm the request and, within 30 days, delete:
+    </p>
+    <ul>
+      <li>your account, profile and organization membership;</li>
+      <li>your chats, projects, devices and their backups;</li>
+      <li>connected agent and GitHub accounts, and any cloud machines.</li>
+    </ul>
+    <p>
+      We keep billing records as long as tax and accounting law requires. To
+      remove the app’s local data from a phone, sign out or uninstall the app.
+    </p>
+
+    <h2>Security</h2>
+    <p>
+      All traffic uses TLS. Stored data is encrypted at rest, and connected
+      credentials are additionally encrypted with keys kept separately from the
+      data. No system is perfectly secure. If a breach affects your data, we will
+      notify you as the law requires.
+    </p>
+
+    <h2>Children</h2>
+    <p>
+      Zeron is a developer tool and is not directed at children under 16. We
+      don’t knowingly collect their data.
+    </p>
+
+    <h2>Changes</h2>
+    <p>
+      We will post any changes on this page and update the date at the top.
+      Significant changes will also be announced in the app or by email.
+    </p>
+
+    <h2>Contact</h2>
+    <p>
+      1499487 B.C. LTD., British Columbia, Canada<br />
+      <a href="mailto:sina@zeron.sh">sina@zeron.sh</a>
+    </p>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>1499487 B.C. LTD.</span>
+      <span class="right"><a href="/">zeron.sh</a></span>
+    </div>
+  </footer>
+
+</body>
+</html>

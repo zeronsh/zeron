@@ -204,6 +204,9 @@ struct WorkspaceHostInner {
     /// device's overlay back to its boot-time row `lastSeenAt` — an instant
     /// (and false) "offline" badge for a host that beat 20s ago.
     presence_seen: Mutex<std::collections::HashMap<String, i64>>,
+    /// Chats whose row this host claimed for a command that outran their
+    /// `createChat` ([`WorkspaceHost::claim_chat`]).
+    claimed: Mutex<std::collections::HashSet<String>>,
     /// Called with a device id whenever its presence heartbeat proves it alive —
     /// wired to `LinkCache::reset_cooldown` so a peer that comes back is dialed
     /// immediately instead of waiting out the failure backoff.
@@ -360,6 +363,7 @@ impl WorkspaceHost {
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
+                claimed: Mutex::default(),
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
@@ -715,6 +719,14 @@ impl WorkspaceHost {
         Ok(self.read(|doc| doc.chat(chat_id))?)
     }
 
+    /// Whether `chat_id`'s parent is unknown here yet: this host claimed its
+    /// row for a command that arrived first ([`Self::claim_chat`]), and its
+    /// `createChat` hasn't landed ([`RegistryDoc::chat_parent_recorded`]).
+    pub fn parent_unknown(&self, chat_id: &str) -> bool {
+        lock(&self.inner.claimed).contains(chat_id)
+            && !self.read(|doc| doc.chat_parent_recorded(chat_id))
+    }
+
     /// The space row as currently known (overlay view).
     pub fn space(&self, space_id: &str) -> Result<Option<Space>, EngineError> {
         Ok(self.read(|doc| doc.space(space_id))?)
@@ -856,6 +868,7 @@ impl WorkspaceHost {
             None => (None, None),
         };
         self.mutate(|doc| doc.claim_chat(chat_id, cwd.as_deref(), space_id.as_deref(), now));
+        lock(&self.inner.claimed).insert(chat_id.to_owned());
         Ok(())
     }
 
@@ -2082,6 +2095,39 @@ mod tests {
         );
         assert_eq!(host.peer_liveness("cloud-1"), zeron_rpc::PeerLiveness::Dark);
         assert_eq!(host.peer_liveness("laptop"), zeron_rpc::PeerLiveness::Live);
+    }
+
+    /// A claimed row doesn't know its parent until the chat's `createChat`
+    /// lands, which records `parentChatId` even when it has none; a row this
+    /// host never claimed always knows it.
+    #[tokio::test]
+    async fn a_claimed_chat_knows_its_parent_once_its_create_lands() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        host.create_chat("created", None, Some("test-device"), None, None)
+            .unwrap();
+        assert!(!host.parent_unknown("created"));
+
+        host.claim_chat("claimed", Some("/tmp")).unwrap();
+        assert!(host.parent_unknown("claimed"));
+        let mut chat = host.chat("claimed").unwrap().expect("the claimed row");
+        chat.parent_chat_id = None;
+        host.mutate(|doc| doc.upsert_chat(&chat)).unwrap();
+        assert!(!host.parent_unknown("claimed"));
     }
 
     #[tokio::test]

@@ -153,7 +153,17 @@ pub async fn exercise(
             ),
         cx,
     )?;
-    pause(cx, 100).await;
+    // The native click reaches WebKit through the X server after xdotool
+    // returns. Wait for the input to take focus instead of racing it with a
+    // fixed pause: a loaded runner lost the first keystroke to that race.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while eval(&page, "document.activeElement?.id === 'browser-input'", cx).await? != true {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "click did not focus the browser input"
+        );
+        pause(cx, 20).await;
+    }
     for c in "hello linux".chars() {
         let key = if c == ' ' {
             "space".into()
@@ -181,9 +191,10 @@ pub async fn exercise(
         )?;
         pause(cx, 35).await;
     }
+    let typed = eval(&page, "document.getElementById('browser-input').value", cx).await?;
     anyhow::ensure!(
-        eval(&page, "document.getElementById('browser-input').value", cx).await? == "hello linux",
-        "GPUI keyboard input did not reach WebKit"
+        typed == "hello linux",
+        "GPUI keyboard input did not reach WebKit: {typed}"
     );
     if let Ok(id) = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW") {
         let scale = AnyWindowHandle::from(window).update(cx, |_, w, _| w.scale_factor())?;

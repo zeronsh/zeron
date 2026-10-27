@@ -16,12 +16,18 @@ the stdio tool-server subset is tiny, so no SDK dependency was taken.
 The engine can inject this server into a harness's MCP config with the
 originating chat in the environment:
 
-| Variable               | Meaning                                                  |
-| ---------------------- | -------------------------------------------------------- |
-| `ZERON_IPC_PORT`       | Engine to proxy (default 27654).                         |
-| `ZERON_IPC_TOKEN_FILE` | The engine's IPC bearer file (see below).                |
-| `ZERON_CHAT_ID`        | The chat whose agent spawned this server.                |
-| `ZERON_DEVICE_ID`      | That chat's host device.                                 |
+| Variable                | Meaning                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `ZERON_IPC_PORT`        | Engine to proxy (default 27654).                         |
+| `ZERON_IPC_TOKEN_FILE`  | The engine's IPC bearer file (see below).                |
+| `ZERON_CHAT_ID`         | The chat whose agent spawned this server.                |
+| `ZERON_DEVICE_ID`       | That chat's host device.                                 |
+| `ZERON_SIDE_CHATS_ONLY` | `1`: the agent has no subagent tools of its own (below). |
+
+`ZERON_SIDE_CHATS_ONLY=1`: the host device turned the provider's native
+subagents off (Settings → Providers), so `initialize` tells the agent to
+delegate with `create_chats`. Never set for a chat that has a parent, nor
+for one whose host doesn't know its parent yet.
 
 ### IPC authentication
 
@@ -124,9 +130,11 @@ lost the bind) gets no Zeron tools rather than a dead server.
 `ForkSideChat { chatId, sourceChatId, parentChatId? }` copies a chat's
 history through its latest completed response into a new chat and appends
 a `fork` part (a system entry: `sourceChatId`, `sourceTitle`) as the seam;
-the transcript draws it as "This chat was forked from <title>". `parentChatId`
-defaults to the source; a side chat's own fork button passes its parent so
-the copy lists as a sibling. The lanes card, under the session card, draws
+the transcript draws it as "This chat was forked from <title>". The copy
+settles what only the source's runtime could finish: open questions copy
+answered, and a spawn chip still `running` in the source copies `failed`
+(its `subagentRef` intact). `parentChatId` defaults to the source; a side
+chat's own fork button passes its parent so the copy lists as a sibling. The lanes card, under the session card, draws
 a chat as a main line with its **side chats** (its children: forks and
 `kind: "side"` spawns) and **subagents** (its spawn chips) branching off it,
 and opens either in the right pane.
@@ -166,6 +174,7 @@ name (default: the local engine's device).
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 | `read_visual_docs` | None: the script reference, served by the MCP server (origin chat only) |
 | `check_visual`     | None: `zeron_visual::check` in the MCP server, nothing stored or shown (origin chat only) |
+| `show_image`       | `PublishImage {chatId, name, data}` (origin chat only; the file base64, read by the MCP server from the agent's cwd) |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
@@ -278,6 +287,28 @@ read back like a scene's image. Nothing foreign is hosted, so a visual scrolls, 
 the glass composer, and takes input like any other row, identically on Linux,
 macOS, and Windows, and it follows theme, appearance, and text-size changes
 without rerunning the script.
+
+### Image replies
+
+`show_image {path}` is listed under the same condition: it shows an image file
+(a screenshot, a rendered PNG) inline in the calling chat as the same `image`
+doc part Codex's generated images use, so every client already renders it
+(the desktop's image row with its lightbox, iOS's image row). The MCP server
+reads the file from the agent's working directory with the agent's own access
+(at most 10 MB) and sends it base64 in `PublishImage {chatId, name, data}`. The
+engine refuses anything but a PNG, JPEG, WebP, or GIF the desktop can preview
+(at most 4096 pixels on a side, read from the header), stores it in uploads as
+`{id}-image.{ext}`, and folds the part into the live turn through the run's
+engine event channel, past the generated-image intake (whose root is Codex's
+own folder). The doc carries the stored path and the file's name, never the
+original path, and the image stays viewable after the source file changes or
+is deleted. Codex rarely finds `show_image` (it defers MCP tools behind its
+tool search) and answers "show me" with `![alt](/abs/path.png)`, the way its
+own app displays local files; the transcript draws such an image in place,
+from the chat's own folder only and never copied (see
+[image-preview.md](image-preview.md#images-in-agent-replies)). Nothing tells
+an agent about that: the tool description and server instructions name only
+`show_image`, and no harness prompt changes.
 
 ## Selecting a host and project
 

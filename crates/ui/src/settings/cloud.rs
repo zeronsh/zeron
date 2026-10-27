@@ -1042,6 +1042,7 @@ impl CloudPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label("Check repositories again")
+            .tooltip(widgets::text_tooltip("Check repositories again"))
             .cursor_pointer()
             .hover(|style| style.bg(crate::theme::ink(0.05)))
             .when(!refreshing, |el| {
@@ -1148,6 +1149,7 @@ impl CloudPage {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label(format!("Copy GitHub code {}", flow.user_code))
+            .tooltip(widgets::text_tooltip("Copy code"))
             .on_click(cx.listener(|this, _, _, cx| this.copy_github_code(cx)))
             .child(
                 div()

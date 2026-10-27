@@ -436,12 +436,15 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
 /// reuses one child across turns instead of respawning.
 struct PersistentHarness {
     runs_started: Arc<Mutex<usize>>,
+    id: HarnessId,
+    /// Per launch: whether its Zeron server was side-chats-only.
+    side_chats_only: Arc<Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
 impl Harness for PersistentHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Persistent"
@@ -464,8 +467,15 @@ impl Harness for PersistentHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         *self.runs_started.lock().unwrap() += 1;
+        self.side_chats_only.lock().unwrap().push(
+            request
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| mcp.side_chats_only()),
+        );
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(32);
         let mut steering = controls.steering;
+        let harness = self.id;
         tokio::spawn(async move {
             let turn = |n: usize, prompt: &str| {
                 vec![
@@ -481,7 +491,7 @@ impl Harness for PersistentHarness {
                 ]
             };
             let first = vec![AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
+                harness,
                 model: "mock-1".into(),
                 tools: vec![],
                 cwd: "/tmp".into(),
@@ -530,6 +540,8 @@ async fn persistent_session_serves_multiple_turns_on_one_child() {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(PersistentHarness {
         runs_started: runs_started.clone(),
+        id: HarnessId::Mock,
+        side_chats_only: Default::default(),
     }));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
@@ -593,6 +605,8 @@ async fn a_switched_credential_replaces_the_parked_session() {
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(PersistentHarness {
         runs_started: runs_started.clone(),
+        id: HarnessId::Mock,
+        side_chats_only: Default::default(),
     }));
     registry.set_run_environment(Arc::new(SwitchableCredential(credential.clone())));
     let core = EngineCore::assemble(&dir, Arc::new(registry), HarnessId::Mock, None)
@@ -625,6 +639,120 @@ async fn a_switched_credential_replaces_the_parked_session() {
         2,
         "a switched account starts a new child"
     );
+    core.shutdown().await;
+}
+
+/// Turning a provider's native subagents off (Settings → Providers) between
+/// turns replaces the parked child, whose successor's Zeron server is
+/// side-chats-only; an unchanged setting keeps it warm.
+#[tokio::test]
+async fn switched_native_subagents_replace_the_parked_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let side_chats_only = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::ClaudeCode,
+        side_chats_only: side_chats_only.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    // A served IPC port: runs carry Zeron's own MCP server.
+    core.sessions.set_ipc_port(27699);
+    pre_title(&core);
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn on the warm child",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "same setting: same child");
+
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+    queue_run(&core, "third", "/tmp", "msg-user-3");
+    wait_for(
+        || complete_assistant_count(&core) == 3,
+        "third turn after the switch",
+    )
+    .await;
+    assert_eq!(
+        *runs_started.lock().unwrap(),
+        2,
+        "a switched setting starts a new child"
+    );
+    assert_eq!(*side_chats_only.lock().unwrap(), [false, true]);
+    core.shutdown().await;
+}
+
+/// A side chat keeps its provider's own subagents whatever the setting, so
+/// switching them off doesn't replace its parked child either.
+#[tokio::test]
+async fn a_parked_side_chat_stays_warm_when_native_subagents_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let runs_started = Arc::new(Mutex::new(0usize));
+    let side_chats_only = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(HarnessRegistry::new());
+    registry.register(Arc::new(PersistentHarness {
+        runs_started: runs_started.clone(),
+        id: HarnessId::ClaudeCode,
+        side_chats_only: side_chats_only.clone(),
+    }));
+    let core = EngineCore::assemble(&dir, registry.clone(), HarnessId::ClaudeCode, None)
+        .expect("engine core assembles");
+    core.sessions.set_ipc_port(27699);
+    core.workspace
+        .create_space("space-restart", &core.device_id, "/tmp", None, false)
+        .expect("create space row");
+    core.workspace
+        .create_chat("main", Some("space-restart"), None, None, None)
+        .expect("create the parent row");
+    core.workspace
+        .create_chat_with_parent(
+            CHAT,
+            Some("space-restart"),
+            None,
+            None,
+            None,
+            Some("main".into()),
+        )
+        .expect("create the side chat row");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+
+    queue_run(&core, "first", "/tmp", "msg-user-1");
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "first turn to complete",
+    )
+    .await;
+    registry
+        .set_native_subagents(HarnessId::ClaudeCode, false)
+        .unwrap();
+    queue_run(&core, "second", "/tmp", "msg-user-2");
+    wait_for(
+        || complete_assistant_count(&core) == 2,
+        "second turn after the switch",
+    )
+    .await;
+    assert_eq!(*runs_started.lock().unwrap(), 1, "the warm child serves it");
+    assert_eq!(*side_chats_only.lock().unwrap(), [false]);
     core.shutdown().await;
 }
 

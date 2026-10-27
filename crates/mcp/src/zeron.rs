@@ -34,6 +34,9 @@ const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
 pub struct Origin {
     pub chat_id: Option<String>,
     pub device_id: Option<String>,
+    /// The host launched the agent without its own subagent tools
+    /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
+    pub side_chats_only: bool,
 }
 
 impl Origin {
@@ -47,6 +50,8 @@ impl Origin {
         Self {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
+            side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
+                == Some("1"),
         }
     }
 }

@@ -102,6 +102,14 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started`: the task's one-line name, `/<skill>` for a forked
+    /// skill (live-verified 2.1.310).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `task_started`: the subagent's opening prompt, a forked skill's body.
+    /// A `Value`: a shape we don't expect must not cost the frame.
+    #[serde(default)]
+    pub prompt: Option<Value>,
     /// `background_tasks_changed`: every background task the session holds
     /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
@@ -191,6 +199,9 @@ pub(crate) struct ContentBlock {
     pub kind: String,
     #[serde(default)]
     pub text: String,
+    /// A `thinking` block's (summarized) text.
+    #[serde(default)]
+    pub thinking: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]

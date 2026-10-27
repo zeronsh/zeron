@@ -115,7 +115,7 @@ impl EngineChatSink {
 
 impl ChatDocSink for EngineChatSink {
     fn cursor_is_verified(&self) -> bool {
-        self.persistence.initial_cursor_verified
+        self.persistence.cursor_verified()
     }
     fn reset_cursor(&self, cursor: u64) {
         self.persistence.reset_cursor(cursor);

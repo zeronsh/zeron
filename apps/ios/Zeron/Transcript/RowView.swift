@@ -75,8 +75,8 @@ final class RowView: UIView {
         linkElements = d.links.map { l in
             let e = UIAccessibilityElement(accessibilityContainer: self)
             let url = URL(string: l.url)
-            // An agent message's sender caption opens the chat that sent it.
-            e.accessibilityLabel = url?.scheme == "zeron-chat" ? "Open sending chat" : url?.host() ?? l.url
+            // A caption over a message between chats opens the other chat.
+            e.accessibilityLabel = url?.scheme == "zeron-chat" ? "Open chat" : url?.host() ?? l.url
             e.accessibilityValue = l.url
             e.accessibilityTraits = .link
             e.accessibilityIdentifier = "transcript-link"

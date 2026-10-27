@@ -98,6 +98,8 @@ struct Inner {
     callback_routes: CallbackRoutes,
     /// Sign-in callbacks this device forwards to the device running them.
     callback_tunnels: CallbackTunnels,
+    /// Redials a refused signaling connection when a sign-in starts.
+    signaling_wake: Arc<tokio::sync::Notify>,
     peers: std::sync::OnceLock<Peers>,
     /// Engine-provided stream services peers may open, by id prefix.
     streams: StreamServices,
@@ -188,13 +190,15 @@ fn candidates(
 }
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
+        let signaling_wake = Arc::new(tokio::sync::Notify::new());
         Ok(Self(Arc::new(Inner {
             catalog: Catalog::open(file, device_id, device_name)?,
             stop: CancellationToken::new(),
             started: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
-            callback_routes: CallbackRoutes::default(),
+            callback_routes: CallbackRoutes::notifying(signaling_wake.clone()),
             callback_tunnels: CallbackTunnels::default(),
+            signaling_wake,
             peers: std::sync::OnceLock::new(),
             streams: StreamServices::default(),
         })))
@@ -273,10 +277,21 @@ impl PreviewService {
         });
         let forwarder = CallbackForwarder::bind(port, lifetime, open).await?;
         self.0.callback_tunnels.insert(login_id, forwarder);
+        self.0.signaling_wake.notify_one();
         Ok(())
     }
     pub fn close_login_tunnel(&self, login_id: &str) {
         self.0.callback_tunnels.close(login_id);
+    }
+    /// A provider sign-in's callback rides the direct connection on either
+    /// end — the device running the login, or the one forwarding to it — so
+    /// signaling joins as a sign-in, past the coordinator's device limit.
+    fn signing_in(&self) -> signaling::SigningIn {
+        let (routes, tunnels) = (
+            self.0.callback_routes.clone(),
+            self.0.callback_tunnels.clone(),
+        );
+        Arc::new(move || routes.any_live() || tunnels.any_live())
     }
     pub async fn start(&self, projects: Projects, signaling: Option<signaling::Config>) {
         if self.0.started.swap(true, Ordering::SeqCst) {
@@ -388,12 +403,14 @@ impl PreviewService {
         let mut tasks = self.0.tasks.lock().unwrap();
         tasks.push(scanner);
         if let Some(config) = signaling {
-            tasks.push(tokio::spawn(signaling::run(
+            tasks.push(tokio::spawn(signaling::run_signing_in(
                 config,
                 self.0.catalog.clone(),
                 peers,
                 output,
                 self.0.stop.child_token(),
+                self.0.signaling_wake.clone(),
+                self.signing_in(),
             )));
         }
     }

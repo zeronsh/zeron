@@ -4020,7 +4020,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         format!("/api/session/{session}/form/{request_id}/reply"),
                         form_answer_body(&pairs, &answers),
                     )),
-                    Ok(answers) => {
+                    Ok(answers) if !answers.is_empty() => {
                         let ordered: Vec<Vec<String>> = pairs
                             .iter()
                             .map(|(_, q)| {
@@ -4042,7 +4042,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     // left to cancel; only the 1.x route gets an explicit
                     // reject.
                     Err(_) if is_form => None,
-                    Err(_) => {
+                    // No answers (the questions were closed unanswered), or
+                    // the run went away: the 1.x route's own decline.
+                    Ok(_) | Err(_) => {
                         if let Err(e) = server
                             .post_json(
                                 &format!("/question/{request_id}/reject"),

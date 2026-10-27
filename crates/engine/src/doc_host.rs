@@ -5753,6 +5753,15 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // Closed without an answer: there is nothing to deliver, and
+                // a resumed turn would only say so. Record it and stop.
+                if answers.is_empty() {
+                    handle.doc.resolve_input(request_id, answers)?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("closed unanswered".into()),
+                    ));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -5772,7 +5781,7 @@ impl DocHost {
                 request.prompt = respond_input_prompt(&questions, answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
-                if let Err(err) = handle.doc.resolve_input(request_id) {
+                if let Err(err) = handle.doc.resolve_input(request_id, answers) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
