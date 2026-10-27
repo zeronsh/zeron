@@ -93,9 +93,12 @@ For each selected suite, `plan` hashes the inputs in the tree being tested
 ([`scripts/ci/reuse.py`](../../scripts/ci/reuse.py)). For a pull request that
 tree is the merge with the current `main`. The inputs are:
 
-- `Cargo.toml`, `Cargo.lock`, the toolchain, `ci.yml`, the composite actions
-  and `scripts/ci`;
-- the suite's workflow and the non-Rust files it uses;
+- `Cargo.toml`, `Cargo.lock`, the toolchain and `ci.yml`;
+- the suite's workflow, the CI scripts and setup actions it runs
+  (`nextest.toml`, `test-core.sh`, the apt and nextest installers…), and the
+  non-Rust files it uses. The planner and the scheduler (`plan.py`,
+  `admit.py`, `reuse.py`, `emergency.py`) decide what runs, not whether a test
+  passes, so changing them reuses everything;
 - for Rust suites:
   - the packages they test and every workspace package those depend on, of any
     dependency kind;

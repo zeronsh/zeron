@@ -9,9 +9,9 @@ fingerprint. Jobs record a pass as their last step (a tiny cache entry keyed
 
 A suite's inputs:
 
-  - COMMON: the workspace manifest and lockfile, the toolchain, ci.yml, the
-    composite actions and scripts/ci (which includes this file);
-  - SUITE_INPUTS: its workflow and the non-Rust files it uses;
+  - COMMON: the workspace manifest and lockfile, the toolchain and ci.yml;
+  - SUITE_INPUTS: its workflow, the CI scripts and actions it runs (not the
+    planner and scheduler), and the non-Rust files it uses;
   - for Rust suites, the directories of the workspace packages it tests and of
     every workspace package those depend on (Cargo.toml path dependencies, of
     every kind), plus any file outside those directories that their Rust
@@ -50,22 +50,28 @@ VERSION = "v1"
 
 COMMON = [
     "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/**", ".github/workflows/ci.yml",
-    ".github/actions/**", "scripts/ci/**",
 ]
+# The CI files a suite runs. plan.py, admit.py, reuse.py and emergency.py decide
+# which suites run and when, not whether their tests pass, so they are no input
+# (a change to what a fingerprint means bumps VERSION instead).
+LINUX_SETUP = [".github/actions/linux-ci/**", "scripts/ci/apt-install.sh", "scripts/ci/install-nextest.sh"]
+NEXTEST = ["scripts/ci/nextest.toml"]
 
 SUITE_INPUTS: dict[str, list[str]] = {
-    "core": [".github/workflows/ui-tests.yml"],
-    "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"],
+    "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
+    "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"]
+          + LINUX_SETUP + NEXTEST,
     "cursor": [".github/workflows/cursor-compatibility.yml", "scripts/*cursor-sdk*", "crates/harness/src/cursor/**"],
     "edge": [".github/workflows/preview-tests.yml", "edge/**"],
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
-                  "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png"],
+                  "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
+                  "scripts/ci/apt-install.sh"],
     "voice": [".github/workflows/voice-tests.yml", "dist/voice/**", "scripts/package-voice-runtime.py",
-              "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*"],
+              "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*"] + LINUX_SETUP + NEXTEST,
     "windows": [".github/workflows/windows.yml", "dist/windows/**", "scripts/test-windows-*.ps1",
-                "scripts/package-windows.ps1"],
+                "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**"] + NEXTEST,
     "macos": [".github/workflows/macos.yml", "edge/**", "scripts/run-macos-browser-fixture.sh",
-              "scripts/test-browser-storage.py", "dist/macos/**"],
+              "scripts/test-browser-storage.py", "dist/macos/**", "scripts/ci/run-macos-fixture.sh"] + NEXTEST,
     "frame_source": [".github/workflows/macos.yml"],
     "ios": [".github/workflows/macos.yml", "apps/ios/**", "scripts/ios/**"],
     "android": [".github/workflows/android.yml", "apps/android/**", "scripts/android/**",

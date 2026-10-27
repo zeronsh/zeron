@@ -137,6 +137,23 @@ class FingerprintTests(unittest.TestCase):
             plain = reuse.suite_keys(["core"], str(ROOT))[0]
             self.assertNotEqual(with_browser["core"], plain["core"])
 
+    def test_the_planner_and_scheduler_are_no_input(self):
+        self.assertEqual(self.changed_after("scripts/ci/plan.py", "# plan\n"), set())
+        self.assertEqual(self.changed_after("scripts/ci/admit.py", "# admit\n"), set())
+        self.assertEqual(self.changed_after(".github/workflows/ci.yml", "on: push\n"), {"a", "b", "app"})
+
+    def test_ci_files_count_for_the_suites_that_run_them(self):
+        keys = lambda: reuse.suite_keys(["core", "edge", "windows"], str(ROOT))[0]  # noqa: E731
+        if not (ROOT / "crates" / "ui" / "src").is_dir():
+            self.skipTest("Rust sources not checked out")
+        self.assertIn("scripts/ci/nextest.toml", reuse.SUITE_INPUTS["core"])
+        self.assertIn("scripts/ci/test-core.sh", reuse.SUITE_INPUTS["core"])
+        self.assertNotIn("scripts/ci/nextest.toml", reuse.SUITE_INPUTS["edge"])
+        self.assertIn(".github/actions/windows-ci-setup/**", reuse.SUITE_INPUTS["windows"])
+        self.assertTrue(all(not reuse.matches(f"scripts/ci/{f}", reuse.COMMON)
+                            for f in ("plan.py", "admit.py", "reuse.py", "emergency.py")))
+        self.assertEqual(keys(), keys())
+
     def test_unrelated_files_change_nothing(self):
         self.assertEqual(self.changed_after("docs/notes.md", "hi\n"), set())
 
