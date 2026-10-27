@@ -31,6 +31,7 @@ async fn live_run(cancel: bool) {
         harness: None, model: None, reasoning: None,
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
+        access: Default::default(), plan: false,
         attachments: Vec::new(), worktree: None, resume: None,
         env: Default::default(),
     };

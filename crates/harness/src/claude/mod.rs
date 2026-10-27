@@ -2002,6 +2002,8 @@ mod tests {
             cwd: String::new(),
             sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
             auto_approve: false,
+            access: Default::default(),
+            plan: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,

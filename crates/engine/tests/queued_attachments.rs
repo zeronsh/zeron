@@ -129,6 +129,8 @@ fn run_payload(message_id: &str, pending_ref: &str) -> SessionCommandPayload {
             cwd: "~".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: vec![pending_ref.to_string()],
             worktree: None,
             resume: None,

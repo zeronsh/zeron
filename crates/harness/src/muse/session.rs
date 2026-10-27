@@ -12,8 +12,11 @@
 //!   (`Steered`) when its user-message item enters the conversation.
 //! - STOP. `turn/interrupt` ends the turn in place (`cancelled`), leaving
 //!   the host and its background subagents running.
-//! - APPROVALS are answered from the choices the host offers: allowed once,
-//!   like every Zeron agent's tool calls (a read-only title run denies).
+//! - APPROVALS are answered from the choices the host offers, one stage at
+//!   a time: a staged approval (`cd app && make` is two) moves to its next
+//!   requirement with `approval/updated`, and each waits for its own
+//!   decision. Full access allows each once, supervised asks the person
+//!   (yes allows once, no rejects), a read-only title run denies.
 //!   QUESTIONS go to the user through [`RunControls::request_input`].
 use super::{
     catalog,
@@ -78,6 +81,11 @@ pub(super) struct Runner {
     pub input: Option<Arc<Input>>,
     dialogs: JoinSet<()>,
     questions: HashMap<String, AbortHandle>,
+    /// Per open approval, the requirement last decided (or being asked),
+    /// so a repeated `approval/updated` for it is not decided twice.
+    approvals: HashMap<String, Value>,
+    /// Supervised approvals waiting on the person, by approval id.
+    asking: HashMap<String, AbortHandle>,
     pub turn: TurnControl,
     lost_context: Option<String>,
 }
@@ -113,6 +121,8 @@ impl Runner {
             input: None,
             dialogs: JoinSet::new(),
             questions: HashMap::new(),
+            approvals: HashMap::new(),
+            asking: HashMap::new(),
             turn: TurnControl::default(),
             lost_context: None,
         }
@@ -170,7 +180,7 @@ impl Runner {
     fn approval_mode(&self) -> &'static str {
         if self.read_only {
             "denyUnmatched"
-        } else if self.request.auto_approve {
+        } else if super::full_access(&self.request) {
             "allowAll"
         } else {
             "promptUnmatched"
@@ -180,7 +190,7 @@ impl Runner {
     /// Without an explicit profile Muse applies its configured default, which
     /// can be an AI reviewer deciding approvals instead of the run.
     fn permission_profile(&self) -> &'static str {
-        if self.request.auto_approve {
+        if super::full_access(&self.request) {
             ":unrestricted"
         } else {
             ":ask-me"
@@ -634,7 +644,14 @@ impl Runner {
                 })
                 .await?;
             }
-            "approval/requested" => self.approve(&params)?,
+            "approval/requested" | "approval/updated" => self.approve(&params)?,
+            "approval/resolved" => {
+                let id = string(&params, "approvalId");
+                self.approvals.remove(id);
+                if let Some(task) = self.asking.remove(id) {
+                    task.abort();
+                }
+            }
             "userInput/requested" => self.ask(&params),
             "userInput/settled" => {
                 if let Some(task) = self.questions.remove(string(&params, "userInputId")) {
@@ -670,40 +687,88 @@ impl Runner {
         Ok(())
     }
 
-    /// Pick from the choices the host offers; never build one.
+    /// Decide the approval's current stage, once; a stage already resolved
+    /// (the update that reports a decision) is left alone.
     fn approve(&mut self, params: &Value) -> Result<(), HarnessError> {
+        let approval = string(params, "approvalId").to_owned();
+        let requirement = params["currentRequirementId"].clone();
+        if approval.is_empty() || requirement.is_null() {
+            return Ok(());
+        }
+        let stages = params["subject"]["stages"].as_array();
+        let stage = stages
+            .into_iter()
+            .flatten()
+            .find(|stage| stage["requirementId"] == requirement);
+        if stage.is_some_and(|stage| string(&stage["resolution"], "kind") != "unresolved")
+            || self.approvals.get(&approval) == Some(&requirement)
+        {
+            return Ok(());
+        }
+        self.approvals.insert(approval.clone(), requirement.clone());
         let choices = params["availableChoices"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         let pick = |decision: &str, scope: Option<&str>| {
-            choices.iter().find(|choice| {
-                string(choice, "decision") == decision
-                    && scope.is_none_or(|scope| string(choice, "scope") == scope)
-            })
+            choices
+                .iter()
+                .find(|choice| {
+                    string(choice, "decision") == decision
+                        && scope.is_none_or(|scope| string(choice, "scope") == scope)
+                })
+                .cloned()
         };
-        let choice = if self.read_only {
-            pick("denied", None).or_else(|| pick("abort", None))
-        } else {
-            pick("approved", Some("once"))
-                .or_else(|| pick("approved", None))
-                .or_else(|| pick("approvedForSession", None))
-                .or_else(|| pick("approvedPolicyAmendment", Some("session")))
+        let allow = pick("approved", Some("once"))
+            .or_else(|| pick("approved", None))
+            .or_else(|| pick("approvedForSession", None))
+            .or_else(|| pick("approvedPolicyAmendment", Some("session")));
+        let deny = pick("denied", None).or_else(|| pick("abort", None));
+        let decide = {
+            let client = self.client.clone();
+            let session = self.session.clone();
+            let approval = approval.clone();
+            move |choice: Option<Value>| {
+                let Some(choice) = choice else {
+                    tracing::warn!(target: "zeron_harness::muse", "Muse offered no usable approval choice");
+                    return Ok(None);
+                };
+                client
+                    .request(
+                        "approval/decide",
+                        json!({
+                            "sessionId": session,
+                            "approvalId": approval,
+                            "requirementId": requirement,
+                            "choiceId": choice["choiceId"],
+                        }),
+                    )
+                    .map(Some)
+            }
         };
-        let Some(choice) = choice else {
-            tracing::warn!(target: "zeron_harness::muse", "Muse offered no usable approval choice");
+        let input = self.input.clone();
+        let ask = !self.read_only && !super::full_access(&self.request);
+        let Some(input) = input.filter(|_| ask) else {
+            let choice = if self.read_only || ask { deny } else { allow };
+            if let Some(id) = decide(choice)? {
+                self.pending.insert(id, Pending::Other("approval/decide"));
+            }
             return Ok(());
         };
-        let id = self.client.request(
-            "approval/decide",
-            json!({
-                "sessionId": self.session,
-                "approvalId": params["approvalId"],
-                "requirementId": params["currentRequirementId"],
-                "choiceId": choice["choiceId"],
-            }),
-        )?;
-        self.pending.insert(id, Pending::Other("approval/decide"));
+        let question = approval_question(params, stage);
+        let answers = (input)(vec![question.clone()]);
+        let task = self.dialogs.spawn(async move {
+            let answers = answers.await.unwrap_or_default();
+            let choice = if crate::approval::approved(&question, &answers) {
+                allow
+            } else {
+                deny
+            };
+            let _ = decide(choice);
+        });
+        if let Some(previous) = self.asking.insert(approval, task) {
+            previous.abort();
+        }
         Ok(())
     }
 
@@ -769,6 +834,45 @@ impl Runner {
             );
         });
         self.questions.insert(user_input, task);
+    }
+}
+
+/// What a supervised approval asks: the stage's own command when the
+/// approval has several ("stage 2 of 3"), else the subject's.
+fn approval_question(params: &Value, stage: Option<&Value>) -> UserInputQuestion {
+    let subject = &params["subject"];
+    match string(subject, "kind") {
+        "shell" => {
+            let command = string(subject, "command");
+            let staged = stage.filter(|s| s["totalStages"].as_u64().unwrap_or(1) > 1);
+            let Some(stage) = staged else {
+                return crate::approval::command("Muse", command);
+            };
+            let argv: Vec<&str> = stage["argv"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            crate::approval::question(
+                "Approve command",
+                format!(
+                    "Muse wants to run `{}` (step {} of {} in `{command}`). Allow it?",
+                    argv.join(" "),
+                    stage["position"].as_u64().unwrap_or(1),
+                    stage["totalStages"].as_u64().unwrap_or(1),
+                ),
+            )
+        }
+        _ => {
+            let path = subject["path"]
+                .as_str()
+                .or_else(|| subject["filePath"].as_str());
+            match path {
+                Some(path) => crate::approval::edit("Muse", &[path]),
+                None => crate::approval::tool("Muse", string(params, "toolName"), None),
+            }
+        }
     }
 }
 

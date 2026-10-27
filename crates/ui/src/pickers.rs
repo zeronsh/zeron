@@ -159,6 +159,8 @@ impl ResolvedRunConfig {
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            access: Default::default(),
+            plan: false,
         })
     }
 }
@@ -9557,6 +9559,8 @@ mod tests {
             reasoning_levels: Vec::new(),
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             supports_steering: false,
+            access_modes: Vec::new(),
+            supports_plan: false,
         }
     }
     #[gpui::test]
@@ -10901,6 +10905,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: None,
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
@@ -10928,6 +10934,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled,
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
             vec![
@@ -10981,6 +10989,8 @@ mod tests {
                 installed,
                 can_install: false,
                 enabled,
+                access_modes: Vec::new(),
+                supports_plan: false,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
         // enabled one rides along. A live engine no longer stamps that

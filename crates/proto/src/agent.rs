@@ -257,6 +257,52 @@ pub enum SandboxLevel {
     DangerFullAccess,
 }
 
+/// How much an agent may do before it has to ask. Each harness maps the
+/// mode onto its own approval policy and sandbox; it lists the modes it can
+/// honor (`Harness::access_modes`), and the composer offers only
+/// those. Whatever a run must still ask reaches the person as a question.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessMode {
+    /// Ask before commands and file changes.
+    Supervised,
+    /// Apply file changes without asking; ask before anything else.
+    AutoAcceptEdits,
+    /// Run commands and change files without asking. Every run before modes
+    /// existed ran this way, so it is the default.
+    #[default]
+    FullAccess,
+}
+
+impl AccessMode {
+    /// Every mode, least to most trusting (the picker's order).
+    pub const ALL: [AccessMode; 3] = [
+        AccessMode::Supervised,
+        AccessMode::AutoAcceptEdits,
+        AccessMode::FullAccess,
+    ];
+
+    pub fn is_full_access(&self) -> bool {
+        *self == AccessMode::FullAccess
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AccessMode::Supervised => "Supervised",
+            AccessMode::AutoAcceptEdits => "Auto-accept edits",
+            AccessMode::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AccessMode::Supervised => "Ask before commands and file changes.",
+            AccessMode::AutoAcceptEdits => "Apply edits, ask before other actions.",
+            AccessMode::FullAccess => "Run commands and edits without asking.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -316,6 +362,15 @@ pub struct RunRequest {
     pub sandbox: SandboxLevel,
     #[serde(default)]
     pub auto_approve: bool,
+    /// What the agent may do without asking (see [`AccessMode`]). Additive +
+    /// serde-defaulted: a request from a client predating modes runs with
+    /// full access, as every run did then.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full_access")]
+    pub access: AccessMode,
+    /// Plan mode: the agent explores and proposes a plan instead of
+    /// changing anything. Honored by harnesses that advertise it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
@@ -365,6 +420,8 @@ impl std::fmt::Debug for RunRequest {
             cwd,
             sandbox,
             auto_approve,
+            access,
+            plan,
             resume,
             attachments,
             worktree,
@@ -380,6 +437,8 @@ impl std::fmt::Debug for RunRequest {
             .field("cwd", cwd)
             .field("sandbox", sandbox)
             .field("auto_approve", auto_approve)
+            .field("access", access)
+            .field("plan", plan)
             .field("resume", resume)
             .field("attachments", attachments)
             .field("worktree", worktree)
@@ -578,7 +637,8 @@ pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
 // assets base64-encoded; that message must fit the engine's 16 MiB frame
 // (tungstenite's default), with room for the script escaped as JSON.
 const _: () = assert!(
-    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
+    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024
+        < 16 * 1024 * 1024
 );
 
 /// Largest image file an agent may show with `show_image` (it rides one

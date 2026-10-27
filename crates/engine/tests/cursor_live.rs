@@ -82,6 +82,8 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     cwd: cwd.to_str().unwrap().into(),
                     sandbox: SandboxLevel::DangerFullAccess,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,

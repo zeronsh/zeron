@@ -9925,6 +9925,8 @@ impl Composer {
                         cwd,
                         sandbox: SandboxLevel::WorkspaceWrite,
                         auto_approve: false,
+                        access: Default::default(),
+                        plan: false,
                         resume: None,
                         attachments: attachment_paths,
                         worktree: run_worktree,

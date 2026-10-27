@@ -570,6 +570,8 @@ impl HarnessesPage {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            access_modes: Vec::new(),
+            supports_plan: false,
         }]);
         self.updates = Loadable::Ready(vec![
             serde_json::from_value(serde_json::json!({ "harness": harness, "phase": "current" }))
@@ -1650,6 +1652,8 @@ mod tests {
                         installed: true,
                         can_install: false,
                         enabled: Some(true),
+                        access_modes: Vec::new(),
+                        supports_plan: false,
                     }]);
                 page.run_pending_sign_in(cx);
                 assert_eq!(page.expanded_harness, Some(zeron_proto::HarnessId::Codex));
@@ -1688,6 +1692,8 @@ mod tests {
             installed: true,
             can_install: false,
             enabled: Some(true),
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         window
             .update(cx, |page, _, cx| {
@@ -1785,6 +1791,8 @@ mod tests {
             installed: true,
             can_install: true,
             enabled: Some(true),
+            access_modes: Vec::new(),
+            supports_plan: false,
         };
         window
             .update(cx, |page, _, cx| {

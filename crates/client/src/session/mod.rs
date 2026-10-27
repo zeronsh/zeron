@@ -1156,6 +1156,8 @@ impl SessionHandle {
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),

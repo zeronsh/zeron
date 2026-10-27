@@ -63,6 +63,8 @@ async fn quiet_acp_prompt_stays_working_until_response() {
                 cwd: dir.path().display().to_string(),
                 sandbox: SandboxLevel::WorkspaceWrite,
                 auto_approve: true,
+                access: Default::default(),
+                plan: false,
                 attachments: Vec::new(),
                 worktree: None,
                 resume: None,

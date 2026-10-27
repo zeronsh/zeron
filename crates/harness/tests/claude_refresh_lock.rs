@@ -86,6 +86,8 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
         cwd: dir.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

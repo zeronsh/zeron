@@ -37,6 +37,8 @@ fn request(cwd: &Path) -> RunRequest {
         cwd: cwd.display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: Vec::new(),
         worktree: None,

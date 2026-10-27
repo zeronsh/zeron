@@ -142,6 +142,8 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
                     cwd: "~".into(),
                     sandbox: SandboxLevel::WorkspaceWrite,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: Vec::new(),
                     worktree: None,
                     resume: None,

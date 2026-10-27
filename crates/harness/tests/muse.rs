@@ -12,8 +12,8 @@ use zeron_harness::{
     CancellationToken, Harness, MuseHarness, RunControls, SteerMessage, TurnControl,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
-    UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, ToolCall,
+    UserInputAnswer, UserInputQuestion,
 };
 
 fn fixtures() -> PathBuf {
@@ -43,6 +43,9 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
         cwd: work.display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
+        // Supervised unless a test says otherwise: it exercises the most.
+        access: AccessMode::Supervised,
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
@@ -81,9 +84,24 @@ fn controls(answers: Vec<UserInputAnswer>) -> (RunControls, Controls) {
             steering,
             interrupt: interrupt.clone(),
             request_input: Box::new(move |questions| {
+                // An answer for question "*" answers every question asked.
+                let answers: Vec<UserInputAnswer> = answers
+                    .iter()
+                    .flat_map(|a| {
+                        let ids: Vec<String> = if a.question_id == "*" {
+                            questions.iter().map(|q| q.id.clone()).collect()
+                        } else {
+                            vec![a.question_id.clone()]
+                        };
+                        ids.into_iter().map(|id| UserInputAnswer {
+                            question_id: id,
+                            labels: a.labels.clone(),
+                        })
+                    })
+                    .collect();
                 let _ = asked_tx.send(questions);
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(answers.clone());
+                let _ = tx.send(answers);
                 rx
             }),
             turn: turn.clone(),
@@ -293,7 +311,7 @@ async fn auto_approve_unsandboxes_and_a_runs_own_api_key_reaches_muse() {
 async fn an_approval_is_allowed_once_and_a_later_prompt_starts_the_next_turn() {
     let dir = tempfile::tempdir().unwrap();
     let harness = harness(dir.path());
-    let (run, controls) = controls(vec![]);
+    let (run, mut controls) = controls(vec![yes()]);
     let mut stream = harness
         .run(request(dir.path(), "permission", "create the marker"), run)
         .await
@@ -312,6 +330,13 @@ async fn an_approval_is_allowed_once_and_a_later_prompt_starts_the_next_turn() {
     let frames = log(dir.path(), "inbound.ndjson");
     let decide = sent(&frames, "approval/decide")[0];
     assert_eq!(decide["params"]["choiceId"], "allow_once");
+    // Supervised: the person was asked first.
+    let asked = controls.asked.try_recv().expect("the approval was asked");
+    assert_eq!(asked[0].header, "Approve command");
+    assert_eq!(
+        asked[0].question,
+        "Muse wants to run `touch muse-approved.txt`. Allow it?"
+    );
     assert!(decide["params"]["requirementId"]["approvalId"].is_string());
     // The host's own approval request was answered.
     assert!(
@@ -337,6 +362,82 @@ async fn an_approval_is_allowed_once_and_a_later_prompt_starts_the_next_turn() {
     assert_eq!(next["params"]["input"][0]["text"], "create a second marker");
     assert_eq!(sent(&frames, "approval/decide").len(), 2);
     ends(stream, controls).await;
+}
+
+fn yes() -> UserInputAnswer {
+    UserInputAnswer {
+        question_id: "*".into(),
+        labels: vec!["Yes".into()],
+    }
+}
+
+/// `mkdir -p out && touch out/…` is one approval of two stages; Muse moves
+/// to the second with `approval/updated`, and the turn waits on it.
+#[tokio::test]
+async fn full_access_decides_every_stage_of_an_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    let (run, mut controls) = controls(vec![]);
+    let mut request = request(dir.path(), "permission-staged", "create the marker");
+    request.access = AccessMode::FullAccess;
+    let mut stream = harness.run(request, run).await.unwrap();
+    let events = turn(&mut stream).await;
+    assert_eq!(done(&events).0, DoneStatus::Completed);
+    assert!(
+        controls.asked.try_recv().is_err(),
+        "full access asks nothing"
+    );
+    ends(stream, controls).await;
+    let frames = log(dir.path(), "inbound.ndjson");
+    let decides = sent(&frames, "approval/decide");
+    assert_eq!(decides.len(), 2, "one decision per stage, none repeated");
+    assert_eq!(decides[0]["params"]["requirementId"]["sourceIndex"], 0);
+    assert_eq!(decides[1]["params"]["requirementId"]["sourceIndex"], 1);
+    assert!(
+        decides
+            .iter()
+            .all(|d| d["params"]["choiceId"] == "allow_once")
+    );
+    let launch = log(dir.path(), "launch.ndjson");
+    assert_eq!(
+        launch[0]["args"],
+        serde_json::json!(["serve", "--trust-workspace", "--disable-sandbox"])
+    );
+    let start = sent(&frames, "session/start")[0];
+    assert_eq!(start["params"]["approvalMode"], "allowAll");
+    assert_eq!(start["params"]["permissionProfile"], ":unrestricted");
+}
+
+#[tokio::test]
+async fn supervised_asks_for_each_stage_of_an_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path());
+    let (run, mut controls) = controls(vec![yes()]);
+    let mut stream = harness
+        .run(
+            request(dir.path(), "permission-staged", "create the marker"),
+            run,
+        )
+        .await
+        .unwrap();
+    let events = turn(&mut stream).await;
+    assert_eq!(done(&events).0, DoneStatus::Completed);
+    let first = controls.asked.try_recv().unwrap();
+    let second = controls.asked.try_recv().unwrap();
+    assert_eq!(
+        first[0].question,
+        "Muse wants to run `mkdir -p out` (step 1 of 2 in `mkdir -p out && touch out/muse-approved.txt`). Allow it?"
+    );
+    assert!(
+        second[0]
+            .question
+            .contains("`touch out/muse-approved.txt` (step 2 of 2")
+    );
+    ends(stream, controls).await;
+    let frames = log(dir.path(), "inbound.ndjson");
+    let decides = sent(&frames, "approval/decide");
+    assert_eq!(decides.len(), 2);
+    assert_eq!(decides[1]["params"]["requirementId"]["sourceIndex"], 1);
 }
 
 #[tokio::test]

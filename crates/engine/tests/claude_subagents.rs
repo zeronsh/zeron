@@ -28,6 +28,8 @@ fn request(dir: &Path, scenario: &str) -> RunRequest {
         cwd: dir.display().to_string(),
         sandbox: SandboxLevel::ReadOnly,
         auto_approve: false,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: None,

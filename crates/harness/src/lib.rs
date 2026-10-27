@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
-    UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -225,6 +225,18 @@ pub trait Harness: Send + Sync {
             && live.reasoning == next.reasoning
             && same_model_options(&live.model_options, &next.model_options)
             && live.cwd == next.cwd
+            && live.access == next.access
+            && live.plan == next.plan
+    }
+    /// The [`AccessMode`]s this driver honors, least to most trusting. A
+    /// request for any other runs with full access (the composer offers
+    /// only these).
+    fn access_modes(&self) -> &[AccessMode] {
+        &[AccessMode::FullAccess]
+    }
+    /// Whether this driver honors [`RunRequest::plan`].
+    fn supports_plan(&self) -> bool {
+        false
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
@@ -292,6 +304,7 @@ pub trait Harness: Send + Sync {
 
 pub mod acp;
 pub(crate) mod adapter_install;
+pub mod approval;
 pub mod archive_install;
 mod catalog;
 mod catalog_failure;

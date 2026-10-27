@@ -1067,6 +1067,8 @@ impl Tools {
             reasoning,
             model_options: Default::default(),
             sandbox,
+            access: Default::default(),
+            plan: false,
         };
 
         let chat_id = uuid::Uuid::new_v4().to_string();
@@ -1516,6 +1518,8 @@ impl Tools {
                         .map(|c| c.sandbox)
                         .unwrap_or(SandboxLevel::WorkspaceWrite),
                     auto_approve: false,
+                    access: Default::default(),
+                    plan: false,
                     resume: None,
                     attachments: Vec::new(),
                     worktree: None,
