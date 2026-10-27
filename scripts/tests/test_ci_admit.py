@@ -62,8 +62,22 @@ class ReservationTests(unittest.TestCase):
         declared = {"linux": 2, "windows": 0, "macos": 3}
         jobs = [job("macos / macos-native", "macos-latest", "in_progress", None)]
         self.assertEqual(held(declared, jobs, since_admitted=60)["macos"], 3)
+        # After CREATE_GRACE only the late jobs (result, Android publish) may still be missing.
+        self.assertEqual(held(declared, jobs, since_admitted=admit.CREATE_GRACE + 1),
+                         {"linux": 2, "windows": 0, "macos": 1})
+        self.assertEqual(held({"linux": 10, "windows": 3, "macos": 3}, [], since_admitted=admit.CREATE_GRACE + 1),
+                         admit.LATE_JOBS)
         self.assertEqual(held(declared, jobs, since_admitted=admit.UNSEEN_GRACE + 1),
                          {"linux": 0, "windows": 0, "macos": 1})
+
+    def test_stalled_for(self):
+        import time
+        stamp = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))  # noqa: E731
+        jobs = [dict(job("linux / core-tests", "ubuntu-24.04", "queued", None), created_at=stamp(700)),
+                dict(job("macos / macos-native", "macos-latest", "queued", None), created_at=stamp(3000)),
+                dict(job("windows / tests", "windows-2022", "in_progress", None), created_at=stamp(5000))]
+        self.assertAlmostEqual(admit.stalled_for(jobs), 700, delta=5)  # macOS queues behind its own limit
+        self.assertEqual(admit.stalled_for(jobs[1:]), 0)
 
     def test_seconds_since(self):
         import time
@@ -142,6 +156,114 @@ class DecideTests(unittest.TestCase):
         d = decide(99, need(linux=3), snap, BUDGET)
         self.assertEqual(d.position, 1)
         self.assertFalse(d.admit)
+
+
+class MisbehaviourTests(unittest.TestCase):
+    BIG = {"total": 20, "macos": 5, "windows": 10}
+
+    def test_a_run_that_never_takes_its_turn_is_ignored(self):
+        # Run 1 claims a full run and its admit step never finishes (an edited ci.yml).
+        fake = waiter(1, 1, **admit.MAX_RESERVATION)
+        snap = lambda: Snapshot([waiter(1, 1, **admit.MAX_RESERVATION), waiter(2, 2, linux=6)], [])  # noqa: E731
+        since = {}
+        s = snap()
+        admit.mark_unresponsive(2, s, self.BIG, since, now=1000)
+        self.assertFalse(decide(2, need(linux=6), s, self.BIG).admit)  # 16 ahead + 6 > 20
+        s = snap()
+        admit.mark_unresponsive(2, s, self.BIG, since, now=1000 + admit.UNRESPONSIVE_GRACE + 1)
+        self.assertTrue(s.waiters[0].ignored)
+        self.assertTrue(decide(2, need(linux=6), s, self.BIG).admit)
+        self.assertEqual(fake.need, s.waiters[0].need)
+
+    def test_a_run_that_cannot_start_yet_is_not_ignored(self):
+        since = {}
+        for now in (0, 10_000):
+            s = Snapshot([waiter(1, 1, macos=3), waiter(2, 2, linux=2)], [held_(macos=4)])
+            admit.mark_unresponsive(2, s, self.BIG, since, now)
+            self.assertFalse(s.waiters[0].ignored)  # it waits for macOS, as it should
+        # Nor one whose admit job has no runner yet.
+        s = Snapshot([waiter(1, 1, running=False, linux=2), waiter(2, 2, linux=2)], [])
+        admit.mark_unresponsive(2, s, self.BIG, {1: 0}, now=10_000)
+        self.assertFalse(s.waiters[0].ignored)
+
+    def test_yield_only_when_admitted_jobs_starve_and_only_from_the_back(self):
+        waiters = [waiter(i, i, linux=3) for i in range(1, 11)]
+        snap = Snapshot(waiters, [Holding(need(linux=5), stalled=admit.STALL_SECONDS - 1)])
+        self.assertFalse(any(admit.should_yield(i, snap, self.BIG) for i in range(1, 11)))
+        snap.holding[0].stalled = admit.STALL_SECONDS + 1
+        keep = self.BIG["total"] // admit.KEEP_WAITING_SHARE
+        self.assertEqual([i for i in range(1, 11) if admit.should_yield(i, snap, self.BIG)],
+                         list(range(keep + 1, 11)))
+
+
+class PhysicalPoolTests(unittest.TestCase):
+    """Waiting admit jobs hold runners from the same pool as the suites.
+
+    The decide()-only simulation (LivenessTests) assumes admitted runs always
+    get their runners. Here GitHub's pool is modelled too: a fixed number of
+    runners, handed to queued jobs (admit jobs and suite jobs alike) in the
+    order they were created. With enough runs waiting, their admit jobs took
+    the whole pool and nothing finished until MAX_WAIT_MINUTES; should_yield
+    must keep every queue draining.
+    """
+
+    def simulate(self, seed, yielding=True, runs_count=30, ticks=400):
+        import random
+        rng = random.Random(seed)
+        budget = {"total": 20, "macos": 5, "windows": 10}
+        tick_s = 60
+        runs = {r: {"need": rng.randint(2, 6), "arrive": rng.randint(0, 5), "duration": rng.randint(3, 15),
+                    "admitted": False, "done": 0} for r in range(1, runs_count + 1)}
+        queue = []  # [created tick, run, kind]; kind "admit" or "suite"
+        running = []  # [run, kind, ticks left]
+        for r, run in sorted(runs.items(), key=lambda kv: kv[1]["arrive"]):
+            queue.append([run["arrive"], r, "admit"])
+        for tick in range(ticks):
+            # Suite jobs finish; GitHub hands free runners to the oldest queued jobs.
+            for job in [j for j in running if j[1] == "suite"]:
+                job[2] -= 1
+                if job[2] <= 0:
+                    running.remove(job)
+                    runs[job[0]]["done"] += 1
+            queue.sort()
+            while len(running) < budget["total"] and queue and queue[0][0] <= tick:
+                created, r, kind = queue.pop(0)
+                running.append([r, kind, runs[r]["duration"]])
+            if all(run["done"] == run["need"] for run in runs.values()):
+                return tick
+
+            def snapshot():
+                waiters, holding = [], []
+                for r, run in runs.items():
+                    if run["arrive"] > tick:
+                        continue
+                    if not run["admitted"]:
+                        on_runner = any(j[0] == r and j[1] == "admit" for j in running)
+                        waiters.append(Waiter(r, (run["arrive"], r), need(linux=run["need"]), on_runner))
+                    else:
+                        left = run["need"] - run["done"]
+                        queued = [c for c, q, k in queue if q == r and k == "suite"]
+                        stalled = (tick - min(queued)) * tick_s if queued else 0
+                        holding.append(Holding(need(linux=left), None, stalled))
+                return Snapshot(waiters, holding)
+
+            for job in [j for j in running if j[1] == "admit"]:
+                r = job[0]
+                snap = snapshot()
+                go = decide(r, need(linux=runs[r]["need"]), snap, budget).admit
+                if go or (yielding and admit.should_yield(r, snap, budget)):
+                    running.remove(job)
+                    runs[r]["admitted"] = True
+                    queue.extend([tick, r, "suite"] for _ in range(runs[r]["need"]))
+        return None
+
+    def test_waiting_admit_jobs_never_starve_the_pool(self):
+        for seed in range(200):
+            self.assertIsNotNone(self.simulate(seed), f"seed {seed}: stuck")
+
+    def test_without_yielding_the_pool_starves(self):
+        # The model reproduces the stall should_yield fixes.
+        self.assertTrue(any(self.simulate(seed, yielding=False) is None for seed in range(20)))
 
 
 class PriorityAndLockTests(unittest.TestCase):

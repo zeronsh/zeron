@@ -21,10 +21,27 @@ requests from forks only get a read-only token):
   - A waiting run's own admit job holds one Linux runner.
 
 Any pull request can edit its own copy of ci.yml, so a reservation read from
-another run is not trusted: it is capped at the most plan.py ever reserves
-(MAX_RESERVATION), and an admitted run's jobs that never show up stop counting
-UNSEEN_GRACE after admission. A run cannot hold more than a full run's worth
-of runners, or hold runners it never uses for long.
+another run is not trusted:
+
+  - it is capped at the most plan.py ever reserves (MAX_RESERVATION);
+  - an admitted run's jobs that have not shown up CREATE_GRACE after admission
+    stop counting, except the LATE_JOBS that start after the others (the
+    result job, Android publishing), which stop at UNSEEN_GRACE;
+  - a waiting run that could have been admitted for UNRESPONSIVE_GRACE but
+    still waits is not following this protocol (an edited admit step that
+    never finishes): the runs behind it stop waiting for it.
+
+So a run cannot hold more than a full run's worth of runners, hold runners it
+never uses for long, or block the queue by never taking its turn.
+
+Waiting costs a runner: the admit job runs on the same hosted pool as the
+suites. When so many runs wait at once that their admit jobs leave admitted
+runs' jobs queued (STALL_SECONDS without a runner), the runs furthest back
+yield: all running admit jobs but the first quarter of the budget
+(KEEP_WAITING_SHARE) stop waiting and start their suites without a
+reservation, which frees their runners. Without this,
+about 20 runs waiting at once took the whole pool and nothing ran until the
+MAX_WAIT_MINUTES timeout.
 
 Priority and locks (labels; adding a label needs the triage role or above):
 
@@ -86,9 +103,20 @@ UNRESERVED_JOBS = ("plan",)  # jobs that run before admission and are not in res
 RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d+)\b")
 # The largest reservation plan.py makes: every suite, on main (checked by test_ci_admit.py).
 MAX_RESERVATION = {"linux": 10, "windows": 3, "macos": 3}
-# How long an admitted run's not-yet-created jobs stay reserved. Jobs that wait for
-# another job (iOS simulator tests, Android publishing) are created within minutes.
+# How long an admitted run's not-yet-created jobs stay reserved. Its suites' jobs
+# are created as soon as admit finishes; LATE_JOBS (the `CI result` job, and
+# Android publishing on main) only once the jobs they need are done.
+CREATE_GRACE = 10 * 60
 UNSEEN_GRACE = 90 * 60
+LATE_JOBS = {"linux": 2, "windows": 0, "macos": 0}
+# A waiting run that could have been admitted this long, but still waits, is ignored.
+UNRESPONSIVE_GRACE = 3 * 60
+# An admitted run's job queued this long (Linux or Windows: the runners waiting
+# admit jobs take from) means waiting admit jobs are starving the pool.
+STALL_SECONDS = 10 * 60
+# ...then all but this share of the total budget of running admit jobs (the first
+# in the queue) stop waiting (should_yield).
+KEEP_WAITING_SHARE = 4
 PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
@@ -122,7 +150,8 @@ def is_admit(job: dict) -> bool:
 def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0) -> dict[str, int]:
     """Runners an admitted run still holds: its reservation minus its finished jobs.
 
-    After UNSEEN_GRACE only jobs that exist and have not finished count.
+    After CREATE_GRACE, jobs not created yet count only up to LATE_JOBS; after
+    UNSEEN_GRACE only jobs that exist and have not finished count.
     """
     done = {r: 0 for r in RUNNERS}
     active = {r: 0 for r in RUNNERS}
@@ -137,7 +166,17 @@ def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0) 
         bucket[runner_of(job)] += 1
     if since_admitted > UNSEEN_GRACE:
         return active
+    if since_admitted > CREATE_GRACE:
+        return {r: active[r] + min(max(declared[r] - done[r] - active[r], 0), LATE_JOBS[r]) for r in RUNNERS}
     return {r: max(declared[r] - done[r], active[r], 0) for r in RUNNERS}
+
+
+def stalled_for(jobs: list[dict]) -> float:
+    """How long the run's longest-queued Linux or Windows job has waited for a runner."""
+    ages = [seconds_since(job.get("created_at")) for job in jobs
+            if job.get("status") == "queued" and not is_admit(job) and job["name"] not in UNRESERVED_JOBS
+            and runner_of(job) != "macos"]  # macOS queues behind its own limit, not admit jobs
+    return max(ages, default=0)
 
 
 def seconds_since(timestamp: str | None) -> float:
@@ -153,12 +192,14 @@ class Waiter:
     need: dict[str, int]
     running: bool  # its admit job holds a runner
     pr: int | None = None  # its pull request, when verified
+    ignored: bool = False  # does not take its turn (mark_unresponsive): nobody waits for it
 
 
 @dataclass
 class Holding:
     need: dict[str, int]  # need_of(held()) of an admitted run
     pr: int | None = None
+    stalled: float = 0  # seconds its longest-queued job has waited for a runner (stalled_for)
 
 
 @dataclass
@@ -236,6 +277,8 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
 
     ahead = dict(zero)
     for w in ahead_of_me:
+        if w.ignored:
+            continue  # it does not take its turn; only its admit runner counts (above)
         if w.pr in snapshot.locked and (my_lock is None or lock_is_older(w.pr)):
             continue  # its need is already in `used` as the lock's standing reservation
         ahead = add(ahead, w.need)
@@ -244,6 +287,48 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     fits = all(used[r] + ahead[r] + min(mine[r], budget[r]) <= budget[r]
                for r in RESOURCES if mine[r] > 0)
     return Decision(fits, position, used, ahead)
+
+
+def mark_unresponsive(me: int, snapshot: Snapshot, budget: dict[str, int], since: dict[int, float],
+                      now: float, grace: float = UNRESPONSIVE_GRACE) -> None:
+    """Ignore waiting runs that could have been admitted for `grace` but still wait.
+
+    An honest admit job takes its turn within a poll (30 s at the head of the
+    queue). One that does not, such as an edited ci.yml whose admit step never
+    finishes, would otherwise hold everyone behind it until MAX_WAIT_MINUTES.
+    `since` (run -> when it was first seen admissible) persists between polls.
+    Ignoring a run only lowers what others wait for, so it cannot add a wait cycle.
+    """
+    for w in sorted(snapshot.waiters, key=lambda w: rank(w, snapshot)):
+        if w.run_id == me or not w.running:
+            continue  # a queued admit job cannot take its turn yet
+        if decide(w.run_id, w.need, snapshot, budget).admit:
+            first = since.setdefault(w.run_id, now)
+            w.ignored = now - first > grace
+        else:
+            since.pop(w.run_id, None)
+    live = {w.run_id for w in snapshot.waiters}
+    for run in [r for r in since if r not in live]:
+        del since[run]
+
+
+def should_yield(me: int, snapshot: Snapshot, budget: dict[str, int],
+                 stall: float = STALL_SECONDS) -> bool:
+    """Whether this waiting run should give its admit runner back and start now.
+
+    Waiting admit jobs hold hosted runners from the same pool as the suites.
+    When an admitted run's jobs have queued for `stall` seconds, those runners
+    are what they wait for: every running admit job but the first
+    budget/KEEP_WAITING_SHARE in the queue stops waiting. Its suites start
+    without a reservation (others count them as held, so admission catches up),
+    and its runner goes to the queued jobs, which GitHub created before the
+    yielding run's.
+    """
+    if not any(h.stalled > stall for h in snapshot.holding):
+        return False
+    keep = max(2, budget["total"] // KEEP_WAITING_SHARE)
+    running = [w.run_id for w in sorted(snapshot.waiters, key=lambda w: rank(w, snapshot)) if w.running]
+    return me in running and running.index(me) >= keep
 
 
 # GitHub API ------------------------------------------------------------------------------------
@@ -361,7 +446,7 @@ class Scheduler:
                                            need_of(declared), admit["status"] == "in_progress", pr))
             elif admit["conclusion"] == "success":
                 since = seconds_since(admit.get("completed_at"))
-                snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr))
+                snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr, stalled_for(jobs)))
         return snap
 
     def labelled(self, label: str) -> set[int]:
@@ -461,6 +546,7 @@ def main() -> int:
     print(f"Reservation {mine}; budget {budget}")
     failures = 0
     last = None
+    admissible_since: dict[int, float] = {}  # mark_unresponsive's memory
     while True:
         waited = time.time() - started
         try:
@@ -482,25 +568,33 @@ def main() -> int:
             time.sleep(30)
             continue
 
+        mark_unresponsive(me, snap, budget, admissible_since, time.time())
         decision = decide(me, mine, snap, budget)
-        state = (decision.position, tuple(decision.used.values()), tuple(decision.ahead.values()))
+        ignored = sorted(w.run_id for w in snap.waiters if w.ignored)
+        state = (decision.position, tuple(decision.used.values()), tuple(decision.ahead.values()), tuple(ignored))
         if state != last:
             print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
                   f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
                   f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
-                  f"API quota left {api.remaining}")
+                  f"ignored (not taking their turn) {ignored or '-'}, API quota left {api.remaining}")
             last = state
         if decision.admit:
             summary(f"Admitted after {waited / 60:.1f} min (reservation `{os.environ['CI_RESERVATION']}`, "
                     f"in use {decision.used}, budget {budget}, {api.requests} API requests).")
             return 0
+        if should_yield(me, snap, budget):
+            summary(f"::notice::Admitted runs' jobs are queued behind waiting admit jobs; after "
+                    f"{waited / 60:.1f} min this run gives its runner back and starts without a reservation.")
+            return 0
         if waited > max_wait:
             summary(f"::warning::Admission waited {waited / 60:.0f} min; starting without a reservation.")
             return 0
 
-        interval = 30 if decision.position == 0 else min(300, 60 * decision.position)
-        if api.remaining < 250:
-            interval = max(interval, 300)
+        # Every poll lists the runs and refetches the jobs of those that changed, from
+        # the repository's shared GITHUB_TOKEN quota: only the head of the queue polls often.
+        interval = {0: 30, 1: 60, 2: 120}.get(decision.position, 300)
+        if api.remaining < 400:
+            interval = max(interval, 600)
         time.sleep(interval)
 
 
