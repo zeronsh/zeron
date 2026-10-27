@@ -216,5 +216,5 @@ jobs:
           FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          echo "$RESULTS" | python3 -c 'import json,sys; [print(f"{k:13} {v[\"result\"]}") for k,v in json.load(sys.stdin).items()]'
+          echo "$RESULTS" | python3 -c 'import json,sys; [print(k.ljust(13), v["result"]) for k, v in json.load(sys.stdin).items()]'
           test "$FAILED" = false
