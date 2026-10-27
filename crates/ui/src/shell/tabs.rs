@@ -442,23 +442,17 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        // What runs alongside the open chat: its working subagents and side
-        // chats, counted on the session card's toggle.
-        let running_lanes = {
+        // What runs alongside the open chat: its working subagents, counted
+        // on the session card's toggle, and its side chats at work, as their
+        // marks beside it.
+        let (running_lanes, side_chats_at_work) = {
             let state = self.state.read(cx);
             let now = Utc::now();
-            state.selected_chat.as_deref().map_or(0, |chat| {
-                let side_chats = state
-                    .chats
-                    .iter()
-                    .filter(|side| {
-                        !side.archived
-                            && side.parent_chat_id.as_deref() == Some(chat)
-                            && state.display_status_for(side, now)
-                                == zeron_proto::ChatIndicator::Working
-                    })
-                    .count() as u32;
-                state.running_subagents_for(chat, now) + side_chats
+            state.selected_chat.as_deref().map_or((0, Vec::new()), |chat| {
+                (
+                    state.running_subagents_for(chat, now),
+                    super::session_lanes::side_chats_at_work(state, chat, now),
+                )
             })
         };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
@@ -678,6 +672,10 @@ impl Shell {
                 )
             })
             .child(div().flex_1())
+            .children(
+                (!takeover && !on_canvas && !side_chats_at_work.is_empty())
+                    .then(|| self.render_side_chat_stack(&side_chats_at_work, &theme, cx)),
+            )
             .children(session_info_toggle)
             .children(trailing);
 

@@ -46,6 +46,7 @@ pub mod rpc;
 pub mod run_journal;
 pub mod runner;
 pub mod sessions;
+pub(crate) mod side_chat_reports;
 pub mod source_control;
 pub mod spaces;
 pub mod terminals;
@@ -271,6 +272,9 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        // Side chats report to the chat that started them from every engine
+        // that runs them, desktop or not (a Cloud machine hosts side chats).
+        doc_host.spawn_side_chat_reports(sessions.watch_sessions(), workspace.watch_chats());
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),

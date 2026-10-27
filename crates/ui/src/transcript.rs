@@ -40,6 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
+use zeron_proto::side_chat_updates::{UpdateKind, UpdateRef, is_quiet_reply, split_updates};
 use zeron_proto::view::{AnswerLine, InputOutcome};
 use zeron_proto::{HarnessId, ToolCall};
 
@@ -1079,6 +1080,18 @@ pub enum RowKind {
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
+    /// What the chats this one started reported to its agent, lifted off
+    /// the head of the prompt Zeron handed it: one line, not a bubble.
+    SideChatUpdates {
+        updates: Arc<Vec<UpdateRef>>,
+    },
+    /// Chats this chat's agent started through Zeron's `create_chat(s)`:
+    /// their marks stacked on one line, opening to a row each.
+    StartedChats {
+        chats: Arc<Vec<StartedChat>>,
+        /// The call hasn't returned yet.
+        pending: bool,
+    },
     /// A message this chat's agent sent another chat through Zeron's
     /// `send_message`: one `Message to [logo] Chat` line, not the tool call.
     SentMessage {
@@ -1385,6 +1398,29 @@ pub fn rows_for_entry(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        // Side-chat updates ride the head of the prompt; they draw as their
+        // own line, and a turn they started alone has no bubble at all.
+        let raw = match split_updates(&raw) {
+            Some((updates, typed)) => {
+                rows.push(Row {
+                    id: format!("{}#updates", entry.id).into(),
+                    version: fnv1a(raw.as_bytes()),
+                    turn_start: true,
+                    kind: RowKind::SideChatUpdates {
+                        updates: Arc::new(updates),
+                    },
+                    entry_id: entry_id.clone(),
+                    timestamp: None,
+                    copy_text: None,
+                    compact_fold: None,
+                });
+                if typed.trim().is_empty() {
+                    return rows;
+                }
+                typed.to_owned()
+            }
+            None => raw,
+        };
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
@@ -1426,10 +1462,12 @@ pub fn rows_for_entry(
                     .any(|chip| crate::attachments::chip_names_attachment(chip, &att.path))
         });
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
-        return vec![Row {
+        // Under an updates line the bubble continues its turn.
+        let turn_start = rows.is_empty();
+        rows.push(Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
-            turn_start: true,
+            turn_start,
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
@@ -1444,9 +1482,13 @@ pub fn rows_for_entry(
             timestamp: Some(entry.created_at),
             copy_text,
             compact_fold: None,
-        }];
+        });
+        return rows;
     }
 
+    if is_quiet_turn(entry) {
+        return rows;
+    }
     // Assistant/system: split parts into block rows, folding consecutive
     // ordinary tools. Agent/spawn chips flush into their own group so they
     // never share a collapse with Reads/Runs.
@@ -1461,12 +1503,12 @@ pub fn rows_for_entry(
     let reply_start = (compact && !streaming)
         .then(|| {
             let mut start = entry.parts.iter().rposition(
-                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+                |part| matches!(part, MessagePart::Text { text, .. } if shows_text(text, false)),
             )?;
             while start > 0
                 && matches!(
                     &entry.parts[start - 1],
-                    MessagePart::Text { text, .. } if !text.trim().is_empty()
+                    MessagePart::Text { text, .. } if shows_text(text, false)
                 )
             {
                 start -= 1;
@@ -1525,6 +1567,36 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // Chats it started read as one line of their marks, out of
+                // the tool fold, compact mode included: they outlive the turn.
+                if let Some(chats) = started_chats(call, output.as_deref()) {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                    let version = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        (&chats, *resolved).hash(&mut h);
+                        h.finish()
+                    };
+                    rows.push(Row {
+                        id: format!("{}#{}.started", entry.id, part.id()).into(),
+                        version,
+                        turn_start: false,
+                        copy_text: None,
+                        kind: RowKind::StartedChats {
+                            chats: Arc::new(chats),
+                            pending: !*resolved,
+                        },
+                        entry_id: entry.id.clone().into(),
+                        timestamp: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
@@ -1635,7 +1707,7 @@ pub fn rows_for_entry(
                 // stays a row.
                 if compact
                     && let MessagePart::Text { id: part_id, text } = other
-                    && !text.trim().is_empty()
+                    && shows_text(text, streaming)
                     && reply_start.is_none_or(|start| part_ix < start)
                 {
                     compact_group_pos.get_or_insert(rows.len());
@@ -1655,7 +1727,7 @@ pub fn rows_for_entry(
                 }
                 match other {
                     MessagePart::Text { id: part_id, text } => {
-                        if text.trim().is_empty() {
+                        if !shows_text(text, streaming) {
                             continue;
                         }
                         let key = format!("{}#{}", entry.id, part_id);
@@ -1936,10 +2008,26 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
         MessagePart::Tool { .. } => true,
         MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
         MessagePart::Text { text, .. } => {
-            !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start)
+            shows_text(text, false) && reply_start.is_none_or(|start| ix < start)
         }
         _ => false,
     }
+}
+
+/// A settled turn that only thought and then said it had nothing for its
+/// user ([`zeron_proto::side_chat_updates::QUIET_REPLY`]): the agent took in
+/// side-chat updates. It draws nothing; the updates line above it says what
+/// happened. A turn that also did something keeps its work.
+fn is_quiet_turn(entry: &SessionMessageEntry) -> bool {
+    entry.status != Some(MessageStatus::Streaming)
+        && entry.parts.iter().any(
+            |part| matches!(part, MessagePart::Text { text, .. } if is_quiet_reply(text)),
+        )
+        && entry.parts.iter().all(|part| match part {
+            MessagePart::Reasoning { .. } => true,
+            MessagePart::Text { text, .. } => !shows_text(text, false),
+            _ => false,
+        })
 }
 
 /// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -2098,6 +2186,13 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
         && prev.is_some_and(|prev| matches!(prev.kind, RowKind::SwitchMarker { .. }))
     {
         return USER_CAPTION_GAP;
+    }
+    // Updates arriving one after another (the quiet turns between them draw
+    // nothing) read as one list.
+    if matches!(row.kind, RowKind::SideChatUpdates { .. })
+        && prev.is_some_and(|prev| matches!(prev.kind, RowKind::SideChatUpdates { .. }))
+    {
+        return Theme::SPACE_SM;
     }
     if row.turn_start {
         return Theme::SPACE_LG;
@@ -3335,6 +3430,13 @@ pub struct Transcript {
     /// keyed by row id. Render-local like `folds` — never part of the row
     /// fingerprint, so toggling one costs a repaint, not a rebuild.
     user_folds: HashMap<SharedString, FoldState>,
+    /// "Started side chats" lines opened to a row per chat, by row id.
+    /// Render-local like `user_folds`.
+    open_side_chat_lines: HashSet<SharedString>,
+    /// The open chat's side chats as their lines show them (status, title,
+    /// provider), hashed: those lines read live state, so a change repaints
+    /// them though the transcript itself did not change.
+    side_chat_signature: u64,
     /// Full laid-out text heights for long user bubbles. The text's paint
     /// canvas writes these cells without notifying or mutating the transcript;
     /// click handlers read them as exact endpoints for the RESIZE tween. This
@@ -3762,6 +3864,8 @@ impl Transcript {
             historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
+            open_side_chat_lines: HashSet::new(),
+            side_chat_signature: 0,
             user_heights: HashMap::new(),
             user_hold_task: None,
             user_hold_token: 0,
@@ -4979,6 +5083,7 @@ impl Transcript {
             }
         };
 
+        self.repaint_side_chat_lines(cx);
         let source = (
             selected.clone(),
             replay,
@@ -6694,6 +6799,533 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// What a side chat's update says about it, after its name.
+    fn update_verb(kind: UpdateKind) -> &'static str {
+        match kind {
+            UpdateKind::Finished => "finished",
+            UpdateKind::Failed => "failed",
+            UpdateKind::NeedsInput => "has a question",
+            UpdateKind::Note => "sent a note",
+        }
+    }
+
+    /// The side-chat updates heading a prompt: `[logo] Title finished` for
+    /// one; for several, their marks stacked with what happened, opening to
+    /// a line each.
+    fn render_side_chat_updates(
+        &mut self,
+        row_id: &SharedString,
+        updates: &Arc<Vec<UpdateRef>>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let line = |this: &Self, ix: usize, update: &UpdateRef, cx: &mut Context<Self>| {
+            this.render_update_line(
+                &format!("{row_id}.{ix}").into(),
+                update,
+                theme,
+                cx,
+            )
+        };
+        if updates.len() == 1 {
+            return div().w_full().child(line(self, 0, &updates[0], cx)).into_any_element();
+        }
+        let avatars: Vec<crate::side_chat_avatars::Avatar> = updates
+            .iter()
+            .map(|update| crate::side_chat_avatars::Avatar {
+                harness: self.chat_harness(&update.chat_id, cx),
+                status: match update.kind {
+                    UpdateKind::Finished => zeron_proto::ChatIndicator::Completed,
+                    UpdateKind::Failed => zeron_proto::ChatIndicator::Errored,
+                    UpdateKind::NeedsInput => zeron_proto::ChatIndicator::AwaitingInput,
+                    UpdateKind::Note => zeron_proto::ChatIndicator::Idle,
+                },
+            })
+            .collect();
+        let mut counts: Vec<(UpdateKind, usize)> = Vec::new();
+        for update in updates.iter() {
+            match counts.iter_mut().find(|(kind, _)| *kind == update.kind) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((update.kind, 1)),
+            }
+        }
+        let what = counts
+            .iter()
+            .map(|(kind, count)| format!("{count} {}", Self::update_verb(*kind)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let open = self.open_side_chat_lines.contains(row_id);
+        let header = self.render_stack_header(
+            row_id,
+            &avatars,
+            format!("Updates from {} side chats", updates.len()).into(),
+            Some(what.into()),
+            open,
+            theme,
+            cx,
+        );
+        // Lines keep their own width: a stretched header would wash the whole
+        // column on hover.
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(4.0))
+            .child(header);
+        if open {
+            for (ix, update) in updates.iter().enumerate() {
+                column = column.child(div().pl(px(4.0)).child(line(self, ix, update, cx)));
+            }
+        }
+        column.into_any_element()
+    }
+
+    /// `[logo] Title finished`, the title opening the chat.
+    fn render_update_line(
+        &self,
+        id: &SharedString,
+        update: &UpdateRef,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (title, mark, known) = self.chat_label(&update.chat_id, &update.title, cx);
+        let chat_id = update.chat_id.clone();
+        user_caption(theme)
+            .id(SharedString::from(format!("{id}-chat")))
+            .max_w(px(self.content_width * 0.8))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-open")))
+                    .min_w_0()
+                    .child(caption_label(title, Some(mark), theme.text_muted))
+                    .when(known, |el| {
+                        el.role(gpui::Role::Link)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                cx.emit(TranscriptEvent::OpenChat {
+                                    chat_id: chat_id.clone(),
+                                });
+                            }))
+                    }),
+            )
+            .child(div().flex_none().child(Self::update_verb(update.kind)))
+            .into_any_element()
+    }
+
+    /// The chats a `create_chat(s)` call started: `Started [logo] Title`
+    /// for one; for several, their marks stacked with how they are doing,
+    /// opening to a row each. Status is live, read off the chat list.
+    fn render_started_chats(
+        &mut self,
+        row_id: &SharedString,
+        chats: &Arc<Vec<StartedChat>>,
+        pending: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = chrono::Utc::now();
+        let chats = &Arc::new(self.resolve_started(chats, cx));
+        let statuses: Vec<zeron_proto::ChatIndicator> = chats
+            .iter()
+            .map(|chat| self.started_status(chat, now, cx))
+            .collect();
+        let lead = if pending { "Starting" } else { "Started" };
+        if chats.len() == 1 {
+            let chat = &chats[0];
+            let (title, mark, known) = match chat.chat_id.as_deref() {
+                Some(id) => self.chat_label(id, &chat.title, cx),
+                None => (
+                    single_line(&chat.title).into(),
+                    chat.harness
+                        .map(crate::pickers::harness_brand_icon)
+                        .unwrap_or((crate::icons::CHAT_ROUND_LINE, None)),
+                    false,
+                ),
+            };
+            let chat_id = chat.chat_id.clone().unwrap_or_default();
+            let status = crate::side_chat_avatars::summary([statuses[0]]);
+            let status = status.trim_start_matches("1 ").to_owned();
+            return div()
+                .w_full()
+                .child(
+                    user_caption(theme)
+                        .id(SharedString::from(format!("{row_id}-chat")))
+                        .max_w(px(self.content_width * 0.8))
+                        .when(pending, |el| el.opacity(0.65))
+                        .child(div().flex_none().child(lead))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{row_id}-open")))
+                                .min_w_0()
+                                .child(caption_label(title, Some(mark), theme.text_muted))
+                                .when(known, |el| {
+                                    el.role(gpui::Role::Link)
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text))
+                                        .on_click(cx.listener(
+                                            move |_, _: &gpui::ClickEvent, _, cx| {
+                                                cx.emit(TranscriptEvent::OpenChat {
+                                                    chat_id: chat_id.clone(),
+                                                });
+                                            },
+                                        ))
+                                }),
+                        )
+                        .when(!pending && !status.is_empty(), |el| {
+                            el.child(div().flex_none().text_color(theme.text_faint).child(status))
+                        }),
+                )
+                .into_any_element();
+        }
+        let avatars: Vec<crate::side_chat_avatars::Avatar> = chats
+            .iter()
+            .zip(&statuses)
+            .map(|(chat, status)| crate::side_chat_avatars::Avatar {
+                harness: chat
+                    .chat_id
+                    .as_deref()
+                    .and_then(|id| self.chat_harness(id, cx))
+                    .or(chat.harness),
+                status: *status,
+            })
+            .collect();
+        let open = self.open_side_chat_lines.contains(row_id);
+        let summary = (!pending).then(|| crate::side_chat_avatars::summary(statuses.iter().copied()).into());
+        let header = self.render_stack_header(
+            row_id,
+            &avatars,
+            format!("{lead} {} side chats", chats.len()).into(),
+            summary,
+            open,
+            theme,
+            cx,
+        );
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(2.0))
+            .when(pending, |el| el.opacity(0.65))
+            .child(header);
+        if open {
+            let view = cx.entity_id();
+            for (ix, (chat, status)) in chats.iter().zip(&statuses).enumerate() {
+                column = column.child(self.render_started_row(
+                    &format!("{row_id}.{ix}").into(),
+                    chat,
+                    *status,
+                    view,
+                    theme,
+                    cx,
+                ));
+            }
+        }
+        column.into_any_element()
+    }
+
+    /// One started chat, opened out of its stack: status, mark, title.
+    fn render_started_row(
+        &self,
+        id: &SharedString,
+        chat: &StartedChat,
+        status: zeron_proto::ChatIndicator,
+        view: gpui::EntityId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (title, mark, known) = match chat.chat_id.as_deref() {
+            Some(chat_id) => self.chat_label(chat_id, &chat.title, cx),
+            None => (
+                single_line(&chat.title).into(),
+                chat.harness
+                    .map(crate::pickers::harness_brand_icon)
+                    .unwrap_or((crate::icons::CHAT_ROUND_LINE, None)),
+                false,
+            ),
+        };
+        let status_mark: AnyElement = match status {
+            zeron_proto::ChatIndicator::Working => crate::loaders::mini_glyph_spinner(
+                format!("{id}-working"),
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            )
+            .into_any_element(),
+            zeron_proto::ChatIndicator::Completed => crate::icons::icon(crate::icons::CHECK)
+                .size(px(12.0))
+                .text_color(crate::shell::spaces::status_dot_color(status, theme))
+                .into_any_element(),
+            _ => div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(crate::shell::spaces::status_dot_color(status, theme))
+                .into_any_element(),
+        };
+        let word = crate::side_chat_avatars::summary([status]);
+        let word = word.trim_start_matches("1 ").to_owned();
+        let chat_id = chat.chat_id.clone().unwrap_or_default();
+        let fade = format!("{id}-hover");
+        div()
+            .id(SharedString::from(format!("{id}-row")))
+            .max_w(px(self.content_width * 0.8))
+            .h(px(26.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(6.0))
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text_muted)
+            .child(
+                div()
+                    .size(px(14.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(status_mark),
+            )
+            .child(caption_label(title, Some(mark), theme.text))
+            .child(div().flex_none().text_color(theme.text_faint).child(word))
+            .when(known, |el| {
+                el.cursor_pointer()
+                    .role(gpui::Role::Link)
+                    .bg(motion::hover_blend(
+                        &fade,
+                        crate::theme::ink(0.0),
+                        crate::theme::ink(0.05),
+                    ))
+                    .on_hover(motion::hover_listener(fade.clone()))
+                    .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                        cx.emit(TranscriptEvent::OpenChat {
+                            chat_id: chat_id.clone(),
+                        });
+                    }))
+            })
+            .into_any_element()
+    }
+
+    /// `[stack] Label · summary ⌄`: a line of stacked chat marks that opens
+    /// to a row per chat.
+    #[allow(clippy::too_many_arguments)]
+    fn render_stack_header(
+        &self,
+        row_id: &SharedString,
+        avatars: &[crate::side_chat_avatars::Avatar],
+        label: SharedString,
+        summary: Option<SharedString>,
+        open: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let toggle = row_id.clone();
+        let fade = format!("{row_id}-stack");
+        div()
+            .id(SharedString::from(format!("{row_id}-stack")))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .pl(px(4.0))
+            .pr(px(8.0))
+            .rounded(px(8.0))
+            .max_w(px(self.content_width * 0.8))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
+            .bg(motion::hover_blend(
+                &fade,
+                crate::theme::ink(0.0),
+                crate::theme::ink(0.05),
+            ))
+            .on_hover(motion::hover_listener(fade))
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.toggle_side_chat_line(toggle.clone(), cx);
+            }))
+            .child(crate::side_chat_avatars::stack(avatars, 20.0, theme.bg, theme))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child(label),
+                    )
+                    .children(summary.map(|summary| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(summary)
+                    })),
+            )
+            .child(
+                crate::icons::icon(if open {
+                    crate::icons::ALT_ARROW_UP
+                } else {
+                    crate::icons::ALT_ARROW_DOWN
+                })
+                .size(px(12.0))
+                .text_color(theme.text_faint),
+            )
+            .into_any_element()
+    }
+
+    /// Repaint the side-chat lines when the chats they show changed.
+    fn repaint_side_chat_lines(&mut self, cx: &mut Context<Self>) {
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let state = self.state.read(cx);
+            let Some(selected) = state.selected_chat.as_deref() else {
+                return;
+            };
+            let now = chrono::Utc::now();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for chat in state
+                .chats
+                .iter()
+                .filter(|chat| chat.parent_chat_id.as_deref() == Some(selected))
+            {
+                chat.id.hash(&mut h);
+                chat.title.hash(&mut h);
+                chat.config.as_ref().map(|c| c.harness).hash(&mut h);
+                (state.display_status_for(chat, now) as u8).hash(&mut h);
+            }
+            h.finish()
+        };
+        if signature == self.side_chat_signature {
+            return;
+        }
+        self.side_chat_signature = signature;
+        let lines: Vec<SharedString> = self
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    RowKind::StartedChats { .. } | RowKind::SideChatUpdates { .. }
+                )
+            })
+            .map(|row| row.id.clone())
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        for id in &lines {
+            self.render_cache.borrow_mut().invalidate_row(id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_side_chat_line(&mut self, row_id: SharedString, cx: &mut Context<Self>) {
+        if !self.open_side_chat_lines.remove(&row_id) {
+            self.open_side_chat_lines.insert(row_id.clone());
+        }
+        if let Some(ix) = self.rows.iter().position(|row| row.id == row_id) {
+            self.render_cache.borrow_mut().invalidate_row(&row_id);
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
+    /// A chat's live title and provider mark, `fallback` titling one this
+    /// workspace doesn't list; `true` when it is listed (and so opens).
+    fn chat_label(
+        &self,
+        chat_id: &str,
+        fallback: &str,
+        cx: &gpui::App,
+    ) -> (SharedString, (&'static str, Option<gpui::Hsla>), bool) {
+        let chat = self.state.read(cx).chats.iter().find(|chat| chat.id == chat_id);
+        let title = chat
+            .and_then(|chat| chat.title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(fallback);
+        let mark = chat
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| crate::pickers::harness_brand_icon(config.harness))
+            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+        (single_line(title).into(), mark, chat.is_some())
+    }
+
+    /// `chats` with each one's id, found among the open chat's side chats by
+    /// title when the call's result didn't name it (the doc keeps only a
+    /// summary of a tool's output).
+    fn resolve_started(&self, chats: &[StartedChat], cx: &gpui::App) -> Vec<StartedChat> {
+        let state = self.state.read(cx);
+        let parent = self.chat_id.as_deref().or(state.selected_chat.as_deref());
+        let mut taken: Vec<&str> = chats.iter().filter_map(|c| c.chat_id.as_deref()).collect();
+        chats
+            .iter()
+            .map(|started| {
+                let mut started = started.clone();
+                if started.chat_id.is_none() && !started.failed {
+                    let found = state.chats.iter().find(|chat| {
+                        chat.parent_chat_id.as_deref() == parent
+                            && parent.is_some()
+                            && !taken.contains(&chat.id.as_str())
+                            && chat
+                                .title
+                                .as_deref()
+                                .is_some_and(|t| t.trim().eq_ignore_ascii_case(started.title.trim()))
+                    });
+                    if let Some(chat) = found {
+                        taken.push(chat.id.as_str());
+                        started.chat_id = Some(chat.id.clone());
+                    }
+                }
+                started
+            })
+            .collect()
+    }
+
+    fn chat_harness(&self, chat_id: &str, cx: &gpui::App) -> Option<HarnessId> {
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness)
+    }
+
+    fn started_status(
+        &self,
+        chat: &StartedChat,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &gpui::App,
+    ) -> zeron_proto::ChatIndicator {
+        if chat.failed {
+            return zeron_proto::ChatIndicator::Errored;
+        }
+        let state = self.state.read(cx);
+        let Some(listed) = chat
+            .chat_id
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|c| c.id == id))
+        else {
+            return zeron_proto::ChatIndicator::Working;
+        };
+        match state.display_status_for(listed, now) {
+            // A side chat the user never opens stays "unseen" once done:
+            // its last turn's outcome is what to show.
+            zeron_proto::ChatIndicator::Idle => zeron_proto::ChatIndicator::Completed,
+            status => status,
+        }
+    }
+
     /// `{lead} [logo] Chat` over a message between chats: chat `chat_id`'s
     /// provider mark and live title, `fallback` for one this workspace doesn't
     /// list. A listed chat opens on click. `end` aligns it over a user bubble;
@@ -7785,6 +8417,12 @@ impl Transcript {
                     );
                 }
                 column.into_any_element()
+            }
+            RowKind::SideChatUpdates { updates } => {
+                self.render_side_chat_updates(&row.id, updates, &theme, cx)
+            }
+            RowKind::StartedChats { chats, pending } => {
+                self.render_started_chats(&row.id, chats, *pending, &theme, cx)
             }
             RowKind::SentMessage {
                 to,
@@ -9568,6 +10206,134 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
 
 /// `[mark] Name` in a user-message caption: a provider's brand mark (or any
 /// glyph) beside its name. A side without a mark shows its name alone.
+/// Whether an agent's text part draws: not blank, and not the bare reply an
+/// agent ends a side-chat update turn with when it has nothing for its user
+/// (nor, while it streams, the start of one).
+fn shows_text(text: &str, streaming: bool) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !is_quiet_reply(trimmed)
+        && !(streaming && zeron_proto::side_chat_updates::QUIET_REPLY.starts_with(trimmed))
+}
+
+/// A chat a `create_chat(s)` call started (or is starting).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StartedChat {
+    /// Known once the call returns.
+    pub chat_id: Option<String>,
+    pub title: SharedString,
+    pub harness: Option<HarnessId>,
+    /// This one couldn't be created.
+    pub failed: bool,
+}
+
+/// The chats a Zeron `create_chat` / `create_chats` call starts: titled and
+/// branded from its arguments, identified from its result once it lands.
+/// `None` for any other call.
+fn started_chats(call: &ToolCall, output: Option<&str>) -> Option<Vec<StartedChat>> {
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input,
+    } = call
+    else {
+        return None;
+    };
+    if server != "zeron" || !matches!(tool.as_str(), "create_chat" | "create_chats") {
+        return None;
+    }
+    let result = output.and_then(tool_json);
+    let listed = result
+        .as_ref()
+        .and_then(|value| value.get("results"))
+        .and_then(|r| r.as_array());
+    // The doc keeps a launch's titles and harnesses (never its prompts); a
+    // call stored before it did is read off its result alone. A model may
+    // pass the batch as a JSON string; the server takes either.
+    let null = serde_json::Value::Null;
+    let input = input.as_ref().unwrap_or(&null);
+    let batch: Option<serde_json::Value> = match input.get("requests") {
+        Some(serde_json::Value::String(raw)) => serde_json::from_str(raw).ok(),
+        other => other.cloned(),
+    };
+    let requests: Vec<&serde_json::Value> = match tool.as_str() {
+        "create_chat" if input.is_object() || result.is_some() => vec![input],
+        "create_chats" => match batch.as_ref().and_then(|b| b.as_array()) {
+            Some(requests) => requests.iter().collect(),
+            None => listed.map(|items| vec![&null; items.len()])?,
+        },
+        _ => return None,
+    };
+    if requests.is_empty() {
+        return None;
+    }
+    let results: Vec<Option<&serde_json::Value>> = match (&result, tool.as_str()) {
+        (Some(value), "create_chat") => vec![Some(value)],
+        (Some(_), _) => (0..requests.len())
+            .map(|ix| {
+                listed.and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.get("index").and_then(|i| i.as_u64()) == Some(ix as u64))
+                })
+            })
+            .collect(),
+        (None, _) => vec![None; requests.len()],
+    };
+    let text = |value: Option<&serde_json::Value>, key: &str| {
+        value
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    Some(
+        requests
+            .iter()
+            .enumerate()
+            .map(|(ix, request)| {
+                let item = results.get(ix).copied().flatten();
+                let failed = item.is_some_and(|item| item.get("isError") == Some(&serde_json::Value::Bool(true)));
+                // A batch wraps each chat's result; a single call is the result.
+                let made = item.map(|item| item.get("result").unwrap_or(item));
+                let title = text(Some(request), "title")
+                    .or_else(|| text(made, "title"))
+                    .or_else(|| {
+                        text(Some(request), "prompt")
+                            .and_then(|p| p.lines().next().map(|line| single_line(line)))
+                    })
+                    .unwrap_or_else(|| "Side chat".into());
+                let harness = text(Some(request), "harness")
+                    .or_else(|| text(made, "harness"))
+                    .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw)).ok());
+                StartedChat {
+                    chat_id: text(made, "chatId"),
+                    title: title.into(),
+                    harness,
+                    failed,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A tool's JSON result, as the agent's harness recorded it: the JSON
+/// itself, or MCP text content wrapping it.
+fn tool_json(output: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+    let content = value
+        .as_array()
+        .or_else(|| value.get("content").and_then(|c| c.as_array()));
+    if let Some(items) = content {
+        let text = items
+            .iter()
+            .find_map(|item| item.get("text").and_then(|t| t.as_str()))?;
+        return serde_json::from_str(text.trim()).ok();
+    }
+    Some(value)
+}
+
 fn caption_label(
     name: SharedString,
     mark: Option<(&'static str, Option<gpui::Hsla>)>,
@@ -12708,6 +13474,115 @@ mod tests {
             .iter()
             .filter(|row| matches!(row.kind, RowKind::SentMessage { .. }))
             .all(|row| row.compact_fold.as_deref() == Some("a1#work")));
+    }
+
+    fn zeron_call(id: &str, tool: &str, input: serde_json::Value, output: Option<&str>) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: Some(input),
+            },
+            is_error: false,
+            resolved: output.is_some(),
+            output: output.map(str::to_owned),
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        }
+    }
+
+    #[test]
+    fn started_side_chats_read_as_one_line_in_either_mode() {
+        let output = serde_json::json!({ "results": [
+            { "index": 0, "isError": false, "result": { "chatId": "c-1", "harness": "claude-code" } },
+            { "index": 1, "isError": true, "error": "nope" },
+        ]})
+        .to_string();
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("k0", "ls"),
+                zeron_call(
+                    "k1",
+                    "create_chats",
+                    serde_json::json!({ "requests": [
+                        { "title": "Slug edge cases", "harness": "claude-code", "prompt": "Fix slugify" },
+                        { "prompt": "Write the README\nwith examples", "harness": "codex" },
+                    ]}),
+                    Some(&output),
+                ),
+                text_part("t1", "Started two."),
+            ],
+        );
+        for compact in [false, true] {
+            let rows = rows_for_entry(&entry, false, compact, &mut parse);
+            let started: Vec<&Row> = rows
+                .iter()
+                .filter(|row| matches!(row.kind, RowKind::StartedChats { .. }) && row.compact_fold.is_none())
+                .collect();
+            assert_eq!(started.len(), 1, "compact {compact}: one visible line");
+            let RowKind::StartedChats { chats, pending } = &started[0].kind else {
+                unreachable!()
+            };
+            assert!(!pending);
+            assert_eq!(chats[0].chat_id.as_deref(), Some("c-1"));
+            assert_eq!(chats[0].title.as_ref(), "Slug edge cases");
+            assert_eq!(chats[0].harness, Some(HarnessId::ClaudeCode));
+            assert!(chats[1].failed);
+            assert_eq!(chats[1].title.as_ref(), "Write the README");
+        }
+        // A call stored without its input reads off its result alone.
+        let MessagePart::Tool { output, .. } = &entry.parts[1] else { unreachable!() };
+        let bare = ToolCall::Mcp { server: "zeron".into(), tool: "create_chats".into(), input: None };
+        let read = started_chats(&bare, output.as_deref()).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].chat_id.as_deref(), Some("c-1"));
+        assert!(started_chats(&bare, None).is_none());
+        // MCP text content wrapping the JSON reads the same.
+        let wrapped = serde_json::json!([{ "type": "text", "text": "{\"chatId\": \"c-9\"}" }]).to_string();
+        let single = zeron_call("k2", "create_chat", serde_json::json!({ "title": "Docs" }), Some(&wrapped));
+        let MessagePart::Tool { call, output, .. } = &single else { unreachable!() };
+        assert_eq!(started_chats(call, output.as_deref()).unwrap()[0].chat_id.as_deref(), Some("c-9"));
+    }
+
+    #[test]
+    fn side_chat_updates_draw_as_a_line_and_quiet_replies_vanish() {
+        use zeron_proto::side_chat_updates::{SideChatUpdate, updates_prompt, with_updates};
+        let update = SideChatUpdate {
+            kind: UpdateKind::Finished,
+            chat_id: "c-1".into(),
+            title: "Slug edge cases".into(),
+            text: "Done.".into(),
+        };
+        let alone = updates_prompt(std::slice::from_ref(&update), &[], false);
+        let rows = rows_for_entry(&user_entry("u1", &alone), false, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0].kind, RowKind::SideChatUpdates { updates } if updates[0].chat_id == "c-1"));
+        assert!(rows[0].turn_start);
+
+        let carried = with_updates(&[update], &[], "How's it going?");
+        let rows = rows_for_entry(&user_entry("u2", &carried), false, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].kind, RowKind::SideChatUpdates { .. }));
+        assert!(matches!(&rows[1].kind, RowKind::User { text, .. } if text.as_ref() == "How's it going?"));
+        assert!(!rows[1].turn_start, "the bubble continues the updates' turn");
+
+        let quiet = assistant("a1", MessageStatus::Complete, vec![text_part("t0", "NO_REPLY")]);
+        for compact in [false, true] {
+            let rows = rows_for_entry(&quiet, false, compact, &mut parse);
+            let kinds: Vec<String> = rows.iter().map(|r| r.id.to_string()).collect();
+            assert!(rows.is_empty(), "compact {compact}: {kinds:?}");
+        }
+        let streaming = assistant("a2", MessageStatus::Streaming, vec![text_part("t0", "NO_RE")]);
+        assert!(rows_for_entry(&streaming, false, false, &mut parse).is_empty());
     }
 
     #[test]

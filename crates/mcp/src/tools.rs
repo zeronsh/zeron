@@ -1129,6 +1129,9 @@ impl Tools {
                 last_seen_at: None,
                 room_gen: None,
             };
+            // A side chat's first prompt carries its parent's header, which
+            // tells it the reply goes back by itself.
+            let prompt = self.attribute(&chat, &prompt).await;
             let sent = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
                 .await?;
@@ -1192,6 +1195,9 @@ impl Tools {
                 "refusing to send a message to your own chat ({})",
                 short(&chat.id)
             );
+        }
+        if let Some(note) = self.note_to_parent(&chat, text).await? {
+            return Ok(note);
         }
         let (spaces, sessions, harnesses) = tokio::try_join!(
             self.zeron.spaces(),
@@ -1369,7 +1375,80 @@ impl Tools {
             }
             _ => short(origin_id).to_owned(),
         };
-        zeron_proto::agent_messages::agent_message(&label, origin_id, text)
+        if target.parent_chat_id.as_deref() == Some(origin_id) {
+            zeron_proto::agent_messages::delegated_message(&label, origin_id, text)
+        } else {
+            zeron_proto::agent_messages::agent_message(&label, origin_id, text)
+        }
+    }
+
+    /// A side chat messaging the chat that started it sends a progress note:
+    /// its parent's agent reads it with its next update, and the user sees
+    /// it beside the side chat, but it never interrupts or starts a turn
+    /// there. `None` for any other message.
+    async fn note_to_parent(&self, target: &Chat, text: &str) -> anyhow::Result<Option<Value>> {
+        let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(origin) = self.zeron.resolve_chat(origin_id).await else {
+            return Ok(None);
+        };
+        if origin.parent_chat_id.as_deref() != Some(target.id.as_str()) {
+            return Ok(None);
+        }
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::POST_SIDE_CHAT_NOTE,
+                json!({ "chatId": target.id, "fromChatId": origin.id, "text": text }),
+            )
+            .await?;
+        Ok(Some(json!({
+            "chatId": target.id,
+            "title": target.title,
+            "sent": {
+                "delivery": "note",
+                "id": reply.get("id").cloned().unwrap_or(Value::Null),
+                "detail": "Posted as a progress note. The chat that started you reads it with its next update; your final reply reaches it by itself when your turn ends.",
+            },
+        })))
+    }
+
+    /// The side-chat notices `turn` already told this chat's agent about, so
+    /// its host never starts a turn to repeat them. Only for a side chat of
+    /// the chat this server speaks for; best effort.
+    async fn ack_reported(&self, chat: &Chat, rendered: &[RenderedMessage], turn: &Value) {
+        let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
+            return;
+        };
+        if chat.parent_chat_id.as_deref() != Some(origin_id) {
+            return;
+        }
+        use zeron_proto::side_chat_updates::UpdateKind;
+        let mut ids = Vec::new();
+        if turn["timedOut"] != true
+            && let Some(user) = rendered
+                .iter()
+                .rev()
+                .find(|m| m.role == zeron_doc::MessageRole::User)
+        {
+            for kind in [UpdateKind::Finished, UpdateKind::Failed] {
+                ids.push(zeron_doc::notice_id(kind, &chat.id, &user.id));
+            }
+        }
+        if let Some(request) = turn["pendingInput"]["requestId"].as_str() {
+            ids.push(zeron_doc::notice_id(UpdateKind::NeedsInput, &chat.id, request));
+        }
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(err) = self
+            .zeron
+            .call(zeron_rpc::methods::ACK_CHAT_NOTICES, json!({ "chatId": origin_id, "ids": ids }))
+            .await
+        {
+            tracing::debug!(error = %err, "notice acknowledgement failed");
+        }
     }
 
     /// Pick and perform the delivery the composer would.
@@ -1551,7 +1630,7 @@ impl Tools {
         let stale = session
             .as_ref()
             .is_some_and(|s| zeron_proto::view::session_stale(s, now));
-        Ok(json!({
+        let turn = json!({
             "outcome": outcome,
             "status": status,
             "sessionStatus": session.as_ref().map(|s| s.status),
@@ -1561,7 +1640,11 @@ impl Tools {
             "timedOut": outcome == TurnOutcome::TimedOut,
             "pendingInput": if stale { None } else { last_pending_input(&rendered) },
             "replies": replies,
-        }))
+        });
+        if expect_turn && outcome != TurnOutcome::TimedOut {
+            self.ack_reported(chat, &rendered, &turn).await;
+        }
+        Ok(turn)
     }
 }
 

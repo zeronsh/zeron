@@ -45,6 +45,15 @@ its host; with both project and device it must belong to that device. Use listed
 ids when names/paths repeat. Without project or device, creation uses the local engine. \
 If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
 \n\
+Side chats you start report back by themselves. When a turn you delegated finishes, fails, \
+or stops on a question, Zeron hands you the update after your current turn, never mid-reply, \
+or starts a turn for it when you are idle. So for work that takes a while, launch it with \
+`wait: false`, tell the user in a line what you started, and end your turn; don't poll. Wait \
+only when you need the answer to continue the turn you are in. The user sees none of the \
+traffic between chats, only what you tell them. In a side chat, never send your result back \
+with `send_message`: finish your turn and your final reply goes back on its own. A \
+`send_message` to the chat that started you posts a short progress note instead.\n\
+\n\
 Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
 those marked `connected` can take work from you whichever provider you run \
 on (a claude-code agent may hand a task to codex, and the reverse). Pass \

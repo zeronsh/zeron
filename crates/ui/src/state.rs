@@ -996,6 +996,9 @@ pub struct AppState {
     /// agent was busy, in the order it will be sent. Device-agnostic: the
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
+    /// What the selected chat's side chats reported to its agent, oldest
+    /// first: their latest word, beside them in the side-chat lane.
+    pub side_chat_notices: Vec<zeron_doc::ChatNotice>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
@@ -1174,6 +1177,7 @@ impl AppState {
             selected_chat: None,
             transcript: Vec::new(),
             queue: Vec::new(),
+            side_chat_notices: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -1434,6 +1438,7 @@ impl AppState {
             self.transcript_replayed = false;
             self.transcript_task = None;
             self.queue.clear();
+            self.side_chat_notices.clear();
             self.queue_task = None;
         }
         changed
@@ -4277,6 +4282,7 @@ impl AppState {
         }
         self.transcript_task = None;
         self.queue.clear();
+        self.side_chat_notices.clear();
         self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
@@ -4808,6 +4814,9 @@ fn spawn_queue_watch(
     struct QueueFrame {
         #[serde(default)]
         items: Vec<zeron_doc::QueuedMessage>,
+        /// Older engines send none.
+        #[serde(default)]
+        notices: Vec<zeron_doc::ChatNotice>,
     }
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -4840,6 +4849,7 @@ fn spawn_queue_watch(
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
                         state.apply_queue(frame.items);
+                        state.side_chat_notices = frame.notices;
                         cx.notify();
                     }
                 });

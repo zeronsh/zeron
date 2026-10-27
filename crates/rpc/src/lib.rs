@@ -86,8 +86,16 @@ pub mod methods {
     /// a report goes stale after 45 s.
     pub const SET_VIEWPORT_FOCUS: &str = "SetViewportFocus";
     /// Messages typed while the agent was busy, held on the chat doc so every
-    /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
+    /// device sees the same queue, and what the chat's side chats reported.
+    /// `{ chatId }` → `{ items: QueuedMessage[], notices: ChatNotice[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
+    /// A side chat's progress note for the chat that started it: rides that
+    /// chat's next turn, never starts one. `{ chatId, fromChatId, text }` → `{ id }`.
+    pub const POST_SIDE_CHAT_NOTE: &str = "PostSideChatNote";
+    /// The chat's agent already read these side-chat notices (its
+    /// `wait_for_turn` returned them): no turn repeats them.
+    /// `{ chatId, ids }` → `{}`.
+    pub const ACK_CHAT_NOTICES: &str = "AckChatNotices";
     /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
     pub const QUEUE_MESSAGE: &str = "QueueMessage";
     /// Retype a queued message; empty text deletes it.

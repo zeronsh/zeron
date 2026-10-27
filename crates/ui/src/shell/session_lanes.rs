@@ -173,6 +173,9 @@ pub(super) struct ChildChatRow {
     pub change_request: Option<zeron_proto::ChangeRequestSummary>,
     /// The harness it runs on, drawn as the sidebar's brand mark.
     pub harness: Option<zeron_proto::HarnessId>,
+    /// Its latest word to the open chat's agent — a progress note, its
+    /// result, the question it is stuck on — as one line under its title.
+    pub note: Option<SharedString>,
     activity: DateTime<Utc>,
 }
 
@@ -197,12 +200,66 @@ pub(super) fn child_chat_rows(
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
                 change_request: state.change_request_for_chat(chat).cloned(),
                 harness: chat.config.as_ref().map(|config| config.harness),
+                note: latest_note(state, &chat.id),
                 activity,
             }
         })
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.activity));
     rows
+}
+
+/// Side chat `chat_id`'s latest notice to the open chat, on one line.
+fn latest_note(state: &AppState, chat_id: &str) -> Option<SharedString> {
+    let notice = state
+        .side_chat_notices
+        .iter()
+        .rev()
+        .find(|notice| notice.chat_id == chat_id)?;
+    let line = notice
+        .text
+        .lines()
+        .map(|line| line.trim().trim_start_matches(['#', '*', '-', '>']).trim())
+        .find(|line| !line.is_empty())?;
+    let lead = match notice.kind {
+        zeron_proto::side_chat_updates::UpdateKind::NeedsInput => "Asks: ",
+        zeron_proto::side_chat_updates::UpdateKind::Failed => "Failed: ",
+        _ => "",
+    };
+    Some(format!("{lead}{line}").into())
+}
+
+/// The open chat's side chats with something going on — asking, failed,
+/// working — as the titlebar stacks them: what needs you first.
+pub(super) fn side_chats_at_work(
+    state: &AppState,
+    chat_id: &str,
+    now: DateTime<Utc>,
+) -> Vec<crate::side_chat_avatars::Avatar> {
+    let rank = |status: ChatIndicator| match status {
+        ChatIndicator::AwaitingInput => Some(0),
+        ChatIndicator::Errored => Some(1),
+        ChatIndicator::Working => Some(2),
+        _ => None,
+    };
+    let mut at_work: Vec<(usize, DateTime<Utc>, crate::side_chat_avatars::Avatar)> = state
+        .chats
+        .iter()
+        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+        .filter_map(|chat| {
+            let status = state.display_status_for(chat, now);
+            Some((
+                rank(status)?,
+                chat.created_at,
+                crate::side_chat_avatars::Avatar {
+                    harness: chat.config.as_ref().map(|config| config.harness),
+                    status,
+                },
+            ))
+        })
+        .collect();
+    at_work.sort_by_key(|(rank, created, _)| (*rank, *created));
+    at_work.into_iter().map(|(_, _, avatar)| avatar).collect()
 }
 
 /// A side chat titles itself on its first turn; until then the preview or a
@@ -280,6 +337,51 @@ fn row_title(id: String, title: SharedString) -> AnyElement {
 }
 
 impl Shell {
+    /// The titlebar's stack of the open chat's side chats at work. It opens
+    /// the session card, whose lanes list them.
+    pub(super) fn render_side_chat_stack(
+        &self,
+        avatars: &[crate::side_chat_avatars::Avatar],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = "titlebar-side-chats";
+        let fade_key = format!("header-icon-{id}");
+        let noun = if avatars.len() == 1 { "Side chat" } else { "Side chats" };
+        let label = format!(
+            "{noun}: {}",
+            crate::side_chat_avatars::summary(avatars.iter().map(|a| a.status))
+        );
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .h(px(28.0))
+            .px(px(6.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .bg(motion::hover_blend(
+                &fade_key,
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.11),
+            ))
+            .on_hover(motion::hover_listener(fade_key))
+            // Carved out of the titlebar's drag region, like its buttons.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.show_session_info(cx);
+            }))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(label.clone()))
+            .tooltip(crate::settings::widgets::text_tooltip(label))
+            .child(crate::side_chat_avatars::stack(avatars, 18.0, theme.bg, theme))
+            .into_any_element()
+    }
+
     /// Show the card with `chat_id`'s side-chat row paged in, so an inline
     /// rename has its row on screen; false when it is not one of the open
     /// chat's live side chats.
@@ -571,7 +673,30 @@ impl Shell {
             .child(popover::picker_icon_slot(mark))
             // The harness mark leads the title, as on the sidebar's rows.
             .children(row.harness.map(|harness| harness_mark(harness, theme)))
-            .child(title)
+            .child(match row.note.clone() {
+                // Its latest word rides under the title, the sidebar's
+                // subline size, dissolving like the title does.
+                Some(note) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .py(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .child(title)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(sidebar_faded_label(
+                                format!("{key}-note").into(),
+                                true,
+                                div().line_height(px(15.0)).child(note),
+                            )),
+                    )
+                    .into_any_element(),
+                None => title,
+            })
             .when(revealing, |row| {
                 let shell = cx.weak_entity();
                 row.child(

@@ -8,11 +8,22 @@ use crate::ToolCall;
 
 const PREFIX: &str = "[Message from Zeron chat ";
 const REPLY: &str = ". Reply to it with the Zeron `send_message` tool, chat ";
+/// A parent's message to its side chat: Zeron hands the side chat's final
+/// reply back on its own, so a reply sent with `send_message` would land twice
+/// (and, mid-turn, steer the parent off what it was saying to its user).
+const DELEGATED: &str = ", which started you. Zeron hands it your final reply when your turn ends, so don't send it back with `send_message`; use that only for a short progress note. Chat ";
 
 /// `text` as sent from chat `chat_id`, labelled `Title (short-id)` (or the
 /// short id alone when untitled).
 pub fn agent_message(label: &str, chat_id: &str, text: &str) -> String {
     format!("{PREFIX}{label}{REPLY}{chat_id}.]\n\n{text}")
+}
+
+/// `text` as sent from chat `chat_id` to a side chat it started, labelled
+/// like [`agent_message`]. The header tells the side chat its reply goes back
+/// by itself.
+pub fn delegated_message(label: &str, chat_id: &str, text: &str) -> String {
+    format!("{PREFIX}{label}{DELEGATED}{chat_id}.]\n\n{text}")
 }
 
 /// The chat an agent-to-agent message came from: its id, and its title as the
@@ -29,7 +40,9 @@ pub struct AgentSender {
 pub fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
     let rest = text.strip_prefix(PREFIX)?;
     let (header, body) = rest.split_once("]\n\n")?;
-    let (label, id) = header.rsplit_once(REPLY)?;
+    let (label, id) = header
+        .rsplit_once(REPLY)
+        .or_else(|| header.rsplit_once(DELEGATED))?;
     let id = id.strip_suffix('.')?;
     // Only the trailing short id goes; a title's own parens stay.
     let title = label
@@ -134,6 +147,22 @@ mod tests {
         let (sender, body) = agent_message_sender(&untitled).unwrap();
         assert_eq!((sender.title.as_str(), body), ("cd27c5c2", "hi"));
         assert!(agent_message_sender("[Message from Zeron chat x]\n\nhi").is_none());
+    }
+
+    #[test]
+    fn a_delegated_task_names_its_parent_too() {
+        let id = "cd27c5c2-0000-4000-8000-000000000000";
+        let text = delegated_message("Release (cd27c5c2)", id, "Fix the tests.");
+        assert!(text.contains("don't send it back"));
+        let (sender, body) = agent_message_sender(&text).unwrap();
+        assert_eq!(body, "Fix the tests.");
+        assert_eq!(
+            sender,
+            AgentSender {
+                chat_id: id.into(),
+                title: "Release".into(),
+            }
+        );
     }
 
     #[test]

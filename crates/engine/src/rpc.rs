@@ -2047,6 +2047,8 @@ fn forwardable(method: &str) -> bool {
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
             | methods::QUEUE_MESSAGE
+            | methods::POST_SIDE_CHAT_NOTE
+            | methods::ACK_CHAT_NOTICES
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -2876,17 +2878,79 @@ impl RpcService for EngineRpc {
                     .open(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
+                let notices = handle.watch_notices();
                 Ok(RpcReply::Stream(
-                    futures::stream::unfold((rx, true), |(mut rx, first)| async move {
-                        if !first {
-                            rx.changed().await.ok()?;
-                        }
-                        let items = rx.borrow_and_update().clone();
-                        let value = serde_json::json!({ "items": items });
-                        Some((value, (rx, false)))
-                    })
+                    futures::stream::unfold(
+                        (rx, notices, true),
+                        |(mut rx, mut notices, first)| async move {
+                            if !first {
+                                tokio::select! {
+                                    changed = rx.changed() => changed.ok()?,
+                                    changed = notices.changed() => changed.ok()?,
+                                }
+                            }
+                            let items = rx.borrow_and_update().clone();
+                            let listed = notices.borrow_and_update().clone();
+                            let value = serde_json::json!({ "items": items, "notices": listed });
+                            Some((value, (rx, notices, false)))
+                        },
+                    )
                     .boxed(),
                 ))
+            }
+            methods::POST_SIDE_CHAT_NOTE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct NoteParams {
+                    chat_id: String,
+                    from_chat_id: String,
+                    text: String,
+                }
+                let p: NoteParams = parse_params(params)?;
+                let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+                let text = p.text.trim();
+                if text.is_empty() {
+                    return Err(RpcError::Failed("the note is empty".into()));
+                }
+                let from = self
+                    .workspace
+                    .chat(&p.from_chat_id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::Failed("unknown side chat".into()))?;
+                if from.parent_chat_id.as_deref() != Some(p.chat_id.as_str()) {
+                    return Err(RpcError::Failed(
+                        "only a side chat posts notes to the chat that started it".into(),
+                    ));
+                }
+                let kind = zeron_proto::side_chat_updates::UpdateKind::Note;
+                let id = zeron_doc::notice_id(kind, &from.id, &crate::new_id());
+                let notice = zeron_doc::ChatNotice {
+                    id: id.clone(),
+                    kind,
+                    chat_id: from.id.clone(),
+                    title: from.title.clone().unwrap_or_else(|| "Untitled side chat".into()),
+                    text: text.to_owned(),
+                    issued_by: self.doc_host.device_id().to_owned(),
+                    issued_at: crate::now_ms(),
+                    delivered_at: None,
+                };
+                self.doc_host
+                    .post_notice(&p.chat_id, &notice)
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::ACK_CHAT_NOTICES => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct AckParams {
+                    chat_id: String,
+                    ids: Vec<String>,
+                }
+                let p: AckParams = parse_params(params)?;
+                self.doc_host
+                    .ack_notices(&p.chat_id, &p.ids)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;

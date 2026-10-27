@@ -631,6 +631,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
+/// and the title/harness/model of each chat a Zeron `create_chat(s)` call
+/// starts (see [`launch_badge`]: the transcript's line for them).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -651,7 +653,7 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| launch_badge(call)),
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
@@ -686,6 +688,51 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
         })
         .collect();
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+/// What a Zeron `create_chat` / `create_chats` call keeps of its input: the
+/// short identifiers of each chat it starts (`title`, `harness`, `model`),
+/// so the transcript can show the chats it is starting before the call
+/// returns. Prompts stay in the run journal. A batch passed as a JSON string
+/// comes out as an array, so this is a fixpoint like [`spawn_badge`].
+fn launch_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    const KEEP: [&str; 3] = ["title", "harness", "model"];
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input: Some(input),
+    } = call
+    else {
+        return None;
+    };
+    if server != "zeron" {
+        return None;
+    }
+    let keep = |request: &serde_json::Value| {
+        let kept: serde_json::Map<String, serde_json::Value> = KEEP
+            .iter()
+            .filter_map(|key| {
+                let value = request.get(key)?.as_str()?.trim();
+                (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect();
+        serde_json::Value::Object(kept)
+    };
+    match tool.as_str() {
+        "create_chat" => Some(keep(input)).filter(|kept| kept.as_object().is_some_and(|o| !o.is_empty())),
+        "create_chats" => {
+            let parsed;
+            let requests = match input.get("requests")? {
+                serde_json::Value::String(raw) => {
+                    parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+                    parsed.as_array()?
+                }
+                value => value.as_array()?,
+            };
+            Some(serde_json::json!({ "requests": requests.iter().map(keep).collect::<Vec<_>>() }))
+        }
+        _ => None,
+    }
 }
 
 /// Deterministic continuation id: `"{root}#c{n}"`.
@@ -1027,6 +1074,35 @@ mod tests {
             }
         );
         assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    /// A Zeron launch keeps each chat's title, harness and model — never its
+    /// prompt — so the transcript can name the chats it is starting.
+    #[test]
+    fn sanitize_keeps_the_chats_a_launch_names() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_chats".into(),
+            input: Some(serde_json::json!({ "requests": [
+                { "title": "Slug", "harness": "codex", "prompt": "a long private prompt", "wait": false },
+                { "prompt": "untitled" },
+            ]})),
+        };
+        let clean = sanitize_tool_call(&call);
+        let ToolCall::Mcp { input: Some(input), .. } = &clean else {
+            panic!("kept nothing");
+        };
+        assert_eq!(
+            input,
+            &serde_json::json!({ "requests": [{ "title": "Slug", "harness": "codex" }, {}] })
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+        let other = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "send_message".into(),
+            input: Some(serde_json::json!({ "chat": "a", "text": "private" })),
+        };
+        assert!(matches!(sanitize_tool_call(&other), ToolCall::Mcp { input: None, .. }));
     }
 
     /// A spawn keeps the two short identifiers its chip names the child by and
