@@ -555,12 +555,21 @@ struct DeviceArgs {
     device: Option<String>,
 }
 
+/// How far a reply's timestamp may trail the send and still count as its
+/// reply, when time has to stand in for a baseline: the chat's host stamps
+/// replies on its own clock.
+const REPLY_CLOCK_SLACK_MS: i64 = 120_000;
+
 /// Messages already in the transcript before a send. Replies are matched by
 /// id, not by time: `createdAt` is stamped on the host's clock, which can run
 /// behind the caller's when the chat lives on another device.
 #[derive(Clone, Default)]
 struct TurnStart {
     message_ids: Vec<String>,
+    /// Set only when the baseline couldn't be read (the host asleep, the
+    /// replica not joined yet): then earlier replies must not pass as the
+    /// reply to this send, and time is all there is to tell them apart.
+    since_ms: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -961,7 +970,7 @@ impl Tools {
         let (spaces, sessions, entries) = tokio::try_join!(
             self.zeron.spaces(),
             self.zeron.sessions(),
-            self.zeron.transcript_on(&chat.id, Some(&chat.device_id))
+            self.zeron.transcript_of(&chat)
         )?;
         let rendered = render_entries(&entries, RenderOptions::default());
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
@@ -1254,10 +1263,7 @@ impl Tools {
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self
-            .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
-            .await?;
+        let entries = self.zeron.transcript_of(&chat).await?;
         let rendered = render_entries(
             &entries,
             RenderOptions {
@@ -1294,24 +1300,32 @@ impl Tools {
                 short(&chat.id)
             );
         }
-        let (spaces, sessions, harnesses) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.harnesses_on(Some(&chat.device_id))
-        )?;
+        let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
+        // Only a chat without a config needs its host's catalog (to pick a
+        // harness), and a sleeping host can't answer one: everything else a
+        // send needs is local, and the send itself is what wakes the host.
+        let harnesses = if chat.config.is_none() {
+            self.zeron.harnesses_on(Some(&chat.device_id)).await?
+        } else {
+            Vec::new()
+        };
         let space = chat
             .space_id
             .as_deref()
             .and_then(|id| spaces.iter().find(|s| s.id == id));
         let baseline = session_for(&sessions, &chat);
         let mode = args.mode.as_deref().unwrap_or("auto");
-        let message_ids = self
-            .zeron
-            .transcript_on(&chat.id, Some(&chat.device_id))
-            .await?
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
+        // The baseline is a best effort: a read failing must not stop the send.
+        let (message_ids, since_ms) = match self.zeron.transcript_of(&chat).await {
+            Ok(entries) => (entries.into_iter().map(|m| m.id).collect(), None),
+            Err(err) => {
+                tracing::debug!(chat = %chat.id, error = %err, "no baseline transcript; sending anyway");
+                (
+                    Vec::new(),
+                    Some(chrono::Utc::now().timestamp_millis() - REPLY_CLOCK_SLACK_MS),
+                )
+            }
+        };
         let body = self.attribute(&chat, text).await;
         let mut result = json!({
             "chatId": chat.id,
@@ -1322,7 +1336,10 @@ impl Tools {
             .await?;
         let pending = Arc::new(PendingTurn {
             baseline,
-            start: TurnStart { message_ids },
+            start: TurnStart {
+                message_ids,
+                since_ms,
+            },
         });
         self.pending_turns
             .lock()
@@ -1437,10 +1454,7 @@ impl Tools {
         let request_id = match args.request_id {
             Some(id) => id,
             None => {
-                let entries = self
-                    .zeron
-                    .transcript_on(&chat.id, Some(&chat.device_id))
-                    .await?;
+                let entries = self.zeron.transcript_of(&chat).await?;
                 let rendered = render_entries(&entries, RenderOptions::default());
                 last_pending_input(&rendered)
                     .and_then(|p| {
@@ -1650,13 +1664,17 @@ impl Tools {
                 }
                 break;
             }
-            let entries = match tokio::time::timeout(
-                remaining,
-                self.zeron.transcript_on(&chat.id, Some(&chat.device_id)),
-            )
-            .await
+            let entries = match tokio::time::timeout(remaining, self.zeron.transcript_of(chat))
+                .await
             {
-                Ok(entries) => entries?,
+                Ok(Ok(entries)) => entries,
+                // A host still waking (or a replica still joining) is a
+                // reason to keep waiting, not to fail a send that landed.
+                Ok(Err(err)) => {
+                    tracing::debug!(chat = %chat.id, error = %err, "transcript read failed; retrying");
+                    tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
+                    continue;
+                }
                 Err(_) => {
                     outcome = TurnOutcome::TimedOut;
                     break;
@@ -1667,6 +1685,7 @@ impl Tools {
                 .iter()
                 .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
                 .filter(|m| !start.message_ids.contains(&m.id))
+                .filter(|m| start.since_ms.is_none_or(|since| m.created_at >= since))
                 .cloned()
                 .collect();
             if !expect_turn
@@ -1747,6 +1766,9 @@ mod tests {
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `dev-remote` is asleep: every read addressed to it fails, the way
+        /// a dial to a sleeping Cloud machine does.
+        remote_dark: bool,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1769,6 +1791,15 @@ mod tests {
                 }
             }
             let remote = params["targetDeviceId"] == "dev-remote";
+            if remote && self.remote_dark && method != methods::LIST_HARNESSES {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                return Err(RpcError::Transport(
+                    "peer dev-remote: device is offline (no recent presence)".into(),
+                ));
+            }
             Ok(match method {
                 methods::LOCAL_DEVICE => RpcReply::Value(json!({ "deviceId": "dev-local" })),
                 methods::ENGINE_INFO => RpcReply::Value(json!({
@@ -2867,6 +2898,35 @@ mod tests {
             world.writes.lock().unwrap().last().unwrap().1["command"]["request"]["harness"],
             "codex"
         );
+    }
+
+    /// A sleeping host can't be read, and only a send wakes it: the send
+    /// must go out through this engine's doc regardless, and a wait on it
+    /// keeps waiting rather than failing.
+    #[tokio::test]
+    async fn a_send_to_a_sleeping_host_still_goes_out() {
+        let world = Arc::new(World {
+            beta_remote: true,
+            remote_dark: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let result = tools
+            .call("send_message", json!({"chat":"Beta", "text":"go"}))
+            .await
+            .unwrap();
+        assert_eq!(result["sent"]["delivery"], "run");
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.last().unwrap();
+        assert_eq!(method, methods::QUEUE_COMMAND);
+        assert!(params.get("targetDeviceId").is_none(), "a local doc write, which wakes the host");
+        drop(writes);
+        // Reading the chat falls back to the local replica too.
+        let read = tools
+            .call("read_chat", json!({"chat":"Beta"}))
+            .await
+            .unwrap();
+        assert!(read["total"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

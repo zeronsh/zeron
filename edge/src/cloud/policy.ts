@@ -133,6 +133,8 @@ export interface AwakeSession {
   readonly lastHeartbeatAt?: number;
   readonly activeRuns: number;
   readonly clients: number;
+  /** Background work outliving a turn (a parked chat's subagents). */
+  readonly backgroundRuns?: number;
 }
 
 /**
@@ -160,7 +162,7 @@ export const planEviction = (
         return now - (s.lastActiveAt ?? 0) >= FIRST_REPORT_GRACE_MS;
       }
       if (now - s.lastHeartbeatAt >= HEARTBEAT_STALE_MS) return true; // dead engine
-      return s.activeRuns === 0 && s.clients === 0;
+      return s.activeRuns === 0 && s.clients === 0 && (s.backgroundRuns ?? 0) === 0;
     })
     .sort((a, b) => (a.lastActiveAt ?? 0) - (b.lastActiveAt ?? 0));
   return idle.length >= need ? idle.slice(0, need).map((s) => s.chatId) : undefined;

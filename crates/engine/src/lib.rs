@@ -963,7 +963,7 @@ impl Engine {
             let heartbeat = runner::spawn_heartbeat(
                 identity.edge_url(),
                 tokens,
-                Arc::new(move || sessions.active_count()),
+                Arc::new(move || sessions.run_counts()),
                 activity.clone(),
                 runner::HEARTBEAT_INTERVAL,
             );

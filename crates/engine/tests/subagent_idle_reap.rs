@@ -80,6 +80,8 @@ fn tagged(event: AgentEvent) -> AgentEvent {
 struct FeedHarness {
     main_prompt: String,
     feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+    /// The main run's turn control, for a test to report background work.
+    turn: Arc<std::sync::Mutex<Option<zeron_harness::TurnControl>>>,
 }
 
 #[async_trait]
@@ -117,6 +119,7 @@ impl Harness for FeedHarness {
             .await
             .take()
             .expect("FeedHarness serves the main dispatch once per test");
+        *self.turn.lock().unwrap() = Some(controls.turn.clone());
         let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
         let cancel = controls.interrupt.clone();
         tokio::spawn(async move {
@@ -183,16 +186,19 @@ where
 struct Parked {
     core: EngineCore,
     feed: mpsc::UnboundedSender<AgentEvent>,
+    turn: Arc<std::sync::Mutex<Option<zeron_harness::TurnControl>>>,
     _dir: tempfile::TempDir,
 }
 
 async fn park_after_spawn() -> Parked {
     init_env();
     let (feed, rx) = mpsc::unbounded_channel();
+    let turn = Arc::new(std::sync::Mutex::new(None));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(FeedHarness {
         main_prompt: "fan out".into(),
         feed: Mutex::new(Some(rx)),
+        turn: turn.clone(),
     }));
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
@@ -239,8 +245,33 @@ async fn park_after_spawn() -> Parked {
     Parked {
         core,
         feed,
+        turn,
         _dir: dir,
     }
+}
+
+/// A parked session's background work keeps a Cloud machine awake: it counts
+/// in the heartbeat and declines the sleep, since stopping the engine would
+/// end the work. Once it settles, the machine may sleep.
+#[tokio::test]
+async fn background_work_holds_a_machine_awake() {
+    let Parked {
+        core, feed: _feed, turn, _dir,
+    } = park_after_spawn().await;
+    let turn = turn.lock().unwrap().clone().expect("the main run's turn control");
+    assert_eq!(core.sessions.run_counts().background, 0);
+
+    turn.set_background(1);
+    let counts = core.sessions.run_counts();
+    assert_eq!((counts.active, counts.background), (0, 1));
+    let busy = core.doc_host.quiesce_for_sleep().await.unwrap_err();
+    assert!(busy.contains("background work"), "{busy}");
+
+    turn.set_background(0);
+    assert_eq!(core.sessions.run_counts().background, 0);
+    core.doc_host.quiesce_for_sleep().await.expect("idle now");
+    core.doc_host.lift_quiesce();
+    core.sessions.shutdown().await;
 }
 
 /// The subagent keeps working for several idle windows, then finishes. It
@@ -248,7 +279,9 @@ async fn park_after_spawn() -> Parked {
 /// the parked session is reaped as usual, counted from its last activity.
 #[tokio::test]
 async fn reaper_spares_a_parked_session_with_a_live_subagent() {
-    let Parked { core, feed, _dir } = park_after_spawn().await;
+    let Parked {
+        core, feed, _dir, ..
+    } = park_after_spawn().await;
 
     // The subagent works on, well past the idle window, with the parent parked.
     let started = tokio::time::Instant::now();
@@ -285,7 +318,9 @@ async fn reaper_spares_a_parked_session_with_a_live_subagent() {
 /// reap stamps the lost subagent `Failed`.
 #[tokio::test]
 async fn reaper_still_ends_a_session_whose_subagent_went_silent() {
-    let Parked { core, feed, _dir } = park_after_spawn().await;
+    let Parked {
+        core, feed, _dir, ..
+    } = park_after_spawn().await;
 
     feed.send(tagged(AgentEvent::TextDelta {
         text: "starting. ".into(),

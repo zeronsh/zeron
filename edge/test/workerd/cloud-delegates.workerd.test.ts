@@ -13,10 +13,29 @@ import {
   readySession,
   runnerKey,
   runnerToken,
+  session,
   userBearer,
   waitForSession,
   type TestUser
 } from "./cloud-helpers";
+
+/** A child of `parent` on a machine of its own, enrolled (ready), with its
+ * runner's bearer. */
+const readyChild = async (u: TestUser, runner: string, parent: string) => {
+  const chatId = `child-${crypto.randomUUID().slice(0, 8)}`;
+  const started = await call("POST", `/cloud/${u.orgId}/sessions`, runner, {
+    chatId,
+    parentChatId: parent,
+    config: { harness: "codex" }
+  });
+  expect(started.status, await started.clone().text()).toBe(200);
+  const { deviceId } = (await started.json()) as { deviceId: string };
+  const key = await runnerKey();
+  expect((await enroll(u, deviceId, await enrollCodeFor(deviceId), key.publicKey)).status).toBe(200);
+  const bearer = `Bearer ${await runnerToken(u, deviceId, key)}`;
+  await waitForSession(u, chatId, "ready");
+  return { chatId, deviceId, bearer };
+};
 
 const rand = () => crypto.randomUUID().slice(0, 8);
 let clock = 0;
@@ -170,5 +189,36 @@ describe("Cloud delegates", () => {
     const grandchild = await startChild(u, childRunner, `g-${rand()}`, child);
     expect(grandchild.status).toBe(403);
     expect(await grandchild.json()).toMatchObject({ error: "too_deep" });
+  });
+
+  it("wakes its sleeping child when it sends to it, and nobody else's", async () => {
+    const { u, main, other, runner } = await world();
+    const child = await readyChild(u, runner, main.chatId);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${child.chatId}/sleep`, runner, {})).status).toBe(200);
+    await waitForSession(u, child.chatId, "sleeping");
+    // Not a session it started: refused at the door, and nothing wakes.
+    expect((await call("POST", `/device/${other.deviceId}/nudge`, runner, { chatId: other.chatId })).status).toBe(403);
+    // Its own child: the send wakes it, as a user's send would.
+    expect((await call("POST", `/device/${child.deviceId}/nudge`, runner, { chatId: child.chatId })).status).toBe(200);
+    await waitForSession(u, child.chatId, "starting");
+    expect((await session(u, other.chatId))?.state).toBe("sleeping");
+  });
+
+  it("wakes its sleeping parent once it stops working: finished, or waiting on an answer", async () => {
+    const { u, user, main, runner } = await world();
+    const child = await readyChild(u, runner, main.chatId);
+    const state = async () => (await session(u, main.chatId))?.state;
+    const beat = (body: Record<string, number>) =>
+      call("POST", "/runner/heartbeat", child.bearer, { activeRuns: 0, clients: 0, ...body });
+    expect((await beat({ activeRuns: 1 })).status).toBe(200);
+    expect((await call("POST", `/cloud/${u.orgId}/sessions/${main.chatId}/sleep`, user, {})).status).toBe(200);
+    await waitForSession(u, main.chatId, "sleeping");
+    // Still working: the parent sleeps on.
+    expect((await beat({ activeRuns: 1 })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await state()).toBe("sleeping");
+    // Waiting on an answer counts as stopped: the parent has to hear of it.
+    expect((await beat({ activeRuns: 1, waitingRuns: 1 })).status).toBe(200);
+    await waitForSession(u, main.chatId, "starting");
   });
 });
