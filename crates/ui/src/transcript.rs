@@ -41,6 +41,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
+use zeron_proto::chat_events::{EventKind, EventRef, is_quiet_reply, split_events};
 use zeron_proto::view::{AnswerLine, InputOutcome};
 use zeron_proto::{HarnessId, ToolCall};
 
@@ -1088,6 +1089,25 @@ pub enum RowKind {
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
+    /// Chats a Zeron `create_chat(s)` call started (side chats, or a task's
+    /// agents): a chip each, the subagent chip's card, opening the chat.
+    /// `task`: a `create_task` call, drawn as the task's card instead.
+    LaunchedChats {
+        chats: Arc<Vec<LaunchedChat>>,
+        task: bool,
+        /// The call hasn't returned yet.
+        pending: bool,
+    },
+    /// What the chats this one started reported, lifted off the head of the
+    /// prompt Zeron handed its agent: a one-line caption over the reply, never
+    /// a message.
+    ChatEvents { events: Arc<Vec<EventRef>> },
+    /// A coordinator's `report` to the chat that started its task.
+    TaskReport {
+        status: SharedString,
+        message: SharedString,
+        pending: bool,
+    },
     /// A message this chat's agent sent another chat through Zeron's
     /// `send_message`: one `Message to [logo] Chat` line, not the tool call.
     SentMessage {
@@ -1394,6 +1414,29 @@ pub fn rows_for_entry(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        // Chat events ride the head of the prompt: a caption of their own,
+        // and a turn they started alone has no bubble at all.
+        let raw = match split_events(&raw) {
+            Some((events, typed)) => {
+                rows.push(Row {
+                    id: format!("{}#events", entry.id).into(),
+                    version: fnv1a(raw.as_bytes()),
+                    turn_start: true,
+                    kind: RowKind::ChatEvents {
+                        events: Arc::new(events),
+                    },
+                    entry_id: entry_id.clone(),
+                    timestamp: None,
+                    copy_text: None,
+                    compact_fold: None,
+                });
+                if typed.trim().is_empty() {
+                    return rows;
+                }
+                typed.to_owned()
+            }
+            None => raw,
+        };
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
@@ -1444,10 +1487,12 @@ pub fn rows_for_entry(
                 full: Arc::new(tree),
             });
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
-        return vec![Row {
+        // Under an events caption the bubble continues its turn.
+        let turn_start = rows.is_empty();
+        rows.push(Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
-            turn_start: true,
+            turn_start,
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
@@ -1463,9 +1508,13 @@ pub fn rows_for_entry(
             timestamp: Some(entry.created_at),
             copy_text,
             compact_fold: None,
-        }];
+        });
+        return rows;
     }
 
+    if is_quiet_turn(entry) {
+        return rows;
+    }
     // Assistant/system: split parts into block rows, folding consecutive
     // ordinary tools. Agent/spawn chips flush into their own group so they
     // never share a collapse with Reads/Runs.
@@ -1480,12 +1529,12 @@ pub fn rows_for_entry(
     let reply_start = (compact && !streaming)
         .then(|| {
             let mut start = entry.parts.iter().rposition(
-                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
+                |part| matches!(part, MessagePart::Text { text, .. } if shows_text(text, false)),
             )?;
             while start > 0
                 && matches!(
                     &entry.parts[start - 1],
-                    MessagePart::Text { text, .. } if !text.trim().is_empty()
+                    MessagePart::Text { text, .. } if shows_text(text, false)
                 )
             {
                 start -= 1;
@@ -1544,6 +1593,50 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // Chats it started, and a coordinator's report, read as their
+                // own rows out of the tool fold, compact mode included: they
+                // outlive the turn.
+                let launched = launched_chats(call);
+                let report = task_report(call);
+                if launched.is_some() || report.is_some() {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                    let kind = match (launched, report) {
+                        (Some((chats, task)), _) => RowKind::LaunchedChats {
+                            chats: Arc::new(chats),
+                            task,
+                            pending: !*resolved,
+                        },
+                        (None, Some((status, message))) => RowKind::TaskReport {
+                            status: status.into(),
+                            message: message.into(),
+                            pending: !*resolved,
+                        },
+                        (None, None) => unreachable!(),
+                    };
+                    let version = {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        (serde_json::to_string(call).unwrap_or_default(), *resolved, *is_error)
+                            .hash(&mut h);
+                        h.finish()
+                    };
+                    rows.push(Row {
+                        id: format!("{}#{}.chats", entry.id, part.id()).into(),
+                        version,
+                        turn_start: false,
+                        copy_text: None,
+                        kind,
+                        entry_id: entry.id.clone().into(),
+                        timestamp: None,
+                        compact_fold: None,
+                    });
+                    continue;
+                }
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
@@ -1653,7 +1746,7 @@ pub fn rows_for_entry(
                 // stays a row.
                 if compact
                     && let MessagePart::Text { id: part_id, text } = other
-                    && !text.trim().is_empty()
+                    && shows_text(text, streaming)
                     && reply_start.is_none_or(|start| part_ix < start)
                 {
                     compact_group_pos.get_or_insert(rows.len());
@@ -1673,7 +1766,7 @@ pub fn rows_for_entry(
                 }
                 match other {
                     MessagePart::Text { id: part_id, text } => {
-                        if text.trim().is_empty() {
+                        if !shows_text(text, streaming) {
                             continue;
                         }
                         let key = format!("{}#{}", entry.id, part_id);
@@ -1954,10 +2047,116 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
         MessagePart::Tool { .. } => true,
         MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
         MessagePart::Text { text, .. } => {
-            !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start)
+            shows_text(text, false) && reply_start.is_none_or(|start| ix < start)
         }
         _ => false,
     }
+}
+
+/// Whether an agent's text part draws: not blank, and not the bare reply an
+/// agent ends an events turn with when it has nothing for its user (nor,
+/// while it streams, the start of one).
+fn shows_text(text: &str, streaming: bool) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && !is_quiet_reply(trimmed)
+        && !(streaming && zeron_proto::chat_events::QUIET_REPLY.starts_with(trimmed))
+}
+
+/// A settled turn that only thought and then said it had nothing for its
+/// user ([`zeron_proto::chat_events::QUIET_REPLY`]): the agent took in chat
+/// events. It draws nothing; the events caption above says what came in. A
+/// turn that also did something keeps its work.
+fn is_quiet_turn(entry: &SessionMessageEntry) -> bool {
+    entry.status != Some(MessageStatus::Streaming)
+        && entry
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::Text { text, .. } if is_quiet_reply(text)))
+        && entry.parts.iter().all(|part| match part {
+            MessagePart::Reasoning { .. } => true,
+            MessagePart::Text { text, .. } => !shows_text(text, false),
+            _ => false,
+        })
+}
+
+/// A chat a Zeron `create_chat(s)` or `create_task` call started, as the doc
+/// keeps the call: titled and branded from its arguments, and linked to the
+/// chat once the call returned.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LaunchedChat {
+    pub chat_id: Option<String>,
+    pub title: SharedString,
+    pub harness: Option<HarnessId>,
+    pub model: Option<SharedString>,
+}
+
+/// The chats a Zeron launch call starts, and whether it starts a task.
+/// `None` for any other call.
+fn launched_chats(call: &ToolCall) -> Option<(Vec<LaunchedChat>, bool)> {
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input,
+    } = call
+    else {
+        return None;
+    };
+    if server != "zeron" {
+        return None;
+    }
+    let null = serde_json::Value::Null;
+    let input = input.as_ref().unwrap_or(&null);
+    let requests: Vec<&serde_json::Value> = match tool.as_str() {
+        "create_chat" | "create_task" => vec![input],
+        "create_chats" => input.get("requests")?.as_array()?.iter().collect(),
+        _ => return None,
+    };
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let chats = requests
+        .iter()
+        .map(|request| LaunchedChat {
+            chat_id: text(request, "chatId"),
+            title: text(request, "title")
+                .unwrap_or_else(|| if tool == "create_task" { "Task" } else { "Side chat" }.into())
+                .into(),
+            harness: text(request, "harness")
+                .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw)).ok()),
+            model: text(request, "model").map(SharedString::from),
+        })
+        .collect::<Vec<_>>();
+    (!chats.is_empty()).then_some((chats, tool == "create_task"))
+}
+
+/// A coordinator's `report` call: its status and message.
+fn task_report(call: &ToolCall) -> Option<(String, String)> {
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input,
+    } = call
+    else {
+        return None;
+    };
+    if server != "zeron" || tool != "report" {
+        return None;
+    }
+    let input = input.as_ref();
+    let field = |key: &str| {
+        input
+            .and_then(|i| i.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    Some((field("status"), field("message")))
 }
 
 /// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -3356,6 +3555,13 @@ pub struct Transcript {
     /// keyed by row id. Render-local like `folds` — never part of the row
     /// fingerprint, so toggling one costs a repaint, not a rebuild.
     user_folds: HashMap<SharedString, FoldState>,
+    /// Task cards opened to their agents, by row id. Render-local like
+    /// `user_folds`.
+    open_task_cards: HashSet<SharedString>,
+    /// The chats this one started (and their agents) as their chips show
+    /// them, hashed: chips read live state, so a change repaints them though
+    /// the transcript itself did not change.
+    launched_signature: u64,
     /// Full laid-out text heights for long user bubbles. The text's paint
     /// canvas writes these cells without notifying or mutating the transcript;
     /// click handlers read them as exact endpoints for the RESIZE tween. This
@@ -3601,6 +3807,8 @@ pub enum TranscriptEvent {
     },
     /// An agent message's sender caption: open the chat that sent it.
     OpenChat { chat_id: String },
+    /// A side chat, task or task agent's chip: open the chat beside this one.
+    OpenSideChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3803,6 +4011,8 @@ impl Transcript {
             historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
+            open_task_cards: HashSet::new(),
+            launched_signature: 0,
             user_heights: HashMap::new(),
             user_hold_task: None,
             user_hold_token: 0,
@@ -5067,6 +5277,7 @@ impl Transcript {
             }
         };
 
+        self.repaint_launched(cx);
         let source = (
             selected.clone(),
             replay,
@@ -6912,6 +7123,636 @@ impl Transcript {
     /// seam's caption style: the sending chat's provider mark and live title
     /// (the header's title for a chat this workspace doesn't list). A known
     /// chat opens on click.
+    /// The live state of chat `chat_id`: its row and display status.
+    fn launched_state(
+        &self,
+        chat_id: Option<&str>,
+        cx: &gpui::App,
+    ) -> Option<(zeron_proto::Chat, zeron_proto::ChatIndicator)> {
+        let state = self.state.read(cx);
+        let chat = state.chats.iter().find(|c| Some(c.id.as_str()) == chat_id)?;
+        Some((chat.clone(), state.display_status_for(chat, chrono::Utc::now())))
+    }
+
+    /// `chat`'s id: as the call recorded it, else found among this chat's
+    /// children by title (a call recorded before its result named it).
+    fn resolve_launched(&self, chat: &LaunchedChat, cx: &gpui::App) -> Option<String> {
+        if let Some(id) = &chat.chat_id {
+            return Some(id.clone());
+        }
+        let parent = self.chat_id.as_deref()?;
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|c| {
+                c.parent_chat_id.as_deref() == Some(parent)
+                    && c.title.as_deref().is_some_and(|t| t.trim() == chat.title.trim())
+            })
+            .map(|c| c.id.clone())
+    }
+
+    /// The chats `chat_id` started, oldest first (a task's agents).
+    fn children_of(&self, chat_id: &str, cx: &gpui::App) -> Vec<zeron_proto::Chat> {
+        let mut children: Vec<zeron_proto::Chat> = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .filter(|c| !c.archived && c.parent_chat_id.as_deref() == Some(chat_id))
+            .cloned()
+            .collect();
+        children.sort_by_key(|c| c.created_at);
+        children
+    }
+
+    /// One chip per side chat a call started: the subagent chip's card,
+    /// opening the chat beside this one.
+    fn render_side_chips(
+        &mut self,
+        row_id: &SharedString,
+        chats: &Arc<Vec<LaunchedChat>>,
+        pending: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // In a coordinator's transcript, the chats it starts are its agents.
+        let label = if self
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.launched_state(Some(id), cx))
+            .is_some_and(|(chat, _)| chat.is_coordinator())
+        {
+            "Agent"
+        } else {
+            "Side chat"
+        };
+        let view = cx.entity_id();
+        let mut column = div().w_full().flex().flex_col();
+        for (ix, chat) in chats.iter().enumerate() {
+            let id = self.resolve_launched(chat, cx);
+            let live = self.launched_state(id.as_deref(), cx);
+            column = column.child(self.launched_chip(
+                format!("{row_id}.{ix}").into(),
+                label,
+                chat,
+                live,
+                pending,
+                theme,
+                view,
+                cx,
+            ));
+        }
+        column.into_any_element()
+    }
+
+    /// A launched chat's chip: provider mark, role label, title, model, and
+    /// its live status; the whole card opens the chat.
+    #[allow(clippy::too_many_arguments)]
+    fn launched_chip(
+        &self,
+        id: SharedString,
+        label: &'static str,
+        chat: &LaunchedChat,
+        live: Option<(zeron_proto::Chat, zeron_proto::ChatIndicator)>,
+        pending: bool,
+        theme: &Theme,
+        view: gpui::EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::ChatIndicator;
+        let title: SharedString = live
+            .as_ref()
+            .and_then(|(c, _)| c.title.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| chat.title.clone());
+        let harness = live
+            .as_ref()
+            .and_then(|(c, _)| c.config.as_ref().map(|config| config.harness))
+            .or(chat.harness);
+        let model: Option<SharedString> = live
+            .as_ref()
+            .and_then(|(c, _)| c.config.as_ref().and_then(|config| config.model.clone()))
+            .map(SharedString::from)
+            .or_else(|| chat.model.clone());
+        let status = match &live {
+            Some((_, status)) => *status,
+            None if pending => ChatIndicator::Working,
+            None => ChatIndicator::Errored,
+        };
+        let failed = status == ChatIndicator::Errored;
+        let chat_id = live.as_ref().map(|(c, _)| c.id.clone());
+        let opens = chat_id.is_some();
+        chip_card(
+            id.clone(),
+            opens,
+            cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                if let Some(chat_id) = chat_id.clone() {
+                    cx.emit(TranscriptEvent::OpenSideChat { chat_id });
+                }
+            }),
+            launched_header(
+                id,
+                label,
+                title,
+                harness,
+                model,
+                status,
+                failed,
+                None::<TaskTrail<fn(&SharedString, &mut Window, &mut gpui::App)>>,
+                theme,
+                view,
+                cx,
+            ),
+        )
+        .into_any_element()
+    }
+
+    /// The card for a task a `create_task` call started: the coordinator's
+    /// mark, the task's name, its agents stacked and how they're doing. The
+    /// card opens the coordinator; its chevron opens the agents beneath.
+    fn render_task_card(
+        &mut self,
+        row_id: &SharedString,
+        chats: &Arc<Vec<LaunchedChat>>,
+        pending: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::ChatIndicator;
+        let Some(task) = chats.first() else {
+            return gpui::Empty.into_any_element();
+        };
+        let view = cx.entity_id();
+        let id = self.resolve_launched(task, cx);
+        let live = self.launched_state(id.as_deref(), cx);
+        let agents: Vec<(zeron_proto::Chat, ChatIndicator)> = live
+            .as_ref()
+            .map(|(coordinator, _)| {
+                let now = chrono::Utc::now();
+                self.children_of(&coordinator.id, cx)
+                    .into_iter()
+                    .map(|agent| {
+                        let status = self.state.read(cx).display_status_for(&agent, now);
+                        (agent, status)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let coordinator_status = live.as_ref().map(|(_, s)| *s);
+        // How the task is doing: what needs someone first, then the work.
+        let status = if agents.iter().any(|(_, s)| *s == ChatIndicator::AwaitingInput)
+            || coordinator_status == Some(ChatIndicator::AwaitingInput)
+        {
+            ChatIndicator::AwaitingInput
+        } else if coordinator_status == Some(ChatIndicator::Working)
+            || agents.iter().any(|(_, s)| *s == ChatIndicator::Working)
+            || (live.is_none() && pending)
+        {
+            ChatIndicator::Working
+        } else if coordinator_status == Some(ChatIndicator::Errored) || (live.is_none() && !pending) {
+            ChatIndicator::Errored
+        } else {
+            ChatIndicator::Completed
+        };
+        let avatars: Vec<crate::chat_avatars::Avatar> = agents
+            .iter()
+            .map(|(agent, status)| crate::chat_avatars::Avatar {
+                harness: agent.config.as_ref().map(|c| c.harness),
+                status: match status {
+                    ChatIndicator::AwaitingInput | ChatIndicator::Errored => *status,
+                    _ => ChatIndicator::Idle,
+                },
+            })
+            .collect();
+        let open = self.open_task_cards.contains(row_id);
+        let toggle = (!agents.is_empty()).then(|| (row_id.clone(), open));
+        let title: SharedString = live
+            .as_ref()
+            .and_then(|(c, _)| c.title.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| task.title.clone());
+        let harness = live
+            .as_ref()
+            .and_then(|(c, _)| c.config.as_ref().map(|config| config.harness))
+            .or(task.harness);
+        let summary = crate::chat_avatars::summary(agents.iter().map(|(_, s)| match s {
+            ChatIndicator::Idle => ChatIndicator::Completed,
+            other => *other,
+        }));
+        let chat_id = live.as_ref().map(|(c, _)| c.id.clone());
+        let opens = chat_id.is_some();
+        let header = div()
+            .id(SharedString::from(format!("{row_id}-lead")))
+            .h(px(CHIP_HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .when(opens, |el| {
+                el.cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::ink(0.02)))
+                    .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = chat_id.clone() {
+                            cx.emit(TranscriptEvent::OpenSideChat { chat_id });
+                        }
+                    }))
+            })
+            .child(launched_header(
+            row_id.clone(),
+            "Task",
+            title,
+            harness,
+            None,
+            status,
+            status == ChatIndicator::Errored,
+            Some(TaskTrail {
+                avatars,
+                summary: summary.into(),
+                toggle,
+                on_toggle: cx.listener(|this, row: &SharedString, _, cx| {
+                    this.toggle_task_card(row.clone(), cx);
+                }),
+            }),
+            theme,
+            view,
+            cx,
+        ));
+        // One card, like a subagent chip's: the lead on top, the agents
+        // beneath a hairline when open.
+        let mut card = div()
+            .debug_selector(|| row_id.to_string())
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(crate::theme::hairline(0.07))
+            .bg(crate::theme::ink(0.03))
+            .child(header);
+        if open {
+            card = card.child(
+                div()
+                    .h(px(DETAIL_SEPARATOR))
+                    .flex_none()
+                    .bg(crate::theme::hairline(0.06)),
+            );
+            let mut list = div().py(px(3.0)).flex().flex_col();
+            for (ix, (agent, status)) in agents.iter().enumerate() {
+                list = list.child(self.task_agent_row(
+                    format!("{row_id}.agent{ix}").into(),
+                    agent,
+                    *status,
+                    theme,
+                    view,
+                    cx,
+                ));
+            }
+            card = card.child(list);
+        }
+        div()
+            .w_full()
+            .py(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
+            .child(card)
+            .into_any_element()
+    }
+
+    /// An agent's line in an open task card: how it's doing, its mark, its
+    /// name and model; the line opens the agent's chat.
+    fn task_agent_row(
+        &self,
+        id: SharedString,
+        agent: &zeron_proto::Chat,
+        status: zeron_proto::ChatIndicator,
+        theme: &Theme,
+        view: gpui::EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::ChatIndicator;
+        let state = match status {
+            ChatIndicator::Working => crate::loaders::mini_glyph_spinner(
+                format!("{id}-working"),
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            )
+            .into_any_element(),
+            ChatIndicator::AwaitingInput | ChatIndicator::Errored => div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(if status == ChatIndicator::Errored {
+                    theme.danger
+                } else {
+                    theme.accent
+                })
+                .into_any_element(),
+            ChatIndicator::Completed | ChatIndicator::Idle => crate::icons::icon(crate::icons::CHECK)
+                .size(px(12.0))
+                .text_color(theme.success.opacity(0.85))
+                .into_any_element(),
+        };
+        let (mark, tint) = agent
+            .config
+            .as_ref()
+            .map(|c| crate::pickers::harness_brand_icon(c.harness))
+            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+        let model = agent.config.as_ref().and_then(|c| c.model.clone());
+        let chat_id = agent.id.clone();
+        div()
+            .id(id)
+            .h(px(26.0))
+            .mx(px(3.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(6.0))
+            .text_size(px(TOOL_LABEL_SIZE))
+            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::ink(0.04)))
+            .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                cx.emit(TranscriptEvent::OpenSideChat {
+                    chat_id: chat_id.clone(),
+                });
+            }))
+            .child(div().w(px(18.0)).flex_none().flex().justify_center().child(state))
+            .child(
+                crate::icons::icon(mark)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(tint.unwrap_or(theme.text_muted)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if status == ChatIndicator::Errored {
+                        theme.danger
+                    } else {
+                        theme.text.opacity(0.85)
+                    })
+                    .child(agent.title.clone().unwrap_or_else(|| "Agent".into())),
+            )
+            .when(status == ChatIndicator::AwaitingInput, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.accent)
+                        .child("needs input"),
+                )
+            })
+            .when_some(model, |row, model| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(model),
+                )
+            })
+            .child(
+                crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_faint),
+            )
+            .into_any_element()
+    }
+
+    fn toggle_task_card(&mut self, row_id: SharedString, cx: &mut Context<Self>) {
+        if !self.open_task_cards.remove(&row_id) {
+            self.open_task_cards.insert(row_id.clone());
+        }
+        if let Some(ix) = self.rows.iter().position(|row| row.id == row_id) {
+            self.render_cache.borrow_mut().invalidate_row(&row_id);
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
+    /// What the chats this one started reported, as the caption over the
+    /// reply they prompted: `[logo] Test Runner finished · [logo] Zeron
+    /// Refactor has a question`, each name opening its chat.
+    fn render_chat_events(
+        &mut self,
+        row_id: &SharedString,
+        events: &Arc<Vec<EventRef>>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const SHOWN: usize = 3;
+        let mut caption = user_caption(theme)
+            .text_size(crate::typography::ui_rems(12.5))
+            .max_w(px(self.content_width))
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_RIGHT)
+                    .size(px(11.0))
+                    .text_color(theme.text_faint),
+            );
+        for (ix, event) in events.iter().take(SHOWN).enumerate() {
+            if ix > 0 {
+                caption = caption.child(div().flex_none().text_color(theme.text_faint).child("·"));
+            }
+            let live = self.launched_state(Some(&event.chat_id), cx);
+            let title: SharedString = live
+                .as_ref()
+                .and_then(|(c, _)| c.title.clone())
+                .map(|t| single_line(&t))
+                .unwrap_or_else(|| single_line(&event.title))
+                .into();
+            let mark = live
+                .as_ref()
+                .and_then(|(c, _)| c.config.as_ref())
+                .map(|config| crate::pickers::harness_brand_icon(config.harness))
+                .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+            let chat_id = event.chat_id.clone();
+            caption = caption
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-event{ix}")))
+                        .min_w_0()
+                        .child(caption_label(title, Some(mark), theme.text_muted))
+                        .when(live.is_some(), |el| {
+                            el.role(gpui::Role::Link)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.text))
+                                .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                    cx.emit(TranscriptEvent::OpenSideChat {
+                                        chat_id: chat_id.clone(),
+                                    });
+                                }))
+                        }),
+                )
+                .child(div().flex_none().child(event_verb(event.kind)));
+        }
+        if events.len() > SHOWN {
+            caption = caption.child(
+                div()
+                    .flex_none()
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!("+{} more", events.len() - SHOWN))),
+            );
+        }
+        div().w_full().child(caption).into_any_element()
+    }
+
+    /// A coordinator's report: `Reported to [logo] Release · Done`, with the
+    /// message beneath as a quiet quote.
+    fn render_task_report(
+        &mut self,
+        row_id: &SharedString,
+        status: &SharedString,
+        message: &SharedString,
+        pending: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let parent = self
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.launched_state(Some(id), cx))
+            .and_then(|(chat, _)| chat.parent_chat_id);
+        let fallback: SharedString = "the chat that started the task".into();
+        let status_word = match status.as_ref() {
+            "done" => "Done",
+            "question" => "Question",
+            "blocked" => "Blocked",
+            _ => "",
+        };
+        let caption = self.render_chat_caption(row_id, "Reported to", parent.as_deref(), fallback, false, theme, cx);
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .when(pending, |el| el.opacity(0.65))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(caption)
+                    .when(!status_word.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .px(px(6.0))
+                                .h(px(18.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(5.0))
+                                .bg(crate::theme::ink(0.06))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(match status.as_ref() {
+                                    "question" => theme.accent,
+                                    "blocked" => theme.danger,
+                                    _ => theme.text_muted,
+                                })
+                                .child(status_word),
+                        )
+                    }),
+            );
+        if !message.trim().is_empty() {
+            // The coordinator usually says it all again in its reply, so a
+            // long report stays a few lines until asked for.
+            const SHOWN_LINES: f32 = 6.0;
+            let long = message.lines().count() > SHOWN_LINES as usize || message.len() > 480;
+            let open = self.open_task_cards.contains(row_id);
+            column = column.child(
+                div()
+                    .max_w(px(self.content_width * 0.9))
+                    .pl(px(12.0))
+                    .border_l_2()
+                    .border_color(crate::theme::ink(0.10))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(crate::typography::ui_rems(19.0))
+                    .text_color(theme.text_muted)
+                    .when(long && !open, |el| {
+                        el.max_h(crate::typography::ui_rems(19.0 * SHOWN_LINES))
+                            .overflow_hidden()
+                    })
+                    .child(message.clone()),
+            );
+            if long {
+                let row = row_id.clone();
+                column = column.child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-more")))
+                        .pl(px(14.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text_muted))
+                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.toggle_task_card(row.clone(), cx);
+                        }))
+                        .child(if open { "Show less" } else { "Show more" }),
+                );
+            }
+        }
+        column.into_any_element()
+    }
+
+    /// Repaint the chips and captions when the chats they show changed.
+    fn repaint_launched(&mut self, cx: &mut Context<Self>) {
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let state = self.state.read(cx);
+            let Some(selected) = self.chat_id.as_deref().or(state.selected_chat.as_deref()) else {
+                return;
+            };
+            let now = chrono::Utc::now();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let children: Vec<&zeron_proto::Chat> = state
+                .chats
+                .iter()
+                .filter(|chat| chat.parent_chat_id.as_deref() == Some(selected))
+                .collect();
+            for chat in state.chats.iter().filter(|chat| {
+                chat.parent_chat_id.as_deref() == Some(selected)
+                    || chat
+                        .parent_chat_id
+                        .as_deref()
+                        .is_some_and(|p| children.iter().any(|c| c.id == p))
+            }) {
+                chat.id.hash(&mut h);
+                chat.title.hash(&mut h);
+                chat.config.as_ref().map(|c| c.harness).hash(&mut h);
+                (state.display_status_for(chat, now) as u8).hash(&mut h);
+            }
+            h.finish()
+        };
+        if signature == self.launched_signature {
+            return;
+        }
+        self.launched_signature = signature;
+        let rows: Vec<(usize, SharedString)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                matches!(
+                    row.kind,
+                    RowKind::LaunchedChats { .. } | RowKind::ChatEvents { .. }
+                )
+            })
+            .map(|(ix, row)| (ix, row.id.clone()))
+            .collect();
+        for (ix, id) in &rows {
+            self.render_cache.borrow_mut().invalidate_row(id);
+            // A task card's agent list grows as agents start.
+            self.list.remeasure_items(*ix..*ix + 1);
+        }
+        if !rows.is_empty() {
+            cx.notify();
+        }
+    }
+
     fn render_agent_sender(
         &self,
         row_id: &SharedString,
@@ -8098,6 +8939,23 @@ impl Transcript {
                 }
                 column.into_any_element()
             }
+            RowKind::LaunchedChats {
+                chats,
+                task,
+                pending,
+            } => {
+                if *task {
+                    self.render_task_card(&row.id, chats, *pending, &theme, cx)
+                } else {
+                    self.render_side_chips(&row.id, chats, *pending, &theme, cx)
+                }
+            }
+            RowKind::ChatEvents { events } => self.render_chat_events(&row.id, events, &theme, cx),
+            RowKind::TaskReport {
+                status,
+                message,
+                pending,
+            } => self.render_task_report(&row.id, status, message, *pending, &theme, cx),
             RowKind::SentMessage {
                 to,
                 pending,
@@ -10046,6 +10904,222 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
 
 /// `[mark] Name` in a user-message caption: a provider's brand mark (or any
 /// glyph) beside its name. A side without a mark shows its name alone.
+/// What a chat's event says about it, after its name.
+fn event_verb(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Finished => "finished",
+        EventKind::Failed => "failed",
+        EventKind::NeedsInput => "has a question",
+        EventKind::TaskDone => "is done",
+        EventKind::TaskQuestion => "needs a decision",
+        EventKind::TaskBlocked => "is blocked",
+    }
+}
+
+/// A launched chat's chip card: the subagent chip's (hairline card, the
+/// whole card a link).
+fn chip_card(
+    id: SharedString,
+    opens: bool,
+    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    header: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    let card = div()
+        .debug_selector(|| id.to_string())
+        .id(id)
+        .h(px(CHIP_CARD_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .rounded(px(9.0))
+        .border_1()
+        .border_color(crate::theme::hairline(0.07))
+        .bg(crate::theme::ink(0.03));
+    let card = if opens {
+        card.cursor_pointer()
+            .hover(|s| s.bg(crate::theme::ink(0.05)))
+            .on_click(on_open)
+    } else {
+        card
+    };
+    div()
+        .id(SharedString::from("chip-row"))
+        .w_full()
+        .flex_none()
+        .py(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
+        .child(card.child(header))
+}
+
+/// A task card's trailing cluster: its agents' marks and how they're doing,
+/// and the chevron that opens them beneath.
+struct TaskTrail<F> {
+    avatars: Vec<crate::chat_avatars::Avatar>,
+    summary: SharedString,
+    /// The row to toggle, and whether it is open; `None` without agents.
+    toggle: Option<(SharedString, bool)>,
+    on_toggle: F,
+}
+
+/// A launched chat's header: the subagent chip's row — mark tile, label,
+/// title, model, status — ending in the open arrow (or a task's cluster).
+#[allow(clippy::too_many_arguments)]
+fn launched_header<F>(
+    id: SharedString,
+    label: &'static str,
+    title: SharedString,
+    harness: Option<HarnessId>,
+    model: Option<SharedString>,
+    status: zeron_proto::ChatIndicator,
+    failed: bool,
+    task: Option<TaskTrail<F>>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div
+where
+    F: Fn(&SharedString, &mut Window, &mut gpui::App) + 'static,
+{
+    use zeron_proto::ChatIndicator;
+    let (mark, tint) = harness
+        .map(crate::pickers::harness_brand_icon)
+        .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+    let tile = |child: AnyElement| {
+        div()
+            .size(px(18.0))
+            .flex_none()
+            .rounded(px(5.0))
+            .bg(crate::theme::ink(0.06))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(child)
+    };
+    let mut row = div()
+        .h(px(CHIP_HEADER_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .text_size(px(TOOL_LABEL_SIZE))
+        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .child(
+            div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.08))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::icons::icon(mark)
+                        .size(px(12.0))
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                ),
+        )
+        .child(
+            div()
+                .flex_none()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if failed { theme.danger } else { theme.text_muted })
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.text.opacity(0.85)
+                })
+                .child(title),
+        );
+    if let Some(model) = model {
+        row = row.child(
+            div()
+                .flex_none()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child(model),
+        );
+    }
+    if let Some(task) = &task {
+        if !task.avatars.is_empty() {
+            row = row.child(crate::chat_avatars::stack(
+                &task.avatars,
+                18.0,
+                theme.surface_card,
+                theme,
+            ));
+        }
+        if !task.summary.is_empty() {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(task.summary.clone()),
+            );
+        }
+    }
+    row = match status {
+        ChatIndicator::Working => row.child(div().flex_none().child(
+            crate::loaders::mini_glyph_spinner(format!("launched-{id}"), 2.0, theme.glyph, view, cx),
+        )),
+        ChatIndicator::AwaitingInput => row.child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.0))
+                .text_color(theme.accent)
+                .child(div().size(px(6.0)).rounded_full().bg(theme.accent))
+                .when(task.is_none(), |el| el.child("needs input")),
+        ),
+        _ => row,
+    };
+    match task {
+        Some(TaskTrail {
+            toggle: Some((toggle_row, open)),
+            on_toggle,
+            ..
+        }) => row.child(
+            tile(
+                crate::icons::icon(if open {
+                    crate::icons::ALT_ARROW_DOWN
+                } else {
+                    crate::icons::ALT_ARROW_RIGHT
+                })
+                .size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.8))
+                .into_any_element(),
+            )
+            .id(SharedString::from(format!("{id}-agents")))
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::ink(0.10)))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_toggle(&toggle_row, window, cx);
+            })
+            .into_any_element(),
+        ),
+        _ => row.child(tile(
+            crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                .size(px(11.0))
+                .text_color(theme.text_muted.opacity(0.8))
+                .into_any_element(),
+        )),
+    }
+}
+
 pub(crate) fn caption_label(
     name: SharedString,
     mark: Option<(&'static str, Option<gpui::Hsla>)>,
@@ -13302,6 +14376,101 @@ mod tests {
         );
     }
 
+    fn zeron_call(id: &str, tool: &str, input: serde_json::Value, resolved: bool) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: Some(input),
+            },
+            is_error: false,
+            resolved,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        }
+    }
+
+    /// Chats a call started read as chips (or a task's card), and a
+    /// coordinator's report as its own row, in either mode, out of the fold.
+    #[test]
+    fn launches_and_reports_read_as_their_own_rows() {
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("k0", "ls"),
+                zeron_call(
+                    "k1",
+                    "create_chats",
+                    serde_json::json!({ "requests": [
+                        { "title": "Test Runner", "harness": "claude-code", "chatId": "c-1" },
+                        { "title": "Docs Writer", "model": "gpt-6.1-sol" },
+                    ]}),
+                    true,
+                ),
+                zeron_call("k2", "create_task", serde_json::json!({ "title": "Zeron Refactor", "chatId": "t-1" }), true),
+                zeron_call("k3", "report", serde_json::json!({ "status": "done", "message": "Merged." }), false),
+                text_part("t1", "Started."),
+            ],
+        );
+        for compact in [false, true] {
+            let rows = rows_for_entry(&entry, false, compact, &mut parse);
+            let visible: Vec<&Row> = rows.iter().filter(|r| r.compact_fold.is_none()).collect();
+            let side = visible
+                .iter()
+                .find_map(|r| match &r.kind {
+                    RowKind::LaunchedChats { chats, task: false, .. } => Some(chats.clone()),
+                    _ => None,
+                })
+                .expect("side chips");
+            assert_eq!(side.len(), 2);
+            assert_eq!(side[0].chat_id.as_deref(), Some("c-1"));
+            assert_eq!(side[0].harness, Some(HarnessId::ClaudeCode));
+            assert_eq!(side[1].model.as_ref().map(|m| m.as_ref()), Some("gpt-6.1-sol"));
+            assert!(visible.iter().any(|r| matches!(&r.kind,
+                RowKind::LaunchedChats { chats, task: true, .. } if chats[0].title.as_ref() == "Zeron Refactor")));
+            assert!(visible.iter().any(|r| matches!(&r.kind,
+                RowKind::TaskReport { status, message, pending: true } if status.as_ref() == "done" && message.as_ref() == "Merged.")));
+        }
+    }
+
+    #[test]
+    fn chat_events_draw_as_a_caption_and_quiet_replies_vanish() {
+        use zeron_proto::chat_events::{Audience, ChatEvent, events_prompt, with_events};
+        let event = ChatEvent {
+            kind: EventKind::TaskDone,
+            chat_id: "t-1".into(),
+            title: "Zeron Refactor".into(),
+            text: "Merged.".into(),
+        };
+        let alone = events_prompt(std::slice::from_ref(&event), &[], Audience::Main { user_follows: false });
+        let rows = rows_for_entry(&user_entry("u1", &alone), false, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&rows[0].kind, RowKind::ChatEvents { events } if events[0].chat_id == "t-1"));
+        assert!(rows[0].turn_start);
+
+        let carried = with_events(&[event], &[], "How's it going?");
+        let rows = rows_for_entry(&user_entry("u2", &carried), false, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[1].kind, RowKind::User { text, .. } if text.as_ref() == "How's it going?"));
+        assert!(!rows[1].turn_start, "the bubble continues the events' turn");
+
+        let quiet = assistant("a1", MessageStatus::Complete, vec![text_part("t0", "NO_REPLY")]);
+        for compact in [false, true] {
+            assert!(rows_for_entry(&quiet, false, compact, &mut parse).is_empty());
+        }
+        let streaming = assistant("a2", MessageStatus::Streaming, vec![text_part("t0", "NO_RE")]);
+        assert!(rows_for_entry(&streaming, false, false, &mut parse).is_empty());
+    }
+
     #[test]
     fn agent_messages_show_their_sender_over_the_body() {
         let id = "cd27c5c2-0000-4000-8000-000000000000";
@@ -13670,6 +14839,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            role: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

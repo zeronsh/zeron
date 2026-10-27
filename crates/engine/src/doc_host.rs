@@ -572,6 +572,9 @@ pub struct ChatDocHandle {
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
     queue_tx: watch::Sender<Vec<QueuedMessage>>,
+    /// Side-chat notices watch (rides WatchQueue): what the chats this one
+    /// started have reported. Same cheap whole-list publication as the queue.
+    notices_tx: watch::Sender<Vec<zeron_doc::ChatNotice>>,
     /// Serializes everything that TAKES from the queue. Both the doc-change
     /// task and the turn-end status watcher call `drain_queue`, and nothing
     /// keeps those two apart: without this they interleave across the
@@ -599,6 +602,8 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// A settle timer for side-chat notices is pending (`drain_notices`).
+    notice_settle_armed: AtomicBool,
     /// True when the doc changed while nobody watched: the mirror rebuild is
     /// deferred to the next `watch_messages` attach instead of paid per commit.
     mirror_dirty: AtomicBool,
@@ -833,6 +838,32 @@ impl ChatDocHandle {
         let rx = self.queue_tx.subscribe();
         self.publish_queue();
         rx
+    }
+
+    /// Notices watch — what this chat's side chats have reported.
+    pub fn watch_notices(&self) -> watch::Receiver<Vec<zeron_doc::ChatNotice>> {
+        self.touch();
+        let rx = self.notices_tx.subscribe();
+        self.publish_notices();
+        rx
+    }
+
+    fn publish_notices(&self) {
+        match self.doc.read_notices() {
+            Ok(notices) => {
+                self.notices_tx.send_if_modified(|slot| {
+                    if *slot == notices {
+                        false
+                    } else {
+                        *slot = notices;
+                        true
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::warn!(chat = %self.chat_id, error = %err, "notices read failed");
+            }
+        }
     }
 
     /// Where a newly steered row goes: after the rows already steered, ahead
@@ -1758,6 +1789,7 @@ impl DocHost {
         // appended after the handle exists retain the normal automatic drain.
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
+        let (notices_tx, _) = watch::channel(doc.read_notices().unwrap_or_default());
 
         let handle = Arc::new(ChatDocHandle {
             chat_id: chat_id.to_string(),
@@ -1767,12 +1799,14 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             queue_tx,
+            notices_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             held_sends: Mutex::new(HashMap::new()),
             stopped_by: Mutex::new(None),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            notice_settle_armed: AtomicBool::new(false),
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             last_focus: AtomicU64::new(0),
@@ -4218,7 +4252,14 @@ impl DocHost {
     /// - Turn in flight: hold. The turn-end watcher comes back for it.
     ///
     /// One at a time by design: each send changes the status this reads.
+    /// Side-chat notices go after the rows: a row carries them, and with none
+    /// left they may start a turn of their own (`drain_notices`).
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
+        self.drain_queue_rows(handle).await;
+        self.drain_notices(handle).await;
+    }
+
+    async fn drain_queue_rows(&self, handle: &Arc<ChatDocHandle>) {
         let Some(_dispatch) = self.dispatch_guard() else {
             return; // quiesced for a Cloud sleep; lifting it re-drains
         };
@@ -4490,31 +4531,47 @@ impl DocHost {
         if send == QueueSend::Interrupt && sessions.turn_in_flight(chat_id) {
             sessions.stop_turn(chat_id).await?;
         }
-        let previous = sessions.last_request(chat_id);
         // ... and on its model, effort and options, not the chat's saved ones.
-        let request = held.or_else(|| {
-            self.request_from_chat_row(chat_id, &prompt)
-                .map(|mut current| {
-                    if let Some(previous) = &previous {
-                        current.auto_approve = previous.auto_approve;
-                        current.worktree = previous.worktree.clone();
-                    }
-                    current
-                })
-                .or(previous)
-        });
+        let request = held.or_else(|| self.next_turn_request(&sessions, chat_id, &prompt));
         let Some(mut request) = request else {
             return Err(EngineError::Other(
                 "no live run and no prior run config".into(),
             ));
         };
+        let carried = self.carry_notices(handle, &mut prompt);
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = attachments;
         let harness = self.harness_for_request(chat_id, &request);
-        self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
-            .await?;
+        if let Err(err) = self
+            .dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
+            .await
+        {
+            self.return_notices(handle, &carried);
+            return Err(err);
+        }
         Ok(())
+    }
+
+    /// The request a fresh turn runs with: the chat row's current settings,
+    /// keeping the previous run's approval and worktree, else the previous
+    /// run's own.
+    fn next_turn_request(
+        &self,
+        sessions: &SessionsEngine,
+        chat_id: &str,
+        prompt: &str,
+    ) -> Option<zeron_proto::RunRequest> {
+        let previous = sessions.last_request(chat_id);
+        self.request_from_chat_row(chat_id, prompt)
+            .map(|mut current| {
+                if let Some(previous) = &previous {
+                    current.auto_approve = previous.auto_approve;
+                    current.worktree = previous.worktree.clone();
+                }
+                current
+            })
+            .or(previous)
     }
 
     /// Persist remote host discovery separately from the outgoing room rows.
@@ -5667,6 +5724,8 @@ impl DocHost {
                 // id, so the dispatch path's own execution-time write dedupes
                 // to a no-op. A provider switch's seam lands with it, above.
                 sessions.note_provider_switch(chat_id, harness, handle);
+                // Side-chat updates waiting for this chat ride its prompt.
+                let carried = self.carry_notices(handle, &mut request.prompt);
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,
@@ -5674,14 +5733,19 @@ impl DocHost {
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
                 }
-                self.dispatch_with_source_context(
-                    sessions,
-                    chat_id,
-                    harness,
-                    request,
-                    Some(message_id.clone()),
-                )
-                .await?;
+                if let Err(err) = self
+                    .dispatch_with_source_context(
+                        sessions,
+                        chat_id,
+                        harness,
+                        request,
+                        Some(message_id.clone()),
+                    )
+                    .await
+                {
+                    self.return_notices(handle, &carried);
+                    return Err(err);
+                }
                 // A fresh user-authored turn is the deliberate action that
                 // thaws a queue frozen by Cancel. Clear only after dispatch
                 // succeeds so a failed send cannot silently unfreeze it.
@@ -6628,6 +6692,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 let _ = tokio::task::spawn_blocking(move || {
                     publishing.publish_messages_if_watched();
                     publishing.publish_queue();
+                    publishing.publish_notices();
                 }).await;
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
@@ -6933,3 +6998,6 @@ mod sync_lifecycle_tests;
 
 #[path = "doc_host_delivery.rs"]
 mod remote_delivery;
+
+#[path = "doc_host_notices.rs"]
+mod notices;

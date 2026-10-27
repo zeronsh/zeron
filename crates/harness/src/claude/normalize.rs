@@ -319,6 +319,22 @@ fn subagent_results(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
         .collect()
 }
 
+/// A `tool_result` block's text: its content string, or its text blocks
+/// joined.
+fn result_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let text: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect();
+            (!text.is_empty()).then(|| text.join("\n"))
+        }
+        _ => None,
+    }
+}
+
 /// An id the CLI minted, safe in a path.
 fn path_safe(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -410,6 +426,10 @@ pub(crate) struct Normalizer {
     /// call's id, and its `task_started` re-decodes the chip as a spawn) or
     /// their result shows they ran inline.
     skill_calls: std::collections::HashMap<String, Value>,
+    /// Zeron launch calls (`create_chat(s)`, `create_task`) in flight, by
+    /// tool use id: their results name the chats they made, which the
+    /// transcript links to, so theirs (alone) pass through.
+    zeron_launches: std::collections::HashSet<String>,
     /// tool_use ids of Agent/Task spawn calls, recorded from their own
     /// assistant frames (plus `task_started`'s agent-task pairing). Gates
     /// `task_notification`: background SHELL tasks settle through the same
@@ -446,6 +466,7 @@ impl Normalizer {
             agent_tasks: std::collections::HashMap::new(),
             agent_tool_spawns: std::collections::HashMap::new(),
             skill_calls: std::collections::HashMap::new(),
+            zeron_launches: std::collections::HashSet::new(),
             agent_spawn_tools: std::collections::HashSet::new(),
             typed_fork: None,
             fork_transcripts: true,
@@ -1009,6 +1030,9 @@ impl Normalizer {
                         "Skill" => {
                             self.skill_calls.insert(b.id.clone(), b.input.clone());
                         }
+                        "mcp__zeron__create_chat" | "mcp__zeron__create_chats" | "mcp__zeron__create_task" => {
+                            self.zeron_launches.insert(b.id.clone());
+                        }
                         _ => {}
                     }
                 }
@@ -1150,10 +1174,15 @@ impl Normalizer {
                         // A skill whose result came back without a task
                         // start ran inline: it never forks now.
                         self.skill_calls.remove(&b.tool_use_id);
+                        let output = self
+                            .zeron_launches
+                            .remove(&b.tool_use_id)
+                            .then(|| result_text(&b.content))
+                            .flatten();
                         AgentEvent::ToolResult {
                             id: b.tool_use_id.clone(),
                             is_error: b.is_error.unwrap_or(false),
-                            output: None,
+                            output,
                             diff: None,
                         }
                     })
@@ -1525,6 +1554,31 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    /// A Zeron launch's result names the chats it made, so it passes
+    /// through; every other tool's result stays out.
+    #[test]
+    fn zeron_launch_results_pass_through_and_others_stay_out() {
+        let mut norm = Normalizer::new();
+        let frame = crate::claude::wire::parse_frame(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tz","name":"mcp__zeron__create_task","input":{"title":"T"}},{"type":"tool_use","id":"tr","name":"mcp__zeron__read_chat","input":{"chat":"c"}}]}}"#,
+        )
+        .expect("parses");
+        norm.normalize(frame, false);
+        let frame = crate::claude::wire::parse_frame(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tz","content":[{"type":"text","text":"{\"taskId\":\"t-1\"}"}]},{"type":"tool_result","tool_use_id":"tr","content":"secret transcript"}]}}"#,
+        )
+        .expect("parses");
+        let ev = norm.normalize(frame, false);
+        let outputs: Vec<Option<String>> = ev
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolResult { output, .. } => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, vec![Some(r#"{"taskId":"t-1"}"#.to_owned()), None]);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use zeron_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{HarnessInfo, OriginRole, TurnOutcome, Zeron, session_for, short};
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
@@ -118,7 +118,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on. A side chat works like a subagent: when its turn ends, Zeron hands you its final reply (after your current turn, or waking you when idle), and it can't message you meanwhile; don't poll it. Only a top-level chat or a task's coordinator (for the task's agents) creates chats. Give every chat a short, specific title naming its role. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -198,6 +198,48 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true }
             })),
+        },
+        ToolDef {
+            name: "create_task",
+            description: "Start a task: a coordinator chat that runs a larger piece of work for you with agents of its own, steering them as they go, and reports back only when the task is done, needs a decision, or is blocked. You hear nothing of the traffic in between, and neither does the user; you can message the coordinator any time with send_message. Use a task for work that needs several agents or a long stretch of supervision, or when the user asks for one; use create_chat for a single delegated job. Write a brief that stands on its own: the goal, what's been decided, the constraints, the files involved, and what done means. The coordinator sees nothing else of this conversation (it can read_chat this chat if it must).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "The task's name: two or three words, Title Case, naming the work (e.g. \"Zeron Refactor\", \"Billing Migration\")." },
+                    "brief": { "type": "string", "description": "Everything the coordinator needs to run the task on its own." },
+                    "harness": { "type": "string", "description": "The coordinator's harness (see list_harnesses). Its agents may use others." },
+                    "model": { "type": "string", "description": "The coordinator's model, from list_models." },
+                    "reasoning": { "type": "string", "description": "The coordinator's reasoning level." },
+                    "project": { "type": "string", "description": "Project id, path, or name. Defaults to this chat's." },
+                    "branch": { "type": "string", "description": "Branch label to record." },
+                    "cwd": { "type": "string", "description": "Working directory override. Defaults to the project folder." }
+                },
+                "required": ["title", "brief"]
+            }),
+        },
+        ToolDef {
+            name: "report",
+            description: "Report to the chat that started your task. status done: the task is finished; the message is the result, written for that chat's agent to relay. status question: you need a decision you can't make; ask it plainly. status blocked: you can't go on; say what would unblock you. Report only those: never progress. Waiting on your agents, end your turn instead; Zeron wakes you as they finish.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["done", "question", "blocked"] },
+                    "message": { "type": "string" }
+                },
+                "required": ["status", "message"]
+            }),
+        },
+        ToolDef {
+            name: "rename_chat",
+            description: "Rename your own chat, or a chat you started (a side chat, a task, a task's agent), when its scope changes. Titles are short and specific: a task by its work (\"Zeron Refactor\"), an agent by its role in it (\"Schema Migrator\", \"Test Author\").",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "The chat to rename (id, prefix, or title). Defaults to your own." },
+                    "title": { "type": "string" }
+                },
+                "required": ["title"]
+            }),
         },
     ];
     for (name, single, description) in [
@@ -605,6 +647,33 @@ struct CreateChatArgs {
     #[serde(default)]
     wait: bool,
     timeout_secs: Option<u64>,
+    /// Set by `create_task` only: the new chat coordinates a task.
+    #[serde(skip)]
+    role: Option<zeron_proto::ChatRole>,
+}
+
+#[derive(Deserialize)]
+struct CreateTaskArgs {
+    title: String,
+    brief: String,
+    harness: Option<String>,
+    model: Option<String>,
+    reasoning: Option<String>,
+    project: Option<String>,
+    branch: Option<String>,
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReportArgs {
+    status: zeron_proto::chat_events::ReportStatus,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct RenameArgs {
+    chat: Option<String>,
+    title: String,
 }
 
 #[derive(Deserialize)]
@@ -751,11 +820,28 @@ impl Tools {
         self.zeron.origin().side_chats_only
     }
 
+    /// What the chat this server speaks for is to the chat that started it.
+    pub fn role(&self) -> OriginRole {
+        self.zeron.origin().role
+    }
+
     pub fn list(&self) -> Vec<ToolDef> {
         let in_chat = self.zeron.origin().chat_id.is_some();
+        let role = self.zeron.origin().role;
         catalog()
             .into_iter()
             .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
+            .filter(|tool| match tool.name {
+                // A top-level chat starts tasks; a coordinator runs one.
+                "create_task" => in_chat && role == OriginRole::Top,
+                "report" => role == OriginRole::Coordinator,
+                // Side chats and agents do their part; they start nothing.
+                "create_chat" | "create_chats" => {
+                    matches!(role, OriginRole::Top | OriginRole::Coordinator)
+                }
+                "rename_chat" => in_chat,
+                _ => true,
+            })
             .collect()
     }
 
@@ -783,6 +869,9 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "create_task" => self.create_task(parse(args)?).await,
+            "report" => self.report(parse(args)?).await,
+            "rename_chat" => self.rename_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -1016,8 +1105,8 @@ impl Tools {
             ChatKind::Chat
         };
 
-        // Delegation is one level deep: a chat that has a parent never
-        // creates chats, and a new chat's parent is a top-level chat.
+        // Only a top-level chat, or a task's coordinator (for the task's
+        // agents), creates chats; a new chat's parent is one of those.
         // The calling chat's access mode caps the new one's: a supervised
         // agent must not hand its work to one that asks nothing.
         let mut ceiling = AccessMode::FullAccess;
@@ -1026,17 +1115,31 @@ impl Tools {
         {
             let origin = self.zeron.resolve_chat(origin).await?;
             anyhow::ensure!(
-                origin.parent_chat_id.is_none(),
-                "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
+                origin.parent_chat_id.is_none() || origin.is_coordinator(),
+                "A delegated chat can't create chats of its own. Do the work in this chat; your final reply reaches the chat that started you when your turn ends."
             );
+            if origin.is_coordinator() {
+                anyhow::ensure!(
+                    args.role.is_none(),
+                    "A coordinator runs its task's agents; it doesn't start tasks."
+                );
+                anyhow::ensure!(
+                    parent_chat_id.as_deref() == Some(origin.id.as_str()),
+                    "A coordinator's agents are its own: create them without a parent or kind chat."
+                );
+            }
             ceiling = origin.config.map(|c| c.access).unwrap_or_default();
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
             anyhow::ensure!(
-                parent.parent_chat_id.is_none(),
-                "{} is itself a delegated chat: only top-level chats have side chats.",
+                parent.parent_chat_id.is_none() || parent.is_coordinator(),
+                "{} is itself a delegated chat: only top-level chats and task coordinators have side chats.",
                 parent.title.as_deref().unwrap_or(&parent.id)
+            );
+            anyhow::ensure!(
+                args.role.is_none() || parent.parent_chat_id.is_none(),
+                "Only a top-level chat starts tasks."
             );
         }
         let (space, device_id) = self
@@ -1132,6 +1235,9 @@ impl Tools {
         }
         if let Some(parent) = &parent_chat_id {
             mutate["parentChatId"] = json!(parent);
+        }
+        if let Some(role) = args.role {
+            mutate["role"] = json!(role);
         }
         if let Some(branch) = args
             .branch
@@ -1235,10 +1341,14 @@ impl Tools {
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 parent_chat_id: parent_chat_id.clone(),
+                role: args.role,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 room_gen: None,
             };
+            // A side chat's first prompt carries its parent's header, which
+            // tells it the reply goes back by itself.
+            let prompt = self.attribute(&chat, &prompt).await;
             let sent = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")
                 .await?;
@@ -1300,6 +1410,7 @@ impl Tools {
                 short(&chat.id)
             );
         }
+        self.check_send(&chat).await?;
         let (spaces, sessions) = tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
         // Only a chat without a config needs its host's catalog (to pick a
         // harness), and a sleeping host can't answer one: everything else a
@@ -1504,17 +1615,194 @@ impl Tools {
         if origin_id == target.id {
             return text.to_owned();
         }
-        let title = match self.zeron.resolve_chat(origin_id).await {
-            Ok(chat) => chat.title,
-            Err(_) => None,
-        };
-        let label = match title {
+        let origin = self.zeron.resolve_chat(origin_id).await.ok();
+        let label = match origin.as_ref().and_then(|chat| chat.title.as_deref()) {
             Some(title) if !title.trim().is_empty() => {
                 format!("{} ({})", title.trim(), short(origin_id))
             }
             _ => short(origin_id).to_owned(),
         };
-        zeron_proto::agent_messages::agent_message(&label, origin_id, text)
+        use zeron_proto::agent_messages::{agent_message, coordinated_message, delegated_message, task_brief};
+        if target.parent_chat_id.as_deref() != Some(origin_id) {
+            return agent_message(&label, origin_id, text);
+        }
+        if target.is_coordinator() {
+            task_brief(&label, origin_id, text)
+        } else if origin.as_ref().is_some_and(Chat::is_coordinator) {
+            coordinated_message(&label, origin_id, text)
+        } else {
+            delegated_message(&label, origin_id, text)
+        }
+    }
+
+    /// Refuse a message the sender's place in the tree doesn't allow: a side
+    /// chat reports only by finishing (like a subagent), a coordinator
+    /// through `report`, and a task's agent talks to its coordinator alone.
+    async fn check_send(&self, target: &Chat) -> anyhow::Result<()> {
+        let role = self.zeron.origin().role;
+        if role == OriginRole::Top {
+            return Ok(());
+        }
+        let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
+            return Ok(());
+        };
+        let origin = self.zeron.resolve_chat(origin_id).await?;
+        let parent = origin.parent_chat_id.as_deref();
+        match role {
+            OriginRole::Side => anyhow::ensure!(
+                parent != Some(target.id.as_str()),
+                "You can't message the chat that started you: Zeron hands it your final reply when your turn ends. Finish your turn when you're done, or stuck."
+            ),
+            OriginRole::Coordinator => anyhow::ensure!(
+                parent != Some(target.id.as_str()),
+                "Use `report` to reach the chat that started your task (done, question, or blocked)."
+            ),
+            OriginRole::Agent => anyhow::ensure!(
+                parent == Some(target.id.as_str()),
+                "A task's agent messages its coordinator only."
+            ),
+            OriginRole::Top => {}
+        }
+        Ok(())
+    }
+
+    async fn create_task(&self, args: CreateTaskArgs) -> anyhow::Result<Value> {
+        let title = args.title.trim();
+        let brief = args.brief.trim();
+        anyhow::ensure!(!title.is_empty(), "a task needs a title");
+        anyhow::ensure!(!brief.is_empty(), "a task needs a brief");
+        let origin_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("create_task only works from an agent Zeron launched in a chat")?;
+        let origin = self.zeron.resolve_chat(&origin_id).await?;
+        anyhow::ensure!(
+            origin.parent_chat_id.is_none(),
+            "Only a top-level chat starts tasks."
+        );
+        // The task runs where this chat does, in its project unless named.
+        let project = args.project.or_else(|| origin.space_id.clone());
+        let created = self
+            .create_chat(CreateChatArgs {
+                kind: Some(ChatKind::Side),
+                project,
+                device: Some(origin.device_id.clone()),
+                parent: None,
+                harness: args.harness,
+                model: args.model,
+                reasoning: args.reasoning,
+                sandbox: None,
+                title: Some(title.to_owned()),
+                branch: args.branch.or_else(|| origin.branch.clone()),
+                cwd: args.cwd.or_else(|| origin.cwd.clone()),
+                cloud: false,
+                prompt: Some(brief.to_owned()),
+                wait: false,
+                timeout_secs: None,
+                role: Some(zeron_proto::ChatRole::Coordinator),
+            })
+            .await?;
+        Ok(json!({
+            "taskId": created["chatId"],
+            "title": title,
+            "coordinator": {
+                "harness": created["harness"],
+                "model": created["model"],
+            },
+            "detail": "The coordinator is on it. You'll hear back when the task is done or needs a decision: end your turn rather than waiting.",
+        }))
+    }
+
+    async fn report(&self, args: ReportArgs) -> anyhow::Result<Value> {
+        let message = args.message.trim();
+        anyhow::ensure!(!message.is_empty(), "the report is empty");
+        let origin_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("report only works from a task's coordinator")?;
+        let origin = self.zeron.resolve_chat(&origin_id).await?;
+        let parent = origin
+            .parent_chat_id
+            .clone()
+            .filter(|_| origin.is_coordinator())
+            .context("only a task's coordinator reports")?;
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::REPORT_TO_PARENT,
+                json!({ "chatId": parent, "fromChatId": origin.id, "status": args.status, "text": message }),
+            )
+            .await?;
+        Ok(json!({
+            "reported": args.status,
+            "to": parent,
+            "id": reply.get("id").cloned().unwrap_or(Value::Null),
+            "detail": "Delivered. The chat that started the task hears it once it is free, never mid-reply.",
+        }))
+    }
+
+    async fn rename_chat(&self, args: RenameArgs) -> anyhow::Result<Value> {
+        let title = args.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        anyhow::ensure!(!title.is_empty(), "the title is empty");
+        let origin_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("rename_chat only works from an agent Zeron launched in a chat")?;
+        let chat = match args.chat.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(key) => self.zeron.resolve_chat(key).await?,
+            None => self.zeron.resolve_chat(&origin_id).await?,
+        };
+        anyhow::ensure!(
+            chat.id == origin_id || chat.parent_chat_id.as_deref() == Some(origin_id.as_str()),
+            "You can rename your own chat and the chats you started."
+        );
+        self.zeron
+            .mutate(json!({ "op": "renameChat", "chatId": chat.id, "title": title }))
+            .await?;
+        Ok(json!({ "chatId": chat.id, "title": title }))
+    }
+
+    /// The side-chat notices `turn` already told this chat's agent about, so
+    /// its host never starts a turn to repeat them. Only for a side chat of
+    /// the chat this server speaks for; best effort.
+    async fn ack_reported(&self, chat: &Chat, rendered: &[RenderedMessage], turn: &Value) {
+        let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
+            return;
+        };
+        if chat.parent_chat_id.as_deref() != Some(origin_id) {
+            return;
+        }
+        use zeron_proto::chat_events::EventKind;
+        let mut ids = Vec::new();
+        if turn["timedOut"] != true
+            && let Some(user) = rendered
+                .iter()
+                .rev()
+                .find(|m| m.role == zeron_doc::MessageRole::User)
+        {
+            for kind in [EventKind::Finished, EventKind::Failed] {
+                ids.push(zeron_doc::notice_id(kind, &chat.id, &user.id));
+            }
+        }
+        if let Some(request) = turn["pendingInput"]["requestId"].as_str() {
+            ids.push(zeron_doc::notice_id(EventKind::NeedsInput, &chat.id, request));
+        }
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(err) = self
+            .zeron
+            .call(zeron_rpc::methods::ACK_CHAT_NOTICES, json!({ "chatId": origin_id, "ids": ids }))
+            .await
+        {
+            tracing::debug!(error = %err, "notice acknowledgement failed");
+        }
     }
 
     /// Pick and perform the delivery the composer would.
@@ -1703,7 +1991,7 @@ impl Tools {
         let stale = session
             .as_ref()
             .is_some_and(|s| zeron_proto::view::session_stale(s, now));
-        Ok(json!({
+        let turn = json!({
             "outcome": outcome,
             "status": status,
             "sessionStatus": session.as_ref().map(|s| s.status),
@@ -1713,7 +2001,11 @@ impl Tools {
             "timedOut": outcome == TurnOutcome::TimedOut,
             "pendingInput": if stale { None } else { last_pending_input(&rendered) },
             "replies": replies,
-        }))
+        });
+        if expect_turn && outcome != TurnOutcome::TimedOut {
+            self.ack_reported(chat, &rendered, &turn).await;
+        }
+        Ok(turn)
     }
 }
 
@@ -2898,6 +3190,130 @@ mod tests {
             world.writes.lock().unwrap().last().unwrap().1["command"]["request"]["harness"],
             "codex"
         );
+    }
+
+    /// What a chat may do follows its place in the tree: a top-level chat
+    /// starts side chats and tasks; a side chat or agent starts nothing; only
+    /// a coordinator reports.
+    #[tokio::test]
+    async fn tools_follow_the_chat_s_role() {
+        let names = |role: OriginRole| {
+            let tools = tools(
+                Arc::new(World::default()),
+                Origin {
+                    chat_id: Some("chat-alpha-1".into()),
+                    role,
+                    ..Default::default()
+                },
+            );
+            tools.list().into_iter().map(|t| t.name).collect::<Vec<_>>()
+        };
+        let top = names(OriginRole::Top);
+        assert!(top.contains(&"create_task") && top.contains(&"create_chats"));
+        assert!(!top.contains(&"report"));
+        let coordinator = names(OriginRole::Coordinator);
+        assert!(coordinator.contains(&"report") && coordinator.contains(&"create_chats"));
+        assert!(!coordinator.contains(&"create_task"));
+        for role in [OriginRole::Side, OriginRole::Agent] {
+            let names = names(role);
+            assert!(!names.contains(&"create_chat") && !names.contains(&"create_task"));
+            assert!(names.contains(&"rename_chat") && names.contains(&"send_message"));
+        }
+    }
+
+    /// A side chat reports by finishing: a message to the chat that started
+    /// it is refused, with what to do instead.
+    #[tokio::test]
+    async fn a_side_chat_cannot_message_its_parent() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            ..Default::default()
+        });
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                role: OriginRole::Side,
+                ..Default::default()
+            },
+        );
+        let err = tools
+            .call("send_message", json!({"chat":"Alpha", "text":"done!"}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("final reply"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    /// `create_task` starts a coordinator under this chat, briefed with the
+    /// task header, and says to end the turn rather than wait.
+    #[tokio::test]
+    async fn create_task_starts_a_briefed_coordinator() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                ..Default::default()
+            },
+        );
+        let result = tools
+            .call(
+                "create_task",
+                json!({"title":"Zeron Refactor", "brief":"Split the engine crate."}),
+            )
+            .await
+            .unwrap();
+        assert!(result["detail"].as_str().unwrap().contains("end your turn"));
+        let writes = world.writes.lock().unwrap();
+        let create = writes
+            .iter()
+            .find(|(m, p)| m == methods::MUTATE && p["op"] == "createChat")
+            .unwrap();
+        assert_eq!(create.1["role"], "coordinator");
+        assert_eq!(create.1["parentChatId"], "chat-alpha-1");
+        let rename = writes
+            .iter()
+            .find(|(m, p)| m == methods::MUTATE && p["op"] == "renameChat")
+            .unwrap();
+        assert_eq!(rename.1["title"], "Zeron Refactor");
+        let run = writes.iter().find(|(m, _)| m == methods::QUEUE_COMMAND).unwrap();
+        let prompt = run.1["command"]["request"]["prompt"].as_str().unwrap();
+        assert!(prompt.contains("made you its coordinator"), "{prompt}");
+        assert!(prompt.ends_with("Split the engine crate."));
+    }
+
+    /// A chat renames itself and the chats it started, nothing else.
+    #[tokio::test]
+    async fn rename_chat_covers_your_own_chats_only() {
+        let world = Arc::new(World {
+            beta_parent: Some("chat-alpha-1".into()),
+            ..Default::default()
+        });
+        let as_alpha = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                ..Default::default()
+            },
+        );
+        as_alpha
+            .call("rename_chat", json!({"chat":"Beta", "title":"Schema  Migrator"}))
+            .await
+            .unwrap();
+        assert_eq!(world.writes.lock().unwrap().last().unwrap().1["title"], "Schema Migrator");
+        let as_beta = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                role: OriginRole::Side,
+                ..Default::default()
+            },
+        );
+        assert!(as_beta
+            .call("rename_chat", json!({"chat":"Alpha", "title":"Nope"}))
+            .await
+            .is_err());
     }
 
     /// A sleeping host can't be read, and only a send wakes it: the send

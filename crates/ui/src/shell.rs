@@ -4604,6 +4604,7 @@ impl Shell {
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
             TranscriptEvent::OpenChat { chat_id } => self.open_chat(chat_id.clone(), cx),
+            TranscriptEvent::OpenSideChat { chat_id } => self.open_child_chat_tab(chat_id, cx),
         }
     }
 
@@ -14609,6 +14610,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
+            role: None,
         }
     }
 
@@ -17741,6 +17743,7 @@ mod exit_regressions {
                         harness_session_cwd: None,
                         harness_session_harness: None,
                         parent_chat_id: None,
+                        role: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,

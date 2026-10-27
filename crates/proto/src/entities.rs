@@ -258,9 +258,50 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// What this chat is to its parent, when more than a side chat: the
+    /// coordinator of a task, which runs agents of its own. A role this build
+    /// doesn't know reads as none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_role"
+    )]
+    pub role: Option<ChatRole>,
+}
+
+/// What a chat is to the chat that started it, beyond a side chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatRole {
+    /// Runs a task for its parent: starts and steers agents (its own
+    /// children), and reports to its parent only when the task is done or
+    /// needs a decision.
+    Coordinator,
+}
+
+impl ChatRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatRole::Coordinator => "coordinator",
+        }
+    }
+}
+
+/// A role from a newer peer costs the role, not the row.
+fn lenient_role<'de, D>(deserializer: D) -> Result<Option<ChatRole>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 impl Chat {
+    /// The coordinator of a task: a child that runs agents of its own.
+    pub fn is_coordinator(&self) -> bool {
+        self.role == Some(ChatRole::Coordinator)
+    }
+
     /// A session the user sees in chat lists: neither another chat's worker
     /// (`parent_chat_id`) nor a hidden voice orchestrator.
     pub fn is_top_level(&self) -> bool {

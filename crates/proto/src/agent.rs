@@ -470,6 +470,12 @@ impl McpServer {
     /// and the driver launches it without its subagent tools.
     pub const SIDE_CHATS_ONLY_ENV: &'static str = "ZERON_SIDE_CHATS_ONLY";
 
+    /// What the chat on Zeron's own server is to the chat that started it,
+    /// when it has one: `side` (a side chat), `coordinator` (runs a task) or
+    /// `agent` (an agent of a task). Decides the tools and instructions it
+    /// gets. Absent for a chat nobody started.
+    pub const CHAT_ROLE_ENV: &'static str = "ZERON_CHAT_ROLE";
+
     pub fn side_chats_only(&self) -> bool {
         self.env
             .get(Self::SIDE_CHATS_ONLY_ENV)

@@ -458,6 +458,9 @@ impl RowBuilder {
                 _ => {
                     flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
                     match part {
+                        // An agent's "nothing for you yet" after chat events
+                        // draws nothing, as on the desktop.
+                        MessagePart::Text { text, .. } if zeron_proto::chat_events::is_quiet_reply(text) => {}
                         MessagePart::Text { id, text } => {
                             let pkey = format!("{}#{}", entry.id, id);
                             live_parts.insert(pkey.clone());
@@ -612,12 +615,41 @@ impl RowBuilder {
 
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool, workspace: Option<&WorkspaceSnapshot>) -> RowCore {
         let key = row_key(&format!("{id}#u"));
+        // Chat events heading the prompt ride over the bubble as one caption;
+        // a turn they started alone is the caption only.
+        if let Some((events, typed)) = zeron_proto::chat_events::split_events(content) {
+            let caption = events_caption(ctx, &events, workspace);
+            if typed.trim().is_empty() {
+                return RowCore {
+                    key,
+                    version: next_version(),
+                    kind: RowKind::Markdown,
+                    entry_id: Arc::from(id),
+                    copy_text: String::new(),
+                    content: Content::Caption { text: caption, pending },
+                };
+            }
+            return self.user_row_with(ctx, key, id, typed, Some(caption), pending);
+        }
         // An agent's message: its sender rides over the bubble, and only the
         // body under the routing header goes in it.
         let (sender, content) = match zeron_proto::agent_messages::agent_message_sender(content) {
             Some((sender, body)) => (Some(sender_caption(ctx, &sender, workspace)), body),
             None => (None, content),
         };
+        self.user_row_with(ctx, key, id, content, sender, pending)
+    }
+
+    /// The user bubble for `content`, `sender`'s caption over it.
+    fn user_row_with(
+        &mut self,
+        ctx: &mut Ctx,
+        key: u64,
+        id: &str,
+        content: &str,
+        sender: Option<PText>,
+        pending: bool,
+    ) -> RowCore {
         // Shared parser: strips the image trailer *and* hidden Appshot context.
         let parsed = zeron_client::attachments::parse_user_message(content);
         let (size, lh) = TYPE.body;
@@ -892,6 +924,24 @@ fn recipient_chat(key: &str, workspace: Option<&WorkspaceSnapshot>) -> (String, 
         .filter(|title| row.has_title && !title.is_empty())
         .unwrap_or_else(|| row.id.chars().take(8).collect());
     (title, row.harness.clone().filter(|h| !h.is_empty()), Some(row.id.clone()))
+}
+
+/// `Update from [mark] Chat`, or `Updates from N chats`: the chats a
+/// prompt's events block reported on.
+fn events_caption(
+    ctx: &mut Ctx,
+    events: &[zeron_proto::chat_events::EventRef],
+    workspace: Option<&WorkspaceSnapshot>,
+) -> PText {
+    if let [event] = events {
+        let sender = zeron_proto::agent_messages::AgentSender {
+            chat_id: event.chat_id.clone(),
+            title: event.title.clone(),
+        };
+        let (title, harness, known) = sender_chat(&sender, workspace);
+        return chat_caption(ctx, "Update from", &title, harness.as_deref(), known.then_some(event.chat_id.as_str()));
+    }
+    chat_caption(ctx, "Updates from", &format!("{} chats", events.len()), None, None)
 }
 
 /// `Message from [mark] Chat`, the desktop's caption over an agent-sent

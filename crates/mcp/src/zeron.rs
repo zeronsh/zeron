@@ -41,6 +41,34 @@ pub struct Origin {
     /// The host launched the agent without its own subagent tools
     /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
     pub side_chats_only: bool,
+    /// What this chat is to the chat that started it
+    /// ([`zeron_proto::McpServer::CHAT_ROLE_ENV`]).
+    pub role: OriginRole,
+}
+
+/// What the chat this server speaks for is to the chat that started it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OriginRole {
+    /// Nobody started it (or no chat at all): it starts side chats and tasks.
+    #[default]
+    Top,
+    /// A side chat: it does its task and finishes; its parent hears the reply.
+    Side,
+    /// A task's coordinator: it runs the task's agents and reports.
+    Coordinator,
+    /// An agent of a task: it does its part, and may ask its coordinator.
+    Agent,
+}
+
+impl OriginRole {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("side") => OriginRole::Side,
+            Some("coordinator") => OriginRole::Coordinator,
+            Some("agent") => OriginRole::Agent,
+            _ => OriginRole::Top,
+        }
+    }
 }
 
 impl Origin {
@@ -56,6 +84,7 @@ impl Origin {
             device_id: read("ZERON_DEVICE_ID"),
             side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
                 == Some("1"),
+            role: OriginRole::parse(read(zeron_proto::McpServer::CHAT_ROLE_ENV).as_deref()),
         }
     }
 }
@@ -885,6 +914,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            role: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

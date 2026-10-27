@@ -9173,6 +9173,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: None,
+            role: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

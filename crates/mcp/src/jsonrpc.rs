@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::tools::Tools;
+use crate::zeron::OriginRole;
 
 /// Protocol revisions this server knows. The client's requested revision
 /// is echoed when it is one of these; otherwise the newest is offered and
@@ -55,7 +56,6 @@ Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
 those marked `connected` can take work from you whichever provider you run \
 on (a claude-code agent may hand a task to codex, and the reverse). Pass \
 `harness` (and a model from `list_models`) to `create_chat` to choose one. \
-Delegation is one level deep: a chat that has a parent cannot create chats. \
 Pass `cloud: true` to run a child on a Cloud machine of its own (Codex or Claude Code); \
 from a Cloud chat it clones the same repository, and without `cloud` it shares your machine.\n\
 \n\
@@ -74,14 +74,67 @@ const SIDE_CHATS_ONLY: &str = "\n\n\
 Your own subagent tools are turned off in Zeron's settings: where you would start a \
 subagent, delegate through Zeron chats instead, with `create_chats` (or `create_chat`).";
 
-/// What `initialize` tells the agent, with the side-chat rule when its host
-/// turned the agent's own subagents off.
-fn instructions(side_chats_only: bool) -> std::borrow::Cow<'static, str> {
-    if side_chats_only {
-        format!("{INSTRUCTIONS}{SIDE_CHATS_ONLY}").into()
-    } else {
-        INSTRUCTIONS.into()
-    }
+/// For a chat nobody started: how its side chats and tasks work.
+const AS_TOP: &str = "\n\n\
+Side chats work like subagents: give one a self-contained job with `create_chat` (or several \
+with `create_chats`) and a short title naming its role. When its turn ends, Zeron hands you \
+its final reply (after your current turn, never mid-reply, or starting a turn when you're \
+idle); it can't message you meanwhile. So launch with `wait: false`, tell the user in a line \
+what you started, and end your turn; don't poll. Wait only when you need the answer to go \
+on in this turn.\n\
+\n\
+For larger work, or when the user asks for a task, start one with `create_task`: a \
+coordinator chat runs it with agents of its own, steering them as they go, and reports to \
+you only when the task is done, needs a decision, or is blocked. Name a task by its work, \
+two or three words in Title Case (\"Zeron Refactor\"). Its traffic is hidden from you and \
+the user; you can message its coordinator with `send_message`.\n\
+\n\
+When an update arrives (a side chat finished, a task reported), tell the user what they \
+need in your own words: they see none of the traffic between chats. Answer what you can \
+yourself. If nothing needs them yet, end that turn with exactly NO_REPLY.";
+
+/// For a side chat: it reports by finishing.
+const AS_SIDE: &str = "\n\n\
+You are a side chat: another chat started you for one job. Do it, and end your turn with a \
+final reply that stands on its own: Zeron hands it to that chat when your turn ends. You \
+can't message it or start chats of your own; if you're stuck, say so in your final reply.";
+
+/// For a task's coordinator: it runs the task and reports.
+const AS_COORDINATOR: &str = "\n\n\
+You coordinate a task another chat started: its brief is your first message. Plan the work, \
+then start agents for it with `create_chats` (each with a prompt that stands on its own, and \
+a title naming its role in the task: \"Schema Migrator\", \"Test Author\"). Keep the \
+number of agents to what the work needs.\n\
+\n\
+Your agents report to you by themselves: when one finishes, fails, or asks something, Zeron \
+hands it to you at your next step, or wakes you if you're idle. While they work, end your \
+turn rather than waiting or polling. Steer an agent that drifts with `send_message`; answer \
+an agent's question with `respond_to_input`; check their work before you trust it. Rename \
+the task or an agent with `rename_chat` if its scope changes.\n\
+\n\
+Reach the chat that started the task only with `report`: `done` with the result when the \
+task is finished, `question` for a decision you can't make, `blocked` when you can't go \
+on. Never report progress. That chat and its user see nothing else of what happens here.";
+
+/// For an agent of a task: it does its part, and may ask its coordinator.
+const AS_AGENT: &str = "\n\n\
+You are an agent of a task run by a coordinator, which started you for one part of it. Do \
+it, and end your turn with a final reply that stands on its own: Zeron hands it to the \
+coordinator when your turn ends. If you're blocked or need a decision before then, message \
+the coordinator with `send_message`; otherwise don't. You can't start chats of your own.";
+
+/// What `initialize` tells the agent: the shared tools, what its place in
+/// the tree (`role`) means, and the side-chat rule when its host turned the
+/// agent's own subagents off.
+fn instructions(side_chats_only: bool, role: OriginRole) -> std::borrow::Cow<'static, str> {
+    let role_text = match role {
+        OriginRole::Top => AS_TOP,
+        OriginRole::Side => AS_SIDE,
+        OriginRole::Coordinator => AS_COORDINATOR,
+        OriginRole::Agent => AS_AGENT,
+    };
+    let side_only = if side_chats_only { SIDE_CHATS_ONLY } else { "" };
+    format!("{INSTRUCTIONS}{role_text}{side_only}").into()
 }
 
 /// How often a call still running reports progress. Clients abort a call
@@ -252,7 +305,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": instructions(tools.side_chats_only()),
+                    "instructions": instructions(tools.side_chats_only(), tools.role()),
                 }),
             )
         }
@@ -380,10 +433,19 @@ mod tests {
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
-        assert_eq!(instructions(false), INSTRUCTIONS);
-        let side_chats = instructions(true);
-        assert!(side_chats.starts_with(INSTRUCTIONS));
+        let plain = instructions(false, OriginRole::Top);
+        assert!(plain.starts_with(INSTRUCTIONS));
+        let side_chats = instructions(true, OriginRole::Top);
         assert!(side_chats.ends_with("with `create_chats` (or `create_chat`)."));
+    }
+
+    #[test]
+    fn each_role_hears_what_its_place_means() {
+        assert!(instructions(false, OriginRole::Top).contains("`create_task`"));
+        assert!(instructions(false, OriginRole::Side).contains("can't message it"));
+        let coordinator = instructions(false, OriginRole::Coordinator);
+        assert!(coordinator.contains("`report`") && coordinator.contains("Never report progress"));
+        assert!(instructions(false, OriginRole::Agent).contains("message the coordinator"));
     }
 
     #[test]

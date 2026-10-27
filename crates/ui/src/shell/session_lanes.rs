@@ -1,9 +1,11 @@
 //! The lanes card, stacked under the session card and shown with it: what
-//! runs alongside the open chat — its **side chats** (forks, and chats an
-//! agent spawned through the Zeron MCP server) and its **subagents** (the
-//! spawn chips of its transcript, with their live status). Each lane is a
-//! section of session-card rows; clicking a row opens it in the right pane.
-//! Settled subagents fold into one "finished" row, closed until opened.
+//! runs alongside the open chat — its **tasks** (a coordinator the chat's
+//! agent started, with the agents it runs), its **side chats** (forks, and
+//! chats an agent spawned through the Zeron MCP server) and its **subagents**
+//! (the spawn chips of its transcript, with their live status). Each lane is
+//! a section of session-card rows; clicking a row opens it in the right pane.
+//! A task opens to its agents; settled subagents fold into one "finished"
+//! row, closed until opened.
 
 use zeron_doc::{MessagePart, SubagentStatus};
 use zeron_proto::{Chat, ChatIndicator};
@@ -20,6 +22,8 @@ const PAGE_ROWS: usize = 10;
 #[derive(Default)]
 pub(super) struct LaneState {
     chat_id: String,
+    /// Tasks opened to their agents, by coordinator id.
+    open_tasks: std::collections::HashSet<String>,
     finished_open: bool,
     shown_chats: usize,
     shown_finished: usize,
@@ -186,7 +190,12 @@ pub(super) fn child_chat_rows(
     let mut rows: Vec<ChildChatRow> = state
         .chats
         .iter()
-        .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
+        .filter(|chat| {
+            !chat.archived
+                && chat.parent_chat_id.as_deref() == Some(chat_id)
+                // A task lists in its own lane.
+                && !chat.is_coordinator()
+        })
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
             ChildChatRow {
@@ -197,6 +206,66 @@ pub(super) fn child_chat_rows(
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
                 change_request: state.change_request_for_chat(chat).cloned(),
                 harness: chat.config.as_ref().map(|config| config.harness),
+                activity,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.activity));
+    rows
+}
+
+/// A task the open chat started, as its lane lists it: the coordinator, and
+/// the agents it runs.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TaskRow {
+    pub chat_id: String,
+    pub title: SharedString,
+    /// The coordinator's harness: the task's lead mark.
+    pub harness: Option<zeron_proto::HarnessId>,
+    /// How the task is doing as a whole: what needs someone first, then work.
+    pub status: ChatIndicator,
+    pub agents: Vec<ChildChatRow>,
+    activity: DateTime<Utc>,
+}
+
+/// The open chat's live tasks, most recent activity first.
+pub(super) fn task_rows(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> Vec<TaskRow> {
+    let mut rows: Vec<TaskRow> = state
+        .chats
+        .iter()
+        .filter(|chat| {
+            !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id) && chat.is_coordinator()
+        })
+        .map(|coordinator| {
+            let mut agents = child_chat_rows(state, &coordinator.id, now);
+            agents.sort_by_key(|agent| agent.activity);
+            let lead = state.display_status_for(coordinator, now);
+            let any = |status: ChatIndicator| lead == status || agents.iter().any(|a| a.status == status);
+            let status = if any(ChatIndicator::AwaitingInput) {
+                ChatIndicator::AwaitingInput
+            } else if any(ChatIndicator::Working) {
+                ChatIndicator::Working
+            } else if lead == ChatIndicator::Errored {
+                ChatIndicator::Errored
+            } else {
+                ChatIndicator::Completed
+            };
+            let activity = agents
+                .iter()
+                .map(|agent| agent.activity)
+                .chain([coordinator.last_message_at.unwrap_or(coordinator.created_at)])
+                .max()
+                .unwrap_or(coordinator.created_at);
+            TaskRow {
+                chat_id: coordinator.id.clone(),
+                title: coordinator
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "New task".into())
+                    .into(),
+                harness: coordinator.config.as_ref().map(|config| config.harness),
+                status,
+                agents,
                 activity,
             }
         })
@@ -344,9 +413,10 @@ impl Shell {
     ) -> AnyElement {
         let now = Utc::now();
         self.session_lanes.follow(&chat.id);
-        let (side_chats, subagents) = {
+        let (tasks, side_chats, subagents) = {
             let state = self.state.read(cx);
             (
+                task_rows(state, &chat.id, now),
                 child_chat_rows(state, &chat.id, now),
                 SubagentLane::new(subagent_rows(state, &chat.id)),
             )
@@ -410,7 +480,28 @@ impl Shell {
                 );
             }
         }
-        let mut rows: Vec<AnyElement> = vec![heading.pr(px(2.0)).into_any_element()];
+        let mut rows: Vec<AnyElement> = Vec::new();
+        // ── Tasks, above the side chats: each opens its coordinator, and its
+        // chevron opens the agents it runs.
+        if !tasks.is_empty() {
+            rows.push(popover::menu_heading(theme, "Tasks").into_any_element());
+            for task in tasks {
+                let open = self.session_lanes.open_tasks.contains(&task.chat_id);
+                let agents = task.agents.clone();
+                rows.push(self.render_task_row(task, open, view, theme, cx));
+                if open {
+                    for agent in agents {
+                        rows.push(
+                            self.render_side_chat_row(agent, view, theme, cx)
+                                .pl(px(30.0))
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+            rows.push(popover::picker_divider().into_any_element());
+        }
+        rows.push(heading.pr(px(2.0)).into_any_element());
         rows.extend(starters);
 
         // ── Side chats.
@@ -527,6 +618,98 @@ impl Shell {
             }))
             .child(body)
             .children(scrollbar)
+            .into_any_element()
+    }
+
+    /// A task's row: the coordinator's mark (the lead), the task's name, its
+    /// agents' marks stacked on the right, and the chevron that opens them.
+    fn render_task_row(
+        &mut self,
+        task: TaskRow,
+        open: bool,
+        view: gpui::EntityId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("session-lanes-task-{}", task.chat_id);
+        let lead = match task.harness {
+            Some(harness) => harness_mark(harness, theme).into_any_element(),
+            None => glyph(icons::CHAT_ROUND_LINE, theme),
+        };
+        let avatars: Vec<crate::chat_avatars::Avatar> = task
+            .agents
+            .iter()
+            .map(|agent| crate::chat_avatars::Avatar {
+                harness: agent.harness,
+                status: match agent.status {
+                    ChatIndicator::AwaitingInput | ChatIndicator::Errored => agent.status,
+                    _ => ChatIndicator::Idle,
+                },
+            })
+            .collect();
+        let open_id = task.chat_id.clone();
+        let toggle_id = task.chat_id.clone();
+        let status = match task.status {
+            ChatIndicator::Working | ChatIndicator::AwaitingInput => {
+                Some(status_mark(format!("{key}-status"), task.status, view, theme, cx))
+            }
+            _ => None,
+        };
+        popover::picker_row(theme, false, false, key.clone())
+            .id(SharedString::from(key.clone()))
+            .aria_label(SharedString::from(format!("Open task {}", task.title)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_session_info_overlay(cx);
+                this.open_child_chat_tab(&open_id, cx);
+            }))
+            .child(popover::picker_icon_slot(lead))
+            .child(row_title(format!("{key}-title"), task.title.clone()))
+            .children(status)
+            .when(!avatars.is_empty(), |row| {
+                row.child(crate::chat_avatars::stack(
+                    &avatars,
+                    18.0,
+                    popover::surface_bg(theme),
+                    theme,
+                ))
+            })
+            .when(!task.agents.is_empty(), |row| {
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("{key}-agents")))
+                        .size(px(22.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(crate::theme::ink(0.08)))
+                        .tooltip(crate::settings::widgets::text_tooltip(if open {
+                            "Hide agents"
+                        } else {
+                            "Show agents"
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let tasks = &mut this.session_lanes.open_tasks;
+                            if !tasks.remove(&toggle_id) {
+                                tasks.insert(toggle_id.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(
+                            icon(if open {
+                                icons::ALT_ARROW_DOWN
+                            } else {
+                                icons::ALT_ARROW_RIGHT
+                            })
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                        ),
+                )
+            })
             .into_any_element()
     }
 

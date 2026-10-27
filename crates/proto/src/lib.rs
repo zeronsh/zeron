@@ -8,6 +8,7 @@ pub mod agent_messages;
 pub mod attachment_mentions;
 pub mod chat_mentions;
 pub mod change_request_assessment;
+pub mod chat_events;
 pub mod cloud;
 pub mod device_paths;
 pub mod entities;

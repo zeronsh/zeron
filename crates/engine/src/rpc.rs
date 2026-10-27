@@ -690,6 +690,10 @@ enum MutateParams {
         /// Cloud machine, cloning the project's GitHub repository.
         #[serde(default)]
         cloud: bool,
+        /// What the new chat is to its parent, beyond a side chat: a task's
+        /// coordinator. Needs a parent.
+        #[serde(default)]
+        role: Option<zeron_proto::ChatRole>,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1750,11 +1754,13 @@ impl EngineRpc {
                 cwd,
                 parent_chat_id,
                 cloud: _,
+                role,
             } => {
                 // A voice orchestrator is hidden, so the chats it creates are
                 // the user's top-level sessions rather than its side chats.
                 let parent_chat_id = parent_chat_id
                     .filter(|parent| !zeron_proto::voice::is_orchestrator_chat(parent));
+                let has_parent = parent_chat_id.is_some();
                 self.workspace
                     .create_chat_with_parent(
                         &chat_id,
@@ -1765,6 +1771,11 @@ impl EngineRpc {
                         parent_chat_id,
                     )
                     .map_err(failed)?;
+                if let Some(role) = role.filter(|_| has_parent) {
+                    self.workspace
+                        .set_chat_role(&chat_id, role)
+                        .map_err(failed)?;
+                }
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
                         .set_chat_branch(&chat_id, branch)
@@ -2142,6 +2153,8 @@ fn forwardable(method: &str) -> bool {
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
             | methods::QUEUE_MESSAGE
+            | methods::REPORT_TO_PARENT
+            | methods::ACK_CHAT_NOTICES
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
             | methods::RENEW_QUEUED_MESSAGE_EDIT
@@ -2972,17 +2985,80 @@ impl RpcService for EngineRpc {
                     .open(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
+                let notices = handle.watch_notices();
                 Ok(RpcReply::Stream(
-                    futures::stream::unfold((rx, true), |(mut rx, first)| async move {
-                        if !first {
-                            rx.changed().await.ok()?;
-                        }
-                        let items = rx.borrow_and_update().clone();
-                        let value = serde_json::json!({ "items": items });
-                        Some((value, (rx, false)))
-                    })
+                    futures::stream::unfold(
+                        (rx, notices, true),
+                        |(mut rx, mut notices, first)| async move {
+                            if !first {
+                                tokio::select! {
+                                    changed = rx.changed() => changed.ok()?,
+                                    changed = notices.changed() => changed.ok()?,
+                                }
+                            }
+                            let items = rx.borrow_and_update().clone();
+                            let listed = notices.borrow_and_update().clone();
+                            let value = serde_json::json!({ "items": items, "notices": listed });
+                            Some((value, (rx, notices, false)))
+                        },
+                    )
                     .boxed(),
                 ))
+            }
+            methods::REPORT_TO_PARENT => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ReportParams {
+                    chat_id: String,
+                    from_chat_id: String,
+                    status: zeron_proto::chat_events::ReportStatus,
+                    text: String,
+                }
+                let p: ReportParams = parse_params(params)?;
+                let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+                let text = p.text.trim();
+                if text.is_empty() {
+                    return Err(RpcError::Failed("the report is empty".into()));
+                }
+                let from = self
+                    .workspace
+                    .chat(&p.from_chat_id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::Failed("unknown chat".into()))?;
+                if !from.is_coordinator() || from.parent_chat_id.as_deref() != Some(p.chat_id.as_str()) {
+                    return Err(RpcError::Failed(
+                        "only a task's coordinator reports, to the chat that started the task".into(),
+                    ));
+                }
+                let kind = zeron_proto::chat_events::EventKind::from_report(p.status);
+                let id = zeron_doc::notice_id(kind, &from.id, &crate::new_id());
+                let notice = zeron_doc::ChatNotice {
+                    id: id.clone(),
+                    kind,
+                    chat_id: from.id.clone(),
+                    title: from.title.clone().unwrap_or_else(|| "Untitled task".into()),
+                    text: text.to_owned(),
+                    issued_by: self.doc_host.device_id().to_owned(),
+                    issued_at: crate::now_ms(),
+                    delivered_at: None,
+                };
+                self.doc_host
+                    .post_notice(&p.chat_id, &notice)
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({ "id": id }))
+            }
+            methods::ACK_CHAT_NOTICES => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct AckParams {
+                    chat_id: String,
+                    ids: Vec<String>,
+                }
+                let p: AckParams = parse_params(params)?;
+                self.doc_host
+                    .ack_notices(&p.chat_id, &p.ids)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::QUEUE_MESSAGE => {
                 let p: QueueMessageParams = parse_params(params)?;
@@ -3375,6 +3451,7 @@ impl RpcService for EngineRpc {
                     cwd,
                     parent_chat_id,
                     cloud,
+                    role,
                 } = &p
                     && let Some(host) = Box::pin(self.cloud_chat_host(
                         chat_id,
@@ -3409,6 +3486,11 @@ impl RpcService for EngineRpc {
                     if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                         self.workspace
                             .set_chat_branch(chat_id, branch)
+                            .map_err(failed)?;
+                    }
+                    if let Some(role) = role.filter(|_| parent_chat_id.is_some()) {
+                        self.workspace
+                            .set_chat_role(chat_id, role)
                             .map_err(failed)?;
                     }
                     return RpcReply::value(&serde_json::json!({

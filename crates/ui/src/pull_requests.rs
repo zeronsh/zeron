@@ -3720,6 +3720,7 @@ mod tests {
             harness_session_harness: None,
             harness_session_cwd: None,
             parent_chat_id: None,
+            role: None,
             space_id: Some(space.into()),
             last_seen_at: None,
             room_gen: None,

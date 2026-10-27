@@ -2214,6 +2214,24 @@ impl Inner {
             })
     }
 
+    /// What `chat_id` is to the chat that started it (see
+    /// [`zeron_proto::McpServer::CHAT_ROLE_ENV`]). `None` for a chat with no
+    /// parent.
+    fn chat_role(&self, chat_id: &str) -> Option<&'static str> {
+        let ws = self.workspace()?;
+        let chat = ws.chat(chat_id).ok().flatten()?;
+        let parent = chat.parent_chat_id.as_deref()?;
+        if chat.is_coordinator() {
+            return Some("coordinator");
+        }
+        let in_task = ws
+            .chat(parent)
+            .ok()
+            .flatten()
+            .is_some_and(|parent| parent.is_coordinator());
+        Some(if in_task { "agent" } else { "side" })
+    }
+
     /// Zeron's own MCP server for a run of `chat_id`: this binary's `zeron
     /// mcp` subcommand, dialing the engine's IPC port and stamped with the
     /// originating chat + device so the agent's side chats link back here.
@@ -2243,6 +2261,12 @@ impl Inner {
             env.insert(
                 zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
                 "1".to_owned(),
+            );
+        }
+        if let Some(role) = self.chat_role(chat_id) {
+            env.insert(
+                zeron_proto::McpServer::CHAT_ROLE_ENV.to_owned(),
+                role.to_owned(),
             );
         }
         if let Some(path) = lock(&self.ipc_token_file)
