@@ -29,6 +29,11 @@ nothing. If a pull request changes a Rust build file no selected suite's
 fingerprint covers, nothing is reused either (fail closed). (A pull request could forge a pass
 in its own runs, as it could edit its own workflows, but no other ref sees it.)
 The `ci:full` label and manual runs reuse nothing.
+
+Two refinements: a suite's gated jobs and optional steps (plan.py's JOB_PATHS
+and FLAG_PATHS) are part of its fingerprint, since they change what its jobs
+check; and the workspace version (Cargo.toml) and the workspace packages'
+versions (Cargo.lock) are left out, since a version bump changes no code.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png"],
     "voice": [".github/workflows/voice-tests.yml", "dist/voice/**", "scripts/package-voice-runtime.py",
-              "scripts/codex-voice-remote-smoke.py", "scripts/tests/**"],
+              "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*"],
     "windows": [".github/workflows/windows.yml", "dist/windows/**", "scripts/test-windows-*.ps1",
                 "scripts/package-windows.ps1"],
     "macos": [".github/workflows/macos.yml", "edge/**", "scripts/run-macos-browser-fixture.sh",
@@ -72,8 +77,9 @@ SUITE_PACKAGES: dict[str, list[str]] = {
     "core": ["zeron-harness", "zeron-engine", "zeron-sync", "zeron-update", "zeron-doc", "zeron-preview",
              "zeron-mcp", "zeron-proto", "zeron-rpc", "zeron-orb", "zeron-voice-session", "zeron-voice-media"],
     "ui": ["zeron-ui"],
-    "voice": ["zeron-audio", "zeron-mobile", "zeron-harness", "zeron-engine", "zeron-voice-media"],
-    "windows": ["zeron-ui", "zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine"],
+    "voice": ["zeron-audio", "zeron-voice-media"],
+    "windows": ["zeron-ui", "zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine",
+                "zeron-voice-media"],
     "macos": ["zeron-update", "zeron-preview", "zeron-ui", "zeron-text", "zeron"],
     "ios": ["zeron-mobile", "zeron-text", "zeron-markdown", "zeron-client"],
     "android": ["zeron-mobile"],
@@ -207,17 +213,42 @@ def exists(path: str, index: dict[str, str]) -> bool:
     return any(p.startswith(prefix) for p in index)
 
 
-def fingerprint(suite: str, index: dict[str, str], patterns: list[str], dirs: set[str]) -> str:
+VERSION_KEY = re.compile(r'^version\s*=\s*"[^"]*"\s*$', re.MULTILINE)
+
+
+def without_versions(path: str, root: str) -> str | None:
+    """Cargo.toml without the workspace version, Cargo.lock without the workspace
+    packages' versions (a version bump changes no code); None for other files."""
+    if path not in ("Cargo.toml", "Cargo.lock"):
+        return None
+    with open(os.path.join(root, path), encoding="utf-8") as f:
+        text = f.read()
+    if path == "Cargo.toml":
+        # Only [workspace.package] has a bare `version = "..."` line; dependencies use inline tables.
+        return hashlib.sha256(VERSION_KEY.sub("", text).encode()).hexdigest()
+    blocks = text.split("\n\n")
+    # Workspace packages are the [[package]] entries without a `source`.
+    kept = [VERSION_KEY.sub("", b) if "[[package]]" in b and "\nsource = " not in b else b for b in blocks]
+    return hashlib.sha256("\n\n".join(kept).encode()).hexdigest()
+
+
+def fingerprint(suite: str, index: dict[str, str], patterns: list[str], dirs: set[str],
+                variant: str = "", root: str | None = None) -> str:
     """Hash of every (path, object id) a suite depends on. `dirs` are file or directory paths."""
     prefixes = tuple(d.rstrip("/") + "/" for d in dirs)
-    lines = sorted(f"{path} {oid}" for path, oid in index.items()
-                   if path in dirs or path.startswith(prefixes) or matches(path, patterns))
-    digest = hashlib.sha256(f"{VERSION}\n{suite}\n".encode())
+    lines = []
+    for path, oid in index.items():
+        if path in dirs or path.startswith(prefixes) or matches(path, patterns):
+            if root is not None:
+                oid = without_versions(path, root) or oid
+            lines.append(f"{path} {oid}")
+    lines.sort()
+    digest = hashlib.sha256(f"{VERSION}\n{suite}\n{variant.strip()}\n".encode())
     digest.update("\n".join(lines).encode())
     return digest.hexdigest()[:40]
 
 
-def suite_keys(suites: list[str], root: str = ".") -> tuple[dict[str, str], dict[str, list[str]],
+def suite_keys(suites: list[str], root: str = ".", variants: dict[str, str] | None = None) -> tuple[dict[str, str], dict[str, list[str]],
                                                              dict[str, tuple[list[str], set[str]]]]:
     """Per suite: cache key prefix, the paths outside its packages it reads, and its inputs."""
     index = tree_index(root)
@@ -237,7 +268,8 @@ def suite_keys(suites: list[str], root: str = ".") -> tuple[dict[str, str], dict
                 patterns = patterns + EVERYTHING
                 refs.discard("*")
             dirs |= refs
-        keys[suite] = f"ci-pass-{VERSION}-{suite}-{fingerprint(suite, index, patterns, dirs)}"
+        variant = (variants or {}).get(suite, "")
+        keys[suite] = f"ci-pass-{VERSION}-{suite}-{fingerprint(suite, index, patterns, dirs, variant, root)}"
         inputs[suite] = (patterns, dirs)
     return keys, extra, inputs
 

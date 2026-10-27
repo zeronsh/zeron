@@ -20,9 +20,18 @@ Pull requests, `main` and the merge queue all go through one workflow,
 
 | | Pull request (fast tier) | `main`, merge queue, manual run (full tier) |
 |---|---|---|
-| Linux core, UI and browser, Cursor, edge, installer | when their files change | when their files change |
-| iOS | app or mobile core changed | app or mobile core changed |
-| Windows, macOS, voice, Android | only when the change looks platform specific | when their files change |
+| Linux core and UI, Cursor, edge, installer | when their files change | when their files change |
+| iOS core (Linux) | app or mobile core changed | app or mobile core changed |
+| iOS simulator | the app, `crates/mobile` or `crates/client` changed | with iOS core |
+| Windows tests, macOS | only when the change looks platform specific | when their files change |
+| Windows packaging (`app`) | `apps/zeron`, `dist/windows`, packaging scripts, `crates/update` | with Windows tests |
+| Linux and macOS browser / preview fixtures | browser, preview or edge code changed | always |
+| Android APK | the Android app or `crates/mobile` changed | when its files change |
+| Voice (audio stack, Windows media runtime) | `crates/audio`, `crates/voice-media`, `dist/voice` changed | the same, and `Cargo.*` |
+| GPUI frame-source | the pinned GPUI revision moved | the same |
+
+The `iOS core` paths come from the Cargo graph: every crate `zeron-mobile`
+depends on.
 
 On the fast tier, a change counts as platform specific when it touches:
 
@@ -32,8 +41,42 @@ On the fast tier, a change counts as platform specific when it touches:
 - changed code (not comments) with a platform conditional or platform API:
   `target_os`, `cfg(unix)`, `cfg(windows)`, `objc`, WebKit, `HWND`, ...
 
-`Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` run everything. Changes to
-CI itself also run everything.
+`Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` changes run everything
+except a version bump: one that only changes `version = "..."` lines (the
+workspace version and the workspace packages' versions in the lockfile) selects
+nothing, and is left out of the reuse fingerprints. Changes to CI itself run
+everything.
+
+### Scheduled runs
+
+- **Nightly** (`ci.yml`, schedule): every suite, job and fixture, nothing
+  reused, slow tests included.
+- **Nightly** (`release-profile-tests.yml`): core and UI in the release profile.
+- **Weekly** (`weekly-tests.yml`): the tests no other workflow runs. That is
+  every `zeron-engine` integration binary, plus the crates whose own tests have
+  no other runner (term, syntax, theme, veil, visual, visual-gpu, zatex,
+  notify).
+
+### Slow tests
+
+Pull requests and `main` use nextest's `ci` profile (`scripts/ci/nextest.toml`).
+It leaves out these slow and soak tests, which the nightly runs keep:
+
+- the doc_host sync tests at 48-chat scale or against the real 30 s quantum;
+- the Codex dying-server backoff test;
+- the preview leak test;
+- two preview discovery tests that assert nothing happens during a sleep.
+
+The Cursor shim stress test runs 14 rounds instead of 100
+(`ZERON_STRESS_ROUNDS`).
+
+Test binaries that run nothing on Linux are not built there:
+
+- Windows-only files;
+- files whose every test is `#[ignore]`d.
+
+Small integration suites share one binary per crate (`tests/misc/`), since
+every `tests/*.rs` file is linked against the whole crate.
 
 To run every suite on a pull request, add the `ci:full` label, then push or
 re-run the CI workflow. To make every pull request run the full tier, set the
@@ -128,7 +171,7 @@ these. A fork's author can't label their own pull request.
   wait for, so the next runners to free up go to them. Running jobs are never
   stopped.
 - **`ci:lock`**: while the pull request is open, admission treats a full run's
-  worth of runners (10 Linux, 3 Windows, 4 macOS) as taken, whether or not
+  worth of runners (10 Linux, 3 Windows, 3 macOS) as taken, whether or not
   the pull request is running anything. Its own runs skip the queue and are
   admitted as soon as their runners are free. The lock ends when:
   - the label is removed;

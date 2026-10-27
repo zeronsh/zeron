@@ -15,9 +15,20 @@ on:
       ui:
         type: boolean
         default: true
+      browser:
+        description: Also run the native browser fixture (pull requests that touch the browser; always otherwise).
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+
+# Pull requests and main leave out the slow and soak tests (scripts/ci/nextest.toml
+# `ci` profile) and run the cursor_shim stress test for 14 rounds; the nightly
+# run (schedule) runs everything in full.
+env:
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
+  ZERON_STRESS_ROUNDS: ${{ github.event_name == 'schedule' && '100' || '14' }}
 
 jobs:
   # Every Linux Rust test that is not UI: one build, one nextest run (see
@@ -42,9 +53,9 @@ jobs:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-core-tests
 
-  # UI and headless layout regressions, then the native browser on X11 and
-  # Wayland. One job: the browser fixture shares the UI build's dependency graph
-  # and cache, so it costs a link rather than a second runner and build.
+  # UI and headless layout regressions, then (when `browser`) the native browser
+  # on X11 and Wayland. One job: the browser fixture shares the UI build's
+  # dependency graph and cache, so it costs a link rather than a second runner.
   ui-tests:
     if: inputs.ui
     runs-on: ubuntu-24.04
@@ -55,26 +66,27 @@ jobs:
         with:
           rust-cache: ui
           save-rust-cache: 'true'
+          # One .deb cache for both package sets (apt-install.sh uses it as its archive).
           apt-cache: ui-browser
-          apt-recommends: 'true'
+          apt-recommends: ${{ inputs.browser && 'true' || 'false' }}
           apt-packages: >-
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev
             libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
-            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xauth xdotool openbox
-            weston ffmpeg imagemagick fonts-noto-cjk
+            libwebkit2gtk-4.1-dev libjson-glib-dev
+            ${{ inputs.browser && 'xvfb xauth xdotool openbox weston ffmpeg imagemagick fonts-noto-cjk' || '' }}
       - name: UI and headless layout regressions
-        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib --test voice_orb_geometry
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
       # The browser steps run even when a UI test failed: they are a separate signal.
       - name: Build browser fixture
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() }}
         run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: Persistent browser profiles across app launches
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() }}
         timeout-minutes: 5
         run: xvfb-run -a python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: X11 and Wayland browser regressions
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() }}
         timeout-minutes: 5
         env:
           RUST_LOG: gpui_wgpu=info
@@ -83,7 +95,7 @@ jobs:
           scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
           VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
       - name: Upload native browser evidence
-        if: always()
+        if: ${{ inputs.browser && always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-browser

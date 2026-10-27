@@ -1,9 +1,10 @@
 name: Native Codex voice
 
-# Called by ci.yml, which decides when voice runs (scripts/ci/plan.py) and holds
-# the runners for it (scripts/ci/admit.py). The protocol, transport, MCP and
-# engine voice tests that need no audio stack run in core-tests
-# (scripts/ci/test-core.sh) with the rest of the Linux Rust suites.
+# Called by ci.yml when the audio stack or the packaged voice runtime changes
+# (scripts/ci/plan.py), and nightly. The rest of voice is tested where it is
+# built: protocol, transport, MCP and voice-media in core-tests
+# (scripts/ci/test-core.sh), the mobile voice and orb core in ios-core
+# (macos.yml), voice-media on Windows in windows.yml.
 on:
   workflow_call:
     inputs:
@@ -15,18 +16,13 @@ on:
         description: JSON list of jobs that already passed on the same inputs (ci.yml skips them).
         type: string
         default: '[]'
-      native-oses:
-        description: JSON list of the native platform checks to run.
-        type: string
-        default: '["macos-14", "windows-latest"]'
 
 permissions:
   contents: read
 
 jobs:
-  # Native audio (WebRTC AEC3), the mobile voice/orb core and the Python
-  # fixtures, in one build. Used to be 14 `cargo test` builds capped at two
-  # compiler jobs (~40 minutes).
+  # The WebRTC AEC3 audio stack (zeron-audio; its meson build is most of the
+  # job) and the Python fixtures.
   offline-linux:
     if: ${{ !contains(fromJSON(inputs.skip), 'offline-linux') }}
     runs-on: ubuntu-24.04
@@ -43,15 +39,9 @@ jobs:
           save-rust-cache: 'true'
           apt-cache: voice
           apt-packages: >-
-            libasound2-dev clang libclang-dev pkg-config meson ninja-build libwayland-dev
-            libxkbcommon-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev
-            libxrandr-dev libxi-dev libxcursor-dev libx11-dev libxinerama-dev libegl1-mesa-dev
-            libvulkan-dev libfontconfig1-dev libfreetype6-dev libssl-dev libdbus-1-dev
-      - name: Native audio and WebRTC AEC3, mobile voice and orb
-        run: >-
-          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast
-          -p zeron-audio -p zeron-mobile --features zeron-audio/aec --lib
-          -E 'package(zeron-audio) | (package(zeron-mobile) & (test(voice) | test(orb)))'
+            libasound2-dev clang libclang-dev pkg-config meson ninja-build
+      - name: Native audio and WebRTC AEC3
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-audio --features aec --lib
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -59,24 +49,18 @@ jobs:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-offline-linux
 
-  native-platform-check:
-    if: inputs.native-oses != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.native-oses) }}
-    runs-on: ${{ matrix.os }}
+  # The packaged Windows media runtime: download, project and initialize it
+  # without audio devices or a provider.
+  windows-runtime:
+    if: ${{ !contains(fromJSON(inputs.skip), 'windows-runtime') }}
+    runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
-      - name: Split-host diagnostic fixtures (no Codex, microphone or provider)
-        if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s scripts/tests -p 'test_voice_remote*.py' -v
       - name: Development runtime projection fixtures (no downloads or audio devices)
-        if: runner.os == 'Windows'
         run: python -m unittest discover -s scripts/tests -p 'test_voice_packaging.py' -v
       - name: Rust toolchain
         shell: bash
@@ -86,12 +70,7 @@ jobs:
           # Only main writes the cache: pull request caches evicted main's.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - name: Compile subscription bridge without audio hardware or provider access
-        run: cargo check --locked -p zeron-harness -p zeron-engine
-      - name: Installed and development runtime resolution
-        run: cargo test --locked -p zeron-voice-media --lib
       - name: Initialize a projected Windows runtime (no provider or audio devices)
-        if: runner.os == 'Windows'
         run: |
           $env:ZERON_VOICE_MEDIA_DIR = Join-Path $env:RUNNER_TEMP 'zeron-media/codex-resources/voice'
           python scripts/package-voice-runtime.py --download --destination $env:ZERON_VOICE_MEDIA_DIR
@@ -102,4 +81,4 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: rust-toolchain.toml
-          key: ${{ inputs.pass-key }}-native-platform-check-${{ matrix.os }}
+          key: ${{ inputs.pass-key }}-windows-runtime

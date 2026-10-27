@@ -29,7 +29,7 @@ class PlanTests(unittest.TestCase):
 
     def test_ui_change_on_main_runs_every_platform_it_touches(self):
         suites = plan.plan(files("crates/ui/src/shell.rs", patch="+let width = 3;"), "full")
-        self.assertEqual(selected(suites), {"core", "ui", "voice", "windows", "macos", "android"})
+        self.assertEqual(selected(suites), {"core", "ui", "windows", "macos", "android"})
 
     def test_platform_code_selects_its_platform(self):
         windows = plan.plan(files("crates/ui/src/shell.rs", patch='+#[cfg(windows)]\n+fn f() {}'), "fast")
@@ -70,13 +70,15 @@ class PlanTests(unittest.TestCase):
 
     def test_lockfile_runs_every_rust_suite(self):
         suites = plan.plan(files("Cargo.lock"), "fast")
-        self.assertEqual(selected(suites), {"core", "ui", "cursor", "voice", "windows", "macos",
-                                            "frame_source", "ios", "android"})
+        self.assertEqual(selected(suites), {"core", "ui", "cursor", "windows", "macos", "ios", "android"})
 
     def test_mobile_core_selects_ios_and_android(self):
         suites = plan.plan(files("crates/sync/src/lib.rs", patch="+let x = 1;"), "fast")
-        self.assertTrue(suites["ios"] and suites["android"])
+        self.assertTrue(suites["ios"])
+        self.assertFalse(suites["android"])  # the same Rust as the Linux suites test
         self.assertFalse(suites["windows"])
+        self.assertTrue(plan.plan(files("crates/mobile/src/lib.rs", patch="+let x = 1;"), "fast")["android"])
+        self.assertTrue(plan.plan(files("crates/sync/src/lib.rs", patch="+x"), "full")["android"])
 
     def test_renamed_from_counts(self):
         f = [{"filename": "docs/x.md", "previous_filename": "apps/ios/Zeron/X.swift", "patch": ""}]
@@ -91,14 +93,50 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
         self.assertTrue(plan.plan(files("edge/package-lock.json"), "fast")["macos"])
 
+    def test_version_bumps_select_nothing(self):
+        bump = [{"filename": "Cargo.toml", "patch": '@@ -37 +37 @@\n-version = "0.2.126"\n+version = "0.2.127"'},
+                {"filename": "Cargo.lock", "patch": ' name = "zeron-ui"\n-version = "0.2.126"\n+version = "0.2.127"'}]
+        self.assertEqual(selected(plan.plan(bump, "full")), set())
+        dep = [{"filename": "Cargo.lock",
+                "patch": '-version = "1.0.1"\n+version = "1.0.2"\n-checksum = "aa"\n+checksum = "bb"'}]
+        self.assertTrue(plan.plan(dep, "fast")["core"])
+
+    def test_frame_source_runs_when_the_gpui_pin_moves(self):
+        moved = [{"filename": "Cargo.toml",
+                  "patch": '-gpui = { git = "https://github.com/zeronsh/zui", rev = "a" }\n'
+                           '+gpui = { git = "https://github.com/zeronsh/zui", rev = "b" }'}]
+        self.assertTrue(plan.plan(moved, "fast")["frame_source"])
+        other = [{"filename": "Cargo.toml", "patch": '+serde = "1"'}]
+        self.assertFalse(plan.plan(other, "full")["frame_source"])
+        self.assertTrue(plan.plan(files(".github/workflows/macos.yml"), "fast")["frame_source"])
+
+    def test_jobs_and_steps_for_their_own_files(self):
+        change = files("crates/ui/src/shell.rs", patch='+#[cfg(windows)]\n+fn f() {}')
+        suites = plan.plan(change, "fast")
+        off, flags = plan.gated(change, "fast", suites)
+        self.assertEqual(off, {"windows": ["app"]})
+        self.assertEqual(flags, {})
+        browser = files("crates/ui/src/browser/view.rs", patch='+let a = 1;')
+        off, flags = plan.gated(browser, "fast", plan.plan(browser, "fast"))
+        self.assertEqual(flags, {"ui": ["browser"]})
+        app = files("crates/mobile/src/lib.rs", "apps/zeron/src/main.rs", patch="+x")
+        off, flags = plan.gated(app, "fast", plan.plan(app, "fast"))
+        self.assertNotIn("windows", off)
+        self.assertNotIn("ios", off)
+        sync = files("crates/sync/src/lib.rs", patch="+x")
+        self.assertEqual(plan.gated(sync, "fast", plan.plan(sync, "fast"))[0], {"ios": ["ios-tests"]})
+        full_off, full_flags = plan.gated(change, "full", plan.plan(change, "full"))
+        self.assertEqual(full_off, {})
+        self.assertEqual(full_flags, {"ui": ["browser"], "macos": ["fixtures"]})
+
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full")
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + cursor + voice + ios-core + apk; voice + windows x2; voice + native + frame + ios
-        self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 4})
+        # result + core + ui + cursor + voice + ios-core + apk; voice runtime + windows x2; native + ios-tests
+        self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 2})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 8)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=4")
+        self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=2")
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
@@ -114,7 +152,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
         "cursor": ("cursor-compatibility.yml", ["cursor-compatibility"]),
         "edge": ("preview-tests.yml", ["edge"]),
         "installer": ("linux-installer.yml", ["desktop-entry"]),
-        "voice": ("voice-tests.yml", ["offline-linux", "native-platform-check"]),
+        "voice": ("voice-tests.yml", ["offline-linux", "windows-runtime"]),
         "windows": ("windows.yml", ["tests", "app"]),
         "macos": ("macos.yml", ["macos-native"]),
         "frame_source": ("macos.yml", ["macos-frame-source"]),

@@ -18,11 +18,21 @@ on:
       ios:
         type: boolean
         default: true
+      fixtures:
+        description: Also run the WebKit browser and preview fixtures (pull requests that touch them; always otherwise).
+        type: boolean
+        default: true
+      skip:
+        description: JSON list of jobs not to run (ci.yml; `ios-tests` when a pull request leaves the app alone).
+        type: string
+        default: '[]'
 
 permissions:
   contents: read
 
 env:
+  # Pull requests and main leave out slow and soak tests (scripts/ci/nextest.toml `ci` profile).
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'default' || 'ci' }}
   # Tests run on the dev profile (workspace crates at opt-level 0, dependencies at 2 as configured in
   # Cargo.toml) instead of --release: a cold build is several times cheaper. No debug info is needed.
   CARGO_PROFILE_DEV_DEBUG: 0
@@ -63,28 +73,30 @@ jobs:
           mkdir -p "$bin"
           tar -xzf "$RUNNER_TEMP/nextest.tar.gz" -C "$bin" cargo-nextest
           echo "$bin" >> "$GITHUB_PATH"
-      - name: Build tests and fixtures
+      # The app (`-p zeron --bins`) is compiled with the tests, sharing their zeron-ui
+      # build: a separate `cargo build -p zeron` rebuilt zeron-ui without the fixture
+      # feature (and a `cargo check` before that recompiled every dependency).
+      - name: Build tests and the application
         run: |
           cargo nextest run --no-run --locked \
-            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests
+            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
+            --features zeron-ui/browser-fixture --lib --bins --tests
+      - name: Build fixtures
+        if: inputs.fixtures
+        run: |
           cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
             --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
-      # Builds the app with the dependencies compiled above. It used to be a `cargo check`
-      # with debug assertions off, which shares nothing with the build (check-only metadata,
-      # another profile) and recompiled every dependency: ~7 minutes.
-      - name: Build macOS application
-        run: cargo build --locked -p zeron --bin zeron
       - name: Updater, preview, CoreText and native UI regressions
         run: |
           # zeron-text's coretext tests are macOS-only (#![cfg(target_os = "macos")]); its other
           # tests run on Linux in ios-core. The attachment filters cover file staging, chips and
           # external Finder drops, whose paths and file metadata are platform-specific.
-          cargo nextest run --no-fail-fast --locked \
-            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text \
-            --features zeron-ui/browser-fixture --lib --tests \
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-fail-fast --locked \
+            -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
+            --features zeron-ui/browser-fixture --lib --bins --tests \
             -E 'package(zeron-update) | package(zeron-preview) | binary_id(zeron-text::coretext) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/) | test(/^attachments::tests::/) | test(/composer::attachment_chip_tests::/) | test(/shell::chat_dropzone_tests::/) | test(=queue::tests::queue_rows_label_attachment_chips_and_file_only_sends) | test(=transcript::tests::user_bubbles_project_attachment_chips_in_place_of_the_strip) | test(=transcript::tests::sent_chips_show_upload_progress_until_their_bytes_land)))'
       - name: Native browser regression and screenshots
+        if: inputs.fixtures
         timeout-minutes: 7
         env:
           RUST_BACKTRACE: 1
@@ -93,21 +105,25 @@ jobs:
           scripts/ci/run-macos-fixture.sh target/debug/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
           test -f "$RUNNER_TEMP/browser-captures/result.txt"
       - name: Persistent browser profiles across app launches
+        if: inputs.fixtures
         timeout-minutes: 5
         run: python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: Upload browser screenshots
-        if: always()
+        if: ${{ inputs.fixtures && always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: browser-macos-captures
           path: ${{ runner.temp }}/browser-captures*
           if-no-files-found: ignore
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: inputs.fixtures
         with:
           node-version: 24
       - name: Install preview fixture server
+        if: inputs.fixtures
         run: npm ci --prefix edge
       - name: Project discovery, stable URLs and HMR in native WebKit
+        if: inputs.fixtures
         timeout-minutes: 5
         env:
           ZERON_PREVIEW_AUTO_OPEN: 1
@@ -115,7 +131,7 @@ jobs:
           VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" scripts/ci/run-macos-fixture.sh target/debug/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
-        if: always()
+        if: ${{ inputs.fixtures && always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preview-macos-captures
@@ -179,7 +195,10 @@ jobs:
           cache-on-failure: true
       - name: Rust mobile core tests
         run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
+      # Only for the simulator tests, which link these bindings (they run when the app,
+      # the FFI crate or the client changes, see scripts/ci/plan.py).
       - name: Generated Swift bindings are current
+        if: ${{ !contains(fromJSON(inputs.skip), 'ios-tests') }}
         run: |
           cargo build --locked -p zeron-mobile --lib
           cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen
@@ -191,6 +210,7 @@ jobs:
           cp "$RUNNER_TEMP/gen/zeron_coreFFI.h" "$RUNNER_TEMP/ios-include/zeron_coreFFI.h"
           cp "$RUNNER_TEMP/gen/zeron_coreFFI.modulemap" "$RUNNER_TEMP/ios-include/module.modulemap"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !contains(fromJSON(inputs.skip), 'ios-tests') }}
         with:
           name: ios-ffi-include
           path: ${{ runner.temp }}/ios-include
@@ -207,7 +227,7 @@ jobs:
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
   ios-tests:
     needs: ios-core
-    if: inputs.ios
+    if: ${{ inputs.ios && !contains(fromJSON(inputs.skip), 'ios-tests') }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

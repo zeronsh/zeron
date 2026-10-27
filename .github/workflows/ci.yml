@@ -8,9 +8,11 @@ name: CI
 #           (scripts/ci/reuse.py; every job records its pass as its last
 #           step). Pull requests get the fast tier: Windows,
 #           macOS, voice and Android only when the change looks platform
-#           specific; the `ci:full` label (then re-run) or the CI_PR_TIER=full
-#           repository variable runs everything. Main, the merge queue and
-#           manual runs get the full tier.
+#           specific, and the Windows packaging, iOS simulator and browser
+#           fixtures only for their own files; the `ci:full` label (then
+#           re-run) or the CI_PR_TIER=full repository variable runs everything.
+#           Main, the merge queue and manual runs get the full tier; the
+#           nightly schedule runs everything, slow tests included.
 #   admit   waits until every runner the run needs is free, so that once a
 #           run starts, none of its jobs queues behind another run's
 #           (scripts/ci/admit.py). Its name carries the reservation; other runs
@@ -38,6 +40,9 @@ on:
     branches: [main]
   merge_group:
   workflow_dispatch:
+  # Nightly: every suite and job in full (slow tests and fixtures included), nothing reused.
+  schedule:
+    - cron: '23 6 * * *'
 
 permissions:
   contents: read
@@ -62,7 +67,7 @@ jobs:
       tier: ${{ steps.plan.outputs.tier }}
       keys: ${{ steps.plan.outputs.keys }}
       skip: ${{ steps.plan.outputs.skip }}
-      native_oses: ${{ steps.plan.outputs.native_oses }}
+      flags: ${{ steps.plan.outputs.flags }}
       pr: ${{ steps.plan.outputs.pr }}
     steps:
       # The Rust sources too: the fingerprints scan them for files they read from
@@ -126,6 +131,7 @@ jobs:
     with:
       core: false
       ui: true
+      browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
 
   cursor:
@@ -157,7 +163,6 @@ jobs:
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).voice || '' }}
       skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).voice || fromJSON('[]')) }}
-      native-oses: ${{ needs.plan.outputs.native_oses }}
 
   windows:
     needs: [plan, admit]
@@ -175,6 +180,7 @@ jobs:
       native: true
       frame-source: false
       ios: false
+      fixtures: ${{ contains(fromJSON(needs.plan.outputs.flags).macos || fromJSON('[]'), 'fixtures') }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).macos || '' }}
 
   frame-source:
@@ -195,6 +201,7 @@ jobs:
       native: false
       frame-source: false
       ios: true
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).ios || fromJSON('[]')) }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ios || '' }}
 
   android:

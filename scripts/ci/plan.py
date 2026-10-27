@@ -15,7 +15,8 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
   skip         JSON object, suite -> jobs that already passed on the same
                inputs and are skipped (Windows and voice skip single jobs; the
                other suites only run or skip as a whole)
-  native_oses  JSON list, the voice platform checks to run
+  flags        JSON object, suite -> optional steps to run (fast tier: only
+               for their own files): ui "browser", macos "fixtures"
   pr           the pull request number (pull requests only), for the admit job name
 
 Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
@@ -53,8 +54,7 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
-    "voice": [("offline-linux", "linux"), ("native-platform-check-macos-14", "macos"),
-              ("native-platform-check-windows-latest", "windows")],  # voice-tests.yml
+    "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "macos": [("macos-native", "macos")],  # macos.yml
     "frame_source": [("macos-frame-source", "macos")],  # macos.yml
@@ -63,7 +63,6 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
 }
 # Suites whose jobs are independent, so one can be skipped while another runs.
 SPLITTABLE = ("voice", "windows")
-VOICE_NATIVE = "native-platform-check-"
 
 CARGO = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 CI_SELF = [
@@ -73,11 +72,22 @@ CI_SELF = [
     "scripts/ci/reuse.py",
 ]
 
-# The app links the Rust mobile core and everything it depends on (iOS and Android).
+# The apps link the Rust mobile core and everything it depends on (iOS and Android).
+# main() replaces this with zeron-mobile's dependency closure from the Cargo.toml
+# files; this list is the fallback when they cannot be read.
 MOBILE_CORE = [
     "crates/mobile/**", "crates/client/**", "crates/text/**", "crates/markdown/**",
     "crates/doc/**", "crates/sync/**", "crates/proto/**", "crates/rpc/**", "crates/syntax/**",
+    "crates/orb/**", "crates/voice-session/**", "crates/visual/**", "crates/visual-gpu/**",
+    "crates/term/**", "crates/term-link/**", "crates/veil/**", "crates/zatex/**", "crates/preview/**",
 ]
+
+# Voice: the WebRTC audio stack (zeron-audio, which nothing else builds yet) and
+# the packaged Windows media runtime. The rest of voice is tested where it is
+# built: protocol and transport in core-tests, mobile voice in ios-core,
+# voice-media in core-tests and the Windows tests.
+VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scripts/package-voice-runtime.py",
+               "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
 
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
@@ -91,22 +101,15 @@ BROAD: dict[str, list[str]] = {
     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",
                   ".github/workflows/linux-installer.yml"],
-    "voice": CARGO + ["crates/audio/**", "crates/voice/**", "crates/voice-media/**", "crates/voice-session/**",
-                      "crates/orb/**", "crates/proto/src/voice/**", "crates/proto/src/voice.rs", "crates/rpc/**",
-                      "crates/client/**", "crates/mobile/**", "crates/harness/**", "crates/engine/**",
-                      "crates/ui/**", "crates/mcp/**", "apps/ios/Zeron/Voice/**",
-                      "apps/ios/ZeronTests/RemoteVoiceLifecycleTests.swift", "dist/voice/**",
-                      "scripts/package-voice-runtime.py", "scripts/codex-voice-remote-smoke.py",
-                      "scripts/tests/*voice_remote*", "scripts/tests/test_voice_packaging.py",
-                      ".github/workflows/voice-tests.yml"],
+    "voice": CARGO + VOICE_PATHS,
     "windows": CARGO + ["crates/**", "apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml"],
     "macos": CARGO + ["crates/**", "apps/zeron/**", "edge/**", "scripts/run-macos-browser-fixture.sh",
                       "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
                       "dist/macos/Info.plist", ".github/workflows/macos.yml"],
-    # Tests the pinned GPUI checkout, which only changes with the gpui rev.
-    "frame_source": ["Cargo.toml", "Cargo.lock", ".github/workflows/macos.yml"],
+    # Tests the pinned GPUI checkout: only when the pin moves (see gpui_moved()).
+    "frame_source": [".github/workflows/macos.yml"],
     "ios": CARGO + MOBILE_CORE + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"],
     "android": CARGO + ["apps/android/**", "crates/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
                         "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
@@ -114,11 +117,7 @@ BROAD: dict[str, list[str]] = {
 
 # Fast tier: the files that always select the platform suite...
 FAST_PATHS: dict[str, list[str]] = {
-    "voice": CARGO + ["crates/audio/**", "crates/voice/**", "crates/voice-media/**", "crates/voice-session/**",
-                      "crates/orb/**", "crates/proto/src/voice/**", "crates/proto/src/voice.rs",
-                      "apps/ios/Zeron/Voice/**", "dist/voice/**", "scripts/package-voice-runtime.py",
-                      "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*",
-                      ".github/workflows/voice-tests.yml"],
+    "voice": VOICE_PATHS,
     "windows": CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml", "crates/update/**"],
@@ -126,9 +125,44 @@ FAST_PATHS: dict[str, list[str]] = {
                       "edge/package.json", "edge/package-lock.json", "scripts/run-macos-browser-fixture.sh",
                       "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
                       "dist/macos/Info.plist", ".github/workflows/macos.yml"],
-    "android": CARGO + MOBILE_CORE + ["apps/android/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
-                                      "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
+    # The Rust is the same code the Linux suites test (no Android cfg), so a pull
+    # request builds the APK for the app, the FFI crate and dependency changes.
+    "android": CARGO + ["apps/android/**", "scripts/android/**", "crates/mobile/**", "crates/mobile-bindgen/**",
+                        "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**",
+                        ".github/workflows/android.yml"],
 }
+
+# Fast tier: jobs and steps of a selected suite that only run for their own files.
+# On the full tier everything runs.
+JOB_PATHS: dict[tuple[str, str], list[str]] = {
+    # Release build, packaging, installer and startup probes (`tests` already
+    # compiles the app).
+    ("windows", "app"): CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
+                                 "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
+                                 ".github/workflows/windows.yml", "crates/update/**"],
+    # The simulator unit tests (and the bindings they link): the app, the FFI
+    # crate and the client it wraps; ios-core tests the rest of the mobile core.
+    ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/client/**",
+                                   ".github/workflows/macos.yml"],
+}
+# Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
+FLAG_PATHS: dict[tuple[str, str], list[str]] = {
+    # Native browser fixture on X11/Wayland/OpenGL.
+    ("ui", "browser"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
+                                "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
+                                ".github/workflows/ui-tests.yml"],
+    # WebKit browser fixture and the preview (HMR) fixture.
+    ("macos", "fixtures"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
+                                    "crates/ui/examples/preview-fixture*", "crates/preview/**", "edge/**",
+                                    "scripts/run-macos-browser-fixture.sh", "scripts/test-browser-storage.py",
+                                    "scripts/ci/run-macos-fixture.sh", ".github/workflows/macos.yml"],
+}
+
+# A version bump (workspace version in Cargo.toml and the workspace packages'
+# versions in Cargo.lock) changes no code: it selects nothing and is left out of
+# the fingerprints (reuse.py).
+VERSION_LINE = re.compile(r'^\s*version\s*=\s*"[^"]*"\s*$')
+
 
 # ...and, for files under crates/, platform markers in the file name or in the
 # changed code (comments are ignored: "as on Windows" changes nothing). A
@@ -182,15 +216,40 @@ def platform_specific(platform: str, files: list[dict]) -> bool:
     return False
 
 
-def plan(files: list[dict] | None, tier: str) -> dict[str, bool]:
+def version_only(f: dict) -> bool:
+    """A Cargo.toml / Cargo.lock change that only changes `version = "..."` lines."""
+    if f["filename"] not in ("Cargo.toml", "Cargo.lock") or f.get("patch") is None:
+        return False
+    changed = [line[1:] for line in f["patch"].splitlines()
+               if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+    return bool(changed) and all(VERSION_LINE.match(line) for line in changed)
+
+
+def gpui_moved(files: list[dict]) -> bool:
+    """Whether the pinned GPUI (zeronsh/zui) checkout changed."""
+    for f in files:
+        if f["filename"] not in ("Cargo.toml", "Cargo.lock"):
+            continue
+        patch = f.get("patch")
+        if patch is None or re.search(r"^[+-].*(gpui|zui)", patch, re.MULTILINE):
+            return True
+    return False
+
+
+def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None) -> dict[str, bool]:
     """files: [{"filename", "previous_filename"?, "patch"?}], or None for "everything"."""
     if files is None:
         return {suite: True for suite in SUITE_JOBS}
+    files = [f for f in files if not version_only(f)]
     paths = {f["filename"] for f in files} | {f["previous_filename"] for f in files if f.get("previous_filename")}
     if any(p in CI_SELF for p in paths):
         return {suite: True for suite in SUITE_JOBS}
 
-    suites = {suite: any(matches(p, BROAD[suite]) for p in paths) for suite in SUITE_JOBS}
+    broad = dict(BROAD)
+    if mobile is not None:
+        broad["ios"] = CARGO + mobile + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"]
+    suites = {suite: any(matches(p, broad[suite]) for p in paths) for suite in SUITE_JOBS}
+    suites["frame_source"] = suites["frame_source"] or gpui_moved(files)
     if tier == "fast":
         for suite in PLATFORM_FAST_SUITES:
             if not suites[suite]:
@@ -200,6 +259,22 @@ def plan(files: list[dict] | None, tier: str) -> dict[str, bool]:
                 fast = platform_specific(suite, files)
             suites[suite] = fast
     return suites
+
+
+def gated(files: list[dict] | None, tier: str, suites: dict[str, bool]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Fast tier: (jobs not needed, flags on) per selected suite. The full tier runs everything."""
+    paths = None if files is None else ({f["filename"] for f in files}
+                                        | {f["previous_filename"] for f in files if f.get("previous_filename")})
+    everything = tier != "fast" or paths is None or any(p in CI_SELF for p in paths)
+    off: dict[str, list[str]] = {}
+    flags: dict[str, list[str]] = {}
+    for (suite, job), patterns in JOB_PATHS.items():
+        if suites.get(suite) and not everything and not any(matches(p, patterns) for p in paths):
+            off.setdefault(suite, []).append(job)
+    for (suite, flag), patterns in FLAG_PATHS.items():
+        if suites.get(suite) and (everything or any(matches(p, patterns) for p in paths)):
+            flags.setdefault(suite, []).append(flag)
+    return off, flags
 
 
 def jobs_to_run(suites: dict[str, bool], skip: dict[str, list[str]] | None = None) -> dict[str, list[tuple[str, str]]]:
@@ -218,13 +293,15 @@ def reservation(running: dict[str, list[tuple[str, str]]], event: str, ref: str)
     return counts
 
 
-def reused_jobs(suites: dict[str, bool], passed: dict[str, set[str]]) -> dict[str, list[str]]:
-    """Jobs to skip: all of a suite's when they all passed, or single ones of SPLITTABLE suites."""
+def reused_jobs(suites: dict[str, bool], passed: dict[str, set[str]],
+                off: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+    """Jobs to skip: all of a suite's (needed ones) when they all passed, or single ones of SPLITTABLE suites."""
+    off = off or {}
     skip: dict[str, list[str]] = {}
     for suite, enabled in suites.items():
         if not enabled:
             continue
-        jobs = [job for job, _ in SUITE_JOBS[suite]]
+        jobs = [job for job, _ in SUITE_JOBS[suite] if job not in off.get(suite, ())]
         done = [job for job in jobs if job in passed.get(suite, set())]
         if len(done) == len(jobs) or (done and suite in SPLITTABLE):
             skip[suite] = done
@@ -311,12 +388,21 @@ def main() -> int:
         print(f"::warning::could not list changed files ({error}); running every suite")
         files = None
 
-    selected = plan(files, tier)
+    mobile = None
+    try:
+        mobile = [d + "/**" for d in sorted(reuse.Workspace(".").closure(["zeron-mobile"]))] + ["crates/mobile-bindgen/**"]
+    except (OSError, ValueError, KeyError) as error:
+        print(f"::warning::could not read the workspace ({error}); using the static mobile core list")
+    selected = plan(files, tier, mobile)
+    off, flags = gated(files, tier, selected)
+    # What a job does depends on its gated jobs and flags too: they are part of the fingerprint.
+    variants = {suite: " ".join(f"-{j}" for j in off.get(suite, [])) + " " + " ".join(flags.get(suite, []))
+                for suite, on in selected.items() if on}
     keys: dict[str, str] = {}
     extra: dict[str, list[str]] = {}
     passed: dict[str, set[str]] = {}
     try:
-        keys, extra, inputs = reuse.suite_keys([suite for suite, on in selected.items() if on])
+        keys, extra, inputs = reuse.suite_keys([suite for suite, on in selected.items() if on], variants=variants)
         uncovered = sorted(f["filename"] for f in files or []
                            if matches(f["filename"], reuse.BUILD_PATHS) and not reuse.covered(f["filename"], inputs))
         if trusted and uncovered:
@@ -331,10 +417,11 @@ def main() -> int:
                 passed[suite] = reuse.passed_jobs(api, repo, key, trusted)
             except (OSError, KeyError, ValueError) as error:
                 print(f"::warning::could not look up earlier passes of {suite} ({error})")
-    skip = reused_jobs(selected, passed)
+    reused = reused_jobs(selected, passed, off)
+    skip = {suite: sorted(set(off.get(suite, [])) | set(reused.get(suite, [])))
+            for suite in set(off) | set(reused)}
     running = jobs_to_run(selected, skip)
     suites = {suite: bool(running.get(suite)) for suite in selected}
-    native_oses = [job[len(VOICE_NATIVE):] for job, _ in running.get("voice", []) if job.startswith(VOICE_NATIVE)]
     counts = reservation(running, event, ref)
     out = {
         "suites": json.dumps(suites, separators=(",", ":")),
@@ -342,7 +429,7 @@ def main() -> int:
         "tier": tier,
         "keys": json.dumps(keys, separators=(",", ":")),
         "skip": json.dumps(skip, separators=(",", ":")),
-        "native_oses": json.dumps(native_oses, separators=(",", ":")),
+        "flags": json.dumps(flags, separators=(",", ":")),
         # The admit job names its pull request, for ci:priority and ci:lock (scripts/ci/admit.py).
         "pr": str(payload["pull_request"]["number"]) if event == "pull_request" else "",
     }
@@ -358,14 +445,15 @@ def main() -> int:
         if not on:
             lines.append(f"| {suite} | – | not affected |")
             continue
-        done = skip.get(suite, [])
-        if not running.get(suite):
-            note = "reused: passed before on the same inputs"
-        elif done:
-            note = f"reused {', '.join(done)}"
-        else:
-            note = ""
-        lines.append(f"| {suite} | {'yes' if running.get(suite) else 'reused'} | {note} |")
+        notes = []
+        if reused.get(suite):
+            notes.append(f"reused (passed on the same inputs): {', '.join(reused[suite])}")
+        if off.get(suite):
+            notes.append(f"not needed for this change: {', '.join(off[suite])}")
+        if flags.get(suite):
+            notes.append(f"with {', '.join(flags[suite])}")
+        state = "yes" if running.get(suite) else "reused" if reused.get(suite) else "–"
+        lines.append(f"| {suite} | {state} | {'; '.join(notes)} |")
     lines += ["", f"Reserved runners: `{out['reservation']}`"]
     if tier == "fast":
         lines += ["", "Windows, macOS, voice and Android run on pull requests only when the change looks "

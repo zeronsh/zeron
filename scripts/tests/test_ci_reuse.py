@@ -28,8 +28,12 @@ class FakeRepo:
         self.dir = tempfile.TemporaryDirectory()
         self.root = self.dir.name
         write(self.root, "Cargo.toml", '[workspace]\nmembers = ["crates/a", "crates/b", "crates/c", "apps/app"]\n'
-                                       '[workspace.dependencies]\nzb = { path = "crates/b" }\n')
-        write(self.root, "Cargo.lock", "# lock\n")
+                                       '[workspace.package]\nversion = "1.0.0"\n'
+                                       '[workspace.dependencies]\nzb = { path = "crates/b" }\n'
+                                       'serde = { version = "1" }\n')
+        write(self.root, "Cargo.lock", '[[package]]\nname = "za"\nversion = "1.0.0"\n\n'
+                                       '[[package]]\nname = "serde"\nversion = "1.0.1"\n'
+                                       'source = "registry+https://github.com/rust-lang/crates.io-index"\n')
         write(self.root, "rust-toolchain.toml", "[toolchain]\n")
         write(self.root, "crates/a/Cargo.toml", '[package]\nname = "za"\n[dependencies]\nzb.workspace = true\n')
         write(self.root, "crates/a/src/lib.rs", 'const ICONS: &str = include_str!("../../c/assets/icons.json");\n')
@@ -110,6 +114,28 @@ class FingerprintTests(unittest.TestCase):
 
     def test_the_lockfile_and_toolchain_rerun_everything(self):
         self.assertEqual(self.changed_after("Cargo.lock", "# lock 2\n"), {"a", "b", "app"})
+        self.assertEqual(self.changed_after("rust-toolchain.toml", "[toolchain]\nchannel = \"1.99\"\n"),
+                         {"a", "b", "app"})
+
+    def test_a_version_bump_changes_no_fingerprint(self):
+        cargo = pathlib.Path(self.repo.root, "Cargo.toml").read_text().replace('version = "1.0.0"', 'version = "1.0.1"')
+        before, _ = self.repo.keys(self.suites)
+        write(self.repo.root, "Cargo.toml", cargo)
+        lock = pathlib.Path(self.repo.root, "Cargo.lock").read_text()
+        write(self.repo.root, "Cargo.lock", lock.replace('name = "za"\nversion = "1.0.0"', 'name = "za"\nversion = "1.0.1"'))
+        self.repo.commit()
+        self.assertEqual(self.repo.keys(self.suites)[0], before)
+        # A dependency's version is a real change.
+        write(self.repo.root, "Cargo.lock", lock.replace('version = "1.0.1"\nsource', 'version = "1.0.2"\nsource'))
+        self.repo.commit()
+        self.assertNotEqual(self.repo.keys(self.suites)[0], before)
+
+    def test_variants_are_part_of_the_key(self):
+        with_browser = reuse.suite_keys(["core"], str(ROOT), variants={"core": "browser"})[0] \
+            if (ROOT / "crates" / "ui" / "src").is_dir() else None
+        if with_browser:
+            plain = reuse.suite_keys(["core"], str(ROOT))[0]
+            self.assertNotEqual(with_browser["core"], plain["core"])
 
     def test_unrelated_files_change_nothing(self):
         self.assertEqual(self.changed_after("docs/notes.md", "hi\n"), set())
@@ -181,11 +207,11 @@ class ReusePlanTests(unittest.TestCase):
 
     def test_single_jobs_of_splittable_suites(self):
         suites = {s: s in ("windows", "voice") for s in plan.SUITE_JOBS}
-        passed = {"windows": {"tests"}, "voice": {"offline-linux", "native-platform-check-macos-14"}}
+        passed = {"windows": {"tests"}, "voice": {"offline-linux"}}
         skip = plan.reused_jobs(suites, passed)
         running = plan.jobs_to_run(suites, skip)
         self.assertEqual(running["windows"], [("app", "windows")])
-        self.assertEqual(running["voice"], [("native-platform-check-windows-latest", "windows")])
+        self.assertEqual(running["voice"], [("windows-runtime", "windows")])
         counts = plan.reservation(running, "pull_request", "refs/pull/1/merge")
         self.assertEqual(counts, {"linux": 1, "windows": 2, "macos": 0})
 

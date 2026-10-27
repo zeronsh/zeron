@@ -144,11 +144,11 @@ class PriorityAndLockTests(unittest.TestCase):
 
     def test_a_lock_holds_a_full_run_while_idle(self):
         full = need_of(admit.MAX_RESERVATION)
-        snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=5)], locked={90})
+        snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=6)], locked={90})
         d = decide(5, need(linux=3, macos=2), snap, self.BIG)
-        self.assertEqual(d.used["macos"], 5 + full["macos"])
-        self.assertFalse(d.admit)  # 5 + 4 locked + 2 > 10
-        snap.holding = [held_(macos=4)]
+        self.assertEqual(d.used["macos"], 6 + full["macos"])
+        self.assertFalse(d.admit)  # 6 + 3 locked + 2 > 10
+        snap.holding = [held_(macos=5)]
         self.assertTrue(decide(5, need(linux=3, macos=2), snap, self.BIG).admit)
 
     def test_the_locked_pull_request_goes_ahead_of_everyone_into_its_reservation(self):

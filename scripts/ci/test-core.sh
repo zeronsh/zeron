@@ -22,14 +22,23 @@
 # nextest does not run doctests; these crates have none (their doc comments
 # contain no Rust code blocks).
 # Extra arguments are passed to nextest (the nightly job adds `--release`).
+# NEXTEST_PROFILE=ci (pull requests and main) leaves out the slow and soak tests
+# that scripts/ci/nextest.toml lists; the nightly runs use the default profile.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# Test binaries that run nothing on Linux are left out: they would still be
+# compiled and linked. Windows-only files (#![cfg(windows)]), and files whose
+# every test is #[ignore]d because it needs a live service or a real CLI.
+skip=" codex_availability windows_native managed_install muse_account_live pi_live real_acp_lifecycle real_quiet_survey coordinator "
 tests=()
-for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.rs; do
-  tests+=(--test "$(basename "$f" .rs)")
+for f in crates/harness/tests/*.rs crates/preview/tests/*.rs; do
+  name="$(basename "$f" .rs)"
+  [[ "$skip" == *" $name "* ]] || tests+=(--test "$name")
 done
-for t in session_publication restart_resume side_chats codex_subagents claude_subagents local_profiles message_queue pi_resume attachments_roundtrip osc7501 voice_runtime device_routing device_room; do
+# `misc` (harness, engine and preview): the small suites, one binary each.
+# The orb geometry tests live in zeron-orb's `geometry`.
+for t in misc geometry session_publication restart_resume side_chats message_queue attachments_roundtrip voice_runtime device_routing device_room; do
   tests+=(--test "$t")
 done
 
