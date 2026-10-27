@@ -1015,6 +1015,53 @@ async fn live_real_cli_single_turn() {
     ));
 }
 
+/// The real CLI in plan mode, supervised: the plan's `ExitPlanMode` and the
+/// command that follows are both asked, and the approved command runs.
+#[tokio::test]
+#[ignore = "spawns the real claude CLI; needs install + auth + network"]
+async fn live_plan_mode_asks_before_implementing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "Run the shell command `echo hi > hello.txt` with Bash. Write a one-line plan and \
+         call ExitPlanMode right away, then run it. Be brief.",
+    );
+    req.model = Some("haiku".into());
+    req.cwd = dir.path().display().to_string();
+    req.auto_approve = false;
+    req.access = zeron_proto::AccessMode::Supervised;
+    req.plan = true;
+    let (controls, _steer, asked) = approving(&["Approve plan", "Approve command"]);
+    let mut stream = ClaudeHarness::new()
+        .run(req, controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(ev) = stream.next().await {
+            if matches!(ev.expect("stream event"), AgentEvent::Done { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("live turn finished in time");
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(
+        headers.first().map(String::as_str),
+        Some("Approve plan"),
+        "{headers:?}"
+    );
+    assert!(
+        headers.iter().any(|h| h == "Approve command"),
+        "{headers:?}"
+    );
+    assert!(dir.path().join("hello.txt").exists());
+}
+
 // ---------------------------------------------------------------------------
 // Slash-command discovery
 // ---------------------------------------------------------------------------
@@ -1729,6 +1776,173 @@ async fn a_changed_model_and_effort_apply_to_the_live_process() {
         ),
         "{events:?}"
     );
+}
+
+/// Controls that answer yes to approvals headed by one of `yes` and no to
+/// any other, keeping every question asked.
+fn approving(
+    yes: &'static [&'static str],
+) -> (
+    RunControls,
+    mpsc::Sender<SteerMessage>,
+    Arc<Mutex<Vec<UserInputQuestion>>>,
+) {
+    let (controls, steer, _token) = controls("No");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let controls = RunControls {
+        request_input: Box::new(move |questions| {
+            seen.lock().unwrap().extend(questions.iter().cloned());
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| {
+                    let allow = yes.contains(&q.header.as_str());
+                    UserInputAnswer {
+                        question_id: q.id.clone(),
+                        labels: vec![if allow { "Yes" } else { "No" }.into()],
+                    }
+                })
+                .collect();
+            let _ = tx.send(answers);
+            rx
+        }),
+        ..controls
+    };
+    (controls, steer, asked)
+}
+
+fn done_result(events: &[AgentEvent]) -> Option<String> {
+    match events.last() {
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result,
+            ..
+        }) => result.clone(),
+        other => panic!("run did not complete: {other:?} in {events:?}"),
+    }
+}
+
+#[tokio::test]
+async fn access_modes_decide_what_is_asked() {
+    use zeron_proto::AccessMode;
+
+    // Full access asks nothing, and launches as every run did before modes.
+    let (controls, _steer, asked) = approving(&[]);
+    let events = run_to_end(&harness(), request("scenario:approvals"), controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some(
+            "bypassPermissions --dangerously-skip-permissions bash=allow edit=allow \
+             plan=allow:bypassPermissions"
+        )
+    );
+    assert!(asked.lock().unwrap().is_empty());
+
+    // Auto-accept edits: the edit goes through, the command and the plan
+    // are asked, and a no denies them.
+    let (controls, _steer, asked) = approving(&[]);
+    let mut req = request("scenario:approvals");
+    req.auto_approve = false;
+    req.access = AccessMode::AutoAcceptEdits;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some("acceptEdits none bash=deny edit=allow plan=deny")
+    );
+    let questions: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.question.clone())
+        .collect();
+    assert_eq!(
+        questions,
+        [
+            "Claude wants to run `rm -rf build`. Allow it?",
+            "Claude wants to start implementing its plan. Allow it?",
+        ]
+    );
+
+    // Supervised asks before each; a yes allows, and the approved plan
+    // continues in the access mode.
+    let (controls, _steer, asked) =
+        approving(&["Approve command", "Approve file change", "Approve plan"]);
+    let mut req = request("scenario:approvals");
+    req.auto_approve = false;
+    req.access = AccessMode::Supervised;
+    req.plan = true;
+    let events = run_to_end(&harness(), req, controls).await;
+    assert_eq!(
+        done_result(&events).as_deref(),
+        Some("plan none bash=allow edit=allow plan=allow:default")
+    );
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(
+        headers,
+        ["Approve command", "Approve file change", "Approve plan"]
+    );
+}
+
+#[tokio::test]
+async fn plan_and_access_modes_switch_on_the_live_process() {
+    use zeron_proto::AccessMode;
+
+    let (controls, steer, asked) = approving(&["Approve plan"]);
+    let mut launch = request("scenario:mode-switch");
+    launch.auto_approve = false;
+    launch.access = AccessMode::Supervised;
+    launch.plan = true;
+    let mut stream = harness()
+        .run(launch.clone(), controls)
+        .await
+        .expect("run starts");
+    /// The next turn's result; it must complete.
+    async fn turn_result(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) -> String {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("event in time")
+                .expect("stream open")
+                .expect("stream event");
+            if let AgentEvent::Done {
+                status,
+                result,
+                error,
+                ..
+            } = event
+            {
+                assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                return result.unwrap_or_default();
+            }
+        }
+    }
+    let mut results = vec![turn_result(&mut stream).await];
+    // The chat is still in plan mode: the next turn plans again.
+    steer.send(steer_msg("plan again")).await.unwrap();
+    results.push(turn_result(&mut stream).await);
+    let mut accepting = launch.clone();
+    accepting.access = AccessMode::AutoAcceptEdits;
+    accepting.plan = false;
+    let mut switched = steer_msg("accept edits");
+    switched.config = Some(Box::new(accepting));
+    steer.send(switched).await.unwrap();
+    results.push(turn_result(&mut stream).await);
+    assert_eq!(results, ["implemented", "planned again", "accepting"]);
+    let headers: Vec<_> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|q| q.header.clone())
+        .collect();
+    assert_eq!(headers, ["Approve plan", "Approve command"]);
 }
 
 /// "Marked done the moment I sent it": resuming a session whose background
