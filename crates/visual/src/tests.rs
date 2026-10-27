@@ -234,6 +234,7 @@ fn check_exercises_every_control_and_reports_where_it_broke() {
         return function()
           return ui.column {
             ui.tabs { options = { "a", "b" }, value = s.tab, on_change = function(v) s.tab = v end },
+            ui.text(s.tab),
             ui.toggle { label = "Log scale", value = s.on, on_change = function(v) s.on = v end },
             ui.slider { label = "Window", value = s.n, min = 1, max = 10, on_change = function(v) s.n = v end },
             ui.canvas { height = 100, animate = true, draw = function(g, w, h, t) g:line(0, 0, w * t, h) end },
@@ -438,4 +439,185 @@ fn missing_and_broken_assets_fail_the_check_with_their_names() {
         "{}",
         error.message
     );
+}
+
+/// Select each tab of the first tabs control and return what the view says.
+fn tab_texts(script: &str) -> Vec<String> {
+    let mut visual = Visual::load(script, 1).unwrap();
+    let tree = visual.render().unwrap();
+    let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
+    let NodeKind::Tabs { options, .. } = tabs.kind.clone() else {
+        unreachable!()
+    };
+    let mut out = vec![text_of(&tree)];
+    for option in options {
+        let tree = visual.render().unwrap();
+        let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
+        let NodeKind::Tabs { on_change, .. } = tabs.kind else {
+            unreachable!()
+        };
+        visual.call(on_change, HandlerArg::Text(option)).unwrap();
+        out.push(text_of(&visual.render().unwrap()));
+    }
+    out
+}
+
+#[test]
+fn nil_children_leave_holes_instead_of_ending_the_list() {
+    // `cond and node or nil` per tab: before, everything after the first
+    // unselected tab's nil was dropped, so only the first tab ever showed.
+    let script = r#"
+        local s = ui.state { tab = "A" }
+        return function()
+          return ui.column {
+            ui.tabs { options = { "A", "B", "C" }, value = s.tab, on_change = function(v) s.tab = v end },
+            s.tab == "A" and ui.text "showing A" or nil,
+            s.tab == "B" and ui.text "showing B" or nil,
+            s.tab == "C" and ui.text "showing C" or nil,
+          }
+        end
+    "#;
+    assert_eq!(
+        tab_texts(script),
+        ["|showing A", "|showing A", "|showing B", "|showing C"]
+    );
+    assert_eq!(check(script, 1).unwrap().tabs, 1);
+
+    let mut visual = Visual::load(
+        r#"return ui.column { ui.text { "a", nil, ui.span { "c" } }, ui.table { columns = { "x", "y", "z" }, rows = { { 1, nil, 3 } } } }"#,
+        1,
+    )
+    .unwrap();
+    let tree = visual.render().unwrap();
+    assert_eq!(text_of(&tree), "ac|1||3", "the nil cell stays a blank cell");
+}
+
+#[test]
+fn tabs_take_positions_and_label_value_options() {
+    let by_position = r#"
+        local s = ui.state { tab = 1 }
+        local names = { "A", "B" }
+        return function()
+          return ui.column {
+            ui.tabs { options = names, value = s.tab, on_change = function(i) s.tab = i end },
+            ui.text("showing " .. names[s.tab]),
+          }
+        end
+    "#;
+    assert_eq!(
+        tab_texts(by_position),
+        ["|showing A", "|showing A", "|showing B"]
+    );
+    check(by_position, 1).unwrap();
+
+    let keyed = r#"
+        local s = ui.state { tab = "a" }
+        return function()
+          return ui.column {
+            ui.tabs { options = { { label = "Alpha", value = "a" }, { "Beta", "b" } }, value = s.tab,
+              on_change = function(v) s.tab = v end },
+            ui.text("showing " .. s.tab),
+          }
+        end
+    "#;
+    let mut visual = Visual::load(keyed, 1).unwrap();
+    let tree = visual.render().unwrap();
+    let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
+    let NodeKind::Tabs { options, value, .. } = &tabs.kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        (options.as_slice(), value.as_str()),
+        (&["Alpha".to_owned(), "Beta".to_owned()][..], "Alpha")
+    );
+    assert_eq!(tab_texts(keyed), ["|showing a", "|showing a", "|showing b"]);
+    check(keyed, 1).unwrap();
+}
+
+#[test]
+fn check_rejects_tabs_that_dont_switch_the_view() {
+    for (script, needle) in [
+        // The view keys on different strings than the options.
+        (
+            r#"local s = ui.state { tab = "Overview" }
+            return function() return ui.column {
+              ui.tabs { options = { "Overview", "Details" }, value = s.tab, on_change = function(v) s.tab = v end },
+              s.tab == "Overview" and ui.text "o" or nil,
+              s.tab == "details" and ui.text "d" or nil,
+            } end"#,
+            "compares the tab state with \"details\"",
+        ),
+        // A misspelt key with more tabs: two of them show only the tabs.
+        (
+            r#"local s = ui.state { tab = "Day" }
+            return function() return ui.column {
+              ui.tabs { options = { "Day", "Week", "Month" }, value = s.tab, on_change = function(v) s.tab = v end },
+              s.tab == "Day" and ui.text "d" or nil,
+              s.tab == "Weekly" and ui.text "w" or nil,
+              s.tab == "Monthly" and ui.text "m" or nil,
+            } end"#,
+            "show the same view",
+        ),
+        // The state starts nil, so nothing shows until a click.
+        (
+            r#"local s = ui.state {}
+            return function() return ui.column {
+              ui.tabs { options = { "A", "B" }, value = s.tab, on_change = function(v) s.tab = v end },
+              s.tab == "A" and ui.text "a" or nil,
+              s.tab == "B" and ui.text "b" or nil,
+            } end"#,
+            "is the tab state nil at first",
+        ),
+        // The handler never stores the choice.
+        (
+            r#"local s = ui.state { tab = "A" }
+            return function() return ui.column {
+              ui.tabs { options = { "A", "B" }, value = s.tab, on_change = function(v) end },
+              ui.text(s.tab),
+            } end"#,
+            "still show 'A' selected",
+        ),
+    ] {
+        let error = check(script, 1).unwrap_err();
+        assert!(
+            error.message.contains(needle),
+            "{needle}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn check_accepts_tabs_that_change_only_a_drawing_or_a_nested_tab() {
+    let canvas = r#"
+        local s = ui.state { tab = "red" }
+        return function() return ui.column {
+          ui.tabs { options = { "red", "blue" }, value = s.tab, on_change = function(v) s.tab = v end },
+          ui.canvas { height = 80, draw = function(g, w, h)
+            g:rect(0, 0, s.tab == "red" and 10 or 20, 10, { fill = "accent" })
+          end },
+        } end
+    "#;
+    assert_eq!(check(canvas, 1).unwrap().tabs, 1);
+
+    let nested = r#"
+        local s = ui.state { outer = "A", inner = "x" }
+        return function() return ui.column {
+          ui.tabs { options = { "A", "B" }, value = s.outer, on_change = function(v) s.outer = v end },
+          s.outer == "B" and ui.tabs { options = { "x", "y" }, value = s.inner, on_change = function(v) s.inner = v end } or nil,
+          ui.text(s.outer .. s.inner),
+        } end
+    "#;
+    assert_eq!(check(nested, 1).unwrap().tabs, 2, "the tabs inside tab B");
+
+    // Switching tabs also clears a selection the first view started with.
+    let resets = r#"
+        local s = ui.state { tab = "A", picked = "x" }
+        return function() return ui.column {
+          ui.tabs { options = { "A", "B", "B" }, value = s.tab,
+            on_change = function(v) s.tab = v; s.picked = "none" end },
+          ui.text(s.tab .. " " .. s.picked),
+        } end
+    "#;
+    assert_eq!(check(resets, 1).unwrap().tabs, 1);
 }

@@ -246,6 +246,31 @@ fn catalog() -> Vec<ToolDef> {
         }),
     });
     tools.push(ToolDef {
+        name: READ_VISUAL_DOCS,
+        description: "The reference for show_visual scripts: the Luau ui API (layout, text, stats, \
+tables, charts, controls, canvases, 3D scenes, shaders, assets) and the style rules Zeron \
+enforces. Read it once before writing your first visual in a chat.",
+        input_schema: json!({ "type": "object", "properties": {} }),
+    });
+    tools.push(ToolDef {
+        name: CHECK_VISUAL,
+        description: "Run a show_visual script exactly as show_visual will (setup, render, every \
+draw, each control, every tab) without showing it, and return the first error with its line, or \
+what it checked and anything it printed.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "script": { "type": "string", "description": "The Luau visual script." },
+                "assets": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "The files the script uses, as for show_visual."
+                }
+            },
+            "required": ["script"]
+        }),
+    });
+    tools.push(ToolDef {
         name: SHOW_IMAGE,
         description: SHOW_IMAGE_DESCRIPTION,
         input_schema: json!({
@@ -265,6 +290,10 @@ fn catalog() -> Vec<ToolDef> {
 /// Shows a page in the CALLING chat, so it is offered only to an agent that
 /// Zeron launched (`ZERON_CHAT_ID` set).
 const SHOW_VISUAL: &str = "show_visual";
+const READ_VISUAL_DOCS: &str = "read_visual_docs";
+const CHECK_VISUAL: &str = "check_visual";
+/// Offered only with `show_visual`: without it they draw nothing.
+const VISUAL_TOOLS: [&str; 3] = [SHOW_VISUAL, READ_VISUAL_DOCS, CHECK_VISUAL];
 
 /// Shows an image file in the CALLING chat; offered like `show_visual`.
 const SHOW_IMAGE: &str = "show_image";
@@ -284,6 +313,16 @@ than prose. The reader already sees it, so the reply should not announce, locate
 only what the visual doesn't say. To show an image file as it is (a screenshot, a photo), use \
 show_image instead.\n\
 \n\
+A visual is a Luau script that Zeron renders with its own native interface. Call read_visual_docs \
+once before your first visual in a chat: it is the script API and the style rules Zeron enforces. \
+show_visual runs the script before showing it and returns the first error with its line; \
+check_visual runs it the same way without showing anything.";
+
+/// The full script reference, loaded by an agent that is about to draw
+/// rather than carried in every chat's tool list.
+const VISUAL_DOCS: &str = "\
+# Zeron visuals\n\
+\n\
 A visual is a Luau script (Lua 5.1 plus `+=`, `continue`, and `if` expressions). Zeron runs it in a \
 sandbox (no I/O or network; math.random is seeded, so data is the same on every render) and renders \
 what it returns with Zeron's own native interface. Build data and state at the top level, then return \
@@ -301,8 +340,9 @@ return function()\n\
   }\n\
 end\n\
 \n\
-Zeron runs the script before showing it (setup, render, every draw, and each tab, toggle, slider, and \
-button once) and returns the first error with its line; fix it and call again.\n\
+Zeron runs the script before showing it (setup, render, every draw, each tab, toggle, slider, and \
+button once, and every tab of every tabs control) and returns the first error with its line; fix it \
+and call again. check_visual { script, assets } does the same without showing anything.\n\
 \n\
 Nodes are props tables: children are the array part, strings are plain text, nil and false children \
 are skipped, and lists of nodes flatten (so ui.map results can be children). Unknown props are errors.\n\
@@ -325,7 +365,12 @@ Scatter series take points = { { x, y }, ... } (x_unit, x_decimals). Axes, gridl
 hover readout are built in.\n\
 - ui.rule {} is a hairline divider; ui.space { size = 16 }; ui.link { label, url = \"https://...\" } \
 opens like a chat link.\n\
-- Controls: ui.tabs { options = { ... }, value, on_change = function(option) end }, ui.toggle { label, \
+- Controls: ui.tabs { options = { \"Overview\", \"Costs\" }, value = s.tab, on_change = function(option) \
+s.tab = option end }: on_change receives the option exactly as written, and value is the selected \
+option, so start the state at the first option (never nil) and branch on those same strings \
+(s.tab == \"Costs\" and ui.chart { ... } or nil). When the shown label differs from the state, \
+give options as { label = \"Overview\", value = \"overview\" } and on_change receives the value. \
+ui.toggle { label, \
 value = bool, on_change = function(on) end }, ui.slider { label, value, min, max, step, unit, on_change \
 = function(n) end }, ui.button { label, on_click = function() end, primary = bool }.\n\
 - ui.canvas { height = 240, draw = function(g, w, h, t) ... end, animate = bool, on_click = \
@@ -405,12 +450,23 @@ notes, lg and xl for headings, 2xl for a headline figure. The width is the reply
 as narrow as 360px), so lay out fluidly with grow, wrap, and grid, and give charts, canvases, and \
 scenes heights of 160-420px.";
 
+/// Base64 by name, as `PublishVisual` takes a visual's files.
+fn encode_assets(files: Vec<(String, Vec<u8>)>) -> serde_json::Map<String, Value> {
+    use base64::Engine as _;
+    files
+        .into_iter()
+        .map(|(name, bytes)| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            (name, Value::String(encoded))
+        })
+        .collect()
+}
+
 /// Read `show_visual`'s asset files (paths relative to the agent's working
-/// directory), base64-encoded by name for the engine.
+/// directory), by name.
 async fn read_visual_assets(
     assets: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<serde_json::Map<String, Value>> {
-    use base64::Engine as _;
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     use zeron_proto::{
         VISUAL_MAX_ASSET_BYTES as MAX_ASSET_BYTES, VISUAL_MAX_ASSETS as MAX_ASSETS,
         VISUAL_MAX_TOTAL_ASSET_BYTES as MAX_TOTAL_ASSET_BYTES,
@@ -420,7 +476,7 @@ async fn read_visual_assets(
         assets.len() <= MAX_ASSETS,
         "a visual takes at most {MAX_ASSETS} assets"
     );
-    let mut out = serde_json::Map::new();
+    let mut out = Vec::new();
     let mut total = 0;
     let mut seen = std::collections::HashSet::new();
     for (name, path) in assets {
@@ -465,10 +521,7 @@ async fn read_visual_assets(
             "a visual's assets total at most {} MB",
             MAX_TOTAL_ASSET_BYTES / (1024 * 1024)
         );
-        out.insert(
-            name.clone(),
-            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
-        );
+        out.push((name.clone(), bytes));
     }
     Ok(out)
 }
@@ -511,6 +564,13 @@ struct ShowImageArgs {
 struct ShowVisualArgs {
     script: String,
     title: String,
+    #[serde(default)]
+    assets: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct CheckVisualArgs {
+    script: String,
     #[serde(default)]
     assets: std::collections::BTreeMap<String, String>,
 }
@@ -736,7 +796,9 @@ impl Tools {
         let in_chat = self.zeron.origin().chat_id.is_some();
         catalog()
             .into_iter()
-            .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
+            .filter(|tool| {
+                in_chat || !(VISUAL_TOOLS.contains(&tool.name) || tool.name == SHOW_IMAGE)
+            })
             .collect()
     }
 
@@ -765,6 +827,8 @@ impl Tools {
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
+            READ_VISUAL_DOCS => Ok(Value::String(VISUAL_DOCS.to_owned())),
+            CHECK_VISUAL => self.check_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
@@ -1332,7 +1396,7 @@ impl Tools {
             .chat_id
             .clone()
             .context("show_visual only works from an agent Zeron launched in a chat")?;
-        let assets = read_visual_assets(&args.assets).await?;
+        let assets = encode_assets(read_visual_assets(&args.assets).await?);
         let shown = self
             .zeron
             .call(
@@ -1348,6 +1412,35 @@ impl Tools {
         Ok(json!({
             "visual": shown,
             "message": "Shown to the reader above your reply. Don't mention or describe the visual; reply with only what it doesn't already say.",
+        }))
+    }
+
+    async fn check_visual(&self, args: CheckVisualArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            !args.script.trim().is_empty() && args.script.len() <= zeron_proto::VISUAL_MAX_BYTES,
+            "script must be 1 to {} bytes",
+            zeron_proto::VISUAL_MAX_BYTES
+        );
+        let assets = zeron_visual::Assets::new(
+            read_visual_assets(&args.assets)
+                .await?
+                .into_iter()
+                .map(|(name, bytes)| (name, bytes.into()))
+                .collect(),
+        );
+        let script = args.script;
+        let report = tokio::task::spawn_blocking(move || {
+            zeron_visual::check_with_assets(&script, 1, assets)
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("visual script failed: {e}"))?;
+        Ok(json!({
+            "ok": true,
+            "checkedNodes": report.nodes,
+            "checkedInteractions": report.interactions,
+            "checkedTabs": report.tabs,
+            "printed": report.logs,
+            "message": "The script runs cleanly. Nothing was shown; call show_visual to show it.",
         }))
     }
 
@@ -1868,21 +1961,24 @@ mod tests {
     }
 
     #[test]
-    fn the_show_visual_example_passes_its_own_check() {
-        let start = SHOW_VISUAL_DESCRIPTION.find("local s = ui.state").unwrap();
+    fn the_visual_docs_example_passes_its_own_check() {
+        let start = VISUAL_DOCS.find("local s = ui.state").unwrap();
         let end = start
-            + SHOW_VISUAL_DESCRIPTION[start..]
+            + VISUAL_DOCS[start..]
                 .find("\n\nZeron runs the script")
                 .unwrap();
-        let report = zeron_visual::check(&SHOW_VISUAL_DESCRIPTION[start..end], 1).unwrap();
+        let report = zeron_visual::check(&VISUAL_DOCS[start..end], 1).unwrap();
         assert_eq!(report.interactions, 2, "both tabs");
+        assert_eq!(report.tabs, 1);
     }
 
     #[tokio::test]
     async fn show_visual_is_offered_only_inside_a_chat() {
         let world = Arc::new(World::default());
         let outside = tools(world.clone(), Origin::default());
-        assert!(!outside.has("show_visual"));
+        for name in VISUAL_TOOLS {
+            assert!(!outside.has(name), "{name}");
+        }
         assert!(
             outside
                 .call(
@@ -1901,11 +1997,40 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(inside.has("show_visual"));
-        // The guidance names every color the runtime accepts.
-        for name in zeron_visual::TOKEN_NAMES {
-            assert!(SHOW_VISUAL_DESCRIPTION.contains(name), "{name}");
+        for name in VISUAL_TOOLS {
+            assert!(inside.has(name), "{name}");
         }
+        // The reference names every color the runtime accepts; the tool list
+        // carries only the short description.
+        let docs = inside.call("read_visual_docs", json!({})).await.unwrap();
+        for name in zeron_visual::TOKEN_NAMES {
+            assert!(docs.as_str().unwrap().contains(name), "{name}");
+        }
+        assert!(SHOW_VISUAL_DESCRIPTION.len() < 1000);
+        assert!(SHOW_VISUAL_DESCRIPTION.contains("read_visual_docs"));
+
+        // Checking shows nothing and reports what it ran, or the error.
+        let writes_before = world.writes.lock().unwrap().len();
+        let checked = inside
+            .call(
+                "check_visual",
+                json!({ "script": r#"local s = ui.state { tab = "a" }
+                    return function() return ui.column {
+                      ui.tabs { options = { "a", "b" }, value = s.tab, on_change = function(v) s.tab = v end },
+                      ui.text(s.tab) } end"# }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(checked["checkedTabs"], 1);
+        assert_eq!(world.writes.lock().unwrap().len(), writes_before);
+        let failed = inside
+            .call(
+                "check_visual",
+                json!({ "script": "return ui.text { color = '#fff', 'x' }" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(failed.contains("theme tokens"), "{failed}");
         let shown = inside
             .call(
                 "show_visual",

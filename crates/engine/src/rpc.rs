@@ -4739,6 +4739,7 @@ impl RpcService for EngineRpc {
                     "id": id,
                     "title": title,
                     "checkedInteractions": report.interactions,
+                    "checkedTabs": report.tabs,
                     "printed": report.logs,
                 }))
             }

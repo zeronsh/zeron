@@ -16,6 +16,24 @@ pub(crate) const LEGEND_GAP: f32 = 8.0;
 const LEGEND_GAP_X: f32 = 14.0;
 const LEGEND_GAP_Y: f32 = 2.0;
 const SWATCH: f32 = 8.0;
+/// A line or area series' swatch is a short stroke, like its mark.
+const SWATCH_LINE: f32 = 12.0;
+/// Bars are at most this wide, so a few categories don't paint slabs.
+const BAR_MAX: f32 = 44.0;
+/// Bars round only at their value end; the baseline stays square.
+const BAR_RADIUS: f32 = 3.0;
+const LINE_WIDTH: f32 = 2.0;
+/// An area's fill at the top of the series, fading to clear at its baseline.
+const AREA_ALPHA: f32 = 0.3;
+/// Steps in the area's fade (mobile paint has no gradients).
+const AREA_STEPS: usize = 7;
+/// Gridlines sit back; the zero baseline is the one firm rule.
+const GRID_ALPHA: f32 = 0.6;
+/// Bars outside the hovered category recede to this.
+const DIM: f32 = 0.4;
+/// Line and area series ending in a labelled value, at most.
+const END_LABELS_MAX: usize = 4;
+const END_GAP: f32 = 8.0;
 
 /// What a finger over the plot picks out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +136,179 @@ fn show_legend(chart: &Chart) -> bool {
     chart.legend && chart.series.len() > 1 && chart.series.iter().any(|s| !s.name.is_empty())
 }
 
+fn lines(chart: &Chart) -> bool {
+    matches!(chart.kind, ChartKind::Line | ChartKind::Area)
+}
+
+fn swatch_width(chart: &Chart) -> f32 {
+    if lines(chart) { SWATCH_LINE } else { SWATCH }
+}
+
+/// The value each line or area series ends on, labelled past the plot's
+/// right edge (none for dense or crowded charts).
+fn end_values(chart: &Chart) -> Vec<(usize, f64)> {
+    if !lines(chart) || chart.series.len() > END_LABELS_MAX || categories(chart) < 2 {
+        return Vec::new();
+    }
+    chart
+        .series
+        .iter()
+        .enumerate()
+        .filter_map(|(s, series)| Some((s, series.values.last().copied().flatten()?)))
+        .collect()
+}
+
+/// A monotone cubic through `points` (Fritsch-Carlson), sampled as a
+/// polyline: smooth, and never overshooting the data between points.
+pub(crate) fn monotone(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let n = points.len();
+    if !(3..=120).contains(&n) {
+        return points.to_vec();
+    }
+    let d: Vec<f32> = points
+        .windows(2)
+        .map(|w| (w[1][1] - w[0][1]) / (w[1][0] - w[0][0]).max(1e-3))
+        .collect();
+    let mut m = vec![0.0f32; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for k in 1..n - 1 {
+        m[k] = if d[k - 1] * d[k] <= 0.0 {
+            0.0
+        } else {
+            (d[k - 1] + d[k]) / 2.0
+        };
+    }
+    for k in 0..n - 1 {
+        if d[k] == 0.0 {
+            m[k] = 0.0;
+            m[k + 1] = 0.0;
+            continue;
+        }
+        let (a, b) = (m[k] / d[k], m[k + 1] / d[k]);
+        let s = a * a + b * b;
+        if s > 9.0 {
+            let t = 3.0 / s.sqrt();
+            m[k] = t * a * d[k];
+            m[k + 1] = t * b * d[k];
+        }
+    }
+    let mut out = vec![points[0]];
+    for k in 0..n - 1 {
+        let ([x0, y0], [x1, y1]) = (points[k], points[k + 1]);
+        let h = x1 - x0;
+        let steps = (h / 4.0).clamp(2.0, 12.0) as usize;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let y = (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+                + (t3 - 2.0 * t2 + t) * h * m[k]
+                + (-2.0 * t3 + 3.0 * t2) * y1
+                + (t3 - t2) * h * m[k + 1];
+            out.push([x0 + h * t, y]);
+        }
+    }
+    out
+}
+
+/// `polygon` clipped to y <= `limit` (Sutherland-Hodgman; fine for the
+/// concave outline of an area).
+fn clip_above(polygon: &[[f32; 2]], limit: f32) -> Vec<[f32; 2]> {
+    let mut out = Vec::with_capacity(polygon.len() + 4);
+    for (i, &a) in polygon.iter().enumerate() {
+        let b = polygon[(i + 1) % polygon.len()];
+        let (a_in, b_in) = (a[1] <= limit, b[1] <= limit);
+        if a_in {
+            out.push(a);
+        }
+        if a_in != b_in {
+            let t = (limit - a[1]) / (b[1] - a[1]);
+            out.push([a[0] + (b[0] - a[0]) * t, limit]);
+        }
+    }
+    out
+}
+
+/// An area's fill fading from the top of its outline to clear at the
+/// bottom, as nested translucent layers: each covers the outline above a
+/// lower line, so they build up toward the top with no seams between them.
+fn fade_fill(out: &mut Paint, outline: &[[f32; 2]], color: Rgba) {
+    let (top, bottom) = outline
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(t, b), p| (t.min(p[1]), b.max(p[1])));
+    if bottom - top < 1.0 {
+        return;
+    }
+    // Each layer's alpha, so all of them together make AREA_ALPHA.
+    let layer = 1.0 - (1.0 - AREA_ALPHA).powf(1.0 / AREA_STEPS as f32);
+    for k in 1..=AREA_STEPS {
+        let limit = top + (bottom - top) * k as f32 / (AREA_STEPS + 1) as f32;
+        out.fill(clip_above(outline, limit), color.alpha(layer));
+    }
+}
+
+/// Which end of a bar holds its value (and takes the rounding).
+#[derive(Clone, Copy)]
+enum End {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// A bar's outline, rounded at its value end only.
+fn bar_outline([x, y, w, h]: [f32; 4], end: End, radius: f32) -> Vec<[f32; 2]> {
+    let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+    // Corners clockwise from the top left; rounded ones get a quarter arc.
+    let corners = [
+        (
+            [x, y],
+            matches!(end, End::Top | End::Left),
+            [1.0, 1.0],
+            180.0,
+        ),
+        (
+            [x + w, y],
+            matches!(end, End::Top | End::Right),
+            [-1.0, 1.0],
+            270.0,
+        ),
+        (
+            [x + w, y + h],
+            matches!(end, End::Bottom | End::Right),
+            [-1.0, -1.0],
+            0.0,
+        ),
+        (
+            [x, y + h],
+            matches!(end, End::Bottom | End::Left),
+            [1.0, -1.0],
+            90.0,
+        ),
+    ];
+    let mut out = Vec::with_capacity(20);
+    for ([cx, cy], round, [sx, sy], start) in corners {
+        if !round || r < 0.5 {
+            out.push([cx, cy]);
+            continue;
+        }
+        let center = [cx + sx * r, cy + sy * r];
+        for i in 0..=4 {
+            let a = (start + 90.0 * i as f32 / 4.0f32).to_radians();
+            out.push([center[0] + r * a.cos(), center[1] + r * a.sin()]);
+        }
+    }
+    out
+}
+
+/// Bar layout within one category band: (inset of the first bar, bar width).
+fn bar_metrics(band: f32, groups: usize) -> (f32, f32) {
+    let groups = groups.max(1) as f32;
+    let bar = (band * 0.72 / groups).clamp(1.0, BAR_MAX);
+    let inner = bar * groups;
+    ((band - inner) / 2.0, bar)
+}
+
 /// Legend entries flowed into rows at `width`: (x, row) per entry.
 fn flow(widths: &[f32], width: f32) -> Vec<(f32, usize)> {
     let (mut x, mut row) = (0.0f32, 0usize);
@@ -150,7 +341,7 @@ pub(crate) fn legend_height(
     let widths: Vec<f32> = chart
         .series
         .iter()
-        .map(|s| SWATCH + 6.0 + measure(ctx, &s.name, sm(Weight::Regular)))
+        .map(|s| swatch_width(chart) + 6.0 + measure(ctx, &s.name, sm(Weight::Regular)))
         .collect();
     let rows = flow(&widths, width).last().map_or(0, |(_, row)| *row) + 1;
     rows as f32 * line + (rows - 1) as f32 * LEGEND_GAP_Y
@@ -198,7 +389,24 @@ fn plan(ctx: &mut TextCtx, chart: &Chart, width: f32, legend: f32) -> Plan {
     } + AXIS_GAP;
     let top = legend + LEGEND_GAP + tick_line / 2.0;
     let bottom = tick_line + AXIS_GAP / 2.0;
-    let right = if horizontal || scatter { 12.0 } else { 4.0 };
+    // Room past the plot for the values line series end on.
+    let ends = end_values(chart)
+        .iter()
+        .map(|(_, v)| {
+            measure(
+                ctx,
+                &chart.format.format(*v),
+                Face::new(TextSize::Xs, Weight::Medium),
+            )
+        })
+        .fold(0.0, f32::max);
+    let right = if ends > 0.0 {
+        (ends + END_GAP).min(width * 0.3)
+    } else if horizontal || scatter {
+        12.0
+    } else {
+        4.0
+    };
     let plot = [
         left,
         top,
@@ -359,7 +567,7 @@ fn paint_legend(
     let widths: Vec<f32> = items
         .iter()
         .map(|item| {
-            item.swatch.map_or(0.0, |_| SWATCH + 6.0)
+            item.swatch.map_or(0.0, |_| swatch_width(chart) + 6.0)
                 + measure(ctx, &item.name, sm(item.weight))
                 + item
                     .value
@@ -378,8 +586,18 @@ fn paint_legend(
         let top = row as f32 * (line + LEGEND_GAP_Y);
         let mut at = x;
         if let Some(swatch) = item.swatch {
-            out.rect(at, top + (line - SWATCH) / 2.0, SWATCH, SWATCH, 2.0, swatch);
-            at += SWATCH + 6.0;
+            match chart.kind {
+                ChartKind::Line | ChartKind::Area => {
+                    out.rect(at, top + line / 2.0 - 1.5, SWATCH_LINE, 3.0, 1.5, swatch)
+                }
+                ChartKind::Scatter => {
+                    out.dot([at + SWATCH / 2.0, top + line / 2.0], SWATCH / 2.0, swatch)
+                }
+                ChartKind::Bar => {
+                    out.rect(at, top + (line - SWATCH) / 2.0, SWATCH, SWATCH, 2.0, swatch)
+                }
+            }
+            at += swatch_width(chart) + 6.0;
         }
         at += out.label(
             ctx,
@@ -421,14 +639,20 @@ fn paint_plot(
     let value_t = |v: f64| ((v - plan.lo) / (plan.hi - plan.lo)) as f32;
     let vy = |v: f64| oy + ph * (1.0 - value_t(v));
     let vx = |v: f64| ox + pw * value_t(v);
-    let (grid, muted) = (palette.border, palette.muted);
+    let (grid, muted) = (palette.border.alpha(GRID_ALPHA), palette.muted);
+    let zero = 0.0f64.clamp(plan.lo, plan.hi);
 
-    // Gridlines and value ticks.
+    // Gridlines and value ticks; the zero line is drawn over the marks.
     for tick in &plan.ticks {
         let label = chart.format.format(*tick);
+        let rule = if *tick == zero && chart.kind != ChartKind::Scatter {
+            Rgba::default()
+        } else {
+            grid
+        };
         if horizontal {
             let x = vx(*tick);
-            out.stroke([[x, oy], [x, oy + ph]], false, 1.0, None, grid);
+            out.stroke([[x, oy], [x, oy + ph]], false, 1.0, None, rule);
             out.label(
                 ctx,
                 &label,
@@ -440,7 +664,7 @@ fn paint_plot(
             );
         } else {
             let y = vy(*tick);
-            out.stroke([[ox, y], [ox + pw, y]], false, 1.0, None, grid);
+            out.stroke([[ox, y], [ox + pw, y]], false, 1.0, None, rule);
             out.label(
                 ctx,
                 &label,
@@ -456,23 +680,35 @@ fn paint_plot(
     match chart.kind {
         ChartKind::Bar => {
             let band = if horizontal { ph } else { pw } / n as f32;
-            if let Some(i) = hover.category {
-                let start = if horizontal { oy } else { ox } + band * i as f32;
-                if horizontal {
-                    out.rect(ox, start, pw, band, 4.0, palette.wash);
-                } else {
-                    out.rect(start, oy, band, ph, 4.0, palette.wash);
-                }
-            }
             let groups = if chart.stacked {
                 1
             } else {
                 chart.series.len().max(1)
             };
-            let inner = band * 0.72;
-            let bar = (inner / groups as f32).max(1.0);
+            let (inset, bar) = bar_metrics(band, groups);
+            let gap = if groups > 1 {
+                2.0f32.min(bar / 4.0)
+            } else {
+                0.0
+            };
             for i in 0..n {
-                let start = band * i as f32 + (band - inner) / 2.0;
+                let start = band * i as f32 + inset;
+                let dim = hover.category.is_some_and(|h| h != i);
+                // The outermost segment of each stack takes the rounding.
+                let (top_pos, top_neg) = if chart.stacked {
+                    let last = |positive: bool| {
+                        chart.series.iter().rposition(|s| {
+                            s.values
+                                .get(i)
+                                .copied()
+                                .flatten()
+                                .is_some_and(|v| (v >= 0.0) == positive && v != 0.0)
+                        })
+                    };
+                    (last(true), last(false))
+                } else {
+                    (None, None)
+                };
                 let (mut pos, mut neg) = (0.0f64, 0.0f64);
                 for (s, series) in chart.series.iter().enumerate() {
                     let Some(v) = series.values.get(i).copied().flatten() else {
@@ -487,38 +723,68 @@ fn paint_plot(
                             (neg - v, neg)
                         }
                     } else {
-                        (0.0f64.clamp(plan.lo, plan.hi), v)
+                        (zero, v)
                     };
                     let offset = if chart.stacked { 0.0 } else { bar * s as f32 };
-                    let gap = if groups > 1 && !chart.stacked {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    let radius = if chart.stacked { 0.0 } else { 2.0 };
-                    let color = palette.color(series.color);
-                    if horizontal {
+                    let rounded = !chart.stacked || Some(s) == top_pos || Some(s) == top_neg;
+                    let radius = if rounded { BAR_RADIUS } else { 0.0 };
+                    // Stacked segments part with a sliver at their value end.
+                    let seam = if chart.stacked && !rounded { 1.0 } else { 0.0 };
+                    let mut color = palette.color(series.color);
+                    if dim {
+                        color = color.alpha(DIM);
+                    }
+                    let up = to >= from;
+                    let rect = if horizontal {
                         let y = oy + start + offset;
                         let (a, b) = (vx(from), vx(to));
-                        out.rect(a.min(b), y, (a - b).abs(), bar - gap, radius, color);
+                        let w = ((a - b).abs() - seam).max(0.0);
+                        let x = if up { a } else { a - w };
+                        let end = if up { End::Right } else { End::Left };
+                        ([x, y, w, bar - gap], end)
                     } else {
                         let x = ox + start + offset;
                         let (a, b) = (vy(from), vy(to));
-                        out.rect(x, a.min(b), bar - gap, (a - b).abs(), radius, color);
+                        let h = ((a - b).abs() - seam).max(0.0);
+                        let y = if up { a - h } else { a };
+                        let end = if up { End::Top } else { End::Bottom };
+                        ([x, y, bar - gap, h], end)
+                    };
+                    let (frame, end) = rect;
+                    if frame[2] <= 0.0 || frame[3] <= 0.0 {
+                        continue;
+                    }
+                    if radius > 0.0 {
+                        out.fill(bar_outline(frame, end, radius), color);
+                    } else {
+                        out.rect(frame[0], frame[1], frame[2], frame[3], 0.0, color);
                     }
                 }
             }
+            baseline(
+                out,
+                palette,
+                horizontal,
+                [ox, oy, pw, ph],
+                vx(zero),
+                vy(zero),
+            );
             for (i, label) in chart.x.iter().enumerate().take(n) {
                 if i % plan.label_stride != 0 {
                     continue;
                 }
                 let center = band * (i as f32 + 0.5);
+                let color = if hover.category == Some(i) {
+                    palette.text
+                } else {
+                    muted
+                };
                 if horizontal {
                     out.label(
                         ctx,
                         label,
                         xs(),
-                        muted,
+                        color,
                         [ox - AXIS_GAP, oy + center],
                         Align::End,
                         Align::Center,
@@ -528,7 +794,7 @@ fn paint_plot(
                         ctx,
                         label,
                         xs(),
-                        muted,
+                        color,
                         [ox + center, oy + ph + AXIS_GAP / 2.0],
                         Align::Center,
                         Align::Start,
@@ -554,34 +820,87 @@ fn paint_plot(
                     palette.border_strong,
                 );
             }
-            let base = vy(0.0f64.clamp(plan.lo, plan.hi));
-            for series in &chart.series {
-                let color = palette.color(series.color);
-                // Gaps split a series into runs.
-                let mut runs: Vec<Vec<[f32; 2]>> = vec![Vec::new()];
-                for (i, v) in series.values.iter().enumerate() {
-                    match v {
-                        Some(v) => runs.last_mut().expect("a run").push([x_at(i), vy(*v)]),
-                        None => runs.push(Vec::new()),
+            let base = vy(zero);
+            // Fills first, so no series' fill covers another's line.
+            let runs: Vec<Vec<Vec<[f32; 2]>>> = chart
+                .series
+                .iter()
+                .map(|series| {
+                    // Gaps split a series into runs.
+                    let mut runs: Vec<Vec<[f32; 2]>> = vec![Vec::new()];
+                    for (i, v) in series.values.iter().enumerate() {
+                        match v {
+                            Some(v) => runs.last_mut().expect("a run").push([x_at(i), vy(*v)]),
+                            None => runs.push(Vec::new()),
+                        }
+                    }
+                    runs.retain(|r| !r.is_empty());
+                    runs
+                })
+                .collect();
+            if chart.kind == ChartKind::Area {
+                for (series, runs) in chart.series.iter().zip(&runs) {
+                    let color = palette.color(series.color);
+                    for run in runs.iter().filter(|r| r.len() > 1) {
+                        let mut outline = monotone(run);
+                        outline.push([run[run.len() - 1][0], base]);
+                        outline.push([run[0][0], base]);
+                        fade_fill(out, &outline, color);
                     }
                 }
-                for run in runs.iter().filter(|r| !r.is_empty()) {
-                    if chart.kind == ChartKind::Area && run.len() > 1 {
-                        let mut area = run.clone();
-                        area.push([run[run.len() - 1][0], base]);
-                        area.push([run[0][0], base]);
-                        out.fill(area, color.alpha(0.22));
-                    }
+            }
+            if chart.kind == ChartKind::Area || plan.lo < 0.0 {
+                baseline(out, palette, false, [ox, oy, pw, ph], 0.0, base);
+            }
+            for (series, runs) in chart.series.iter().zip(&runs) {
+                let color = palette.color(series.color);
+                for run in runs {
                     if run.len() == 1 {
                         out.dot(run[0], 2.5, color);
                     } else {
-                        out.stroke(run.iter().copied(), false, 1.75, None, color);
+                        out.stroke(monotone(run), false, LINE_WIDTH, None, color);
                     }
                 }
-                if let Some(i) = hover.category
-                    && let Some(Some(v)) = series.values.get(i)
-                {
-                    out.dot([x_at(i), vy(*v)], 3.5, color);
+            }
+            // Each series ends on a dot and its value; the hovered category
+            // gets a ringed dot per series.
+            let ends = end_values(chart);
+            let line = ctx.line_height(TextSize::Xs);
+            let mut labels: Vec<(f32, usize, f64)> =
+                ends.iter().map(|&(s, v)| (vy(v), s, v)).collect();
+            labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // Nudge apart labels that would overlap, then back inside the plot.
+            for k in 1..labels.len() {
+                labels[k].0 = labels[k].0.max(labels[k - 1].0 + line);
+            }
+            if let Some(last) = labels.last() {
+                let over = (last.0 - (oy + ph)).max(0.0);
+                for label in &mut labels {
+                    label.0 -= over;
+                }
+            }
+            for (y, s, v) in labels {
+                let color = palette.color(chart.series[s].color);
+                if hover.category.is_none() {
+                    out.dot([ox + pw, vy(v)], 3.0, color);
+                }
+                out.label(
+                    ctx,
+                    &chart.format.format(v),
+                    Face::new(TextSize::Xs, Weight::Medium),
+                    color,
+                    [ox + pw + END_GAP, y],
+                    Align::Start,
+                    Align::Center,
+                );
+            }
+            if let Some(i) = hover.category {
+                for series in &chart.series {
+                    if let Some(Some(v)) = series.values.get(i) {
+                        let color = palette.color(series.color);
+                        out.dot([x_at(i), vy(*v)], 7.0, color.alpha(0.2));
+                        out.dot([x_at(i), vy(*v)], 3.5, color);
+                    }
                 }
             }
             for (i, label) in chart.x.iter().enumerate().take(n) {
@@ -595,11 +914,16 @@ fn paint_plot(
                 } else {
                     Align::Center
                 };
+                let color = if hover.category == Some(i) {
+                    palette.text
+                } else {
+                    muted
+                };
                 out.label(
                     ctx,
                     label,
                     xs(),
-                    muted,
+                    color,
                     [x_at(i), oy + ph + AXIS_GAP / 2.0],
                     align,
                     Align::Start,
@@ -624,15 +948,45 @@ fn paint_plot(
             for (s, series) in chart.series.iter().enumerate() {
                 let color = palette.color(series.color);
                 for (ix, (x, y)) in series.points.iter().enumerate() {
-                    let r = if hover.point == Some((s, ix)) {
-                        5.0
+                    let at = [sx(*x), vy(*y)];
+                    if hover.point == Some((s, ix)) {
+                        out.dot(at, 9.0, color.alpha(0.2));
+                        out.dot(at, 5.0, color);
                     } else {
-                        3.0
-                    };
-                    out.dot([sx(*x), vy(*y)], r, color);
+                        let faded = hover.point.is_some_and(|(hs, _)| hs != s);
+                        out.dot(at, 3.5, color.alpha(if faded { DIM } else { 0.9 }));
+                    }
                 }
             }
         }
+    }
+}
+
+/// The zero line: the one firm rule, over the marks it anchors.
+fn baseline(
+    out: &mut Paint,
+    palette: &Palette,
+    horizontal: bool,
+    [ox, oy, pw, ph]: [f32; 4],
+    x: f32,
+    y: f32,
+) {
+    if horizontal {
+        out.stroke(
+            [[x, oy], [x, oy + ph]],
+            false,
+            1.0,
+            None,
+            palette.border_strong,
+        );
+    } else {
+        out.stroke(
+            [[ox, y], [ox + pw, y]],
+            false,
+            1.0,
+            None,
+            palette.border_strong,
+        );
     }
 }
 

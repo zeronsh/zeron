@@ -19,7 +19,6 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-
-[dev-dependencies]
+# `check_visual` runs a script exactly as `show_visual`'s engine check does.
 zeron-visual.workspace = true
 tempfile.workspace = true

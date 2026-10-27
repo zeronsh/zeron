@@ -172,6 +172,8 @@ name (default: the local engine's device).
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
+| `read_visual_docs` | None: the script reference, served by the MCP server (origin chat only) |
+| `check_visual`     | None: `zeron_visual::check` in the MCP server, nothing stored or shown (origin chat only) |
 | `show_image`       | `PublishImage {chatId, name, data}` (origin chat only; the file base64, read by the MCP server from the agent's cwd) |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
@@ -218,7 +220,12 @@ done (this was the one bug the first live run found).
 
 `show_visual` is listed only when `ZERON_CHAT_ID` is set: it shows an
 interactive visual (chart, table, dashboard, diagram, simulation, 3D view)
-inline in the calling chat, above the agent's final reply. A visual is a Luau
+inline in the calling chat, above the agent's final reply. Its description is
+a short summary; the script API and style rules come from `read_visual_docs`,
+which an agent reads once before its first visual in a chat, so the reference
+isn't carried in every chat's tool list on every turn. `check_visual` runs a
+script exactly as `show_visual` will, without storing or showing it, so an
+agent can iterate on a draft. All three are listed together. A visual is a Luau
 script, not a web page. The script builds its data and state once and returns a
 view function; the view returns a tree of `ui.*` nodes (rows, columns, grids,
 text, stats, tables, charts, tabs, toggles, sliders, buttons, links, 2D
@@ -256,7 +263,15 @@ bloom, so it never sits in a black box.
 The engine runs every script before showing it (`zeron_visual::check`: setup,
 the first render, every canvas and scene draw, then each tab, toggle, slider
 end, and button once) and returns the first error with its line, so the agent
-fixes it before the reader sees anything. A passing script is stored in uploads
+fixes it before the reader sees anything. Every tabs control, including tabs
+inside a tab, is then checked on a fresh run: selecting each option must
+select it, no two options may show the same view (tree and drawings), and the
+first render must match the tab shown selected (state that starts nil fails
+here). A string the script compares against that matches an option only up to
+case (`s.tab == "details"` for `"Details"`) is an error too. Children and table
+cells are read past nil holes, so `{ a, cond and b or nil, c }` keeps `c`; tab
+options may be `{ label, value }` pairs, and `value` may hold the selected
+option's position, in which case `on_change` receives positions. A passing script is stored in uploads
 (`{id}-visual.luau`) and a `visual` doc part is folded into the chat's live turn
 through the run's engine event channel; with no live turn on this device the
 call fails and nothing is stored. The doc carries only the path and title, so

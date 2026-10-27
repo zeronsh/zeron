@@ -276,6 +276,8 @@ const MAX_TEXT: usize = 8000;
 /// functions it references.
 pub(crate) struct Parser {
     pub handlers: Vec<Function>,
+    /// For tabs: the Lua value each option hands its `on_change`, by handler.
+    pub choices: std::collections::HashMap<HandlerId, Vec<(String, Value)>>,
     nodes: usize,
 }
 
@@ -303,6 +305,7 @@ impl Parser {
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            choices: Default::default(),
             nodes: 0,
         }
     }
@@ -349,8 +352,8 @@ impl Parser {
                 if table.raw_get::<Option<String>>("__kind")?.is_some() {
                     out.push(self.node(&table, depth)?);
                 } else {
-                    for child in table.sequence_values::<Value>() {
-                        self.children_into(child?, out, depth + 1)?;
+                    for child in array_slots(&table)? {
+                        self.children_into(child, out, depth + 1)?;
                     }
                 }
             }
@@ -398,8 +401,8 @@ impl Parser {
             "column" | "row" => {
                 props.allow(&["gap", "align", "justify", "wrap", "hover", "on_click"])?;
                 let mut children = Vec::new();
-                for child in table.sequence_values::<Value>() {
-                    self.children_into(child?, &mut children, depth + 1)?;
+                for child in array_slots(table)? {
+                    self.children_into(child, &mut children, depth + 1)?;
                 }
                 NodeKind::Stack(Stack {
                     axis: if kind == "row" {
@@ -422,8 +425,8 @@ impl Parser {
             "grid" => {
                 props.allow(&["columns", "gap"])?;
                 let mut children = Vec::new();
-                for child in table.sequence_values::<Value>() {
-                    self.children_into(child?, &mut children, depth + 1)?;
+                for child in array_slots(table)? {
+                    self.children_into(child, &mut children, depth + 1)?;
                 }
                 NodeKind::Grid {
                     columns: props.number("columns")?.unwrap_or(3.0).clamp(1.0, 12.0) as u16,
@@ -599,22 +602,35 @@ impl Parser {
             }
             "tabs" => {
                 props.allow(&["options", "value", "on_change"])?;
-                let options: Vec<String> = props
-                    .get::<Option<Vec<Value>>>("options")?
-                    .unwrap_or_default()
-                    .iter()
-                    .map(value_text)
-                    .collect();
-                if options.is_empty() {
+                let mut choices = tab_choices(&props)?;
+                if choices.is_empty() {
                     return Err(props.error("needs options = { ... }"));
                 }
-                let value = props
-                    .text_value("value")?
-                    .unwrap_or_else(|| options[0].clone());
+                let value = match props.table.raw_get::<Value>("value")? {
+                    Value::Nil => choices[0].0.clone(),
+                    value => match choices.iter().position(|(_, v)| same_value(v, &value)) {
+                        Some(ix) => choices[ix].0.clone(),
+                        // `value = s.tab` holding a position (`tab = 1`):
+                        // select by position and hand positions back.
+                        None => match as_number(&value).filter(|n| n.fract() == 0.0) {
+                            Some(n) if n >= 1.0 && n <= choices.len() as f64 => {
+                                let n = n as usize;
+                                for (ix, choice) in choices.iter_mut().enumerate() {
+                                    choice.1 = Value::Number(ix as f64 + 1.0);
+                                }
+                                choices[n - 1].0.clone()
+                            }
+                            _ => props.text_value("value")?.unwrap_or_default(),
+                        },
+                    },
+                };
+                let on_change = self.required_function(&props, "on_change")?;
+                let options = choices.iter().map(|(label, _)| label.clone()).collect();
+                self.choices.insert(on_change, choices);
                 NodeKind::Tabs {
                     options,
                     value,
-                    on_change: self.required_function(&props, "on_change")?,
+                    on_change,
                 }
             }
             "toggle" => {
@@ -688,8 +704,8 @@ impl Parser {
         ])?;
         let mut spans = Vec::new();
         let mut len = 0usize;
-        for child in props.table.sequence_values::<Value>() {
-            let span = match child? {
+        for child in array_slots(props.table)? {
+            let span = match child {
                 Value::Table(table)
                     if table.raw_get::<Option<String>>("__kind")?.as_deref() == Some("span") =>
                 {
@@ -698,11 +714,7 @@ impl Parser {
                         kind: "span",
                     };
                     span_props.allow(&["weight", "color", "mono", "italic"])?;
-                    let text: String = table
-                        .sequence_values::<Value>()
-                        .map(|v| v.map(|v| value_text(&v)))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .concat();
+                    let text: String = array_slots(&table)?.iter().map(value_text).collect();
                     Span {
                         text,
                         weight: span_props.weight()?,
@@ -763,8 +775,7 @@ impl Parser {
         let mut rows = Vec::new();
         for row in props.get::<Option<Vec<Table>>>("rows")?.unwrap_or_default() {
             let mut cells = Vec::new();
-            for cell in row.sequence_values::<Value>() {
-                let cell = cell?;
+            for cell in array_slots(&row)? {
                 let numeric = matches!(cell, Value::Integer(_) | Value::Number(_));
                 let mut out = Vec::new();
                 self.children_into(cell, &mut out, depth + 1)?;
@@ -1067,6 +1078,92 @@ pub(crate) fn parse_color(value: Value) -> Result<Option<Color>, VisualError> {
             )));
         }
     })
+}
+
+/// Tab options as (label, the value `on_change` receives): plain strings or
+/// numbers, or `{ label = "Overview", value = "overview" }` (also
+/// `{ "Overview", "overview" }`) when the shown label and the state differ.
+fn tab_choices(props: &Props) -> Result<Vec<(String, Value)>, VisualError> {
+    let Some(options) = props.get::<Option<Table>>("options")? else {
+        return Ok(Vec::new());
+    };
+    let mut choices = Vec::new();
+    for option in array_slots(&options)? {
+        choices.push(match option {
+            Value::Nil | Value::Boolean(false) => continue,
+            Value::Table(t) => {
+                let label = match t.raw_get::<Value>("label")? {
+                    Value::Nil => t.raw_get::<Value>(1)?,
+                    label => label,
+                };
+                let value = match t.raw_get::<Value>("value")? {
+                    Value::Nil => t.raw_get::<Value>(2)?,
+                    value => value,
+                };
+                let value = if value.is_nil() { label.clone() } else { value };
+                if !matches!(
+                    label,
+                    Value::String(_) | Value::Integer(_) | Value::Number(_)
+                ) {
+                    return Err(props.error(
+                        "options are strings, or { label = \"Shown\", value = \"state\" }",
+                    ));
+                }
+                (clip(value_text(&label)), value)
+            }
+            value => (clip(value_text(&value)), value),
+        });
+    }
+    Ok(choices)
+}
+
+/// Lua equality for the plain values a tab option can hold.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(a), Value::String(b)) => a.as_bytes() == b.as_bytes(),
+        (Value::Boolean(a), Value::Boolean(b)) => a == b,
+        _ => match (as_number(a), as_number(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
+    }
+}
+
+fn as_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(n) => Some(*n as f64),
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// A table's array part in index order, with holes as nil. A constructor
+/// like `{ a, cond and b or nil, c }` keeps `c` at index 3, but
+/// `sequence_values` (and `ipairs`) stop at the hole and drop it: the classic
+/// "only the first tab shows anything" bug. Children skip the nils; table
+/// cells keep them as blanks so later cells stay in their columns.
+pub(crate) fn array_slots(table: &Table) -> mlua::Result<Vec<Value>> {
+    let mut entries = Vec::new();
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let index = match key {
+            Value::Integer(n) if n >= 1 => n as usize,
+            Value::Number(n) if n >= 1.0 && n.fract() == 0.0 && n < 1e9 => n as usize,
+            _ => continue,
+        };
+        entries.push((index, value));
+    }
+    entries.sort_unstable_by_key(|(index, _)| *index);
+    let last = entries.last().map_or(0, |(index, _)| *index);
+    // Sparse indexes (`{ [1000000] = x }`) keep their order without padding.
+    if last > entries.len() * 2 + 64 {
+        return Ok(entries.into_iter().map(|(_, value)| value).collect());
+    }
+    let mut slots = vec![Value::Nil; last];
+    for (index, value) in entries {
+        slots[index - 1] = value;
+    }
+    Ok(slots)
 }
 
 pub(crate) fn value_text(value: &Value) -> String {
