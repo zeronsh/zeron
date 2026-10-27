@@ -250,6 +250,16 @@ fn permission_mode(request: &RunRequest) -> &'static str {
     }
 }
 
+/// How much a CLI permission mode holds back on its own, least first.
+fn strictness(mode: &str) -> u8 {
+    match mode {
+        "bypassPermissions" => 0,
+        "acceptEdits" => 1,
+        "default" => 2,
+        _ => 3, // plan
+    }
+}
+
 /// Claude's file-changing tools: auto-accept edits allows these unasked.
 const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
@@ -773,11 +783,15 @@ impl Harness for ClaudeHarness {
     }
     /// Model, context window, effort, fast mode, thinking, ultracode, the
     /// access mode and plan mode all change on the live process
-    /// (`set_model`, `apply_flag_settings`, `set_permission_mode`). Only the
-    /// directory and `auto_approve` need a new one: the CLI switches to
-    /// `bypassPermissions` only if it launched able to.
+    /// (`set_model`, `apply_flag_settings`, `set_permission_mode`). The
+    /// directory and `auto_approve` need a new one — the CLI switches to
+    /// `bypassPermissions` only if it launched able to — and so does a
+    /// stricter permission mode: the prompt follows the switch on stdin, so
+    /// a switch the CLI refused would run it with less asked than chosen.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd && live.auto_approve == next.auto_approve
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && strictness(permission_mode(next)) <= strictness(permission_mode(live))
     }
     fn access_modes(&self) -> &[AccessMode] {
         &AccessMode::ALL
@@ -2300,7 +2314,13 @@ mod access_tests {
         assert!(harness.reconfigures_in_place(&full, &supervised));
         let planning = request(Supervised, false, true);
         assert!(!harness.same_runtime(&supervised, &planning));
-        assert!(harness.reconfigures_in_place(&supervised, &planning));
+        assert!(harness.reconfigures_in_place(&planning, &supervised));
+        // A stricter CLI mode relaunches: a refused switch must not leave
+        // the next prompt running with less asked.
+        assert!(!harness.reconfigures_in_place(&supervised, &planning));
+        let auto_edits = request(AutoAcceptEdits, false, false);
+        assert!(harness.reconfigures_in_place(&supervised, &auto_edits));
+        assert!(!harness.reconfigures_in_place(&auto_edits, &supervised));
         let auto_planning = request(FullAccess, true, true);
         let auto = request(FullAccess, true, false);
         assert!(harness.reconfigures_in_place(&auto_planning, &auto));

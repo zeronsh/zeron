@@ -26,14 +26,15 @@ pub(super) fn allowed_without_asking(access: AccessMode, params: &Value) -> bool
     action(params).is_none_or(|action| approval::allowed_without_asking(access, action))
 }
 
-/// The answer to a permission: yes selects `allow_once` (else
-/// `allow_always`), no `reject_once` (else `reject_always`). With neither
-/// on offer the request is `cancelled`, never answered with another option.
+/// The answer to a permission: yes selects `allow_once` — never
+/// `allow_always`, which would stop the agent asking — and no `reject_once`
+/// (else `reject_always`). Without such an option the request is
+/// `cancelled`, never answered with another one.
 pub(super) fn outcome(options: &[Value], allow: bool) -> Value {
-    let kinds = if allow {
-        ["allow_once", "allow_always"]
+    let kinds: &[&str] = if allow {
+        &["allow_once"]
     } else {
-        ["reject_once", "reject_always"]
+        &["reject_once", "reject_always"]
     };
     let option = kinds
         .iter()
@@ -106,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn answers_pick_the_once_options_and_fall_back_by_kind() {
+    fn answers_pick_the_once_options_and_never_allow_always() {
         let options = vec![
             json!({ "optionId": "always", "kind": "allow_always" }),
             json!({ "optionId": "once", "kind": "allow_once" }),
@@ -117,7 +118,11 @@ mod tests {
             |options: &[Value], allow| outcome(options, allow)["outcome"]["optionId"].clone();
         assert_eq!(picked(&options, true), "once");
         assert_eq!(picked(&options, false), "no");
-        assert_eq!(picked(&options[..1], true), "always");
+        // Only a lasting allow on offer: a yes must not grant it.
+        assert_eq!(
+            outcome(&options[..1], true),
+            json!({ "outcome": { "outcome": "cancelled" } })
+        );
         assert_eq!(picked(&options[..3], false), "never");
         // Nothing to refuse with: cancelled, not an allow.
         assert_eq!(

@@ -130,7 +130,7 @@ fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "default": "full-access", "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to, and can't exceed, the access of the chat you are speaking from." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
@@ -569,6 +569,11 @@ struct PendingTurn {
     start: TurnStart,
 }
 
+/// Least to most trusting.
+fn access_rank(mode: AccessMode) -> usize {
+    AccessMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
+}
+
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
     kind: Option<ChatKind>,
@@ -1004,6 +1009,9 @@ impl Tools {
 
         // Delegation is one level deep: a chat that has a parent never
         // creates chats, and a new chat's parent is a top-level chat.
+        // The calling chat's access mode caps the new one's: a supervised
+        // agent must not hand its work to one that asks nothing.
+        let mut ceiling = AccessMode::FullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
         {
@@ -1012,6 +1020,7 @@ impl Tools {
                 origin.parent_chat_id.is_none(),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
+            ceiling = origin.config.map(|c| c.access).unwrap_or_default();
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
@@ -1070,15 +1079,20 @@ impl Tools {
         };
         let access: AccessMode = match args.access.as_deref() {
             Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
-            None => AccessMode::FullAccess,
+            None => ceiling,
         };
+        anyhow::ensure!(
+            access_rank(access) <= access_rank(ceiling),
+            "This chat runs {}, so the chats it creates can't have more access than that.",
+            ceiling.label()
+        );
         // A Cloud machine's catalog is checked when it runs, not here; an
         // engine predating modes lists none and runs with full access.
         if let Some(info) = harnesses.iter().find(|h| h.id == harness).filter(|_| !args.cloud) {
             let modes = &info.access_modes;
             anyhow::ensure!(
                 access.is_full_access() || modes.contains(&access),
-                "{harness:?} on device {device_id} cannot run {:?} (accessModes: {})",
+                "{harness:?} on device {device_id} cannot run {} (accessModes: {})",
                 access.label(),
                 modes.iter().map(|m| m.label()).collect::<Vec<_>>().join(", ")
             );
@@ -1820,7 +1834,8 @@ mod tests {
                 ])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
-                      "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
+                      "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true,
+                      "accessModes": ["supervised", "auto-accept-edits", "full-access"], "supportsPlan": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
                 ])),
@@ -2385,6 +2400,59 @@ mod tests {
             device_id: None,
             ..Default::default()
         }
+    }
+
+    fn tools_from(world: &Arc<World>, chat: &str) -> Tools {
+        tools(world.clone(), origin(chat))
+    }
+
+    #[tokio::test]
+    async fn a_chat_creates_chats_with_no_more_access_than_its_own() {
+        let supervised = json!({
+            "id": "chat-careful", "deviceId": "dev-local", "title": "Careful",
+            "archived": false, "spaceId": "space-1",
+            "config": { "harness": "claude-code", "sandbox": "workspace-write", "access": "supervised" },
+            "createdAt": "2026-09-01T00:00:00Z"
+        });
+        let world = Arc::new(World {
+            extra_chats: vec![supervised],
+            ..Default::default()
+        });
+        let tools = tools_from(&world, "chat-careful");
+        tools.call("create_chat", json!({})).await.unwrap();
+        tools
+            .call("create_chat", json!({"access": "supervised", "plan": true}))
+            .await
+            .unwrap();
+        let err = tools
+            .call("create_chat", json!({"access": "full-access"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can't have more access"), "{err}");
+        let writes = world.writes.lock().unwrap();
+        let created: Vec<&Value> = writes
+            .iter()
+            .filter(|(_, w)| w["op"] == "createChat")
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0]["config"]["access"], "supervised", "inherited");
+        assert_eq!(created[1]["config"]["plan"], true);
+        drop(writes);
+        // A top-level chat with no mode of its own runs with full access,
+        // which its chats inherit (the field is omitted on the wire).
+        tools_from(&world, "chat-alpha-1")
+            .call("create_chat", json!({}))
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let last = writes
+            .iter()
+            .rev()
+            .find(|(_, w)| w["op"] == "createChat")
+            .unwrap();
+        assert!(last.1["config"].get("access").is_none());
     }
 
     #[tokio::test]

@@ -502,10 +502,10 @@ case "$turnline" in
   # Auto-accept edits: the workspace is writable (network on) and codex asks
   # to step outside it. A file change is accepted without asking; a command
   # and a permission grant are asked (the test answers No).
-  for want in '"approvalPolicy":"on-request"' '"sandbox":"workspace-write"' '"approvalsReviewer":"user"'; do
+  for want in '"approvalPolicy":"untrusted"' '"sandbox":"workspace-write"' '"approvalsReviewer":"user"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "auto-edits thread param missing: $want"; exit 0; }
   done
-  for want in '"approvalPolicy":"on-request"' '"type":"workspaceWrite"' '"networkAccess":true' '"approvalsReviewer":"user"'; do
+  for want in '"approvalPolicy":"untrusted"' '"type":"workspaceWrite"' '"networkAccess":true' '"approvalsReviewer":"user"'; do
     has "$turnline" "$want" || { fail_turn "$tid" "auto-edits turn param missing: $want"; exit 0; }
   done
   has "$turnline" 'collaborationMode' && { fail_turn "$tid" "collaborationMode without plan"; exit 0; }

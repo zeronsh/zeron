@@ -5781,6 +5781,14 @@ fn is_edit_permission(permission: &str) -> bool {
 /// opencode's own asks already.
 const ASKED_PERMISSIONS: [&str; 3] = ["bash", "webfetch", "websearch"];
 
+/// What a restricted mode still lets through unasked on 1.x, where every
+/// other tool — MCP tools, custom tools — is asked (`"*": "ask"`, verified
+/// live on 1.19.4): looking around, the agent's own todo list and
+/// questions, and subagents, whose tools answer to the same rules.
+const UNASKED_PERMISSIONS: [&str; 10] = [
+    "read", "glob", "grep", "list", "lsp", "todoread", "todowrite", "question", "task", "skill",
+];
+
 /// Where the `plan` agent writes its plan: `.opencode/plans/` in a
 /// repository, opencode's data directory otherwise (a path relative to the
 /// worktree); `*` spans directories.
@@ -5808,10 +5816,28 @@ fn access_config(
     match protocol {
         Protocol::V1 => {
             let rules = permission_object(object, "permission", "OPENCODE_CONFIG_CONTENT")?;
-            for permission in asked {
-                if rules.get(permission) != Some(&json!("deny")) {
-                    rules.insert(permission.into(), json!("ask"));
+            // The catch-all leads so every named rule after it wins.
+            let inherited = std::mem::take(rules);
+            let deny = json!("deny");
+            let all = match inherited.get("*") {
+                Some(rule) if *rule == deny => deny.clone(),
+                _ => json!("ask"),
+            };
+            rules.insert("*".into(), all);
+            rules.extend(inherited.into_iter().filter(|(name, _)| name != "*"));
+            let mut set = |permission: &str, rule: &str| {
+                if rules.get(permission) != Some(&deny) {
+                    rules.insert(permission.into(), json!(rule));
                 }
+            };
+            for permission in UNASKED_PERMISSIONS {
+                set(permission, "allow");
+            }
+            if !supervised {
+                set("edit", "allow");
+            }
+            for permission in asked {
+                set(permission, "ask");
             }
             if supervised {
                 let plan = object
@@ -6099,7 +6125,7 @@ http.createServer((req, res) => {
                 // Full access passes the run's config through untouched.
                 AccessMode::FullAccess => assert_eq!(config, json!({"model": "keep"})),
                 AccessMode::AutoAcceptEdits => {
-                    assert_eq!((edit, bash), (&Value::Null, &json!("ask")))
+                    assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
                 }
                 AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
             }

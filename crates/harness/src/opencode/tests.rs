@@ -2205,12 +2205,24 @@ fn access_config_asks_through_opencode_permission_rules() {
     let v1 = |inherited: Option<&str>, access| -> Value {
         serde_json::from_str(&access_config(inherited, access, Protocol::V1).unwrap()).unwrap()
     };
+    // Everything is asked but looking around (and, short of supervised,
+    // file changes); the catch-all leads so the named rules win.
+    let expected = |edit: &str, overrides: Value| -> Value {
+        let mut rules = json!({"*": "ask", "edit": edit, "bash": "ask", "webfetch": "ask",
+                               "websearch": "ask"});
+        for tool in UNASKED_PERMISSIONS {
+            rules[tool] = json!("allow");
+        }
+        for (name, rule) in overrides.as_object().unwrap() {
+            rules[name] = rule.clone();
+        }
+        rules
+    };
     let edits = v1(Some(r#"{"model": "keep"}"#), AccessMode::AutoAcceptEdits);
     assert_eq!(edits["model"], "keep");
-    assert_eq!(
-        edits["permission"],
-        json!({"bash": "ask", "webfetch": "ask", "websearch": "ask"})
-    );
+    assert_eq!(edits["permission"], expected("allow", json!({})));
+    let order: Vec<&String> = edits["permission"].as_object().unwrap().keys().collect();
+    assert_eq!(order[0], "*");
     assert!(edits.get("agent").is_none());
     let supervised = v1(
         Some(r#"{"permission": {"bash": "deny", "read": "allow"}}"#),
@@ -2218,8 +2230,7 @@ fn access_config_asks_through_opencode_permission_rules() {
     );
     assert_eq!(
         supervised["permission"],
-        json!({"bash": "deny", "read": "allow", "webfetch": "ask", "websearch": "ask",
-               "edit": "ask"})
+        expected("ask", json!({"bash": "deny"}))
     );
     // The plan agent keeps its edit denial and asks before its plan file.
     assert_eq!(
@@ -2230,12 +2241,17 @@ fn access_config_asks_through_opencode_permission_rules() {
         .as_object()
         .unwrap();
     assert_eq!(rules.keys().collect::<Vec<_>>(), ["*", PLAN_FILES]);
+    // An inherited allow-everything is overridden; a deny-everything kept.
     assert_eq!(
         v1(
             Some(r#"{"permission": "allow"}"#),
             AccessMode::AutoAcceptEdits
         )["permission"],
-        json!({"*": "allow", "bash": "ask", "webfetch": "ask", "websearch": "ask"})
+        expected("allow", json!({}))
+    );
+    assert_eq!(
+        v1(Some(r#"{"permission": "deny"}"#), AccessMode::Supervised)["permission"]["*"],
+        "deny"
     );
     // 2.x: ordered rules appended after the inherited ones.
     let v2: Value = serde_json::from_str(

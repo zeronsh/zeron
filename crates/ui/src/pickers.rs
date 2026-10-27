@@ -174,8 +174,10 @@ impl ResolvedRunConfig {
 
 /// The mode a run gets when `wanted` is not among those the harness
 /// `offered`: the most trusting offered mode that still asks at least as
-/// much, so a fallback never grants more than was picked. Nothing offered
-/// (an engine predating modes) runs as before, with full access.
+/// much. A harness with nothing that asks as much runs in its least
+/// trusting mode — for an agent that cannot ask at all, full access, which
+/// the chip then shows. Nothing offered (an engine predating modes) runs as
+/// before, with full access.
 pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode {
     if offered.is_empty() {
         return AccessMode::FullAccess;
@@ -4928,6 +4930,21 @@ impl Pickers {
         let modes = self.offered_access(cx);
         let current = self.effective_access(cx);
         let plan = self.plan_offered(cx).then(|| self.effective_plan(cx));
+        // An agent with one mode cannot ask before acting: say so.
+        let only = (modes.len() == 1)
+            .then(|| self.effective_descriptor(cx).map(|d| d.name.clone()))
+            .flatten()
+            .map(|name| {
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{name} can't ask before acting, so it always runs with {}.",
+                        modes[0].label().to_lowercase()
+                    )))
+            });
         let active = self.active;
         let plan_row = plan.map(|on| {
             let ix = modes.len();
@@ -4976,6 +4993,7 @@ impl Pickers {
                         )
                     })
             }))
+            .when_some(only, |menu, note| menu.child(note))
             .when_some(plan_row, |menu, row| {
                 menu.child(popover::menu_separator()).child(row)
             })
@@ -4983,14 +5001,15 @@ impl Pickers {
     }
 
     /// The access chip beside the model chip: the mode's glyph and name,
-    /// "Plan" in the accent when plan mode is on. None when the harness
-    /// offers no choice (one mode and no plan mode, or an older engine).
+    /// "Plan" in the accent when plan mode is on. Shown even when the agent
+    /// has a single mode, so a chat never runs with more access than it
+    /// says; None only before the catalog names the modes (or from an
+    /// engine predating them).
     fn access_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         if self.title.is_some() {
             return None;
         }
-        let modes = self.offered_access(cx);
-        if modes.len() < 2 && !self.plan_offered(cx) {
+        if self.offered_access(cx).is_empty() {
             return None;
         }
         let mode = self.effective_access(cx);

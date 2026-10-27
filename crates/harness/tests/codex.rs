@@ -720,7 +720,7 @@ async fn auto_accept_edits_applies_file_changes_and_asks_before_the_rest() {
     req.access = AccessMode::AutoAcceptEdits;
     let events = run_to_end(&harness(), req, controls).await;
 
-    // The fake checks the on-request / workspace-write wire and completes
+    // The fake checks the untrusted / workspace-write wire and completes
     // only after the file change is accepted and the rest declined.
     assert!(
         matches!(

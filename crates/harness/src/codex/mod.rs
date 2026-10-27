@@ -24,8 +24,10 @@
 //! - Approvals + sandbox follow the run's [`AccessMode`], on every
 //!   `turn/start` (so a change applies from the next turn in place): full
 //!   access is `"never"` + `danger-full-access`, as every run was before
-//!   modes; auto-accept edits is `"on-request"` + `workspace-write`;
-//!   supervised is `"untrusted"` + `read-only`. A title run stays `"never"`
+//!   modes; auto-accept edits is `"untrusted"` + `workspace-write` (every
+//!   command but codex's known-safe reads is asked, even inside the
+//!   sandbox; file changes are accepted); supervised is `"untrusted"` +
+//!   `read-only`. A title run stays `"never"`
 //!   + `read-only`. `item/commandExecution/requestApproval`,
 //!   `item/fileChange/requestApproval` and `item/permissions/requestApproval`
 //!   the mode does not cover round-trip through
@@ -411,14 +413,15 @@ fn run_access(request: &RunRequest) -> AccessMode {
 
 /// The approval policy and sandbox a run's thread and turns get. Full access
 /// is codex's `--dangerously-bypass-approvals-and-sandbox`, as every run was
-/// before modes; auto-accept edits writes the workspace and asks to step
-/// outside it; supervised asks before anything but codex's known-safe reads.
+/// before modes; auto-accept edits writes the workspace and, like
+/// supervised, asks before anything but codex's known-safe reads (under
+/// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
 /// A title run never asks and never writes, whatever its chat's mode.
 fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
     match access {
         _ if title_only => ("never", SandboxLevel::ReadOnly),
         AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
-        AccessMode::AutoAcceptEdits => ("on-request", SandboxLevel::WorkspaceWrite),
+        AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
         AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
     }
 }
@@ -2948,7 +2951,7 @@ mod tests {
         assert_eq!(
             wire(AccessMode::AutoAcceptEdits, false),
             (
-                "on-request",
+                "untrusted",
                 "workspace-write",
                 json!({"type": "workspaceWrite", "networkAccess": true})
             )

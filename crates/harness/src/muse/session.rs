@@ -719,10 +719,9 @@ impl Runner {
                 })
                 .cloned()
         };
-        let allow = pick("approved", Some("once"))
-            .or_else(|| pick("approved", None))
-            .or_else(|| pick("approvedForSession", None))
-            .or_else(|| pick("approvedPolicyAmendment", Some("session")));
+        // A person's yes allows this once; only a run that asks nothing
+        // may take a broader choice when Muse offers no single one.
+        let once = pick("approved", Some("once")).or_else(|| pick("approved", None));
         let deny = pick("denied", None).or_else(|| pick("abort", None));
         let decide = {
             let client = self.client.clone();
@@ -749,7 +748,12 @@ impl Runner {
         let input = self.input.clone();
         let ask = !self.read_only && !super::full_access(&self.request);
         let Some(input) = input.filter(|_| ask) else {
-            let choice = if self.read_only || ask { deny } else { allow };
+            let choice = if self.read_only || ask {
+                deny
+            } else {
+                once.or_else(|| pick("approvedForSession", None))
+                    .or_else(|| pick("approvedPolicyAmendment", Some("session")))
+            };
             if let Some(id) = decide(choice)? {
                 self.pending.insert(id, Pending::Other("approval/decide"));
             }
@@ -760,7 +764,7 @@ impl Runner {
         let task = self.dialogs.spawn(async move {
             let answers = answers.await.unwrap_or_default();
             let choice = if crate::approval::approved(&question, &answers) {
-                allow
+                once
             } else {
                 deny
             };
