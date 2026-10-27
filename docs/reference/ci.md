@@ -25,9 +25,10 @@ Pull requests, `main` and the merge queue all go through one workflow,
 | iOS simulator | the app, `crates/mobile` or `crates/client` changed | with iOS core |
 | Windows tests, macOS | only when the change looks platform specific | when their files change |
 | Windows packaging (`app`) | `apps/zeron`, `dist/windows`, packaging scripts, `crates/update` | with Windows tests |
-| Linux and macOS browser / preview fixtures | browser, preview or edge code changed | always |
+| macOS browser / preview fixtures | browser, preview or edge code changed | always |
+| Linux browser fixture | nightly or `ci:full` only | nightly or manual run only |
 | Android APK | the Android app or `crates/mobile` changed | when its files change |
-| Voice (audio stack, Windows media runtime) | `crates/audio`, `crates/voice-media`, `dist/voice` changed | the same, and `Cargo.*` |
+| Voice (audio stack, Windows media runtime) | nightly or `ci:full` only | nightly or manual run only |
 | GPUI frame-source | the pinned GPUI revision moved | the same |
 
 The `iOS core` paths come from the Cargo graph: every crate `zeron-mobile`
@@ -50,7 +51,12 @@ everything.
 ### Scheduled runs
 
 - **Nightly** (`ci.yml`, schedule): every suite, job and fixture, nothing
-  reused, slow tests included.
+  reused, slow tests included. Voice and the Linux browser fixture run only
+  here, on manual runs and with `ci:full`: in the two weeks measured, the
+  voice jobs left after the move to `core-tests` never failed, and the Linux
+  browser fixture's failures were window-timing flakes and package downloads.
+  The rest of voice (protocol, transport, MCP, voice-media) runs in
+  `core-tests`, `ios-core` and the Windows tests.
 - **Nightly** (`release-profile-tests.yml`): core and UI in the release profile.
 - **Weekly** (`weekly-tests.yml`): the tests no other workflow runs. That is
   every `zeron-engine` integration binary, plus the crates whose own tests have
@@ -118,7 +124,8 @@ Which recorded passes count:
 
 | Run | Reuses passes from |
 |---|---|
-| Pull request | its own earlier runs, and `main` |
+| Pull request from a branch of this repository | its own earlier runs, and `main` |
+| Pull request from a fork | `main` only (its own too with `CI_FORK_REUSE=own`) |
 | `main` | `main` only |
 | Merge queue (the last gate before `main`), `ci:full` label, manual run | nothing |
 
@@ -131,8 +138,13 @@ Reuse fails closed:
   code (`.parent()`, `.ancestors()`, `join("..")`), the scan can't follow it.
   That suite then counts the whole workspace as its input.
 
-A pull request could fake a pass in its own runs, but it could just as well
-edit its own workflows. No other ref ever sees those entries.
+A pull request could fake a pass in its own runs: an earlier push whose edited
+workflow saves the pass entry for the fingerprint of a later, clean-looking
+commit would let that commit's suites be skipped. No other ref ever sees those
+entries, but until the merge queue (which reuses nothing) is the required gate,
+a green `CI result` on the pull request is what a reviewer goes by. So forks
+reuse only `main`'s passes; set `CI_FORK_REUSE=own` once the merge queue is
+required.
 
 Changing what goes into a fingerprint (`SUITE_INPUTS`, `COMMON`,
 `SUITE_PACKAGES` in `reuse.py`) changes every fingerprint once, so the next run
@@ -212,13 +224,18 @@ Repository variables:
 | `CI_ADMISSION` | on | `off` starts every run at once |
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
 | `CI_LOCK_HOURS` | 6 | How long a `ci:lock` label holds runners |
+| `CI_FORK_REUSE` | (unset) | `own`: fork pull requests also reuse their own earlier passes. Set it once the merge queue is required |
 
 A pull request can edit its own copy of `ci.yml`, so the reservation other runs
 read from its admit job is not trusted:
 
 - it is capped at a full run (`MAX_RESERVATION`);
-- jobs an admitted run reserved but never created stop counting 90 minutes
-  after admission.
+- jobs an admitted run reserved but never created stop counting 10 minutes
+  after admission, except the `CI result` job and Android publishing, which
+  start late (90 minutes);
+- a waiting run that could have been admitted for 3 minutes but still waits
+  (an edited admit step that never finishes) is ignored: the runs behind it
+  stop waiting for it.
 
 Admission ensures that all of a run's runners were free when it started. It
 can't stop jobs it doesn't see from taking runners in the meantime: other
@@ -241,9 +258,16 @@ other.
 priority, overlapping locks, any polling order) and checks that every run gets
 admitted. The scheduler before this rule deadlocked in about 1 in 10 of them.
 
-One case is outside the model. If every runner in the pool is taken by a
-waiting `admit` job (about 20 runs waiting at once), admitted runs get no
-runner until something else finishes. The fail-open timeout below bounds it.
+Waiting costs a runner: an `admit` job runs on the same hosted pool as the
+suites. With about 20 runs waiting at once, their admit jobs took the whole
+pool, admitted runs' jobs got no runner, and nothing moved until the 2-hour
+timeout. So when an admitted run's Linux or Windows job has been queued for 10
+minutes, every waiting admit job but the first 5 (a quarter of
+`CI_BUDGET_TOTAL`) in the queue gives its runner back and starts its run
+without a reservation. Others count that run as holding its runners, so
+admission catches up. The test models GitHub's runner pool as well as
+admission: without this rule most of its 30-run queues never drain, with it
+all of them do.
 
 Admission never blocks CI. It lets the run start anyway if:
 
@@ -257,7 +281,10 @@ admission:
 
 - uses conditional requests, which cost nothing when nothing changed;
 - refetches a run's jobs only when the run changed;
-- polls less often the further back in the queue it is.
+- polls every 30 s at the head of the queue, 1 and 2 min at the next two
+  places, 5 min further back, and 10 min when fewer than 400 requests are
+  left. The quota is shared with every workflow (releases, the Cursor SDK
+  update, CI emergency).
 
 ## Caches
 

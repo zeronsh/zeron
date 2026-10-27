@@ -240,7 +240,7 @@ class ReusePlanTests(unittest.TestCase):
 class PlanMainTests(unittest.TestCase):
     """plan.py end to end on a fake repository and API."""
 
-    def run_plan(self, event, payload, caches, labels=(), files=None):
+    def run_plan(self, event, payload, caches, labels=(), files=None, head_repo="o/r", extra_env=None):
         repo = FakeRepo()
         self.addCleanup(repo.dir.cleanup)
         out = pathlib.Path(repo.root, "out")
@@ -254,7 +254,8 @@ class PlanMainTests(unittest.TestCase):
             if path.endswith("/files?per_page=100&page=1"):
                 return files
             if "/pulls/" in path:
-                return {"number": 3, "changed_files": 1, "labels": [{"name": n} for n in labels]}
+                return {"number": 3, "changed_files": 1, "labels": [{"name": n} for n in labels],
+                        "head": {"repo": {"full_name": head_repo} if head_repo else None}}
             return {"files": files}
 
         env = {"GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": "refs/pull/3/merge",
@@ -262,7 +263,9 @@ class PlanMainTests(unittest.TestCase):
         old_env, old_api, cwd = dict(os.environ), plan.api, os.getcwd()
         packages, inputs = dict(reuse.SUITE_PACKAGES), dict(reuse.SUITE_INPUTS)
         try:
+            os.environ.pop("CI_FORK_REUSE", None)
             os.environ.update(env)
+            os.environ.update(extra_env or {})
             os.environ.pop("GITHUB_STEP_SUMMARY", None)
             plan.api = fake_api
             reuse.SUITE_PACKAGES.clear()
@@ -294,6 +297,22 @@ class PlanMainTests(unittest.TestCase):
         self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests"]})
         self.assertLess(int(second["reservation"].split()[0].split("=")[1]),
                         int(first["reservation"].split()[0].split("=")[1]))
+
+    def test_forks_reuse_only_mains_passes(self):
+        first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [], head_repo="someone/r")
+        key = json.loads(first["keys"])["core"] + "-core-tests"
+        own = [{"key": key, "ref": "refs/pull/3/merge"}]
+        self.assertTrue(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, own,
+                                                 head_repo="someone/r")["suites"])["core"])
+        self.assertTrue(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, own,
+                                                 head_repo=None)["suites"])["core"])  # deleted fork
+        mains = [{"key": key, "ref": "refs/heads/main"}]
+        self.assertFalse(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, mains,
+                                                  head_repo="someone/r")["suites"])["core"])
+        # CI_FORK_REUSE=own, once the merge queue is required.
+        self.assertFalse(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, own,
+                                                  head_repo="someone/r",
+                                                  extra_env={"CI_FORK_REUSE": "own"})["suites"])["core"])
 
     def test_the_merge_queue_reuses_nothing(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])

@@ -85,8 +85,16 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(plan.plan(f, "fast")["ios"])
 
     def test_ci_changes_run_everything(self):
-        self.assertTrue(all(plan.plan(files("scripts/ci/admit.py"), "fast").values()))
-        self.assertTrue(all(plan.plan(None, "fast").values()))
+        daytime = set(plan.SUITE_JOBS) - set(plan.NIGHTLY_SUITES)
+        self.assertEqual(selected(plan.plan(files("scripts/ci/admit.py"), "fast")), daytime)
+        self.assertEqual(selected(plan.plan(None, "fast")), daytime)
+        self.assertTrue(all(plan.plan(None, "full", nightly=True).values()))
+
+    def test_voice_runs_only_nightly(self):
+        change = files("crates/audio/src/aec.rs", patch="+let x = 1;")
+        self.assertFalse(plan.plan(change, "fast")["voice"])
+        self.assertFalse(plan.plan(change, "full")["voice"])
+        self.assertTrue(plan.plan(change, "full", nightly=True)["voice"])
 
     def test_edge_and_installer(self):
         self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
@@ -118,6 +126,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(flags, {})
         browser = files("crates/ui/src/browser/view.rs", patch='+let a = 1;')
         off, flags = plan.gated(browser, "fast", plan.plan(browser, "fast"))
+        self.assertEqual(flags, {})  # the Linux browser fixture runs nightly
+        off, flags = plan.gated(browser, "fast", plan.plan(browser, "fast"), nightly=True)
         self.assertEqual(flags, {"ui": ["browser"]})
         app = files("crates/mobile/src/lib.rs", "apps/zeron/src/main.rs", patch="+x")
         off, flags = plan.gated(app, "fast", plan.plan(app, "fast"))
@@ -127,16 +137,21 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan.gated(sync, "fast", plan.plan(sync, "fast"))[0], {"ios": ["ios-tests"]})
         full_off, full_flags = plan.gated(change, "full", plan.plan(change, "full"))
         self.assertEqual(full_off, {})
-        self.assertEqual(full_flags, {"ui": ["browser"], "macos": ["fixtures"]})
+        self.assertEqual(full_flags, {"macos": ["fixtures"]})
+        nightly = plan.gated(change, "full", plan.plan(change, "full", nightly=True), nightly=True)
+        self.assertEqual(nightly[1], {"ui": ["browser"], "macos": ["fixtures"]})
 
     def test_reservation(self):
-        suites = plan.plan(files("Cargo.lock"), "full")
+        suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
         # result + core + ui + cursor + voice + ios-core + apk; voice runtime + windows x2; native + ios-tests
         self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 2})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 8)  # + android publish
         self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=2")
+        daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
+                                   "refs/heads/main")
+        self.assertEqual(daytime, {"linux": 7, "windows": 2, "macos": 2})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})

@@ -23,11 +23,12 @@ Git object ids identify the contents, so the fingerprint is the hash of the
 sorted (path, object id) list. The ids come from `git ls-tree` on the checked
 out commit: no file needs to be read except the Rust sources that are scanned.
 
-Which passes count: a pull request trusts its own earlier runs and main's;
-main trusts only main's; the merge queue, the last gate before main, reuses
+Which passes count: a pull request trusts its own earlier runs and main's (a
+fork only main's, unless CI_FORK_REUSE=own: its earlier runs could have
+forged a pass for the fingerprint of the commit it asks to merge); main
+trusts only main's; the merge queue, the last gate before main, reuses
 nothing. If a pull request changes a Rust build file no selected suite's
-fingerprint covers, nothing is reused either (fail closed). (A pull request could forge a pass
-in its own runs, as it could edit its own workflows, but no other ref sees it.)
+fingerprint covers, nothing is reused either (fail closed).
 The `ci:full` label and manual runs reuse nothing.
 
 Two refinements: a suite's gated jobs and optional steps (plan.py's JOB_PATHS

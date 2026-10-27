@@ -30,6 +30,10 @@ Android) only run when the change can plausibly be platform specific: their
 own files, or Rust/script hunks that mention the platform (cfg(windows),
 target_os, objc, WebKit...). Linux, iOS (already selective) and the cheap
 suites run as on the full tier. Changes to CI itself run everything.
+
+Nightly only. Some checks cost more runner time than the regressions they
+catch on pull requests and main (NIGHTLY_SUITES, NIGHTLY_FLAGS): they run on
+the nightly schedule, on manual runs and with the `ci:full` label.
 """
 
 from __future__ import annotations
@@ -61,6 +65,13 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
 }
+# Run only nightly, manually or with `ci:full` (see the module docstring): voice
+# (the AEC3 audio stack and the packaged Windows media runtime; no failures of
+# their own in the two weeks measured, and the rest of voice is tested in
+# core-tests, ios-core and the Windows tests) and the Linux native browser
+# fixture (its failures were window-timing flakes and package downloads).
+NIGHTLY_SUITES = ("voice",)
+NIGHTLY_FLAGS = (("ui", "browser"),)
 # Suites whose jobs are independent, so one can be skipped while another runs.
 SPLITTABLE = ("voice", "windows")
 
@@ -236,8 +247,20 @@ def gpui_moved(files: list[dict]) -> bool:
     return False
 
 
-def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None) -> dict[str, bool]:
-    """files: [{"filename", "previous_filename"?, "patch"?}], or None for "everything"."""
+def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None,
+         nightly: bool = False) -> dict[str, bool]:
+    """files: [{"filename", "previous_filename"?, "patch"?}], or None for "everything".
+
+    `nightly`: the nightly schedule, a manual run or `ci:full`, which also run NIGHTLY_SUITES.
+    """
+    suites = select(files, tier, mobile)
+    if not nightly:
+        for suite in NIGHTLY_SUITES:
+            suites[suite] = False
+    return suites
+
+
+def select(files: list[dict] | None, tier: str, mobile: list[str] | None) -> dict[str, bool]:
     if files is None:
         return {suite: True for suite in SUITE_JOBS}
     files = [f for f in files if not version_only(f)]
@@ -261,8 +284,10 @@ def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None) -
     return suites
 
 
-def gated(files: list[dict] | None, tier: str, suites: dict[str, bool]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Fast tier: (jobs not needed, flags on) per selected suite. The full tier runs everything."""
+def gated(files: list[dict] | None, tier: str, suites: dict[str, bool],
+          nightly: bool = False) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Fast tier: (jobs not needed, flags on) per selected suite. The full tier runs
+    everything but NIGHTLY_FLAGS, which only `nightly` runs."""
     paths = None if files is None else ({f["filename"] for f in files}
                                         | {f["previous_filename"] for f in files if f.get("previous_filename")})
     everything = tier != "fast" or paths is None or any(p in CI_SELF for p in paths)
@@ -272,6 +297,8 @@ def gated(files: list[dict] | None, tier: str, suites: dict[str, bool]) -> tuple
         if suites.get(suite) and not everything and not any(matches(p, patterns) for p in paths):
             off.setdefault(suite, []).append(job)
     for (suite, flag), patterns in FLAG_PATHS.items():
+        if (suite, flag) in NIGHTLY_FLAGS and not nightly:
+            continue
         if suites.get(suite) and (everything or any(matches(p, patterns) for p in paths)):
             flags.setdefault(suite, []).append(flag)
     return off, flags
@@ -357,6 +384,8 @@ def main() -> int:
         payload = json.load(f)
 
     tier = "full"
+    # The nightly schedule and manual runs (and `ci:full`, below) also run the nightly-only checks.
+    nightly = event in ("schedule", "workflow_dispatch")
     files: list[dict] | None = None
     why = ""
     # Refs whose recorded passes this run may reuse (none: run everything selected).
@@ -369,8 +398,17 @@ def main() -> int:
             labels = {label["name"] for label in pr.get("labels", [])}
             if "ci:full" in labels:
                 why = "label ci:full: every suite, nothing reused"
+                nightly = True
             else:
-                trusted = {ref, "refs/heads/main"}
+                # A fork's earlier runs could have recorded a pass for any fingerprint
+                # (its own edited workflows write the cache), including the one of the
+                # commit it asks to merge: forks reuse main's passes only, until the
+                # merge queue (which reuses nothing) is the required gate and
+                # CI_FORK_REUSE=own turns this back on.
+                head_repo = (pr.get("head", {}).get("repo") or {}).get("full_name")
+                fork = head_repo != repo
+                own = not fork or os.environ.get("CI_FORK_REUSE", "") == "own"
+                trusted = {ref, "refs/heads/main"} if own else {"refs/heads/main"}
                 if os.environ.get("CI_PR_TIER", "fast") == "full":
                     why = "CI_PR_TIER=full"
                 else:
@@ -393,8 +431,8 @@ def main() -> int:
         mobile = [d + "/**" for d in sorted(reuse.Workspace(".").closure(["zeron-mobile"]))] + ["crates/mobile-bindgen/**"]
     except (OSError, ValueError, KeyError) as error:
         print(f"::warning::could not read the workspace ({error}); using the static mobile core list")
-    selected = plan(files, tier, mobile)
-    off, flags = gated(files, tier, selected)
+    selected = plan(files, tier, mobile, nightly)
+    off, flags = gated(files, tier, selected, nightly)
     # What a job does depends on its gated jobs and flags too: they are part of the fingerprint.
     variants = {suite: " ".join(f"-{j}" for j in off.get(suite, [])) + " " + " ".join(flags.get(suite, []))
                 for suite, on in selected.items() if on}
@@ -456,8 +494,10 @@ def main() -> int:
         lines.append(f"| {suite} | {state} | {'; '.join(notes)} |")
     lines += ["", f"Reserved runners: `{out['reservation']}`"]
     if tier == "fast":
-        lines += ["", "Windows, macOS, voice and Android run on pull requests only when the change looks "
+        lines += ["", "Windows, macOS and Android run on pull requests only when the change looks "
                   "platform specific. Add the `ci:full` label and re-run for everything."]
+    if not nightly:
+        lines += ["", "Nightly only (or with `ci:full`): voice and the Linux native browser fixture."]
     files_read = {path for paths in extra.values() for path in paths}
     if files_read:
         lines += ["", "Files outside their packages that Rust suites read (part of their fingerprints): "
