@@ -23,15 +23,6 @@ retries = 2
 filter = 'package(zeron-harness) & test(mcp_injection_reaches_isolated_server_processes)'
 retries = 2
 
-# zeron-engine `remote_terminals::tests::a_terminal_rides_a_real_webrtc_pair_through_a_network_change`
-# waits for the terminal path to report Direct, types, and asserts no write went
-# through the relay. Now and then one does (left 1, right 0, seen 2026-10-27 in a
-# loaded run): the path reports Direct a moment before writes switch over. A race
-# to fix in remote_terminals; retried meanwhile.
-[[profile.default.overrides]]
-filter = 'package(zeron-engine) & test(a_terminal_rides_a_real_webrtc_pair_through_a_network_change)'
-retries = 2
-
 # Windows used to run the zeron-ui library with `cargo test --test-threads=1`:
 # every test in one process, where native platform state (fonts, DirectWrite,
 # the message loop) is shared. nextest gives each test its own process, so they
