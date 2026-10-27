@@ -52,7 +52,7 @@ jobs:
           save-rust-cache: 'true'
       - name: Build tests
         run: >-
-          cargo nextest run --no-run --release --locked
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked
           -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media
           --features zeron-harness/native-fixture
           --lib --bins

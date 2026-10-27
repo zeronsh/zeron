@@ -78,7 +78,7 @@ jobs:
       # feature (and a `cargo check` before that recompiled every dependency).
       - name: Build tests and the application
         run: |
-          cargo nextest run --no-run --locked \
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --locked \
             -p zeron-update -p zeron-preview -p zeron-ui -p zeron-text -p zeron \
             --features zeron-ui/browser-fixture --lib --bins --tests
       - name: Build fixtures
