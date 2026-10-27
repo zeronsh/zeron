@@ -1,7 +1,7 @@
 // MIT: extracted with the orb; see THIRD_PARTY_NOTICES.md.
-//! Smoke tests + microbench for mode painters.
+//! Smoke tests for the mode painters (moved from zeron-ui, which re-exports this crate).
 
-use zeron_ui::orb::{
+use zeron_orb::{
     ModeKey, OrbSize, OrbState,
     engine::{MAX_ICON_D, MAX_MORPH_DOTS, MAX_NODE_N, ModeOpts, draw_mode, sanitize_mode_opts},
     resolve_preset,
@@ -162,52 +162,6 @@ fn legacy_all_constant_keeps_its_original_array_shape() {
     assert_eq!(original_nine.len(), 9);
     assert_eq!(OrbState::ALL_STATES.len(), 12);
 }
-
-#[test]
-fn bench_geometry_cost() {
-    use std::time::Instant;
-    for &state in OrbState::ALL_STATES {
-        for &size in OrbSize::ALL_SIZES {
-            let resolved = resolve_preset(state, size);
-            for i in 0..20 {
-                let _ = draw_mode(
-                    resolved.mode,
-                    size.pixels(),
-                    i as f32 * 0.016,
-                    &resolved.opts,
-                );
-            }
-            let n = 1000usize;
-            let t0 = Instant::now();
-            let mut total_dots = 0usize;
-            let mut total_lines = 0usize;
-            for i in 0..n {
-                let f = draw_mode(
-                    resolved.mode,
-                    size.pixels(),
-                    i as f32 * 0.016,
-                    &resolved.opts,
-                );
-                total_dots += f.dots.len();
-                total_lines += f.lines.len();
-            }
-            let elapsed = t0.elapsed();
-            let per = elapsed / n as u32;
-            let avg_dots = total_dots / n;
-            let avg_lines = total_lines / n;
-            eprintln!(
-                "{:>12}/{:<6}  {:>5} dots  {:>4} lines  {:>8.2?} /frame  (~{:.0}k geom-fps)",
-                state.as_str(),
-                size.pixels() as u32,
-                avg_dots,
-                avg_lines,
-                per,
-                1.0 / per.as_secs_f64() / 1000.0
-            );
-        }
-    }
-}
-
 /// Strokes are painted at their exact colour, one `Path` per segment. Batching
 /// them into shared paths was tried and reverted for visibly brightening the
 /// web (see `paint.rs`), so what matters now is that every alpha the engine

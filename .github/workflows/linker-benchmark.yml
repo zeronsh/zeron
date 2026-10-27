@@ -1,0 +1,69 @@
+name: Windows build benchmark
+
+# Side by side, from the same cold start, one runner each: the Windows tests job's
+# build, then the app's, with today's setup (link.exe, target on C:), with LLD
+# (.github/actions/fast-linker), and with LLD on a Dev Drive (windows-ci-setup).
+# Times are in the run summary and the log. Builds only; nothing is tested or
+# cached. Runs when the Windows build setup or this file changes, and by hand.
+on:
+  pull_request:
+    paths:
+      - .github/actions/fast-linker/**
+      - .github/actions/windows-ci-setup/**
+      - .github/workflows/linker-benchmark.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {variant: "link.exe, C: (before)", linker: 'false', drive: 'false'}
+          - {variant: "LLD, C:", linker: 'true', drive: 'false'}
+          - {variant: "LLD, Dev Drive (now)", linker: 'true', drive: 'true'}
+    name: windows (${{ matrix.variant }})
+    runs-on: windows-2022
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
+        with:
+          fast-linker: ${{ matrix.linker }}
+          dev-drive: ${{ matrix.drive }}
+      - name: Build (the tests job's test binaries, then the app, as CI builds them)
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          # Nothing restored survives: every variant compiles from cold. (./target may be the
+          # Dev Drive's mount point, so its contents go, not the folder.)
+          if (Test-Path target) {
+            Get-ChildItem target -Force | Where-Object Name -ne 'System Volume Information' |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $tests = Measure-Command {
+            cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked `
+              -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media `
+              --features zeron-harness/native-fixture --lib --bins `
+              --test codex_availability --test windows_native --test opencode --test cursor_shim --test pi_rpc `
+              --test background_engine --test noop_browser `
+              --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'test build failed' }
+          }
+          $app = Measure-Command {
+            cargo build --release --locked -p zeron | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'app build failed' }
+          }
+          $line = "| $env:VARIANT | tests $([int]$tests.TotalSeconds)s | app $([int]$app.TotalSeconds)s |"
+          $line
+          $line >> $env:GITHUB_STEP_SUMMARY

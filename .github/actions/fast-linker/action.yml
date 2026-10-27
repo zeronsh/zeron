@@ -1,0 +1,22 @@
+name: Fast linker
+description: >-
+  Link Windows builds with LLD (rust-lld, shipped with the toolchain) instead of
+  link.exe: about 6% off the Windows test and app builds (linker-benchmark.yml).
+  Linux already links with LLD (Rust's default) and macOS with ld-prime; mold on
+  Linux measured no faster on the 4-core runners. Run it before the Rust cache
+  step: the setting is part of the cache key.
+
+inputs:
+  enabled:
+    description: "'false' keeps link.exe (for comparisons)."
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: LLD (Windows)
+      if: inputs.enabled == 'true' && runner.os == 'Windows'
+      shell: pwsh
+      # rustc finds rust-lld in its own tools directory and gives it the MSVC library
+      # paths it gives link.exe.
+      run: '"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe" >> $env:GITHUB_ENV'
