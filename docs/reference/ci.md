@@ -198,9 +198,9 @@ Repository variables:
 
 | Variable | Default | |
 |---|---|---|
-| `CI_BUDGET_TOTAL` | 50 | Hosted runners all CI runs may hold at once. Leave room for the organization's other repositories. |
-| `CI_BUDGET_MACOS` | 10 | macOS runners |
-| `CI_BUDGET_WINDOWS` | 16 | Windows runners |
+| `CI_BUDGET_TOTAL` | 20 | Hosted runners all CI runs may hold at once: the organization's concurrency limit |
+| `CI_BUDGET_MACOS` | 5 | macOS runners: the organization's macOS limit |
+| `CI_BUDGET_WINDOWS` | 10 | Windows runners: half the pool, so Linux keeps the other half |
 | `CI_DEBOUNCE_SECONDS` | 60 | How long a pull request run waits before queueing. A push within that time cancels it. |
 | `CI_ADMISSION` | on | `off` starts every run at once |
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
@@ -215,8 +215,8 @@ read from its admit job is not trusted:
 
 Admission ensures that all of a run's runners were free when it started. It
 can't stop jobs it doesn't see from taking runners in the meantime: other
-repositories of the organization, release and deploy workflows. The budget
-leaves headroom for those.
+repositories of the organization, release and deploy workflows. Those can
+still take a free runner first.
 
 Admission never blocks CI. It lets the run start anyway if:
 

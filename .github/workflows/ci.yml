@@ -22,9 +22,9 @@ name: CI
 #
 # Repository variables (all optional):
 #   CI_PR_TIER           fast (default) or full, for pull requests
-#   CI_BUDGET_TOTAL      hosted runners all CI runs may hold at once (50)
-#   CI_BUDGET_MACOS      ... macOS runners (10)
-#   CI_BUDGET_WINDOWS    ... Windows runners (16)
+#   CI_BUDGET_TOTAL      hosted runners all CI runs may hold at once (20, the org limit)
+#   CI_BUDGET_MACOS      ... macOS runners (5, the org limit)
+#   CI_BUDGET_WINDOWS    ... Windows runners (10)
 #   CI_ADMISSION         off: start at once, as before
 #   CI_DEBOUNCE_SECONDS  wait for further pushes to a pull request first (60)
 #   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)

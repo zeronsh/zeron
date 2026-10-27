@@ -50,11 +50,13 @@ a macOS runner, but never takes anything that run is waiting for (conservative
 backfilling: nobody is overtaken on a resource they wait for).
 
 Resources: `total` (every hosted job, the org-wide concurrency limit), and
-`macos` and `windows`. Budgets come from repository variables
-CI_BUDGET_TOTAL / CI_BUDGET_MACOS / CI_BUDGET_WINDOWS. They should leave
-headroom for runners this script cannot see (other repositories of the
-organization, release and deploy workflows), which is also why admission is
-"all runners were free when the run started", not a hard guarantee.
+`macos` and `windows`. Budgets default to the organization's runner limits
+(20 jobs, 5 on macOS; Windows capped at 10 so Linux keeps half), overridable
+with the repository variables CI_BUDGET_TOTAL / CI_BUDGET_MACOS /
+CI_BUDGET_WINDOWS. Runners this script cannot see (other repositories of the
+organization, release and deploy workflows) can still take a free runner
+first, which is why admission is "all runners were free when the run
+started", not a hard guarantee.
 
 The GITHUB_TOKEN may make 1000 API requests an hour per repository, shared by
 every job. The script uses conditional requests (a 304 is free), refetches a
@@ -413,9 +415,10 @@ def main() -> int:
         return 0
 
     budget = {
-        "total": env_int("CI_BUDGET_TOTAL", 50),
-        "macos": env_int("CI_BUDGET_MACOS", 10),
-        "windows": env_int("CI_BUDGET_WINDOWS", 16),
+        # The organization's hosted-runner concurrency limit (20 jobs, 5 on macOS).
+        "total": env_int("CI_BUDGET_TOTAL", 20),
+        "macos": env_int("CI_BUDGET_MACOS", 5),
+        "windows": env_int("CI_BUDGET_WINDOWS", 10),
     }
     max_wait = env_int("MAX_WAIT_MINUTES", 300) * 60
     debounce = env_int("CI_DEBOUNCE_SECONDS", 60) if os.environ.get("GITHUB_EVENT_NAME") == "pull_request" else 0
