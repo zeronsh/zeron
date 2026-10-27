@@ -5,6 +5,10 @@ name: macOS tests
 on:
   workflow_call:
     inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
       native:
         type: boolean
         default: true
@@ -117,6 +121,12 @@ jobs:
           name: preview-macos-captures
           path: ${{ runner.temp }}/preview-captures*
           if-no-files-found: ignore
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-macos-native
 
   # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
   macos-frame-source:
@@ -145,6 +155,12 @@ jobs:
       - name: Native frame-source recovery regression
         working-directory: frame-source-tests
         run: cargo test --locked -p gpui_macos --test frame_source_recovery
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-macos-frame-source
 
   # The iOS checks that do not need Apple tooling run on Linux: Rust mobile core tests, and "the
   # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the
@@ -179,6 +195,12 @@ jobs:
           name: ios-ffi-include
           path: ${{ runner.temp }}/ios-include
           retention-days: 1
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ios-core
 
   # iOS unit tests in the simulator (only when iOS or the mobile core changed).
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
@@ -243,3 +265,9 @@ jobs:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
           if-no-files-found: ignore
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ios-tests

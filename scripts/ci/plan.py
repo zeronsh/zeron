@@ -10,6 +10,17 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
                (scripts/ci/admit.py) can read it.
   tier         "fast" (pull requests) or "full" (main, merge queue, manual,
                `ci:full` label, CI_PR_TIER=full)
+  keys         JSON object, suite -> cache key prefix under which its jobs record
+               a pass (scripts/ci/reuse.py)
+  skip         JSON object, suite -> jobs that already passed on the same
+               inputs and are skipped (Windows and voice skip single jobs; the
+               other suites only run or skip as a whole)
+  native_oses  JSON list, the voice platform checks to run
+  pr           the pull request number (pull requests only), for the admit job name
+
+Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
+its jobs passed, on this pull request or on main, is skipped, as are single
+Windows and voice jobs that passed while the others did not.
 
 Tiers. Every suite has a broad path list (what used to trigger its workflow).
 On the full tier a suite runs when any changed file matches it. On the fast
@@ -22,34 +33,44 @@ suites run as on the full tier. Changes to CI itself run everything.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 
-# Suite -> the runner OS of each job it starts. Keep in step with the reusable
-# workflows (scripts/tests/test_ci_plan.py checks the job counts).
-SUITE_JOBS: dict[str, list[str]] = {
-    "core": ["linux"],  # ui-tests.yml core-tests
-    "ui": ["linux"],  # ui-tests.yml ui-tests (UI + Linux browser)
-    "cursor": ["linux"],  # cursor-compatibility.yml
-    "edge": ["linux"],  # preview-tests.yml
-    "installer": ["linux"],  # linux-installer.yml
-    "voice": ["linux", "macos", "windows"],  # voice-tests.yml
-    "windows": ["windows", "windows"],  # windows.yml tests + app
-    "macos": ["macos"],  # macos.yml macos-native
-    "frame_source": ["macos"],  # macos.yml macos-frame-source
-    "ios": ["linux", "macos"],  # macos.yml ios-core + ios-tests
-    "android": ["linux"],  # android.yml apk (+ publish on main, added below)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import reuse  # noqa: E402
+from reuse import matches  # noqa: E402
+
+# Suite -> (job, runner) for each job it starts; the job name is also the name its
+# pass is recorded under. Keep in step with the reusable workflows
+# (scripts/tests/test_ci_plan.py checks).
+SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
+    "core": [("core-tests", "linux")],  # ui-tests.yml
+    "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
+    "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
+    "edge": [("edge", "linux")],  # preview-tests.yml
+    "installer": [("desktop-entry", "linux")],  # linux-installer.yml
+    "voice": [("offline-linux", "linux"), ("native-platform-check-macos-14", "macos"),
+              ("native-platform-check-windows-latest", "windows")],  # voice-tests.yml
+    "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
+    "macos": [("macos-native", "macos")],  # macos.yml
+    "frame_source": [("macos-frame-source", "macos")],  # macos.yml
+    "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
+    "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
 }
+# Suites whose jobs are independent, so one can be skipped while another runs.
+SPLITTABLE = ("voice", "windows")
+VOICE_NATIVE = "native-platform-check-"
 
 CARGO = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 CI_SELF = [
     ".github/workflows/ci.yml",
     "scripts/ci/plan.py",
     "scripts/ci/admit.py",
+    "scripts/ci/reuse.py",
 ]
 
 # The app links the Rust mobile core and everything it depends on (iOS and Android).
@@ -131,16 +152,6 @@ COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
 PLATFORM_FAST_SUITES = ("voice", "windows", "macos", "android")
 
 
-def matches(path: str, patterns: list[str]) -> bool:
-    for pattern in patterns:
-        if pattern.endswith("/**"):
-            if path.startswith(pattern[:-2]):
-                return True
-        elif fnmatch.fnmatchcase(path, pattern):
-            return True
-    return False
-
-
 def changed_code(patch: str) -> str:
     """The added and removed lines of a diff, without comments."""
     lines = []
@@ -191,15 +202,33 @@ def plan(files: list[dict] | None, tier: str) -> dict[str, bool]:
     return suites
 
 
-def reservation(suites: dict[str, bool], event: str, ref: str) -> dict[str, int]:
+def jobs_to_run(suites: dict[str, bool], skip: dict[str, list[str]] | None = None) -> dict[str, list[tuple[str, str]]]:
+    skip = skip or {}
+    return {suite: [job for job in SUITE_JOBS[suite] if job[0] not in skip.get(suite, ())]
+            for suite, enabled in suites.items() if enabled}
+
+
+def reservation(running: dict[str, list[tuple[str, str]]], event: str, ref: str) -> dict[str, int]:
     counts = {"linux": 1, "windows": 0, "macos": 0}  # 1: the final `CI result` job
-    for suite, enabled in suites.items():
-        if enabled:
-            for runner in SUITE_JOBS[suite]:
-                counts[runner] += 1
-    if suites.get("android") and event == "push" and ref == "refs/heads/main":
+    for jobs in running.values():
+        for _, runner in jobs:
+            counts[runner] += 1
+    if running.get("android") and event == "push" and ref == "refs/heads/main":
         counts["linux"] += 1  # android.yml publish
     return counts
+
+
+def reused_jobs(suites: dict[str, bool], passed: dict[str, set[str]]) -> dict[str, list[str]]:
+    """Jobs to skip: all of a suite's when they all passed, or single ones of SPLITTABLE suites."""
+    skip: dict[str, list[str]] = {}
+    for suite, enabled in suites.items():
+        if not enabled:
+            continue
+        jobs = [job for job, _ in SUITE_JOBS[suite]]
+        done = [job for job in jobs if job in passed.get(suite, set())]
+        if len(done) == len(jobs) or (done and suite in SPLITTABLE):
+            skip[suite] = done
+    return skip
 
 
 def format_reservation(counts: dict[str, int]) -> str:
@@ -253,6 +282,8 @@ def main() -> int:
     tier = "full"
     files: list[dict] | None = None
     why = ""
+    # Refs whose recorded passes this run may reuse (none: run everything selected).
+    trusted: set[str] = set()
     try:
         if event == "pull_request":
             # The pull request as it is now (not as in the event), so adding `ci:full`
@@ -260,28 +291,54 @@ def main() -> int:
             pr = api(f"/repos/{repo}/pulls/{payload['pull_request']['number']}")
             labels = {label["name"] for label in pr.get("labels", [])}
             if "ci:full" in labels:
-                why = "label ci:full"
-            elif os.environ.get("CI_PR_TIER", "fast") == "full":
-                why = "CI_PR_TIER=full"
+                why = "label ci:full: every suite, nothing reused"
             else:
-                tier = "fast"
+                trusted = {ref, "refs/heads/main"}
+                if os.environ.get("CI_PR_TIER", "fast") == "full":
+                    why = "CI_PR_TIER=full"
+                else:
+                    tier = "fast"
             files = pull_request_files(repo, pr["number"], pr.get("changed_files", 0))
         elif event == "push":
+            trusted = {"refs/heads/main"}
             files = compare_files(repo, payload.get("before", ""), payload.get("after", ""))
         elif event == "merge_group":
+            trusted = {"refs/heads/main"}
             group = payload["merge_group"]
             files = compare_files(repo, group["base_sha"], group["head_sha"])
-        # workflow_dispatch and anything else: everything.
+        # workflow_dispatch and anything else: everything, nothing reused.
     except (OSError, KeyError, ValueError) as error:  # URLError, HTTPError, timeouts, bad JSON
         print(f"::warning::could not list changed files ({error}); running every suite")
         files = None
 
-    suites = plan(files, tier)
-    counts = reservation(suites, event, ref)
+    selected = plan(files, tier)
+    keys: dict[str, str] = {}
+    extra: dict[str, list[str]] = {}
+    passed: dict[str, set[str]] = {}
+    try:
+        keys, extra = reuse.suite_keys([suite for suite, on in selected.items() if on])
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"::warning::could not fingerprint the suites ({error}); nothing is reused or recorded")
+    if trusted:
+        for suite, key in keys.items():
+            try:
+                passed[suite] = reuse.passed_jobs(api, repo, key, trusted)
+            except (OSError, KeyError, ValueError) as error:
+                print(f"::warning::could not look up earlier passes of {suite} ({error})")
+    skip = reused_jobs(selected, passed)
+    running = jobs_to_run(selected, skip)
+    suites = {suite: bool(running.get(suite)) for suite in selected}
+    native_oses = [job[len(VOICE_NATIVE):] for job, _ in running.get("voice", []) if job.startswith(VOICE_NATIVE)]
+    counts = reservation(running, event, ref)
     out = {
         "suites": json.dumps(suites, separators=(",", ":")),
         "reservation": format_reservation(counts),
         "tier": tier,
+        "keys": json.dumps(keys, separators=(",", ":")),
+        "skip": json.dumps(skip, separators=(",", ":")),
+        "native_oses": json.dumps(native_oses, separators=(",", ":")),
+        # The admit job names its pull request, for ci:priority and ci:lock (scripts/ci/admit.py).
+        "pr": str(payload["pull_request"]["number"]) if event == "pull_request" else "",
     }
     with open(os.environ["GITHUB_OUTPUT"], "a") as f:
         for key, value in out.items():
@@ -290,12 +347,27 @@ def main() -> int:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     lines = [f"### CI plan: {tier} tier{f' ({why})' if why else ''}", "",
              f"Changed files: {'all (not listed)' if files is None else len(files)}", "",
-             "| suite | runs |", "|---|---|"]
-    lines += [f"| {suite} | {'yes' if enabled else '–'} |" for suite, enabled in suites.items()]
+             "| suite | runs | |", "|---|---|---|"]
+    for suite, on in selected.items():
+        if not on:
+            lines.append(f"| {suite} | – | not affected |")
+            continue
+        done = skip.get(suite, [])
+        if not running.get(suite):
+            note = "reused: passed before on the same inputs"
+        elif done:
+            note = f"reused {', '.join(done)}"
+        else:
+            note = ""
+        lines.append(f"| {suite} | {'yes' if running.get(suite) else 'reused'} | {note} |")
     lines += ["", f"Reserved runners: `{out['reservation']}`"]
     if tier == "fast":
         lines += ["", "Windows, macOS, voice and Android run on pull requests only when the change looks "
                   "platform specific. Add the `ci:full` label and re-run for everything."]
+    files_read = {path for paths in extra.values() for path in paths}
+    if files_read:
+        lines += ["", "Files outside their packages that Rust suites read (part of their fingerprints): "
+                  + ", ".join(f"`{p}`" for p in sorted(files_read))]
     text = "\n".join(lines)
     print(text)
     if summary:

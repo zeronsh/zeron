@@ -16,6 +16,11 @@ name: Android
 # the shared fonts and icons changed) and holds the runners for it.
 on:
   workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
   workflow_dispatch:
 
 permissions:
@@ -119,6 +124,12 @@ jobs:
           path: out/android/*
           if-no-files-found: error
           retention-days: 14
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-apk
 
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.apk.outputs.signed == 'true'

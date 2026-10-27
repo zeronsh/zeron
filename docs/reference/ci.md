@@ -4,8 +4,9 @@ Pull requests, `main` and the merge queue all go through one workflow,
 [`ci.yml`](../../.github/workflows/ci.yml). It runs these jobs in order:
 
 1. **plan** ([`scripts/ci/plan.py`](../../scripts/ci/plan.py)) lists the
-   changed files and picks the suites the change needs. It also counts the
-   runners those suites will use.
+   changed files and picks the suites the change needs. It drops the jobs that
+   already passed on the same inputs (see [Reuse](#reuse)), and counts the
+   runners the rest will use.
 2. **admit** ([`scripts/ci/admit.py`](../../scripts/ci/admit.py)) waits until
    all of those runners are free.
 3. **The suites** all start together. Each is a reusable workflow:
@@ -38,6 +39,55 @@ To run every suite on a pull request, add the `ci:full` label, then push or
 re-run the CI workflow. To make every pull request run the full tier, set the
 repository variable `CI_PR_TIER=full`.
 
+## Reuse
+
+After a new push, a suite runs again only if something it reads changed. That
+is checked by content, not by what the push touched: a suite reruns when `main`
+changed something it reads, and is skipped when the push only touched code it
+doesn't read.
+
+For each selected suite, `plan` hashes the inputs in the tree being tested
+([`scripts/ci/reuse.py`](../../scripts/ci/reuse.py)). For a pull request that
+tree is the merge with the current `main`. The inputs are:
+
+- `Cargo.toml`, `Cargo.lock`, the toolchain, `ci.yml`, the composite actions
+  and `scripts/ci`;
+- the suite's workflow and the non-Rust files it uses;
+- for Rust suites:
+  - the packages they test and every workspace package those depend on, of any
+    dependency kind;
+  - every file outside those packages that their Rust sources name with a
+    `../` path, for example `include_str!("../../../ui/src/file-icons.json")`
+    or `CARGO_MANIFEST_DIR` joined with `../harness/tests/fixtures`. The
+    sources are scanned on every run, so new references are picked up without
+    a list to maintain. The plan summary lists the files found.
+
+When a job passes, its last step saves a tiny Actions cache entry named after
+the suite's hash and the job. `plan` skips a suite when all its jobs have such
+an entry. A single Windows or voice job can be skipped while the suite's other
+jobs run. Skipped suites reserve no runners and count as passed in `CI result`.
+The plan summary shows what was reused.
+
+Which recorded passes count:
+
+| Run | Reuses passes from |
+|---|---|
+| Pull request | its own earlier runs, and `main` |
+| `main`, merge queue | `main` only |
+| `ci:full` label, manual run | nothing |
+
+A pull request could fake a pass in its own runs, but it could just as well
+edit its own workflows. No other ref ever sees those entries.
+
+Limits:
+
+- A path built in pieces (`.join("..").join("ui")`) is not found by the scan.
+  Write such references as one `../` literal, or add the path to the suite's
+  `SUITE_INPUTS`.
+- A test that depends on the network or on timing and passed by luck stays
+  passed until its inputs change. Re-run with `ci:full` to check everything
+  again.
+
 ## Admission
 
 GitHub starts a job as soon as a runner frees up. When several runs compete,
@@ -59,6 +109,39 @@ token that pull requests from forks get:
 - How much of it a run still holds comes from how many of its jobs have
   finished.
 
+### Priority and locks
+
+Adding a label needs the triage role or above, so GitHub decides who can use
+these. A fork's author can't label their own pull request.
+
+- **`ci:priority`**: the pull request's runs go to the front of the queue,
+  behind any locked pull request. Nobody behind them may take runners they
+  wait for, so the next runners to free up go to them. Running jobs are never
+  stopped.
+- **`ci:lock`**: while the pull request is open, admission treats a full run's
+  worth of runners (10 Linux, 3 Windows, 4 macOS) as taken, whether or not
+  the pull request is running anything. Its own runs skip the queue and are
+  admitted as soon as their runners are free. The lock ends when:
+  - the label is removed;
+  - the pull request is merged or closed;
+  - `CI_LOCK_HOURS` (6) have passed since the label was added. Add the label
+    again to extend.
+- **CI emergency** ([`ci-emergency.yml`](../../.github/workflows/ci-emergency.yml)):
+  a workflow you start by hand from the Actions tab with a pull request number.
+  It needs write access. It:
+  - adds `ci:lock` to the pull request;
+  - cancels every other pull request's CI run (with `cancel-main`, also
+    `main` and merge queue runs);
+  - re-runs the pull request's own CI if none is running and the last run
+    didn't pass.
+
+  The cancelled pull requests need a push or a re-run afterwards.
+
+A run states its pull request in its admit job's name, for example
+`admit [linux=4 windows=0 macos=1] #1077`. The claim only counts when that
+pull request's head is the run's commit, so a run can't borrow another pull
+request's priority or lock.
+
 Repository variables:
 
 | Variable | Default | |
@@ -69,6 +152,7 @@ Repository variables:
 | `CI_DEBOUNCE_SECONDS` | 60 | How long a pull request run waits before queueing. A push within that time cancels it. |
 | `CI_ADMISSION` | on | `off` starts every run at once |
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
+| `CI_LOCK_HOURS` | 6 | How long a `ci:lock` label holds runners |
 
 A pull request can edit its own copy of `ci.yml`, so the reservation other runs
 read from its admit job is not trusted:
@@ -88,8 +172,9 @@ Admission never blocks CI. It lets the run start anyway if:
 - the API keeps failing;
 - the API rate limit runs out for more than 10 minutes.
 
-The `GITHUB_TOKEN` gets 1000 API requests an hour per repository. To stay
-under that, admission:
+The `GITHUB_TOKEN` gets 1000 to 5000 API requests an hour per repository,
+depending on the plan; zeron has seen 5000. To stay well under that,
+admission:
 
 - uses conditional requests, which cost nothing when nothing changed;
 - refetches a run's jobs only when the run changed;

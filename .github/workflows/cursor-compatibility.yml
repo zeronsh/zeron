@@ -10,6 +10,10 @@ on:
         default: true
   workflow_call:
     inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
       rust-tests:
         type: boolean
         default: true
@@ -32,6 +36,12 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/cursor-sdk-contract" --ignore-scripts --no-audit --no-fund "$pin"
       - name: Actual SDK token expiry, stream invalidation, and transient auth recovery
         run: node scripts/test-cursor-sdk-auth.mjs "$RUNNER_TEMP/cursor-sdk-contract/node_modules/@cursor/sdk"
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-cursor-compatibility
 
   # The Rust half (harness compatibility, steering, session recovery, durable
   # commands, message delivery, native Pi RPC) is part of the `core-tests` job

@@ -6,6 +6,11 @@ name: Preview networking
 # one job: each takes seconds, a runner of its own cost more than the tests.
 on:
   workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -36,3 +41,9 @@ jobs:
           npm ci
           npm run typecheck
           npm test
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-edge

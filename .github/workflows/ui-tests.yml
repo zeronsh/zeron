@@ -5,6 +5,10 @@ name: Linux tests
 on:
   workflow_call:
     inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
       core:
         type: boolean
         default: true
@@ -31,6 +35,12 @@ jobs:
           save-rust-cache: 'true'
       - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
         run: scripts/ci/test-core.sh
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-core-tests
 
   # UI and headless layout regressions, then the native browser on X11 and
   # Wayland. One job: the browser fixture shares the UI build's dependency graph
@@ -79,3 +89,9 @@ jobs:
           name: linux-browser
           path: ${{ runner.temp }}/linux-browser
           if-no-files-found: warn
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-ui-tests

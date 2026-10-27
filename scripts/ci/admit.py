@@ -26,6 +26,23 @@ another run is not trusted: it is capped at the most plan.py ever reserves
 UNSEEN_GRACE after admission. A run cannot hold more than a full run's worth
 of runners, or hold runners it never uses for long.
 
+Priority and locks (labels; adding a label needs the triage role or above):
+
+  - `ci:priority` on a pull request puts its runs at the front of the queue
+    (after locked ones): the runners that free up go to it first, since nobody
+    behind it may take what it waits for.
+  - `ci:lock` on a pull request keeps a full run's worth of runners
+    (MAX_RESERVATION) out of everyone else's budget while the pull request is
+    open, whether or not it is running anything; its own runs are admitted as
+    soon as their runners are free, ahead of every queue. It ends when the
+    label is removed, the pull request is merged or closed, or LOCK_HOURS
+    after the label was added (add it again to extend).
+  - A run claims its pull request in its admit job's name ("... #123"); the
+    claim only counts when that pull request's head is the run's commit.
+
+The emergency workflow (.github/workflows/ci-emergency.yml, write access)
+adds `ci:lock` and cancels the other pull requests' CI runs.
+
 A waiting run is admitted when, for every resource it needs, what admitted
 runs hold + what the runs ahead of it in the queue need + its own need fits in
 the budget. So a run that needs only Linux can go ahead of a run waiting for
@@ -57,6 +74,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from dataclasses import dataclass, field
 
 RUNNERS = ("linux", "windows", "macos")
@@ -69,6 +87,10 @@ MAX_RESERVATION = {"linux": 10, "windows": 3, "macos": 4}
 # How long an admitted run's not-yet-created jobs stay reserved. Jobs that wait for
 # another job (iOS simulator tests, Android publishing) are created within minutes.
 UNSEEN_GRACE = 90 * 60
+PRIORITY_LABEL = "ci:priority"
+LOCK_LABEL = "ci:lock"
+LOCK_HOURS = 6
+PR_CLAIM = re.compile(r"#(\d+)\s*$")
 
 
 def parse_reservation(name: str) -> dict[str, int] | None:
@@ -128,12 +150,21 @@ class Waiter:
     key: tuple  # (admit job created_at, admit job id): queue order
     need: dict[str, int]
     running: bool  # its admit job holds a runner
+    pr: int | None = None  # its pull request, when verified
+
+
+@dataclass
+class Holding:
+    need: dict[str, int]  # need_of(held()) of an admitted run
+    pr: int | None = None
 
 
 @dataclass
 class Snapshot:
     waiters: list[Waiter] = field(default_factory=list)
-    holding: list[dict[str, int]] = field(default_factory=list)  # need_of(held()) per admitted run
+    holding: list[Holding] = field(default_factory=list)
+    priority: set[int] = field(default_factory=set)  # pull requests labelled ci:priority
+    locked: set[int] = field(default_factory=set)  # pull requests holding a ci:lock
 
 
 @dataclass
@@ -144,35 +175,57 @@ class Decision:
     ahead: dict[str, int]
 
 
+def add(a: dict[str, int], b: dict[str, int], sign: int = 1) -> dict[str, int]:
+    return {r: a[r] + sign * b[r] for r in RESOURCES}
+
+
+def bigger(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    return {r: max(a[r], b[r]) for r in RESOURCES}
+
+
+def rank(w: Waiter, snapshot: Snapshot) -> int:
+    return 0 if w.pr in snapshot.locked else 1 if w.pr in snapshot.priority else 2
+
+
 def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, int]) -> Decision:
-    used = {r: 0 for r in RESOURCES}
+    zero = {r: 0 for r in RESOURCES}
+    full = need_of(MAX_RESERVATION)
+
+    # A lock holds a full run, or what its runs actually hold if that is more.
+    lock_use = {pr: dict(zero) for pr in snapshot.locked}
+    used = dict(zero)
     for h in snapshot.holding:
-        for r in RESOURCES:
-            used[r] += h[r]
+        if h.pr in snapshot.locked:
+            lock_use[h.pr] = add(lock_use[h.pr], h.need)
+        else:
+            used = add(used, h.need)
+    for pr in snapshot.locked:
+        used = add(used, bigger(full, lock_use[pr]))
     for w in snapshot.waiters:
         if w.run_id != me and w.running:
             used["total"] += 1
 
-    ahead = {r: 0 for r in RESOURCES}
-    position = 0
-    order = sorted(snapshot.waiters, key=lambda w: w.key)
-    if any(w.run_id == me for w in order):
-        for w in order:
-            if w.run_id == me:
-                break
-            position += 1
-            for r in RESOURCES:
-                ahead[r] += w.need[r]
-    else:  # not visible yet (API lag): behind everyone
-        position = len(order)
-        for w in order:
-            for r in RESOURCES:
-                ahead[r] += w.need[r]
+    def fits(in_use: dict[str, int], ahead: dict[str, int]) -> bool:
+        # A run larger than the budget goes when nothing else holds or waits for that resource.
+        return all(in_use[r] + ahead[r] + min(mine[r], budget[r]) <= budget[r]
+                   for r in RESOURCES if mine[r] > 0)
 
-    # A run larger than the budget goes when nothing else holds or waits for that resource.
-    fits = all(used[r] + ahead[r] + min(mine[r], budget[r]) <= budget[r]
-               for r in RESOURCES if mine[r] > 0)
-    return Decision(fits, position, used, ahead)
+    self_ = next((w for w in snapshot.waiters if w.run_id == me), None)
+    if self_ is not None and self_.pr in snapshot.locked:
+        # The lock is ours: only what our pull request's runs really hold counts against it.
+        in_use = add(add(used, bigger(full, lock_use[self_.pr]), -1), lock_use[self_.pr])
+        return Decision(fits(in_use, zero), 0, in_use, zero)
+
+    ahead = dict(zero)
+    order = sorted(snapshot.waiters, key=lambda w: (rank(w, snapshot), w.key))
+    position = 0
+    for w in order:
+        if w.run_id == me:
+            break
+        position += 1
+        if rank(w, snapshot) > 0:  # a locked run's need is already in `used`
+            ahead = add(ahead, w.need)
+    return Decision(fits(used, ahead), position, used, ahead)
 
 
 # GitHub API ------------------------------------------------------------------------------------
@@ -273,7 +326,8 @@ class Scheduler:
         live = {run["id"] for run in runs}
         self.jobs = {k: v for k, v in self.jobs.items() if k in live}
 
-        snap = Snapshot()
+        snap = Snapshot(priority=self.labelled(PRIORITY_LABEL), locked=self.locks())
+        special = snap.priority | snap.locked
         for run in runs:
             jobs = self.run_jobs(run)
             admit = next((j for j in jobs if is_admit(j)), None)
@@ -282,12 +336,54 @@ class Scheduler:
             declared = parse_reservation(admit["name"])
             if declared is None:
                 continue
+            pr = self.verified_pr(admit["name"], run, special)
             if admit["status"] != "completed":
                 snap.waiters.append(Waiter(run["id"], (admit["created_at"], admit["id"]),
-                                           need_of(declared), admit["status"] == "in_progress"))
+                                           need_of(declared), admit["status"] == "in_progress", pr))
             elif admit["conclusion"] == "success":
-                snap.holding.append(need_of(held(declared, jobs, seconds_since(admit.get("completed_at")))))
+                since = seconds_since(admit.get("completed_at"))
+                snap.holding.append(Holding(need_of(held(declared, jobs, since)), pr))
         return snap
+
+    def labelled(self, label: str) -> set[int]:
+        """Open pull requests carrying `label`."""
+        found: set[int] = set()
+        page = 1
+        while True:
+            issues = self.api.get(f"/repos/{self.repo}/issues?state=open&labels={quote(label)}"
+                                  f"&per_page=100&page={page}")
+            found |= {i["number"] for i in issues if "pull_request" in i}
+            if len(issues) < 100:
+                return found
+            page += 1
+
+    def locks(self) -> set[int]:
+        """Pull requests labelled ci:lock less than LOCK_HOURS ago."""
+        hours = float(os.environ.get("CI_LOCK_HOURS") or LOCK_HOURS)
+        locked = set()
+        for number in self.labelled(LOCK_LABEL):
+            added = None
+            page = 1
+            while True:
+                events = self.api.get(f"/repos/{self.repo}/issues/{number}/events?per_page=100&page={page}")
+                for event in events:
+                    if event.get("event") == "labeled" and event.get("label", {}).get("name") == LOCK_LABEL:
+                        added = event["created_at"]
+                if len(events) < 100:
+                    break
+                page += 1
+            if added and seconds_since(added) < hours * 3600:
+                locked.add(number)
+        return locked
+
+    def verified_pr(self, admit_name: str, run: dict, special: set[int]) -> int | None:
+        """The pull request a run claims, if it matters and the run is really its head."""
+        match = PR_CLAIM.search(admit_name)
+        if not match or int(match.group(1)) not in special or run.get("event") != "pull_request":
+            return None
+        number = int(match.group(1))
+        pull = self.api.get(f"/repos/{self.repo}/pulls/{number}")
+        return number if pull.get("head", {}).get("sha") == run.get("head_sha") else None
 
 
 def env_int(name: str, default: int) -> int:
@@ -371,6 +467,7 @@ def main() -> int:
         if state != last:
             print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
                   f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
+                  f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
                   f"API quota left {api.remaining}")
             last = state
         if decision.admit:

@@ -1,5 +1,6 @@
 """scripts/ci/plan.py: which suites a change selects, and the runners they reserve."""
 
+import json
 import pathlib
 import sys
 import unittest
@@ -92,13 +93,14 @@ class PlanTests(unittest.TestCase):
 
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full")
-        counts = plan.reservation(suites, "pull_request", "refs/pull/1/merge")
+        counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
         # result + core + ui + cursor + voice + ios-core + apk; voice + windows x2; voice + native + frame + ios
         self.assertEqual(counts, {"linux": 7, "windows": 3, "macos": 4})
-        main = plan.reservation(suites, "push", "refs/heads/main")
+        main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 8)  # + android publish
         self.assertEqual(plan.format_reservation(counts), "linux=7 windows=3 macos=4")
-        self.assertEqual(plan.reservation({s: False for s in plan.SUITE_JOBS}, "push", "refs/heads/main"),
+        self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
+                                          "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
 
 
@@ -121,19 +123,28 @@ class WorkflowConsistencyTests(unittest.TestCase):
     }
 
     def test_job_runners_match(self):
+        """Each suite's jobs and runners, and the name each records its pass under."""
         try:
             import yaml
         except ImportError:
             self.skipTest("PyYAML not installed")
         workflows = ROOT / ".github" / "workflows"
         for suite, (workflow, jobs) in self.SUITES.items():
-            spec = yaml.safe_load((workflows / workflow).read_text())["jobs"]
+            text = (workflows / workflow).read_text()
+            spec = yaml.safe_load(text)
             runners = []
             for job in jobs:
-                runs_on = spec[job]["runs-on"]
-                matrix = spec[job].get("strategy", {}).get("matrix", {}).get("os")
-                for label in (matrix if "matrix.os" in runs_on else [runs_on]):
-                    runners.append("windows" if "windows" in label else "macos" if "macos" in label else "linux")
+                runs_on = spec["jobs"][job]["runs-on"]
+                if "matrix.os" in runs_on:
+                    default = spec.get("on", spec.get(True))["workflow_call"]["inputs"]["native-oses"]["default"]
+                    labels = [(f"{job}-{os}", os) for os in json.loads(default)]
+                else:
+                    labels = [(job, runs_on)]
+                for marker, label in labels:
+                    runner = "windows" if "windows" in label else "macos" if "macos" in label else "linux"
+                    runners.append((marker, runner))
+                    recorded = marker if "matrix.os" not in runs_on else f"{job}-${{{{ matrix.os }}}}"
+                    self.assertIn(f"key: ${{{{ inputs.pass-key }}}}-{recorded}", text, (suite, marker))
             self.assertEqual(sorted(runners), sorted(plan.SUITE_JOBS[suite]), suite)
 
     def test_every_suite_is_called(self):
@@ -144,6 +155,7 @@ class WorkflowConsistencyTests(unittest.TestCase):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
         for suite in plan.SUITE_JOBS:
             self.assertIn(f"suites).{suite}", ci, suite)
+            self.assertIn(f"keys).{suite} ||", ci, suite)
 
 
 if __name__ == "__main__":
