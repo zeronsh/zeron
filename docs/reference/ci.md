@@ -134,6 +134,10 @@ Reuse fails closed:
 A pull request could fake a pass in its own runs, but it could just as well
 edit its own workflows. No other ref ever sees those entries.
 
+Changing what goes into a fingerprint (`SUITE_INPUTS`, `COMMON`,
+`SUITE_PACKAGES` in `reuse.py`) changes every fingerprint once, so the next run
+reruns everything; recorded passes count again after that.
+
 Limits:
 
 - A path assembled from variables is not found by the scan. Write such
