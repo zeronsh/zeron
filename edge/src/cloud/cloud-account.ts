@@ -253,6 +253,10 @@ export interface TokenRequest extends CloudCaller {
 export interface Heartbeat {
   readonly activeRuns: number;
   readonly clients: number;
+  /** Background work outliving a turn (a parked chat's subagents). */
+  readonly backgroundRuns?: number;
+  /** Of `activeRuns`, those waiting on an answer rather than working. */
+  readonly waitingRuns?: number;
 }
 
 /** The GitHub repository a new session runs on (its project's origin). */
@@ -340,6 +344,10 @@ interface SessionRecord {
   lastHeartbeatAt?: number;
   activeRuns: number;
   clients: number;
+  /** Last heartbeat's background work (see {@link Heartbeat}). */
+  backgroundRuns?: number;
+  /** Last heartbeat's runs waiting on an answer. */
+  waitingRuns?: number;
   lastTtlExtendAt?: number;
   /** Throttles the "ready but silent — did the provider auto-stop it?" probe. */
   lastProbeAt?: number;
@@ -1413,6 +1421,14 @@ export class CloudAccount extends DurableObject<Env> {
     const chatId = this.byDevice.get(deviceId);
     const s = chatId ? this.sessions.get(chatId) : undefined;
     if (!s || !this.matches(caller) || s.pendingDelete || s.state === "deleting") return false;
+    // A machine wakes only the sessions it started (its delegates).
+    if (caller.deviceId !== undefined && s.parentChatId !== this.byDevice.get(caller.deviceId)) return false;
+    return this.wake(s);
+  }
+
+  /** Bring `s`'s machine back: from sleep, after a stop in progress, or when
+   * the provider stopped it behind our back (auto-stop). */
+  private async wake(s: SessionRecord): Promise<boolean> {
     if (s.state === "sleeping") return (await this.beginWake(s)).ok;
     if (s.state === "stopping") {
       if (!s.pendingWake) {
@@ -1547,10 +1563,20 @@ export class CloudAccount extends DurableObject<Env> {
       return fail(403, "revoked", "This Cloud device is not enrolled.");
     }
     const now = Date.now();
-    const changed = s.activeRuns !== beat.activeRuns || s.clients !== beat.clients;
-    const busy = beat.activeRuns > 0 || beat.clients > 0;
+    const backgroundRuns = beat.backgroundRuns ?? 0;
+    const waitingRuns = beat.waitingRuns ?? 0;
+    const wasWorking = s.activeRuns - (s.waitingRuns ?? 0) > 0 || (s.backgroundRuns ?? 0) > 0;
+    const working = beat.activeRuns - waitingRuns > 0 || backgroundRuns > 0;
+    const changed =
+      s.activeRuns !== beat.activeRuns ||
+      s.clients !== beat.clients ||
+      (s.backgroundRuns ?? 0) !== backgroundRuns ||
+      (s.waitingRuns ?? 0) !== waitingRuns;
+    const busy = beat.activeRuns > 0 || beat.clients > 0 || backgroundRuns > 0;
     s.activeRuns = beat.activeRuns;
     s.clients = beat.clients;
+    s.backgroundRuns = backgroundRuns;
+    s.waitingRuns = waitingRuns;
     s.lastHeartbeatAt = now;
     if (busy || changed) s.lastActiveAt = now;
     this.markAlive(s, now);
@@ -1571,6 +1597,15 @@ export class CloudAccount extends DurableObject<Env> {
     }
     await this.saveSession(s);
     await this.saveAccount();
+    // A delegate that just stopped working (finished, or waiting on an
+    // answer) has something for the chat that started it, which reads it
+    // from its own machine: wake that machine if it went to sleep meanwhile.
+    if (wasWorking && !working && s.parentChatId !== undefined) {
+      const parent = this.sessions.get(s.parentChatId);
+      if (parent && !parent.pendingDelete && parent.state !== "deleting") {
+        await this.wake(parent).catch((e: unknown) => console.warn("cloud parent wake failed", explain(e)));
+      }
+    }
     return { ok: true, value: { ok: true } };
   }
 
@@ -1588,7 +1623,7 @@ export class CloudAccount extends DurableObject<Env> {
         idleMs: this.idleMs(),
         lastActiveAt: s.lastActiveAt,
         lastHeartbeatAt: s.lastHeartbeatAt,
-        activeRuns: s.activeRuns,
+        activeRuns: s.activeRuns + (s.backgroundRuns ?? 0),
         clients: s.clients
       });
       if (decision.sleep) await this.beginSleep(s, "idle");

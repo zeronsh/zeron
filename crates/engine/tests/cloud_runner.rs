@@ -683,7 +683,11 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     let task = runner::spawn_heartbeat(
         identity.edge_url(),
         Arc::new(auth),
-        Arc::new(|| 2),
+        Arc::new(|| runner::RunCounts {
+            active: 2,
+            waiting: 1,
+            background: 1,
+        }),
         activity.clone(),
         Duration::from_millis(50),
     );
@@ -696,9 +700,15 @@ async fn heartbeat_reports_active_runs_with_the_runner_bearer() {
     .expect("heartbeats");
     task.abort();
     let beats = rig.edge.requests("/runner/heartbeat");
-    assert_eq!(beats[0].body, json!({"activeRuns": 2, "clients": 3}));
+    assert_eq!(
+        beats[0].body,
+        json!({"activeRuns": 2, "clients": 3, "backgroundRuns": 1, "waitingRuns": 1})
+    );
     // Drained by the delivered beat: an idle open link reports nothing.
-    assert_eq!(beats[1].body, json!({"activeRuns": 2, "clients": 0}));
+    assert_eq!(
+        beats[1].body,
+        json!({"activeRuns": 2, "clients": 0, "backgroundRuns": 1, "waitingRuns": 1})
+    );
     assert!(beats[0].bearer.as_deref().is_some_and(|b| b.contains('.')));
 }
 
