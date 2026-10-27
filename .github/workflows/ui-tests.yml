@@ -16,7 +16,7 @@ on:
         type: boolean
         default: true
       browser:
-        description: Also run the native browser fixture (pull requests that touch the browser; always otherwise).
+        description: Also run the native browser fixture (ci.yml - nightly, manual runs and `ci:full`).
         type: boolean
         default: true
 

@@ -8,11 +8,13 @@ name: CI
 #           (scripts/ci/reuse.py; every job records its pass as its last
 #           step). Pull requests get the fast tier: Windows,
 #           macOS, voice and Android only when the change looks platform
-#           specific, and the Windows packaging, iOS simulator and browser
+#           specific, and the Windows packaging, iOS simulator and macOS
 #           fixtures only for their own files; the `ci:full` label (then
 #           re-run) or the CI_PR_TIER=full repository variable runs everything.
 #           Main, the merge queue and manual runs get the full tier; the
-#           nightly schedule runs everything, slow tests included.
+#           nightly schedule runs everything, slow tests included. Voice and
+#           the Linux browser fixture run only nightly, manually or with
+#           `ci:full`. Fork pull requests reuse only main's passes.
 #   admit   waits until every runner the run needs is free, so that once a
 #           run starts, none of its jobs queues behind another run's
 #           (scripts/ci/admit.py). Its name carries the reservation; other runs
@@ -28,6 +30,8 @@ name: CI
 #   CI_ADMISSION         off: start at once, as before
 #   CI_DEBOUNCE_SECONDS  wait for further pushes to a pull request first (60)
 #   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)
+#   CI_FORK_REUSE        own: fork pull requests also reuse their own earlier passes
+#                        (safe once the merge queue, which reuses nothing, is required)
 #
 # Labels (adding one needs the triage role): ci:full (every suite, nothing
 # reused), ci:priority (front of the admission queue), ci:lock (a full run's
@@ -86,6 +90,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_PR_TIER: ${{ vars.CI_PR_TIER }}
+          CI_FORK_REUSE: ${{ vars.CI_FORK_REUSE }}
         run: python3 -I scripts/ci/plan.py
 
   admit:
@@ -208,7 +213,14 @@ jobs:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).android
     uses: ./.github/workflows/android.yml
-    secrets: inherit
+    # Only what android.yml uses, and only on pushes to main, which publish: pull
+    # requests and the merge queue (code not on main yet) sign with a debug key.
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ github.event_name == 'push' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name == 'push' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+      ANDROID_KEY_ALIAS: ${{ github.event_name == 'push' && secrets.ANDROID_KEY_ALIAS || '' }}
+      ANDROID_KEY_PASSWORD: ${{ github.event_name == 'push' && secrets.ANDROID_KEY_PASSWORD || '' }}
+      CLOUDFLARE_API_TOKEN: ${{ github.event_name == 'push' && secrets.CLOUDFLARE_API_TOKEN || '' }}
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).android || '' }}
 

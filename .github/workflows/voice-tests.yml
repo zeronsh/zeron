@@ -1,7 +1,7 @@
 name: Native Codex voice
 
-# Called by ci.yml when the audio stack or the packaged voice runtime changes
-# (scripts/ci/plan.py), and nightly. The rest of voice is tested where it is
+# Called by ci.yml nightly, on manual runs and with the `ci:full` label
+# (scripts/ci/plan.py NIGHTLY_SUITES). The rest of voice is tested where it is
 # built: protocol, transport, MCP and voice-media in core-tests
 # (scripts/ci/test-core.sh), the mobile voice and orb core in ios-core
 # (macos.yml), voice-media on Windows in windows.yml.
