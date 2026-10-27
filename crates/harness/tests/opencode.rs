@@ -17,7 +17,8 @@ use zeron_harness::{
     CancellationToken, Harness, HarnessError, OpencodeHarness, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, ReasoningLevel, RunRequest, SandboxLevel, ToolCall, UserInputAnswer,
+    AccessMode, AgentEvent, DoneStatus, ReasoningLevel, RunRequest, SandboxLevel, ToolCall,
+    UserInputAnswer,
 };
 
 // ---------------------------------------------------------------------------
@@ -950,6 +951,58 @@ async fn a_model_switch_rides_the_next_prompt() {
     );
 }
 
+/// A supervised plan-mode run names the plan agent on its prompt, and puts
+/// a command to the person instead of approving it: "No" rejects it.
+#[tokio::test]
+async fn supervised_plan_run_names_the_plan_agent_and_asks_before_commands() {
+    let fake = FakeOpencode::start().await;
+    let driver = harness(&fake);
+    assert_eq!(driver.access_modes(), AccessMode::ALL);
+    assert!(driver.supports_plan());
+    let (mut controls, _steer, _token) = controls();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    controls.request_input = Box::new(move |questions| {
+        let (tx, rx) = oneshot::channel();
+        let answers = questions
+            .iter()
+            .map(|q| UserInputAnswer {
+                question_id: q.id.clone(),
+                labels: vec!["No".into()],
+            })
+            .collect();
+        seen.lock()
+            .unwrap()
+            .extend(questions.into_iter().map(|q| q.question));
+        let _ = tx.send(answers);
+        rx
+    });
+    let mut opening = request("plan the cleanup");
+    opening.auto_approve = false;
+    opening.access = AccessMode::Supervised;
+    opening.plan = true;
+    let mut stream = driver.run(opening, controls).await.expect("run starts");
+    let prompts = wait_posts(&fake, "/session/ses_test/prompt_async", 1).await;
+    assert_eq!(prompts[0]["agent"], "plan");
+    assistant_message(&fake, "ses_test", "msg_1");
+    fake.emit(json!({
+        "type": "permission.asked",
+        "properties": {
+            "id": "per_1", "sessionID": "ses_test", "permission": "bash",
+            "patterns": ["rm -rf build"], "metadata": { "command": "rm -rf build" },
+            "always": ["rm *"],
+        },
+    }));
+    let replies = wait_posts(&fake, "/permission/per_1/reply", 1).await;
+    assert_eq!(replies[0], json!({ "reply": "reject" }));
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["OpenCode wants to run `rm -rf build`. Allow it?"]
+    );
+    idle(&fake, "ses_test");
+    drain_to_done(&mut stream).await;
+}
+
 #[tokio::test]
 async fn provider_retries_surface_and_cap_out() {
     let fake = FakeOpencode::start().await;
@@ -1538,4 +1591,86 @@ async fn live_turns_against_a_real_opencode() {
     assert_eq!(status, DoneStatus::Completed, "{error:?}");
     assert!(text.to_ascii_lowercase().contains("done"), "{text}");
     drop(steer);
+}
+
+/// Restricted access modes against an installed opencode (isolated like
+/// [`live_turns_against_a_real_opencode`]): supervised asks before the
+/// command and the file and, refused, leaves no file; auto-accept edits
+/// writes the file unasked and still asks before the command. Run with
+/// `ZERON_OPENCODE_LIVE_EXE=/path/to/opencode cargo test -p zeron-harness
+/// --test opencode live_access -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "drives a real opencode; set ZERON_OPENCODE_LIVE_EXE"]
+async fn live_access_modes_against_a_real_opencode() {
+    let Some(exe) = std::env::var_os("ZERON_OPENCODE_LIVE_EXE") else {
+        eprintln!("ZERON_OPENCODE_LIVE_EXE unset; skipping");
+        return;
+    };
+    let model = std::env::var("ZERON_OPENCODE_LIVE_MODEL")
+        .unwrap_or_else(|_| "opencode/big-pickle".to_owned());
+    for access in [AccessMode::Supervised, AccessMode::AutoAcceptEdits] {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut env = std::collections::BTreeMap::new();
+        for (key, dir) in [
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_STATE_HOME", "state"),
+        ] {
+            let dir = root.path().join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            env.insert(key.to_owned(), dir.to_string_lossy().into_owned());
+        }
+        let mut run = request(
+            "Use the bash tool to run `echo probe-ok`, then use the write tool to create \
+             note.txt containing the word hello. Do both even if one fails, then stop.",
+        );
+        run.cwd = project.to_string_lossy().into_owned();
+        run.model = Some(model.clone());
+        run.env = env;
+        run.auto_approve = false;
+        run.access = access;
+        let (mut controls, _steer, _token) = controls();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        controls.request_input = Box::new(move |questions| {
+            let (tx, rx) = oneshot::channel();
+            let answers = questions
+                .iter()
+                .map(|q| UserInputAnswer {
+                    question_id: q.id.clone(),
+                    labels: vec!["No".into()],
+                })
+                .collect();
+            seen.lock()
+                .unwrap()
+                .extend(questions.into_iter().map(|q| q.question));
+            let _ = tx.send(answers);
+            rx
+        });
+        let driver = OpencodeHarness::new().with_executable(std::path::PathBuf::from(&exe));
+        let mut stream = driver.run(run, controls).await.expect("run starts");
+        let (text, status, error, _) = live_turn(&mut stream).await;
+        let asked = asked.lock().unwrap().clone();
+        eprintln!("{access:?}: {status:?} {text:?} {error:?} asked {asked:?}");
+        assert!(
+            asked
+                .iter()
+                .any(|q| q.contains("wants to run `echo probe-ok`")),
+            "{asked:?}"
+        );
+        let wrote = project.join("note.txt").exists();
+        match access {
+            AccessMode::Supervised => {
+                assert!(asked.iter().any(|q| q.contains("note.txt")), "{asked:?}");
+                assert!(!wrote, "a refused edit was written");
+            }
+            _ => {
+                assert!(!asked.iter().any(|q| q.contains("note.txt")), "{asked:?}");
+                assert!(wrote, "an accepted edit was not written");
+            }
+        }
+    }
 }
