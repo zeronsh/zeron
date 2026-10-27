@@ -70,6 +70,13 @@ Repository variables:
 | `CI_ADMISSION` | on | `off` starts every run at once |
 | `CI_PR_TIER` | fast | `full` runs everything on pull requests |
 
+A pull request can edit its own copy of `ci.yml`, so the reservation other runs
+read from its admit job is not trusted:
+
+- it is capped at a full run (`MAX_RESERVATION`);
+- jobs an admitted run reserved but never created stop counting 90 minutes
+  after admission.
+
 Admission ensures that all of a run's runners were free when it started. It
 can't stop jobs it doesn't see from taking runners in the meantime: other
 repositories of the organization, release and deploy workflows. The budget

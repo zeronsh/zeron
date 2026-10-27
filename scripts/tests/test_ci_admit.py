@@ -31,6 +31,16 @@ class ReservationTests(unittest.TestCase):
         self.assertEqual(parse_reservation("admit [linux=1]"), {"linux": 1, "windows": 0, "macos": 0})
         self.assertIsNone(parse_reservation("admit []"))
 
+    def test_reservations_are_capped_at_a_full_run(self):
+        # Another run's admit name comes from its own (editable) ci.yml.
+        self.assertEqual(parse_reservation("admit [linux=999 windows=50 macos=40]"), admit.MAX_RESERVATION)
+
+    def test_cap_is_the_largest_plan(self):
+        sys.path.insert(0, str(pathlib.Path(admit.__file__).parent))
+        import plan
+        everything = plan.reservation({s: True for s in plan.SUITE_JOBS}, "push", "refs/heads/main")
+        self.assertEqual(everything, admit.MAX_RESERVATION)
+
     def test_held_releases_finished_jobs(self):
         declared = {"linux": 3, "windows": 2, "macos": 1}
         jobs = [
@@ -42,6 +52,19 @@ class ReservationTests(unittest.TestCase):
             job("macos / macos-frame-source", "macos-latest", conclusion="skipped"),
         ]
         self.assertEqual(held(declared, jobs), {"linux": 2, "windows": 2, "macos": 0})
+
+    def test_jobs_that_never_appear_stop_counting(self):
+        declared = {"linux": 2, "windows": 0, "macos": 3}
+        jobs = [job("macos / macos-native", "macos-latest", "in_progress", None)]
+        self.assertEqual(held(declared, jobs, since_admitted=60)["macos"], 3)
+        self.assertEqual(held(declared, jobs, since_admitted=admit.UNSEEN_GRACE + 1),
+                         {"linux": 0, "windows": 0, "macos": 1})
+
+    def test_seconds_since(self):
+        import time
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
+        self.assertAlmostEqual(admit.seconds_since(stamp), 120, delta=2)
+        self.assertEqual(admit.seconds_since(None), 0)
 
     def test_held_never_below_what_is_running(self):
         jobs = [job(f"w{i}", "windows-2022", "in_progress", None) for i in range(3)]

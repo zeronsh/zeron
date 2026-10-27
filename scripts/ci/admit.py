@@ -20,6 +20,12 @@ requests from forks only get a read-only token):
     soon as the job using it is done, not when the whole run ends.
   - A waiting run's own admit job holds one Linux runner.
 
+Any pull request can edit its own copy of ci.yml, so a reservation read from
+another run is not trusted: it is capped at the most plan.py ever reserves
+(MAX_RESERVATION), and an admitted run's jobs that never show up stop counting
+UNSEEN_GRACE after admission. A run cannot hold more than a full run's worth
+of runners, or hold runners it never uses for long.
+
 A waiting run is admitted when, for every resource it needs, what admitted
 runs hold + what the runs ahead of it in the queue need + its own need fits in
 the budget. So a run that needs only Linux can go ahead of a run waiting for
@@ -43,6 +49,7 @@ MAX_WAIT_MINUTES, it lets the run start (fail open) rather than block CI.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
@@ -57,13 +64,18 @@ RESOURCES = ("total", "macos", "windows")
 ADMIT_PREFIX = "admit"
 UNRESERVED_JOBS = ("plan",)  # jobs that run before admission and are not in reservations
 RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d+)\b")
+# The largest reservation plan.py makes: every suite, on main (checked by test_ci_admit.py).
+MAX_RESERVATION = {"linux": 10, "windows": 3, "macos": 4}
+# How long an admitted run's not-yet-created jobs stay reserved. Jobs that wait for
+# another job (iOS simulator tests, Android publishing) are created within minutes.
+UNSEEN_GRACE = 90 * 60
 
 
 def parse_reservation(name: str) -> dict[str, int] | None:
     found = dict((k, int(v)) for k, v in RESERVATION.findall(name))
     if not found:
         return None
-    return {r: found.get(r, 0) for r in RUNNERS}
+    return {r: min(found.get(r, 0), MAX_RESERVATION[r]) for r in RUNNERS}
 
 
 def need_of(counts: dict[str, int]) -> dict[str, int]:
@@ -83,8 +95,11 @@ def is_admit(job: dict) -> bool:
     return job["name"].startswith(ADMIT_PREFIX)
 
 
-def held(declared: dict[str, int], jobs: list[dict]) -> dict[str, int]:
-    """Runners an admitted run still holds: its reservation minus its finished jobs."""
+def held(declared: dict[str, int], jobs: list[dict], since_admitted: float = 0) -> dict[str, int]:
+    """Runners an admitted run still holds: its reservation minus its finished jobs.
+
+    After UNSEEN_GRACE only jobs that exist and have not finished count.
+    """
     done = {r: 0 for r in RUNNERS}
     active = {r: 0 for r in RUNNERS}
     for job in jobs:
@@ -96,7 +111,15 @@ def held(declared: dict[str, int], jobs: list[dict]) -> dict[str, int]:
             continue
         bucket = done if job["status"] == "completed" else active
         bucket[runner_of(job)] += 1
+    if since_admitted > UNSEEN_GRACE:
+        return active
     return {r: max(declared[r] - done[r], active[r], 0) for r in RUNNERS}
+
+
+def seconds_since(timestamp: str | None) -> float:
+    if not timestamp:
+        return 0
+    return time.time() - calendar.timegm(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 @dataclass
@@ -263,7 +286,7 @@ class Scheduler:
                 snap.waiters.append(Waiter(run["id"], (admit["created_at"], admit["id"]),
                                            need_of(declared), admit["status"] == "in_progress"))
             elif admit["conclusion"] == "success":
-                snap.holding.append(need_of(held(declared, jobs)))
+                snap.holding.append(need_of(held(declared, jobs, seconds_since(admit.get("completed_at")))))
         return snap
 
 
