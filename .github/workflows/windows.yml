@@ -39,8 +39,8 @@ jobs:
   # Every Windows crate suite in ONE build: separate `cargo test` invocations
   # with different package sets each recompiled the shared dependency graph
   # (they used to be three jobs, ~20 min each, almost all of it compiling).
-  # nextest runs each test in its own process; zeron-ui's tests stay serial
-  # (scripts/ci/nextest.toml), as the old --test-threads=1 run was.
+  # nextest runs each test in its own process, so zeron-ui's tests run side by
+  # side (the old in-process `--test-threads=1` run needed them one at a time).
   tests:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022

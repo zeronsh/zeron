@@ -23,16 +23,11 @@ retries = 2
 filter = 'package(zeron-harness) & test(mcp_injection_reaches_isolated_server_processes)'
 retries = 2
 
-# Windows (windows.yml) ran the zeron-ui library with --test-threads=1: native
-# platform state (fonts, DirectWrite, the message loop) is per process but the
-# tests were never run side by side there. Keep them one at a time.
-[test-groups]
-windows-ui-serial = { max-threads = 1 }
-
-[[profile.default.overrides]]
-platform = 'cfg(windows)'
-filter = 'package(zeron-ui)'
-test-group = 'windows-ui-serial'
+# Windows used to run the zeron-ui library with `cargo test --test-threads=1`:
+# every test in one process, where native platform state (fonts, DirectWrite,
+# the message loop) is shared. nextest gives each test its own process, so they
+# run side by side there too. If one turns out to share state across processes,
+# put just it in a max-threads = 1 test group.
 
 # preview `discovery` tests bind the fixed port 7331 and serialize with a mutex,
 # which does nothing when every test is its own process (nextest): one at a time.

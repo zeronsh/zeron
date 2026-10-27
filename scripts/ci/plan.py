@@ -142,8 +142,8 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
                                  ".github/workflows/windows.yml", "crates/update/**"],
     # The simulator unit tests (and the bindings they link): the app, the FFI
     # crate and the client it wraps; ios-core tests the rest of the mobile core.
-    ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/client/**",
-                                   ".github/workflows/macos.yml"],
+    ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
+                                   "crates/client/**", ".github/workflows/macos.yml"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
 FLAG_PATHS: dict[tuple[str, str], list[str]] = {
