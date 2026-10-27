@@ -12,39 +12,14 @@ name: Android
 #   ANDROID_KEYSTORE_PASSWORD  ANDROID_KEY_ALIAS  ANDROID_KEY_PASSWORD
 # Without them the APK is signed with a throwaway debug key and not published.
 
+# Called by ci.yml, which decides when Android runs (the app, its Rust core or
+# the shared fonts and icons changed) and holds the runners for it.
 on:
-  pull_request:
-    paths:
-      - 'apps/android/**'
-      - 'crates/**'
-      - 'scripts/android/**'
-      # The app measures and draws the iOS app's fonts and icons.
-      - 'apps/ios/Zeron/Fonts/**'
-      - 'apps/ios/Zeron/Assets.xcassets/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/android.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'apps/android/**'
-      - 'crates/**'
-      - 'scripts/android/**'
-      - 'apps/ios/Zeron/Fonts/**'
-      - 'apps/ios/Zeron/Assets.xcassets/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/android.yml'
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   NDK_VERSION: 29.0.14206865
@@ -80,6 +55,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: android
+          # Only main writes the cache: pull request caches would evict main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: build tools (cargo-ndk, rsvg-convert)
         run: |
           cargo install cargo-ndk --locked
@@ -92,8 +69,11 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           # Only grows: Android installs a build over another only when it's higher.
-          echo "BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
-          echo "build=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          # The run number is the calling workflow's (ci.yml), which started over at 1
+          # when Android moved into it; the standalone workflow had reached ~200, so
+          # 2000 keeps published build numbers above every build already installed.
+          echo "BUILD_NUMBER=$((2000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "build=$((2000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
 
       - id: signing
         name: release key

@@ -22,3 +22,14 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'package(zeron-harness) & test(mcp_injection_reaches_isolated_server_processes)'
 retries = 2
+
+# Windows (windows.yml) ran the zeron-ui library with --test-threads=1: native
+# platform state (fonts, DirectWrite, the message loop) is per process but the
+# tests were never run side by side there. Keep them one at a time.
+[test-groups]
+windows-ui-serial = { max-threads = 1 }
+
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'package(zeron-ui)'
+test-group = 'windows-ui-serial'

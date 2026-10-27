@@ -1,41 +1,22 @@
 name: macOS tests
 
+# Called by ci.yml, which decides which of these run (scripts/ci/plan.py) and
+# holds the runners for them (scripts/ci/admit.py).
 on:
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'edge/**'
-      - 'scripts/run-macos-browser-fixture.sh'
-      - 'scripts/test-browser-storage.py'
-      - 'scripts/ci/run-macos-fixture.sh'
-      - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
-      - '.github/workflows/macos.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'edge/**'
-      - 'scripts/run-macos-browser-fixture.sh'
-      - 'scripts/test-browser-storage.py'
-      - 'scripts/ci/run-macos-fixture.sh'
-      - 'dist/macos/Info.plist'
-      - 'apps/ios/**'
-      - '.github/workflows/macos.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      native:
+        type: boolean
+        default: true
+      frame-source:
+        type: boolean
+        default: true
+      ios:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-
-concurrency:
-  group: macos-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Tests run on the dev profile (workspace crates at opt-level 0, dependencies at 2 as configured in
@@ -46,42 +27,10 @@ env:
 # rustc 1.98.0 and another 1.98.1) and rust-cache keys include the rustc version, so a job that lands
 # on an older image would otherwise miss the cache that `main` seeded.
 jobs:
-  changes:
-    runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: read
-    outputs:
-      ios: ${{ steps.filter.outputs.result }}
-    steps:
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        id: filter
-        with:
-          script: |
-            // Preserve iOS coverage for main pushes and manual runs.
-            if (context.eventName !== 'pull_request') return true;
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              ...context.repo,
-              pull_number: context.payload.pull_request.number,
-              per_page: 100,
-            });
-            // Run conservatively if the API did not return the full diff.
-            if (files.length < context.payload.pull_request.changed_files) return true;
-            // The app links the Rust mobile core and everything it depends on.
-            const mobileCore = ['crates/mobile/', 'crates/client/', 'crates/text/', 'crates/markdown/',
-              'crates/doc/', 'crates/sync/', 'crates/proto/', 'crates/rpc/', 'crates/syntax/',
-              'scripts/ios/'];
-            const affectsIOS = path => path?.startsWith('apps/ios/')
-              || mobileCore.some(prefix => path?.startsWith(prefix))
-              || path === 'Cargo.lock'
-              || path === 'Cargo.toml'
-              || path === 'rust-toolchain.toml'
-              || path === '.github/workflows/macos.yml';
-            return files.some(file => affectsIOS(file.filename)
-              || affectsIOS(file.previous_filename));
-
   # Updater and preview tests, native UI regressions and the two native WebKit fixtures. Everything is
   # compiled once (one cargo invocation, so dependencies are built once) and then run.
   macos-native:
+    if: inputs.native
     runs-on: macos-latest
     # A cold cache (first run, eviction, toolchain bump) takes about 32 minutes; warm is about 10.
     timeout-minutes: 45
@@ -117,11 +66,11 @@ jobs:
             --features zeron-ui/browser-fixture --lib --tests
           cargo build --locked -p zeron-update -p zeron-preview -p zeron-ui \
             --features zeron-ui/browser-fixture --example browser-fixture --example preview-fixture
-      - name: Check macOS application
-        env:
-          # Match the old `cargo check --release`: no debug assertions.
-          CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: false
-        run: cargo check --locked -p zeron
+      # Builds the app with the dependencies compiled above. It used to be a `cargo check`
+      # with debug assertions off, which shares nothing with the build (check-only metadata,
+      # another profile) and recompiled every dependency: ~7 minutes.
+      - name: Build macOS application
+        run: cargo build --locked -p zeron --bin zeron
       - name: Updater, preview, CoreText and native UI regressions
         run: |
           # zeron-text's coretext tests are macOS-only (#![cfg(target_os = "macos")]); its other
@@ -171,6 +120,7 @@ jobs:
 
   # gpui_macos lives in the pinned GPUI checkout, a separate workspace with its own cache.
   macos-frame-source:
+    if: inputs.frame-source
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -200,8 +150,7 @@ jobs:
   # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the
   # bindings are generated from the host build of the library).
   ios-core:
-    needs: changes
-    if: needs.changes.outputs.ios == 'true'
+    if: inputs.ios
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -231,13 +180,12 @@ jobs:
           path: ${{ runner.temp }}/ios-include
           retention-days: 1
 
-  # iOS unit tests in the simulator (only when iOS or the mobile core changed, see `changes`).
-  # Waiting for macos-frame-source keeps a run to two macOS runners at a time.
+  # iOS unit tests in the simulator (only when iOS or the mobile core changed).
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
   ios-tests:
-    needs: [changes, ios-core, macos-frame-source]
-    if: needs.changes.outputs.ios == 'true'
+    needs: ios-core
+    if: inputs.ios
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

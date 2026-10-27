@@ -1,0 +1,157 @@
+name: CI
+
+# The one entry point for pull request, main and merge queue checks.
+#
+#   plan    which suites this change needs, and the runners they will use
+#           (scripts/ci/plan.py). Pull requests get the fast tier: Windows,
+#           macOS, voice and Android only when the change looks platform
+#           specific; the `ci:full` label (then re-run) or the CI_PR_TIER=full
+#           repository variable runs everything. Main, the merge queue and
+#           manual runs get the full tier.
+#   admit   waits until every runner the run needs is free, so that once a
+#           run starts, none of its jobs queues behind another run's
+#           (scripts/ci/admit.py). Its name carries the reservation; other runs
+#           read it from there.
+#   suites  the reusable workflows, all started together once admitted.
+#   result  "CI result": one check to require in the ruleset and merge queue.
+#
+# Repository variables (all optional):
+#   CI_PR_TIER           fast (default) or full, for pull requests
+#   CI_BUDGET_TOTAL      hosted runners all CI runs may hold at once (50)
+#   CI_BUDGET_MACOS      ... macOS runners (10)
+#   CI_BUDGET_WINDOWS    ... Windows runners (16)
+#   CI_ADMISSION         off: start at once, as before
+#   CI_DEBOUNCE_SECONDS  wait for further pushes to a pull request first (60)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request cancels its previous run, admitted or still
+  # waiting, which releases everything that run held.
+  group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+      reservation: ${{ steps.plan.outputs.reservation }}
+      tier: ${{ steps.plan.outputs.tier }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: |
+            scripts/ci
+            scripts/tests
+            .github/workflows
+      - name: Planner and admission tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+      - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_PR_TIER: ${{ vars.CI_PR_TIER }}
+        run: python3 -I scripts/ci/plan.py
+
+  admit:
+    name: admit [${{ needs.plan.outputs.reservation }}]
+    needs: plan
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ needs.plan.outputs.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
+          MAX_WAIT_MINUTES: 300
+        run: python3 -I scripts/ci/admit.py
+
+  linux:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).core || fromJSON(needs.plan.outputs.suites).ui
+    uses: ./.github/workflows/ui-tests.yml
+    with:
+      core: ${{ fromJSON(needs.plan.outputs.suites).core }}
+      ui: ${{ fromJSON(needs.plan.outputs.suites).ui }}
+
+  cursor:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).cursor
+    uses: ./.github/workflows/cursor-compatibility.yml
+    with:
+      rust-tests: false
+
+  edge:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).edge
+    uses: ./.github/workflows/preview-tests.yml
+
+  installer:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).installer
+    uses: ./.github/workflows/linux-installer.yml
+
+  voice:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).voice
+    uses: ./.github/workflows/voice-tests.yml
+
+  windows:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).windows
+    uses: ./.github/workflows/windows.yml
+
+  macos:
+    needs: [plan, admit]
+    if: >-
+      fromJSON(needs.plan.outputs.suites).macos
+      || fromJSON(needs.plan.outputs.suites).frame_source
+      || fromJSON(needs.plan.outputs.suites).ios
+    uses: ./.github/workflows/macos.yml
+    with:
+      native: ${{ fromJSON(needs.plan.outputs.suites).macos }}
+      frame-source: ${{ fromJSON(needs.plan.outputs.suites).frame_source }}
+      ios: ${{ fromJSON(needs.plan.outputs.suites).ios }}
+
+  android:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).android
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
+
+  result:
+    name: CI result
+    needs: [plan, admit, linux, cursor, edge, installer, voice, windows, macos, android]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | python3 -c 'import json,sys; [print(f"{k:10} {v[\"result\"]}") for k,v in json.load(sys.stdin).items()]'
+          test "$FAILED" = false

@@ -1,33 +1,11 @@
 name: Linux installer
 
+# Called by ci.yml when the installers or the desktop entry change.
 on:
-  pull_request:
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: linux-installer-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   desktop-entry:
