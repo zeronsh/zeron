@@ -77,7 +77,7 @@ subagent, delegate through Zeron chats instead, with `create_chats` (or `create_
 /// For a chat nobody started: how its side chats and tasks work.
 const AS_TOP: &str = "\n\n\
 Side chats work like subagents: give one a self-contained job with `create_chat` (or several \
-with `create_chats`) and a short title naming its role. When its turn ends, Zeron hands you \
+with `create_chats`) and a short Title Case title naming its role. When its turn ends, Zeron hands you \
 its final reply (after your current turn, never mid-reply, or starting a turn when you're \
 idle); it can't message you meanwhile. So launch with `wait: false`, tell the user in a line \
 what you started, and end your turn; don't poll. Wait only when you need the answer to go \
@@ -103,8 +103,8 @@ can't message it or start chats of your own; if you're stuck, say so in your fin
 const AS_COORDINATOR: &str = "\n\n\
 You coordinate a task another chat started: its brief is your first message. Plan the work, \
 then start agents for it with `create_chats` (each with a prompt that stands on its own, and \
-a title naming its role in the task: \"Schema Migrator\", \"Test Author\"). Keep the \
-number of agents to what the work needs.\n\
+a title naming its role in the task, in Title Case: \"Schema Migrator\", \"Test Author\"). \
+Keep the number of agents to what the work needs.\n\
 \n\
 Your agents report to you by themselves: when one finishes, fails, or asks something, Zeron \
 hands it to you at your next step, or wakes you if you're idle. While they work, end your \

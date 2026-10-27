@@ -21,7 +21,7 @@ use super::*;
 
 /// How long the newest notice settles before it is delivered, so chats
 /// finishing within moments of each other share a turn.
-pub(super) const NOTICE_SETTLE_MS: i64 = 1_500;
+pub(super) const NOTICE_SETTLE_MS: i64 = 3_000;
 
 impl DocHost {
     /// Leave `notice` on `chat_id`'s doc for its agent. `false` when it was

@@ -178,6 +178,7 @@ pub(super) struct ChildChatRow {
     /// The harness it runs on, drawn as the sidebar's brand mark.
     pub harness: Option<zeron_proto::HarnessId>,
     activity: DateTime<Utc>,
+    created: DateTime<Utc>,
 }
 
 /// The live (unarchived) children of `chat_id`, most recent activity first —
@@ -207,6 +208,7 @@ pub(super) fn child_chat_rows(
                 change_request: state.change_request_for_chat(chat).cloned(),
                 harness: chat.config.as_ref().map(|config| config.harness),
                 activity,
+                created: chat.created_at,
             }
         })
         .collect();
@@ -238,7 +240,8 @@ pub(super) fn task_rows(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         })
         .map(|coordinator| {
             let mut agents = child_chat_rows(state, &coordinator.id, now);
-            agents.sort_by_key(|agent| agent.activity);
+            // In the order the coordinator started them, as on the task card.
+            agents.sort_by_key(|agent| agent.created);
             let lead = state.display_status_for(coordinator, now);
             let any = |status: ChatIndicator| lead == status || agents.iter().any(|a| a.status == status);
             let status = if any(ChatIndicator::AwaitingInput) {
@@ -281,6 +284,33 @@ pub(super) fn child_chat_title(chat: &Chat) -> String {
         .clone()
         .or_else(|| chat.last_message_preview.clone())
         .unwrap_or_else(|| "New side chat".into())
+}
+
+/// A task row's squircles: its lead's, and its agents'.
+const TASK_LEAD_SIZE: f32 = 18.0;
+const TASK_AVATAR_SIZE: f32 = 16.0;
+/// The trailing column a task's chevron and its agents' status marks share.
+const STATUS_SLOT: f32 = 20.0;
+
+/// How a task or one of its agents is doing, centered in the trailing
+/// column; empty once it's done, so only what's moving or waiting shows.
+fn task_status_slot(
+    key: String,
+    status: ChatIndicator,
+    view: gpui::EntityId,
+    theme: &Theme,
+    cx: &mut App,
+) -> gpui::Div {
+    div()
+        .size(px(STATUS_SLOT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(
+            !matches!(status, ChatIndicator::Completed | ChatIndicator::Idle),
+            |slot| slot.child(status_mark(key, status, view, theme, cx)),
+        )
 }
 
 /// A status mark in a row's icon slot: Working spins, Completed wears the
@@ -491,11 +521,7 @@ impl Shell {
                 rows.push(self.render_task_row(task, open, view, theme, cx));
                 if open {
                     for agent in agents {
-                        rows.push(
-                            self.render_side_chat_row(agent, view, theme, cx)
-                                .pl(px(30.0))
-                                .into_any_element(),
-                        );
+                        rows.push(self.render_task_agent_row(agent, view, theme, cx));
                     }
                 }
             }
@@ -621,8 +647,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A task's row: the coordinator's mark (the lead), the task's name, its
-    /// agents' marks stacked on the right, and the chevron that opens them.
+    /// A task's row: the coordinator's mark (the lead), the task's name, how
+    /// it's doing, its agents' marks, and the chevron that lists them.
     fn render_task_row(
         &mut self,
         task: TaskRow,
@@ -632,29 +658,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = format!("session-lanes-task-{}", task.chat_id);
-        let lead = match task.harness {
-            Some(harness) => harness_mark(harness, theme).into_any_element(),
-            None => glyph(icons::CHAT_ROUND_LINE, theme),
-        };
         let avatars: Vec<crate::chat_avatars::Avatar> = task
             .agents
             .iter()
             .map(|agent| crate::chat_avatars::Avatar {
                 harness: agent.harness,
-                status: match agent.status {
-                    ChatIndicator::AwaitingInput | ChatIndicator::Errored => agent.status,
-                    _ => ChatIndicator::Idle,
-                },
+                status: agent.status,
             })
             .collect();
         let open_id = task.chat_id.clone();
         let toggle_id = task.chat_id.clone();
-        let status = match task.status {
-            ChatIndicator::Working | ChatIndicator::AwaitingInput => {
-                Some(status_mark(format!("{key}-status"), task.status, view, theme, cx))
-            }
-            _ => None,
-        };
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key.clone()))
             .aria_label(SharedString::from(format!("Open task {}", task.title)))
@@ -663,13 +676,17 @@ impl Shell {
                 this.close_session_info_overlay(cx);
                 this.open_child_chat_tab(&open_id, cx);
             }))
-            .child(popover::picker_icon_slot(lead))
+            .child(
+                crate::chat_avatars::tile(TASK_LEAD_SIZE, theme)
+                    .child(crate::chat_avatars::mark(task.harness, TASK_LEAD_SIZE, theme)),
+            )
             .child(row_title(format!("{key}-title"), task.title.clone()))
-            .children(status)
-            .when(!avatars.is_empty(), |row| {
+            .child(task_status_slot(format!("{key}-status"), task.status, view, theme, cx))
+            // Open, the rows beneath name them.
+            .when(!avatars.is_empty() && !open, |row| {
                 row.child(crate::chat_avatars::stack(
                     &avatars,
-                    18.0,
+                    TASK_AVATAR_SIZE,
                     popover::surface_bg(theme),
                     theme,
                 ))
@@ -678,12 +695,12 @@ impl Shell {
                 row.child(
                     div()
                         .id(SharedString::from(format!("{key}-agents")))
-                        .size(px(22.0))
+                        .size(px(STATUS_SLOT))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(5.0))
+                        .rounded(px(6.0))
                         .cursor_pointer()
                         .hover(|style| style.bg(crate::theme::ink(0.08)))
                         .tooltip(crate::settings::widgets::text_tooltip(if open {
@@ -710,6 +727,55 @@ impl Shell {
                         ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// An agent under its open task: its mark under the task's name, its
+    /// name, and how it's doing in the chevron's column. Opens the agent.
+    fn render_task_agent_row(
+        &mut self,
+        row: ChildChatRow,
+        view: gpui::EntityId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("session-lanes-agent-{}", row.chat_id);
+        let open_id = row.chat_id.clone();
+        let menu_id = row.chat_id.clone();
+        popover::picker_row(theme, false, false, key.clone())
+            .id(SharedString::from(key.clone()))
+            .aria_label(SharedString::from(format!("Open agent {}", row.title)))
+            .pl(px(8.0 + TASK_LEAD_SIZE + 8.0))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_session_info_overlay(cx);
+                this.open_child_chat_tab(&open_id, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.chat_menu.open(ChatMenuState {
+                        chat_id: menu_id.clone(),
+                        tab: None,
+                        position: event.position,
+                        page: ChatMenuPage::Root,
+                    });
+                    cx.notify();
+                }),
+            )
+            .child(
+                crate::chat_avatars::tile(TASK_AVATAR_SIZE, theme)
+                    .child(crate::chat_avatars::mark(row.harness, TASK_AVATAR_SIZE, theme)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(theme.text.opacity(0.85))
+                    .child(row_title(format!("{key}-title"), row.title.clone())),
+            )
+            .child(task_status_slot(format!("{key}-status"), row.status, view, theme, cx))
             .into_any_element()
     }
 
