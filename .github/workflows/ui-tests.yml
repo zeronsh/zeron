@@ -62,7 +62,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/linux-ci
+      - id: setup
+        uses: ./.github/actions/linux-ci
         with:
           rust-cache: ui
           save-rust-cache: 'true'
@@ -77,16 +78,17 @@ jobs:
             ${{ inputs.browser && 'xvfb xauth xdotool openbox weston ffmpeg imagemagick fonts-noto-cjk' || '' }}
       - name: UI and headless layout regressions
         run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
-      # The browser steps run even when a UI test failed: they are a separate signal.
+      # The browser steps run even when a UI test failed (a separate signal), but not
+      # when the setup did: without the packages they can only fail.
       - name: Build browser fixture
-        if: ${{ inputs.browser && !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: Persistent browser profiles across app launches
-        if: ${{ inputs.browser && !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 5
         run: xvfb-run -a python3 scripts/test-browser-storage.py --fixture target/debug/examples/browser-fixture
       - name: X11 and Wayland browser regressions
-        if: ${{ inputs.browser && !cancelled() }}
+        if: ${{ inputs.browser && !cancelled() && steps.setup.outcome == 'success' }}
         timeout-minutes: 5
         env:
           RUST_LOG: gpui_wgpu=info
