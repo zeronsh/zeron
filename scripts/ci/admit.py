@@ -63,7 +63,7 @@ every job. The script uses conditional requests (a 304 is free), refetches a
 run's jobs only when the run changed, polls less often the further back in the
 queue it is, and slows down when the remaining quota is low. If it cannot
 reach the API, the quota resets more than 10 minutes away, or it waited
-MAX_WAIT_MINUTES, it lets the run start (fail open) rather than block CI.
+MAX_WAIT_MINUTES (120), it lets the run start (fail open) rather than block CI.
 """
 
 from __future__ import annotations
@@ -167,6 +167,7 @@ class Snapshot:
     holding: list[Holding] = field(default_factory=list)
     priority: set[int] = field(default_factory=set)  # pull requests labelled ci:priority
     locked: set[int] = field(default_factory=set)  # pull requests holding a ci:lock
+    lock_times: dict[int, str] = field(default_factory=dict)  # when each lock's label was added
 
 
 @dataclass
@@ -185,15 +186,36 @@ def bigger(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
     return {r: max(a[r], b[r]) for r in RESOURCES}
 
 
-def rank(w: Waiter, snapshot: Snapshot) -> int:
-    return 0 if w.pr in snapshot.locked else 1 if w.pr in snapshot.priority else 2
+def rank(w: Waiter, snapshot: Snapshot) -> tuple:
+    """Queue order: locked runs (oldest lock first), then ci:priority, then everyone, each first come first served."""
+    if w.pr in snapshot.locked:
+        return (0, snapshot.lock_times.get(w.pr, ""), w.key)
+    return (1 if w.pr in snapshot.priority else 2, "", w.key)
 
 
 def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, int]) -> Decision:
+    """Whether run `me` may start.
+
+    Every wait points forward in one order (locked runs by lock age, then
+    ci:priority, then first come first served), so no cycle, and so no deadlock,
+    can form:
+      - a waiting run's admit job holds a runner until it is admitted, so a run
+        counts the admit runners of the runs *ahead* of it, never of those
+        behind it (they wait for it; counting them was a circular wait);
+      - a lock's standing reservation counts against everyone except the
+        older locks: two locks never wait for each other.
+    """
     zero = {r: 0 for r in RESOURCES}
     full = need_of(MAX_RESERVATION)
+    order = sorted(snapshot.waiters, key=lambda w: rank(w, snapshot))
+    self_ = next((w for w in order if w.run_id == me), None)
+    position = order.index(self_) if self_ is not None else len(order)
+    ahead_of_me = order[:position]
+    my_lock = self_.pr if self_ is not None and self_.pr in snapshot.locked else None
 
-    # A lock holds a full run, or what its runs actually hold if that is more.
+    def lock_is_older(pr: int) -> bool:
+        return (snapshot.lock_times.get(pr, ""), pr) < (snapshot.lock_times.get(my_lock, ""), my_lock)
+
     lock_use = {pr: dict(zero) for pr in snapshot.locked}
     used = dict(zero)
     for h in snapshot.holding:
@@ -202,32 +224,26 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
         else:
             used = add(used, h.need)
     for pr in snapshot.locked:
-        used = add(used, bigger(full, lock_use[pr]))
-    for w in snapshot.waiters:
-        if w.run_id != me and w.running:
+        if my_lock is None or (pr != my_lock and lock_is_older(pr)):
+            # A full run held for the lock, or what its runs hold if that is more.
+            used = add(used, bigger(full, lock_use[pr]))
+        else:
+            # Our own lock, or a newer one: only what its runs really hold.
+            used = add(used, lock_use[pr])
+    for w in ahead_of_me:
+        if w.running:
             used["total"] += 1
 
-    def fits(in_use: dict[str, int], ahead: dict[str, int]) -> bool:
-        # A run larger than the budget goes when nothing else holds or waits for that resource.
-        return all(in_use[r] + ahead[r] + min(mine[r], budget[r]) <= budget[r]
-                   for r in RESOURCES if mine[r] > 0)
-
-    self_ = next((w for w in snapshot.waiters if w.run_id == me), None)
-    if self_ is not None and self_.pr in snapshot.locked:
-        # The lock is ours: only what our pull request's runs really hold counts against it.
-        in_use = add(add(used, bigger(full, lock_use[self_.pr]), -1), lock_use[self_.pr])
-        return Decision(fits(in_use, zero), 0, in_use, zero)
-
     ahead = dict(zero)
-    order = sorted(snapshot.waiters, key=lambda w: (rank(w, snapshot), w.key))
-    position = 0
-    for w in order:
-        if w.run_id == me:
-            break
-        position += 1
-        if rank(w, snapshot) > 0:  # a locked run's need is already in `used`
-            ahead = add(ahead, w.need)
-    return Decision(fits(used, ahead), position, used, ahead)
+    for w in ahead_of_me:
+        if w.pr in snapshot.locked and (my_lock is None or lock_is_older(w.pr)):
+            continue  # its need is already in `used` as the lock's standing reservation
+        ahead = add(ahead, w.need)
+
+    # A run larger than the budget goes when nothing else holds or waits for that resource.
+    fits = all(used[r] + ahead[r] + min(mine[r], budget[r]) <= budget[r]
+               for r in RESOURCES if mine[r] > 0)
+    return Decision(fits, position, used, ahead)
 
 
 # GitHub API ------------------------------------------------------------------------------------
@@ -328,7 +344,8 @@ class Scheduler:
         live = {run["id"] for run in runs}
         self.jobs = {k: v for k, v in self.jobs.items() if k in live}
 
-        snap = Snapshot(priority=self.labelled(PRIORITY_LABEL), locked=self.locks())
+        lock_times = self.locks()
+        snap = Snapshot(priority=self.labelled(PRIORITY_LABEL), locked=set(lock_times), lock_times=lock_times)
         special = snap.priority | snap.locked
         for run in runs:
             jobs = self.run_jobs(run)
@@ -359,10 +376,10 @@ class Scheduler:
                 return found
             page += 1
 
-    def locks(self) -> set[int]:
-        """Pull requests labelled ci:lock less than LOCK_HOURS ago."""
+    def locks(self) -> dict[int, str]:
+        """Pull requests labelled ci:lock less than LOCK_HOURS ago, and when."""
         hours = float(os.environ.get("CI_LOCK_HOURS") or LOCK_HOURS)
-        locked = set()
+        locked: dict[int, str] = {}
         for number in self.labelled(LOCK_LABEL):
             added = None
             page = 1
@@ -375,7 +392,7 @@ class Scheduler:
                     break
                 page += 1
             if added and seconds_since(added) < hours * 3600:
-                locked.add(number)
+                locked[number] = added
         return locked
 
     def verified_pr(self, admit_name: str, run: dict, special: set[int]) -> int | None:
@@ -420,7 +437,7 @@ def main() -> int:
         "macos": env_int("CI_BUDGET_MACOS", 5),
         "windows": env_int("CI_BUDGET_WINDOWS", 10),
     }
-    max_wait = env_int("MAX_WAIT_MINUTES", 300) * 60
+    max_wait = env_int("MAX_WAIT_MINUTES", 120) * 60
     debounce = env_int("CI_DEBOUNCE_SECONDS", 60) if os.environ.get("GITHUB_EVENT_NAME") == "pull_request" else 0
 
     repo = os.environ["GITHUB_REPOSITORY"]

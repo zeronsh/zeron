@@ -225,9 +225,29 @@ can't stop jobs it doesn't see from taking runners in the meantime: other
 repositories of the organization, release and deploy workflows. Those can
 still take a free runner first.
 
+### No deadlocks
+
+Every wait points the same way: locked runs (oldest lock first), then
+`ci:priority`, then first come first served. So no two runs can wait for each
+other.
+
+- A waiting run's `admit` job holds a runner until the run is admitted. A run
+  counts those runners only for the runs ahead of it, not behind it.
+- A lock's reservation counts against everyone except older locks. A second
+  lock waits until the first is released; the first never waits for the
+  second.
+
+`scripts/tests/test_ci_admit.py` simulates 3,000 random queues (any sizes,
+priority, overlapping locks, any polling order) and checks that every run gets
+admitted. The scheduler before this rule deadlocked in about 1 in 10 of them.
+
+One case is outside the model. If every runner in the pool is taken by a
+waiting `admit` job (about 20 runs waiting at once), admitted runs get no
+runner until something else finishes. The fail-open timeout below bounds it.
+
 Admission never blocks CI. It lets the run start anyway if:
 
-- it waited 5 hours;
+- it waited 2 hours;
 - the API keeps failing;
 - the API rate limit runs out for more than 10 minutes.
 

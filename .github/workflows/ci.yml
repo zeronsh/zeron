@@ -112,7 +112,7 @@ jobs:
           CI_ADMISSION: ${{ vars.CI_ADMISSION }}
           CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
           CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
-          MAX_WAIT_MINUTES: 300
+          MAX_WAIT_MINUTES: 120
         run: python3 -I scripts/ci/admit.py
 
   linux-core:

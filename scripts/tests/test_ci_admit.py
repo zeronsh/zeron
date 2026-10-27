@@ -105,13 +105,31 @@ class DecideTests(unittest.TestCase):
         snap.holding = [held_(linux=4, macos=3)]  # 7 held + run 7's admit job + run 7's 3 ahead + 2 > 10
         self.assertFalse(decide(8, need(linux=2), snap, BUDGET).admit)
 
-    def test_waiting_admit_jobs_hold_a_runner(self):
-        others = [waiter(i, 10 + i, running=True, linux=1) for i in range(20, 25)]
-        snap = Snapshot([waiter(1, 1, linux=5)] + others, [])
-        # five other admit jobs are running: 5 + 5 <= 10
-        self.assertTrue(decide(1, need(linux=5), snap, BUDGET).admit)
-        snap.holding = [held_(linux=1)]
-        self.assertFalse(decide(1, need(linux=5), snap, BUDGET).admit)
+    def test_admit_jobs_ahead_hold_a_runner_those_behind_do_not_count(self):
+        ahead = [waiter(i, i, running=True, linux=1) for i in range(1, 4)]
+        behind = [waiter(i, i, running=True, linux=1) for i in range(20, 30)]
+        snap = Snapshot(ahead + [waiter(10, 10, linux=4)] + behind, [held_(linux=2)])
+        d = decide(10, need(linux=4), snap, BUDGET)
+        # 2 held + 3 admit jobs ahead + 3 needed ahead + 4 > 10; the ten behind are not counted
+        self.assertEqual(d.used["total"], 5)
+        self.assertFalse(d.admit)
+        snap.holding = []
+        self.assertTrue(decide(10, need(linux=4), snap, BUDGET).admit)  # 3 + 3 + 4 <= 10
+
+    def test_no_circular_wait_behind_a_full_run(self):
+        # A full run at the head and many waiting behind it, each holding its admit
+        # runner: counting those as busy made the head wait for them and them for it.
+        big = {"total": 20, "macos": 5, "windows": 10}
+        full = need_of(admit.MAX_RESERVATION)
+        behind = [waiter(10 + i, 10 + i, linux=8, windows=1) for i in range(12)]
+        snap = Snapshot([waiter(1, 1, **{k: v for k, v in admit.MAX_RESERVATION.items()})] + behind, [])
+        self.assertTrue(decide(1, full, snap, big).admit)
+        # Once it holds its runners, the next one goes as soon as they free up.
+        snap.waiters = behind
+        snap.holding = [held_(**admit.MAX_RESERVATION)]
+        self.assertFalse(decide(10, need(linux=8, windows=1), snap, big).admit)
+        snap.holding = [held_(linux=2)]
+        self.assertTrue(decide(10, need(linux=8, windows=1), snap, big).admit)
 
     def test_oversized_run_goes_when_the_resource_is_idle(self):
         snap = Snapshot([waiter(1, 1, macos=5)], [])
@@ -163,6 +181,20 @@ class PriorityAndLockTests(unittest.TestCase):
         snap = Snapshot([waiter(5, 1, macos=2)], [held_(pr=90, macos=4), held_(macos=4)], locked={90})
         self.assertEqual(decide(5, need(macos=2), snap, self.BIG).used["macos"], 8)
 
+    def test_two_locks_do_not_wait_for_each_other(self):
+        big = {"total": 20, "macos": 5, "windows": 10}
+        full_counts = admit.MAX_RESERVATION
+        full = need_of(full_counts)
+        snap = Snapshot([waiter(1, 1, pr=90, **full_counts), waiter(2, 2, pr=91, **full_counts)], [],
+                        locked={90, 91}, lock_times={90: "2026-10-27T10:00:00Z", 91: "2026-10-27T10:05:00Z"})
+        self.assertTrue(decide(1, full, snap, big).admit)  # the older lock goes
+        self.assertFalse(decide(2, full, snap, big).admit)  # the newer one waits for the older
+        # The older lock keeps its runners until it is released; then the newer one goes.
+        snap.waiters = [w for w in snap.waiters if w.run_id == 2]
+        snap.locked, snap.lock_times = {91}, {91: "2026-10-27T10:05:00Z"}
+        snap.holding = [held_(pr=90, linux=2)]
+        self.assertTrue(decide(2, full, snap, big).admit)
+
     def test_an_unverified_claim_is_an_ordinary_run(self):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
         self.assertEqual(decide(2, need(linux=2), snap, self.BIG).position, 1)
@@ -193,7 +225,7 @@ class SchedulerLabelTests(unittest.TestCase):
                            {"ci:priority": [77], "ci:lock": [90, 91]},
                            {90: lock_event(now), 91: lock_event(old)})
         scheduler = admit.Scheduler(api, "o/r", 1)
-        self.assertEqual(scheduler.locks(), {90})
+        self.assertEqual(set(scheduler.locks()), {90})
         run = {"event": "pull_request", "head_sha": "abc"}
         self.assertEqual(scheduler.verified_pr("admit [linux=2] #77", run, {77}), 77)
         self.assertIsNone(scheduler.verified_pr("admit [linux=2] #77", dict(run, head_sha="zzz"), {77}))
@@ -265,3 +297,46 @@ class SchedulerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LivenessTests(unittest.TestCase):
+    """Random queues always drain: whatever arrives, every run is eventually admitted."""
+
+    def test_random_queues_drain(self):
+        import random
+        budget = {"total": 20, "macos": 5, "windows": 10}
+        cap = admit.MAX_RESERVATION
+        for seed in range(3000):
+            rng = random.Random(seed)
+            runs = {}
+            for run in range(1, rng.randint(2, 14)):
+                counts = {r: rng.randint(0, cap[r]) for r in admit.RUNNERS}
+                counts["linux"] = max(counts["linux"], 1)
+                runs[run] = {"need": need(**counts), "pr": run, "arrive": rng.randint(0, 5),
+                             "duration": rng.randint(1, 6)}
+            locked = set(rng.sample(sorted(runs), k=min(len(runs), rng.choice([0, 0, 1, 2]))))
+            priority = set(rng.sample(sorted(runs), k=min(len(runs), rng.choice([0, 1, 2])))) - locked
+            lock_times = {pr: f"2026-10-27T10:0{i}:00Z" for i, pr in enumerate(sorted(locked, key=lambda p: rng.random()))}
+            admitted, done = {}, set()
+            for tick in range(400):
+                for run, left in list(admitted.items()):
+                    if left == 0:
+                        del admitted[run]
+                        done.add(run)
+                        locked.discard(runs[run]["pr"])  # merged: the lock ends
+                    else:
+                        admitted[run] = left - 1
+                waiting = [run for run in runs if run not in admitted and run not in done
+                           and runs[run]["arrive"] <= tick]
+                for run in sorted(waiting, key=lambda r: rng.random()):  # polls in any order
+                    snap = Snapshot(
+                        [Waiter(r, (f"t{runs[r]['arrive']:03d}", r), runs[r]["need"], True, runs[r]["pr"])
+                         for r in runs if r not in admitted and r not in done and runs[r]["arrive"] <= tick],
+                        [Holding(runs[r]["need"], runs[r]["pr"]) for r in admitted],
+                        priority=priority, locked=set(locked),
+                        lock_times={p: t for p, t in lock_times.items() if p in locked})
+                    if decide(run, runs[run]["need"], snap, budget).admit:
+                        admitted[run] = runs[run]["duration"]
+                if len(done) == len(runs):
+                    break
+            self.assertEqual(len(done), len(runs), f"seed {seed}: stuck with {sorted(set(runs) - done)}")
