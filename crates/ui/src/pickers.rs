@@ -194,15 +194,6 @@ pub fn resolve_access(wanted: AccessMode, offered: &[AccessMode]) -> AccessMode 
         .unwrap_or(offered[0])
 }
 
-/// The access chip's glyph per mode.
-pub fn access_icon(mode: AccessMode) -> &'static str {
-    match mode {
-        AccessMode::Supervised => crate::icons::LOCK_KEYHOLE,
-        AccessMode::AutoAcceptEdits => crate::icons::PEN,
-        AccessMode::FullAccess => crate::icons::LOCK_KEYHOLE_UNLOCKED,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Pure: default resolution (no "Default" placeholders — a concrete pick always)
 // ---------------------------------------------------------------------------
@@ -4951,12 +4942,6 @@ impl Pickers {
             popover::menu_row_nav(&theme, false, ix == active, "access-row-plan")
                 .id("access-row-plan")
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_plan(cx)))
-                .child(
-                    crate::icons::icon(crate::icons::CHECKLIST)
-                        .size(px(14.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
                 .child(access_row_text(
                     "Plan mode",
                     "Explore and propose a plan before changing anything.",
@@ -4977,12 +4962,6 @@ impl Pickers {
                 popover::menu_row_nav(&theme, selected, ix == active, format!("access-row-{ix}"))
                     .id(("access-row", ix))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_access(mode, cx)))
-                    .child(
-                        crate::icons::icon(access_icon(mode))
-                            .size(px(14.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
                     .child(access_row_text(mode.label(), mode.description(), &theme))
                     .when(selected, |row| {
                         row.child(
@@ -5000,7 +4979,7 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// The access chip beside the model chip: the mode's glyph and name,
+    /// The access chip beside the model chip: the mode's name,
     /// "Plan" in the accent when plan mode is on. Shown even when the agent
     /// has a single mode, so a chat never runs with more access than it
     /// says; None only before the catalog names the modes (or from an
@@ -5020,7 +4999,7 @@ impl Pickers {
             PickerKind::Access,
             mode.label().into(),
             !mode.is_full_access(),
-            Some((access_icon(mode), None)),
+            None,
             false,
             false,
             plan,

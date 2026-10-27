@@ -148,8 +148,6 @@ icon_assets![
     // Hand-drawn pushpin in the Solar Linear style for local sidebar pins.
     (PIN, "pin"),
     (PEN, "pen"),
-    (LOCK_KEYHOLE, "lock-keyhole-minimalistic"),
-    (LOCK_KEYHOLE_UNLOCKED, "lock-keyhole-minimalistic-unlocked"),
     (ARCHIVE_MINIMALISTIC, "archive-minimalistic"),
     (TRASH_BIN_MINIMALISTIC, "trash-bin-minimalistic"),
     // Shared settings glyph: user-supplied horizontal sliders.
