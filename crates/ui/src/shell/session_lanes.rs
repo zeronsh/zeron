@@ -718,8 +718,10 @@ impl Shell {
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
+                            // One task open at a time: opening one closes the rest.
                             let tasks = &mut this.session_lanes.open_tasks;
                             if !tasks.remove(&toggle_id) {
+                                tasks.clear();
                                 tasks.insert(toggle_id.clone());
                             }
                             cx.notify();

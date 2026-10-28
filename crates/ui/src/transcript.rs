@@ -7702,7 +7702,7 @@ impl Transcript {
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.text))
                             .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                                cx.emit(TranscriptEvent::OpenChat {
+                                cx.emit(TranscriptEvent::OpenSideChat {
                                     chat_id: chat_id.clone(),
                                 });
                             }))
@@ -7885,8 +7885,8 @@ impl Transcript {
 
     /// `{lead} [logo] Chat` over a message between chats: chat `chat_id`'s
     /// provider mark and live title, `fallback` for one this workspace doesn't
-    /// list. A listed chat opens on click. `end` aligns it over a user bubble;
-    /// otherwise it sits over the agent's side.
+    /// list. A listed chat opens in a tab beside this one on click. `end`
+    /// aligns it over a user bubble; otherwise it sits over the agent's side.
     #[allow(clippy::too_many_arguments)]
     fn render_chat_caption(
         &self,
@@ -7918,7 +7918,7 @@ impl Transcript {
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.text))
                             .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                                cx.emit(TranscriptEvent::OpenChat {
+                                cx.emit(TranscriptEvent::OpenSideChat {
                                     chat_id: chat_id.clone(),
                                 });
                             }))
