@@ -33,6 +33,7 @@ fn request(dir: &Path, scenario: &str) -> RunRequest {
         attachments: vec![],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: [(
             "CLAUDE_CONFIG_DIR".to_owned(),
             dir.join("claude").display().to_string(),

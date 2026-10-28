@@ -33,6 +33,7 @@ async fn live_run(cancel: bool) {
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         access: Default::default(), plan: false,
         attachments: Vec::new(), worktree: None, resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
     let mut stream = zeron_harness::PiHarness::new()

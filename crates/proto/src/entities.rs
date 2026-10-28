@@ -235,6 +235,10 @@ pub struct Chat {
     /// taken to belong to the chat's configured harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_harness: Option<String>,
+    /// Native forks keep their provider fixed. This UI hint is backed by
+    /// authoritative lineage in the session document, never by a run request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_fork: bool,
     /// The space this chat belongs to. Invariant: `Some` for every UI-created
     /// chat; rows with a missing/dangling space id are not rendered (the host
     /// device's repair sweep deletes its own danglers).

@@ -37,6 +37,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+pub mod native_forks;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -143,6 +144,7 @@ pub struct EngineConfig {
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
 pub struct EngineCore {
+    pub native_forks: native_forks::NativeForks,
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,
     pub workspace: WorkspaceHost,
@@ -361,7 +363,16 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let native_forks = native_forks::NativeForks::new(
+            profile.store_root().join("native-forks"),
+            doc_host.clone(),
+            workspace.clone(),
+            registry.clone(),
+            sessions.clone(),
+        )
+        .map_err(EngineError::Other)?;
         Ok(Self {
+            native_forks,
             sessions,
             doc_host,
             workspace,
@@ -518,6 +529,7 @@ impl EngineCore {
             self.agent_accounts.clone(),
             self.workspace_scope,
         )
+        .with_native_forks(self.native_forks.clone())
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
@@ -586,6 +598,7 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        self.native_forks.shutdown().await;
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally

@@ -624,6 +624,7 @@ fn dictation_question_takeover_stops_capture_without_losing_draft(cx: &mut TestA
     state.update(cx, |state, cx| {
         state.transcript = vec![SessionMessageEntry {
             duration_ms: None,
+            native_fork_point: None,
             id: "question-message".into(),
             role: MessageRole::Assistant,
             created_at: 0,

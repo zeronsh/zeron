@@ -1107,6 +1107,7 @@ impl WorkspaceHost {
                 room_gen: Some(2),
                 harness_session_cwd: None,
                 harness_session_harness: None,
+                native_fork: false,
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
@@ -1428,9 +1429,10 @@ impl WorkspaceHost {
 
     // ── persistence / teardown ──────────────────────────────────────────────
 
-    /// Persist the snapshot now (shutdown path; bypasses the debounce).
-    pub fn flush(&self) {
-        self.inner.save_snapshot();
+    /// Persist the snapshot now, bypassing the debounce. Callers that acknowledge
+    /// durable publication must propagate failures before confirming success.
+    pub fn flush(&self) -> Result<(), EngineError> {
+        self.inner.persist_snapshot().map(|_| ())
     }
 
     /// Shutdown: stamp our `lastSeenAt` (the only periodic-ish row write besides

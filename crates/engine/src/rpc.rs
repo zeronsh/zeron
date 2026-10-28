@@ -774,6 +774,7 @@ enum MutateParams {
 
 #[derive(Clone)]
 pub struct EngineRpc {
+    native_forks: Option<crate::native_forks::NativeForks>,
     voice: crate::voice::VoiceManager,
     sessions: SessionsEngine,
     doc_host: DocHost,
@@ -825,7 +826,13 @@ impl EngineRpc {
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: {
-                let mut capabilities = zeron_proto::capabilities::current();
+                let mut capabilities: Vec<_> = zeron_proto::capabilities::current()
+                    .into_iter()
+                    .filter(|c| {
+                        c != zeron_proto::capabilities::NATIVE_MESSAGE_FORK_V1
+                            && c != zeron_proto::capabilities::NATIVE_MESSAGE_FORK_MAIN_V1
+                    })
+                    .collect();
                 if crate::desktop_notify::enabled() {
                     capabilities
                         .push(zeron_proto::capabilities::DESKTOP_NOTIFICATIONS_V1.to_string());
@@ -835,6 +842,7 @@ impl EngineRpc {
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
+            native_forks: None,
             voice: sessions.voice_manager(),
             sessions,
             doc_host,
@@ -860,6 +868,17 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             engine_info,
         }
+    }
+
+    pub fn with_native_forks(mut self, forks: crate::native_forks::NativeForks) -> Self {
+        self.native_forks = Some(forks);
+        self.engine_info
+            .capabilities
+            .push(zeron_proto::capabilities::NATIVE_MESSAGE_FORK_V1.into());
+        self.engine_info
+            .capabilities
+            .push(zeron_proto::capabilities::NATIVE_MESSAGE_FORK_MAIN_V1.into());
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1891,12 +1910,27 @@ impl EngineRpc {
                 // (Only a hosting engine knows about the turn; on any other
                 // device the row simply syncs to the host, which turns the
                 // stale session away at dispatch.)
-                let switching = self
-                    .workspace
-                    .chat(&chat_id)
-                    .map_err(failed)?
-                    .and_then(|chat| chat.config)
+                let chat = self.workspace.chat(&chat_id).map_err(failed)?;
+                let switching = chat
+                    .as_ref()
+                    .and_then(|chat| chat.config.as_ref())
                     .is_some_and(|current| current.harness != config.harness);
+                let native = chat.as_ref().is_some_and(|chat| chat.native_fork);
+                if switching || native {
+                    let lineage = self.doc_host.open(&chat_id).map_err(failed)?
+                        .doc().native_fork_lineage()
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let wrong_provider = lineage.as_ref()
+                        .is_some_and(|lineage| lineage.point.harness != config.harness);
+                    let wrong_owner = native && chat.as_ref()
+                        .and_then(|chat| chat.harness_session_harness.as_deref())
+                        != Some(config.harness.as_str());
+                    if wrong_provider || wrong_owner {
+                        return Err(RpcError::Failed(
+                            "Native forks must keep their original provider".into(),
+                        ));
+                    }
+                }
                 if switching && self.sessions.turn_in_flight(&chat_id) {
                     return Err(RpcError::Failed(
                         "Wait for the current turn to finish before switching provider".into(),
@@ -2102,6 +2136,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        methods::FORK_MESSAGE_SIDE_CHAT => Duration::from_secs(200),
+        methods::GET_NATIVE_FORK_AVAILABILITY => Duration::from_secs(100),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
@@ -2122,6 +2158,8 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::FORK_MESSAGE_SIDE_CHAT
+            | methods::GET_NATIVE_FORK_AVAILABILITY
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -2777,6 +2815,25 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
+            methods::GET_NATIVE_FORK_AVAILABILITY => {
+                let forks = self.native_forks.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Update the chat host to fork this message".into())
+                })?;
+                let request = parse_params(params)?;
+                RpcReply::value(
+                    &forks
+                        .availability(request)
+                        .await
+                        .map_err(RpcError::Failed)?,
+                )
+            }
+            methods::FORK_MESSAGE_SIDE_CHAT => {
+                let forks = self.native_forks.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Update the chat host to fork this message".into())
+                })?;
+                let request = parse_params(params)?;
+                RpcReply::value(&forks.create(request).await.map_err(RpcError::Failed)?)
+            }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -2841,6 +2898,8 @@ impl RpcService for EngineRpc {
                 chat.last_message_at = None;
                 chat.last_message_preview = None;
                 chat.last_seen_at = None;
+                chat.native_fork = false;
+                chat.harness_session_harness = None;
                 chat.harness_session_id = None;
                 chat.harness_session_cwd = None;
                 chat.room_gen = Some(2);
@@ -2900,6 +2959,7 @@ impl RpcService for EngineRpc {
                         .doc()
                         .push_message(&zeron_doc::SessionMessageEntry {
                             duration_ms: None,
+                            native_fork_point: None,
                             id: marker_id.clone(),
                             role: zeron_doc::MessageRole::System,
                             parts: vec![zeron_doc::MessagePart::Fork {
@@ -5192,6 +5252,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                native_fork_point: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -5299,6 +5360,12 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    #[test]
+    fn native_fork_rpcs_route_to_the_execution_host() {
+        assert!(forwardable(methods::FORK_MESSAGE_SIDE_CHAT));
+        assert!(forwardable(methods::GET_NATIVE_FORK_AVAILABILITY));
     }
 
     #[test]
@@ -5621,6 +5688,7 @@ mod context_usage_tests {
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 })
                 .unwrap()
         };
@@ -5742,6 +5810,7 @@ mod context_usage_tests {
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

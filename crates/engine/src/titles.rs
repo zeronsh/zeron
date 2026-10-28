@@ -213,6 +213,7 @@ impl TitleGenerator {
                 plan: false,
                 attachments: Vec::new(),
                 resume: None,
+                resume_policy: Default::default(),
                 worktree: None,
                 env: Default::default(),
             };
@@ -392,6 +393,7 @@ mod tests {
             access: Default::default(),
             plan: false,
             resume: None,
+            resume_policy: Default::default(),
             attachments: vec![],
             worktree: None,
             env: Default::default(),

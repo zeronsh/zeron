@@ -29,6 +29,7 @@ fn env_dumper(dir: &Path) -> PathBuf {
 
 fn request(cwd: &Path) -> RunRequest {
     RunRequest {
+        resume_policy: Default::default(),
         prompt: "hello".into(),
         harness: None,
         model: None,

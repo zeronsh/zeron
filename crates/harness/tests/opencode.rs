@@ -279,6 +279,7 @@ fn request(prompt: &str) -> RunRequest {
         plan: false,
         attachments: Vec::new(),
         resume: None,
+        resume_policy: Default::default(),
         worktree: None,
         env: Default::default(),
     }

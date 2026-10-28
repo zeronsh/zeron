@@ -93,6 +93,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         harness_session_id: None,
         harness_session_cwd: None,
         harness_session_harness: None,
+        native_fork: false,
         space_id: Some(SPACE.into()),
         last_seen_at: Some(now),
         room_gen: Some(2),
@@ -277,6 +278,7 @@ fn host_answers(edge: &MockEdge, host_doc: &LoroDoc) -> Option<String> {
         status: Some(zeron_doc::MessageStatus::Complete),
         continuation_of: None,
         duration_ms: None,
+        native_fork_point: None,
     };
     session
         .push_message(&entry(&message_id, MessageRole::User, "ios-live", &prompt))

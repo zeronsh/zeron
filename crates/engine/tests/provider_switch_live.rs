@@ -17,6 +17,7 @@ const CODEWORD: &str = "TANGERINE-4417";
 
 fn request(harness: HarnessId, prompt: &str, cwd: &str) -> RunRequest {
     RunRequest {
+        resume_policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: Some(harness),

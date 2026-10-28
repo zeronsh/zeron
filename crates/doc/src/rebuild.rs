@@ -56,6 +56,9 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     if let Some(usage) = source.context_usage() {
         thin.update_context_usage(usage.tokens, usage.window)?;
     }
+    if let Some(lineage) = source.native_fork_lineage()? {
+        thin.set_native_fork_lineage(&lineage)?;
+    }
     let mut sidecar = Vec::new();
     let entries = source.read_entries()?;
     let entry_count = entries.len();
@@ -190,6 +193,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         }
     }
 

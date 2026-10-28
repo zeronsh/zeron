@@ -78,6 +78,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
     std::fs::create_dir(&held).unwrap();
 
     let request = RunRequest {
+        resume_policy: Default::default(),
         prompt: "hello".into(),
         harness: None,
         model: None,

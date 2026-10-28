@@ -35,6 +35,7 @@ fn request(dir: &Path, scenario: &str, prompt: &str) -> RunRequest {
     let work = dir.join("work");
     std::fs::create_dir_all(&work).unwrap();
     RunRequest {
+        resume_policy: Default::default(),
         prompt: prompt.into(),
         harness: None,
         model: None,

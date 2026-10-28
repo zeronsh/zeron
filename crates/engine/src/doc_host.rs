@@ -898,6 +898,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
     }
 
@@ -941,6 +942,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })?;
         self.doc.mark_provider_switched()?;
         Ok(true)
@@ -6127,6 +6129,7 @@ impl DocHost {
             plan: config.as_ref().is_some_and(|c| c.plan),
             attachments: Vec::new(),
             resume: None,
+            resume_policy: Default::default(),
             worktree: None,
             env: Default::default(),
         })
@@ -6270,6 +6273,7 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 })
                 .unwrap();
         }

@@ -60,6 +60,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     };
 

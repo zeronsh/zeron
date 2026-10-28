@@ -54,6 +54,7 @@ impl Harness for Capture {
 fn message(id: &str, role: MessageRole, text: &str, status: MessageStatus) -> SessionMessageEntry {
     SessionMessageEntry {
         duration_ms: None,
+        native_fork_point: None,
         id: id.into(),
         role,
         parts: vec![MessagePart::Text {
@@ -176,6 +177,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 access: Default::default(),
                 plan: false,
                 resume: None,
+                resume_policy: Default::default(),
                 attachments: vec![],
                 worktree: None,
                 env: Default::default(),
@@ -558,6 +560,7 @@ async fn side_turn(
                 access: Default::default(),
                 plan: false,
                 resume,
+                resume_policy: Default::default(),
                 attachments: vec![],
                 worktree: None,
                 env: Default::default(),
@@ -769,6 +772,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         access: Default::default(),
         plan: false,
         resume: None,
+        resume_policy: Default::default(),
         attachments: vec![],
         worktree: None,
         env: Default::default(),
@@ -957,6 +961,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         access: Default::default(),
         plan: false,
         resume: None,
+        resume_policy: Default::default(),
         attachments: vec![],
         worktree: None,
         env: Default::default(),
@@ -1081,6 +1086,7 @@ async fn a_side_chat_keeps_its_subagent_tools_when_native_subagents_are_off() {
                     access: Default::default(),
                     plan: false,
                     resume: None,
+                    resume_policy: Default::default(),
                     attachments: vec![],
                     worktree: None,
                     env: Default::default(),

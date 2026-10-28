@@ -114,6 +114,7 @@ fn run_payload(message_id: &str) -> SessionCommandPayload {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
             env: Default::default(),
         },
         message_id: message_id.into(),

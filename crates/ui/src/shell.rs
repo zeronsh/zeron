@@ -2184,6 +2184,11 @@ pub struct Shell {
     subagent_seq: u64,
     side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
+    native_fork_operations: std::collections::HashMap<
+        (String, String, zeron_proto::NativeForkDestination),
+        zeron_proto::ForkMessageSideChatRequest,
+    >,
+    native_fork_pending: std::collections::HashSet<String>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -2769,6 +2774,8 @@ impl Shell {
             subagent_seq: 0,
             side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
+            native_fork_operations: Default::default(),
+            native_fork_pending: Default::default(),
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -3138,6 +3145,7 @@ impl Shell {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    native_fork_point: None,
                 };
                 state.update(cx, |s, cx| {
                     s.push_echo(&chat_id, echo);
@@ -4583,11 +4591,24 @@ impl Shell {
     /// transcripts (nested spawns open their own tabs).
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        transcript: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
+            TranscriptEvent::ForkMessage {
+                chat_id,
+                message_id,
+                destination,
+            } => {
+                self.fork_message(
+                    transcript,
+                    chat_id.clone(),
+                    message_id.clone(),
+                    *destination,
+                    cx,
+                );
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -14605,6 +14626,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             harness_session_harness: None,
+            native_fork: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -17740,6 +17762,7 @@ mod exit_regressions {
                         harness_session_id: None,
                         harness_session_cwd: None,
                         harness_session_harness: None,
+                        native_fork: false,
                         parent_chat_id: None,
                         space_id: Some("other".into()),
                         last_seen_at: None,
@@ -19945,6 +19968,23 @@ mod settings_modal_regressions {
             assert_eq!(shell.route, Route::Chat);
             assert_eq!(shell.settings.settings_section, SettingsSection::Devices);
         });
+    }
+}
+
+#[cfg(feature = "native-forks-fixture")]
+impl Shell {
+    pub fn fixture_native_fork_reveal(&self, entry: &str, cx: &mut Context<Self>) {
+        self.transcript
+            .update(cx, |t, cx| t.fixture_native_fork_reveal(entry, cx));
+    }
+    pub fn fixture_native_fork_create(&mut self, cx: &mut Context<Self>) {
+        self.fork_message(
+            self.transcript.clone(),
+            "native-fixture".into(),
+            "a1".into(),
+            zeron_proto::NativeForkDestination::SideChat,
+            cx,
+        );
     }
 }
 

@@ -157,6 +157,7 @@ fn rig_with(gated: Option<HarnessId>, codex_failures: usize) -> Rig {
 
 fn run_request(harness: HarnessId, prompt: &str) -> RunRequest {
     RunRequest {
+        resume_policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
         harness: Some(harness),
@@ -221,6 +222,7 @@ impl Rig {
             .unwrap()
             .doc()
             .push_message(&SessionMessageEntry {
+                native_fork_point: None,
                 id: message_id.into(),
                 role: MessageRole::User,
                 parts: vec![MessagePart::Text {
@@ -573,6 +575,7 @@ async fn replayed_history_is_capped_to_the_newest_messages() {
         };
         doc.doc()
             .push_message(&SessionMessageEntry {
+                native_fork_point: None,
                 duration_ms: None,
                 id: id.clone(),
                 role,
@@ -744,6 +747,7 @@ async fn a_switched_side_chat_counts_only_its_own_seams() {
     ] {
         doc.doc()
             .push_message(&SessionMessageEntry {
+                native_fork_point: None,
                 duration_ms: None,
                 id: id.into(),
                 role: MessageRole::System,

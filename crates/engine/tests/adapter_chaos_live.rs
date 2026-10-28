@@ -128,6 +128,7 @@ impl Suite {
             attachments: vec![],
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
         }
     }
 
@@ -1197,6 +1198,7 @@ fn restart_request(name: &str, cwd: &str, prompt: &str) -> RunRequest {
         attachments: vec![],
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
     }
 }
 

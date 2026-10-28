@@ -7276,10 +7276,13 @@ mod tests {
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("mac".into());
-            state.chats.push(serde_json::from_value(serde_json::json!({
-                "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
-                "createdAt":"2026-09-01T00:00:00Z",
-            })).unwrap());
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
+                    "createdAt":"2026-09-01T00:00:00Z",
+                }))
+                .unwrap(),
+            );
             state
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -7474,6 +7477,35 @@ mod tests {
                 pickers.session_checkout_plan(cx),
                 CheckoutPlan::Cloud { .. }
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn native_fork_provider_stays_locked_when_host_supports_switching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let (state, pickers) = side_chat_picker(false, cx);
+            assert!(!pickers.read(cx).harness_locked(cx));
+            for top_level in [false, true] {
+                state.update(cx, |state, _| {
+                    let chat = state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == "side")
+                        .unwrap();
+                    chat.native_fork = true;
+                    if top_level {
+                        chat.parent_chat_id = None;
+                    }
+                });
+                pickers.update(cx, |pickers, cx| {
+                    assert!(pickers.harness_locked(cx));
+                    pickers.pick_harness(HarnessId::Codex, cx);
+                    assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                });
+            }
         });
     }
 

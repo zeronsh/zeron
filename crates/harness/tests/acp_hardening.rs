@@ -32,6 +32,7 @@ fn harness() -> AcpHarness {
 
 fn request(mode: &str) -> RunRequest {
     RunRequest {
+        resume_policy: Default::default(),
         mcp: None,
         prompt: "hello".into(),
         harness: None,

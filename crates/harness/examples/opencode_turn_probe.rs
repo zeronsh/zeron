@@ -55,6 +55,7 @@ async fn main() {
         plan: false,
         attachments: Vec::new(),
         resume: None,
+        resume_policy: Default::default(),
         worktree: None,
         env: Default::default(),
     };

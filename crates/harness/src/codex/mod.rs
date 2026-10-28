@@ -64,6 +64,7 @@
 
 pub(crate) mod catalog;
 mod elicitation;
+mod fork;
 mod normalize;
 pub mod npm_repair;
 pub mod realtime;
@@ -792,6 +793,20 @@ impl Harness for CodexHarness {
         ])
     }
 
+    async fn native_fork_support(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        self.fork_support().await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        self.fork_at(point, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -834,6 +849,13 @@ impl CodexHarness {
         title_only: bool,
         idle: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+            && request.resume.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(HarnessError::Protocol(
+                "Native fork requires its existing Codex thread".into(),
+            ));
+        }
         let native = command_request(&request.prompt, "")?;
         if native
             .as_ref()
@@ -1574,7 +1596,9 @@ async fn run_session(session: Session) {
                 // thread — visibly: the reply will not know the earlier
                 // conversation. The log keeps Codex's own words.
                 Err((Some(reason), e)) => {
-                    if command_request(&request.prompt, resume)?.is_some() {
+                    if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+                        || command_request(&request.prompt, resume)?.is_some()
+                    {
                         return Err(e);
                     }
                     tracing::warn!(
@@ -1599,6 +1623,13 @@ async fn run_session(session: Session) {
                 .await?
         };
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+            && request.resume.as_deref() != Some(thread_id.as_str())
+        {
+            return Err(HarnessError::Protocol(
+                "Codex resumed an unexpected thread".into(),
+            ));
+        }
         let mut children = subagents::Subagents::new(thread_id.clone());
         children.restore(&thread["thread"]);
         let voice_context = realtime::ThreadContext {
@@ -1973,7 +2004,7 @@ async fn run_session(session: Session) {
                                 // Deltas are token chunks, not steering
                                 // boundaries: the completed item is the
                                 // provider-authoritative end of the text part.
-                                let (prev, _next) = rotate(&mut assistant_message_id);
+                                let prev = assistant_message_id.clone();
                                 if !send(
                                     &event_tx,
                                     AgentEvent::AssistantMessageCompleted {
@@ -2057,6 +2088,17 @@ async fn run_session(session: Session) {
                         } else {
                             DoneStatus::Completed
                         };
+                        if status == DoneStatus::Completed
+                            && params.pointer("/turn/status").and_then(Value::as_str) == Some("completed")
+                            && !id.is_empty()
+                        {
+                            let point = zeron_proto::NativeForkPoint {
+                                format_version: 1, harness: HarnessId::Codex, source_device_id: "host".into(),
+                                source_session_id: thread_id.clone(), cwd: request.cwd.clone(),
+                                boundary: zeron_proto::NativeForkBoundary::AppServerTurn { turn_id: id.clone() },
+                            };
+                            if !send(&event_tx, AgentEvent::NativeForkReady { assistant_message_id: assistant_message_id.clone(), point }).await { break 'main; }
+                        }
                         if status == DoneStatus::Interrupted {
                             prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
                         }
@@ -2934,6 +2976,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
             env: Default::default(),
         }
     }

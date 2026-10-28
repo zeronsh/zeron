@@ -41,6 +41,7 @@ fn run_request(prompt: &str) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        resume_policy: Default::default(),
         env: Default::default(),
     }
 }
@@ -1266,6 +1267,7 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
         let mut writer = SegmentWriter::begin(&doc, "m-assist", device_id, 2).unwrap();
@@ -1368,6 +1370,7 @@ async fn recover_stale_journal_settles_chips_in_completed_local_entries() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
     }
@@ -1436,6 +1439,7 @@ async fn subagent_done_without_a_live_sink_updates_a_persisted_chip() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
     core.sessions
@@ -1761,6 +1765,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            native_fork_point: None,
         })
         .unwrap();
     queue_as_viewer(
@@ -2638,6 +2643,7 @@ async fn real_claude_sees_uploaded_image_inline() {
         plan: false,
         attachments: vec![path],
         resume: None,
+        resume_policy: Default::default(),
         worktree: None,
         env: Default::default(),
     };

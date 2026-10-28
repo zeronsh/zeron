@@ -74,6 +74,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod fork;
+
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -639,11 +641,31 @@ impl Harness for OpencodeHarness {
         result
     }
 
+    async fn native_fork_support(
+        &self,
+        cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        self.fork_support(cwd).await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        self.fork_at(point, controls).await
+    }
     async fn run(
         &self,
         mut request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+            && request.resume.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(HarnessError::Protocol(
+                "Native fork requires its existing OpenCode session".into(),
+            ));
+        }
         // The engine intentionally leaves OpenCode's canonical invocation
         // intact. Capture the selected identity before converting it to the
         // provider's `/command arguments` text.
@@ -1873,6 +1895,7 @@ struct PartState {
 struct SessionFeed {
     /// messageID → is-assistant (user prompt echoes must not render).
     assistant_messages: HashMap<String, bool>,
+    last_native_reply: Option<String>,
     /// Parts whose message ROLE isn't known yet, replayed when it lands.
     pending_parts: Vec<Value>,
     parts: HashMap<String, PartState>,
@@ -2048,6 +2071,13 @@ async fn run_session(session: Session) {
                             .and_then(Value::as_str)
                             .unwrap_or(resume)
                             .to_owned();
+                        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting
+                            && &id != resume
+                        {
+                            return Err(HarnessError::Protocol(
+                                "OpenCode resumed an unexpected session".into(),
+                            ));
+                        }
                         // A session a plan-mode run left on the plan agent
                         // goes back to the default one.
                         let agent = agent.or_else(|| {
@@ -2068,6 +2098,9 @@ async fn run_session(session: Session) {
                         id
                     }
                     Err(e) => {
+                        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting {
+                            return Err(e);
+                        }
                         tracing::debug!(
                             target: "zeron_harness::opencode",
                             "session resume failed (starting fresh): {e}"
@@ -2145,6 +2178,7 @@ async fn run_session(session: Session) {
         .collect();
     drop(providers);
 
+    let session_admission = fork::admission(&server, dir, &session_id);
     let mut assistant_message_id = new_message_id();
     if !send(
         &event_tx,
@@ -2305,6 +2339,7 @@ async fn run_session(session: Session) {
                 continue $label;
             }
             turn.active = false;
+            session_admission.active.store(false, std::sync::atomic::Ordering::Release);
             if let Some(usage) = pending_usage.take()
                 && !interrupt_requested
                 && !stopping
@@ -2408,12 +2443,17 @@ async fn run_session(session: Session) {
             }
             let (prev, _next) = rotate(&mut assistant_message_id);
             if !send(&event_tx, AgentEvent::AssistantMessageCompleted {
-                assistant_message_id: prev,
+                assistant_message_id: prev.clone(),
             }).await {
                 break $label;
             }
             let errored = turn.aborted_for_retry
                 || (turn.error.is_some() && !turn.saw_content);
+            if !errored && let Some(id) = main_feed.last_native_reply.take() {
+                let _ = send(&event_tx, AgentEvent::NativeForkReady { assistant_message_id: prev, point: zeron_proto::NativeForkPoint {
+                    format_version: 1, harness: HarnessId::Opencode, source_device_id: "host".into(), source_session_id: session_id.clone(), cwd: request.cwd.clone(), boundary: zeron_proto::NativeForkBoundary::OpenCodeReply { assistant_message_id: id },
+                }}).await;
+            }
             let _ = send(&event_tx, AgentEvent::Done {
                 status: if errored {
                     DoneStatus::Errored
@@ -3363,6 +3403,10 @@ async fn post_prompt(
         attachments,
     } = spec;
     let protocol = server.protocol().await;
+    let admission = fork::admission(server, dir, session_id);
+    admission
+        .active
+        .store(true, std::sync::atomic::Ordering::Release);
     // A prompt or command naming no agent runs the default one.
     let agent = (plan && protocol == Protocol::V1).then_some(PLAN_AGENT);
     if let Some((name, arguments)) =
@@ -3394,6 +3438,10 @@ async fn post_prompt(
         let path_owned = path.clone();
         let updates = updates.clone();
         tokio::spawn(async move {
+            let admission_guard = admission.gate.lock().await;
+            // A fork already holding this gate finishes before transmission;
+            // subsequent forks see the active turn, including delivery retries.
+            drop(admission_guard);
             // The command endpoint blocks for the whole turn; the bus
             // carries the real events, so this response is ignored —
             // but it must not be cut off mid-turn by CALL_TIMEOUT.
@@ -3455,6 +3503,7 @@ async fn post_prompt(
             &message_id,
             dir.as_deref(),
             &delivery,
+            &admission,
         )
         .await;
         if delivery.is_cancelled() {
@@ -3489,6 +3538,7 @@ async fn deliver_prompt(
     message_id: &str,
     dir: Option<&str>,
     cancel: &tokio_util::sync::CancellationToken,
+    admission: &fork::Admission,
 ) -> Result<(), String> {
     let mut last_error = String::new();
     for attempt in 0..PROMPT_ATTEMPTS {
@@ -3504,6 +3554,19 @@ async fn deliver_prompt(
                 return Err("prompt delivery cancelled".into());
             }
         }
+        // Every retry is an admission too: a fork copying a stable final tail
+        // must finish before a previously unacknowledged prompt is posted.
+        let guard = tokio::select! {
+            _ = cancel.cancelled() => return Err("prompt delivery cancelled".into()),
+            guard = admission.gate.lock() => guard,
+        };
+        if cancel.is_cancelled() {
+            return Err("prompt delivery cancelled".into());
+        }
+        admission
+            .active
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(guard);
         match server.post_json_raw(path, dir, body).await {
             Ok((status, _)) if status.is_success() => return Ok(()),
             Ok((status, text)) if status.is_client_error() => {
@@ -3897,6 +3960,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 return BusOutcome::Continue;
             };
             if session == session_id {
+                if role == "assistant" && info["_zeronSyntheticUsage"] != true {
+                    main_feed.last_native_reply = Some(message.to_owned());
+                }
                 main_feed
                     .assistant_messages
                     .entry(message.to_owned())
@@ -5103,6 +5169,7 @@ fn normalize_v2_frame_with_session_models(
             let mut info = json!({
                 "sessionID": session(),
                 "id": "usage",
+                "_zeronSyntheticUsage": true,
                 "role": "assistant",
                 "tokens": tokens,
             });
@@ -5932,10 +5999,8 @@ mod mcp_injection_tests {
         for major in [1, 2] {
             let exe = fixture.path().join(format!("opencode-{major}"));
             let script = format!(
-                r#"#!/usr/bin/env node
-const http = require('node:http');
+                r#"const http = require('node:http');
 const version = '{major}.0.0';
-if (process.argv.includes('--version')) {{ console.log(version); process.exit(0); }}
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
 const server = {major} === 1 ? config.mcp.zeron : config.mcp.servers.zeron;
 if (!server || server.command[1] !== 'mcp') throw new Error('missing MCP config');
@@ -5950,7 +6015,22 @@ http.createServer((req, res) => {{
 }}).listen(port, '127.0.0.1');
 "#
             );
-            std::fs::write(&exe, script).unwrap();
+            std::fs::write(exe.with_extension("js"), script).unwrap();
+            // The version probe has a shorter deadline than server startup.
+            // Keep the fixture's static version independent of Node startup.
+            std::fs::write(
+                &exe,
+                format!(
+                    r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    printf '%s\n' '{major}.0.0'
+    exit 0
+fi
+exec node "$0.js" "$@"
+"#
+                ),
+            )
+            .unwrap();
             std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
             let first = zeron_proto::McpServer {
                 name: "zeron".into(),

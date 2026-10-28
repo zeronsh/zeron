@@ -52,6 +52,7 @@
 
 pub mod catalog;
 mod discovery;
+mod fork;
 mod fork_tail;
 mod normalize;
 pub mod refresh_lock;
@@ -883,6 +884,20 @@ impl Harness for ClaudeHarness {
             .await
     }
 
+    async fn native_fork_support(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> zeron_proto::NativeForkAvailability {
+        fork::support().await
+    }
+    async fn fork_native(
+        &self,
+        point: &zeron_proto::NativeForkPoint,
+        controls: crate::NativeForkControls,
+    ) -> Result<zeron_proto::NativeForkResult, crate::NativeForkError> {
+        fork::fork(point, controls).await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -916,6 +931,29 @@ impl ClaudeHarness {
         controls: RunControls,
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting {
+            let session = request
+                .resume
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    HarnessError::Protocol(
+                        "Native fork requires its existing Claude session".into(),
+                    )
+                })?;
+            fork::helper(
+                serde_json::json!({"mode":"check","sourceSessionId":session,"dir":request.cwd}),
+                crate::NativeForkControls {
+                    execution_lease: controls.execution_lease.clone(),
+                    interrupt: controls.interrupt.clone(),
+                    timeout: Duration::from_secs(30),
+                    source_idle: true,
+                },
+            )
+            .await
+            .map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        }
+
         let exe = self.resolve_executable()?;
         // A session whose transcript holds no conversation cannot be
         // resumed: the CLI says so and exits, every time. Start fresh
@@ -928,6 +966,11 @@ impl ClaudeHarness {
                 let (normalizer, transcript) =
                     Normalizer::for_resume(&config_root(&request.env), &session_id).await;
                 if transcript == Transcript::Empty {
+                    if request.resume_policy == zeron_proto::ResumePolicy::RequireExisting {
+                        return Err(HarnessError::Protocol(
+                            "Native fork requires its existing Claude conversation".into(),
+                        ));
+                    }
                     tracing::info!(
                         target: "zeron_harness::claude",
                         %session_id,
@@ -972,6 +1015,9 @@ impl ClaudeHarness {
             let _ = event_tx.try_send(Ok(AgentEvent::Error { message }));
         }
         tokio::spawn(run_session(Session {
+            expected_resume: (request.resume_policy == zeron_proto::ResumePolicy::RequireExisting)
+                .then(|| request.resume.clone())
+                .flatten(),
             normalizer,
             title_only,
             exe,
@@ -1167,6 +1213,7 @@ async fn stdin_writer(
 }
 
 struct Session {
+    expected_resume: Option<String>,
     normalizer: Normalizer,
     title_only: bool,
     /// What the process was launched from, for a fresh relaunch when its
@@ -1196,6 +1243,7 @@ struct Session {
 /// mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        expected_resume,
         normalizer: mut norm,
         title_only,
         exe,
@@ -1236,7 +1284,8 @@ async fn run_session(session: Session) {
     let mut turn_open = true;
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
-    let mut restore_fallback = launched.resume.is_some();
+    let mut restore_fallback = launched.resume.is_some()
+        && launched.resume_policy != zeron_proto::ResumePolicy::RequireExisting;
     let mut relaunch = false;
     // Our configuration requests the CLI has not answered yet (`set_model`,
     // `apply_flag_settings`): what each asked for, and when we stop waiting.
@@ -1284,6 +1333,10 @@ async fn run_session(session: Session) {
     // starts its own turn, which ends with its own result; it is released
     // as the turn's end if that message is cancelled before it starts.
     let mut held_done: Option<AgentEvent> = None;
+    // A fork candidate belongs to the same result as its held Done. It must
+    // never escape while that result is only a boundary for pending input.
+    let mut held_fork_point: Option<(u64, AgentEvent)> = None;
+    let mut reply_generation = 0u64;
     // Last stdout activity, for the held result's settle fallback.
     let mut last_frame_at = tokio::time::Instant::now();
     let mut done_after_interrupt = false;
@@ -1448,6 +1501,7 @@ async fn run_session(session: Session) {
                     };
                     if taken_up {
                         held_done = None;
+                        held_fork_point = None;
                         active_since_stop = true;
                     }
                     if let Some(at) = confirmed
@@ -1456,10 +1510,19 @@ async fn run_session(session: Session) {
                         for _ in 0..=at {
                             pending_steers.pop_front();
                             let (prev, next) = norm.rotate_for_steer();
+                            reply_generation += 1;
                             if event_tx.send(Ok(AgentEvent::Steered {
                                 assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                             })).await.is_err() { break 'main; }
                         }
+                    }
+                    if let Frame::System(init) = &frame
+                        && init.subtype == "init"
+                        && expected_resume.as_ref().is_some_and(|id| id != &init.session_id)
+                    {
+                        interrupt.cancel();
+                        let _ = event_tx.send(Ok(AgentEvent::Error { message: "Claude resumed an unexpected native session".into() })).await;
+                        break 'main;
                     }
                     // Every waiting message was cancelled before it started:
                     // the held result was the turn's real end after all.
@@ -1467,6 +1530,12 @@ async fn run_session(session: Session) {
                         && !commands.waiting()
                         && let Some(done) = held_done.take()
                     {
+                        if !interrupted && stopping.is_none()
+                            && !send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await
+                        {
+                            break 'main;
+                        }
+                        held_fork_point = None;
                         if event_tx.send(Ok(done)).await.is_err() {
                             break 'main;
                         }
@@ -1494,7 +1563,12 @@ async fn run_session(session: Session) {
                         restore_fallback = false;
                         stdin.replay = None;
                     }
+                    let mut result_fork_point = None;
                     for ev in events {
+                        if matches!(ev, AgentEvent::NativeForkReady { .. }) {
+                            result_fork_point = Some((reply_generation, ev));
+                            continue;
+                        }
                         match &ev {
                             AgentEvent::ToolCall { id, .. } => {
                                 open_tools.insert(id.clone());
@@ -1531,10 +1605,17 @@ async fn run_session(session: Session) {
                         }
                         if is_done && !interrupted && stopping.is_none() && boundary {
                             held_done = Some(ev);
+                            held_fork_point = result_fork_point.take();
                             continue;
                         }
                         if is_done {
                             held_done = None;
+                            held_fork_point = None;
+                            if matches!(&ev, AgentEvent::Done { status: DoneStatus::Completed, .. })
+                                && !send_native_fork_point(&event_tx, result_fork_point.take(), reply_generation).await
+                            {
+                                break 'main;
+                            }
                             // The stopped turn has ended; the runtime lives on.
                             if stopping.take().is_some() {
                                 stopped_end = None;
@@ -1656,6 +1737,7 @@ async fn run_session(session: Session) {
                 pending_steers.clear();
                 commands.cancel_waiting();
                 stopping = Some(id.clone());
+                held_fork_point = None;
                 stop_settle_at = None;
                 stop_done_at = None;
                 if !stdin.line(wire::stop_turn_request_line(&id)) {
@@ -1707,6 +1789,7 @@ async fn run_session(session: Session) {
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
+                held_fork_point = None;
                 // The runtime is going: so is everything it started.
                 #[cfg(unix)]
                 if let Some(pid) = child.id() {
@@ -1737,11 +1820,17 @@ async fn run_session(session: Session) {
                 commands.cancel_waiting();
                 while pending_steers.pop_front().is_some() {
                     let (prev, next) = norm.rotate_for_steer();
+                    reply_generation += 1;
                     if event_tx.send(Ok(AgentEvent::Steered {
                         assistant_message_id: Some(prev), next_assistant_message_id: Some(next),
                     })).await.is_err() { break 'main; }
                 }
                 let done = held_done.take().expect("guarded by if");
+                // Absorbed steers rotated the visible reply. A point captured
+                // before that rotation cannot be reassigned to the new reply.
+                if !send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await {
+                    break 'main;
+                }
                 if event_tx.send(Ok(done)).await.is_err() {
                     break 'main;
                 }
@@ -1770,6 +1859,8 @@ async fn run_session(session: Session) {
     // A turn end still held when the CLI exited is the run's real end.
     if let Some(done) = held_done.take()
         && !event_tx.is_closed()
+        && (interrupted
+            || send_native_fork_point(&event_tx, held_fork_point.take(), reply_generation).await)
         && event_tx.send(Ok(done)).await.is_ok()
     {
         turn_open = false;
@@ -1827,6 +1918,21 @@ async fn run_session(session: Session) {
     if let Some(handle) = escalation {
         handle.abort();
     }
+}
+
+async fn send_native_fork_point(
+    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    point: Option<(u64, AgentEvent)>,
+    reply_generation: u64,
+) -> bool {
+    if let Some((generation, event)) = point {
+        // A cancelled or absorbed steer may already have closed this reply.
+        // Preserve its identity; never attach its UUID to a later segment.
+        if generation == reply_generation {
+            return event_tx.send(Ok(event)).await.is_ok();
+        }
+    }
+    true
 }
 
 /// How far the CLI has taken each stdin user message we wrote, by the uuid
@@ -2113,6 +2219,89 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_fork_cli_resume_refusal_never_relaunches_fresh() {
+        use std::os::unix::fs::PermissionsExt;
+        for stderr_only in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = dir.path().join("claude");
+            let refusal = if stderr_only {
+                "echo 'No conversation found with session ID: child' >&2\n"
+            } else {
+                "echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"No conversation found with session ID: child\"]}'\n"
+            };
+            std::fs::write(
+                &exe,
+                format!("#!/bin/sh\necho launch >> launches\n{refusal}exit 1\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let launched: RunRequest = serde_json::from_value(json!({
+                "prompt":"hello", "cwd":dir.path(), "sandbox":"workspace-write",
+                "resume":"child", "resumePolicy":"requireExisting"
+            }))
+            .unwrap();
+            let Runtime {
+                child,
+                stdout_lines,
+                stdin,
+                stderr_tail,
+            } = ClaudeHarness::launch(&exe, &launched, false).unwrap();
+            let (event_tx, mut events) = mpsc::channel(32);
+            let (_steer, steering) = mpsc::channel(1);
+            // Exercise the CLI event loop after a successful storage preflight:
+            // the CLI can still refuse a session that was readable beforehand.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                run_session(Session {
+                    expected_resume: Some("child".into()),
+                    normalizer: Normalizer::new(),
+                    title_only: false,
+                    exe,
+                    config: launched.clone(),
+                    launched,
+                    child,
+                    stdout_lines,
+                    stdin,
+                    stderr_tail,
+                    first_command: "first".into(),
+                    event_tx,
+                    lock_dir: dir.path().join("config"),
+                    interrupt_grace: Duration::from_millis(50),
+                    kill_grace: Duration::from_millis(50),
+                    controls: RunControls {
+                        realtime: None,
+                        execution_lease: None,
+                        steering,
+                        interrupt: crate::CancellationToken::new(),
+                        turn: Default::default(),
+                        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+                    },
+                }),
+            )
+            .await
+            .expect("resume refusal settles");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("launches")).unwrap(),
+                "launch\n"
+            );
+            let mut errored = false;
+            while let Some(event) = events.recv().await {
+                let event = event.unwrap();
+                assert!(!matches!(&event, AgentEvent::SessionStarted { .. }));
+                errored |= matches!(
+                    event,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        ..
+                    }
+                );
+            }
+            assert!(errored, "the refused child must fail explicitly");
+        }
+    }
+
     #[test]
     fn probe_timeout_says_what_the_cli_printed_without_its_secrets() {
         let message = probe_timeout_message(Some(
@@ -2188,6 +2377,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
             env: Default::default(),
         };
         let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
@@ -2221,6 +2411,7 @@ mod access_tests {
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            resume_policy: Default::default(),
             env: Default::default(),
         }
     }

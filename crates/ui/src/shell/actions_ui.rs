@@ -746,4 +746,3 @@ fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
         .text_color(theme.text_muted)
         .child(SharedString::from(label.to_string()))
 }
-

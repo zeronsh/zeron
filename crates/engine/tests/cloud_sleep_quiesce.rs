@@ -133,6 +133,7 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
             CHAT,
             SessionCommandPayload::Run {
                 request: RunRequest {
+                    resume_policy: Default::default(),
                     mcp: None,
                     prompt: prompt.into(),
                     harness: None,

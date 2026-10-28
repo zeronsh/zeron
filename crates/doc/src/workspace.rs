@@ -280,6 +280,7 @@ impl WorkspaceDoc {
         )?;
         set_opt_ms(&row, "lastMessageAt", chat.last_message_at)?;
         row.insert("createdAt", chat.created_at.timestamp_millis())?;
+        row.insert("nativeFork", chat.native_fork)?;
         // Preserved on full-row upserts (set_chat_activity/set_chat_host read →
         // modify → upsert; dropping these here would silently amnesia the chat).
         set_opt_str(&row, "harnessSessionId", chat.harness_session_id.as_deref())?;
@@ -744,6 +745,8 @@ pub(crate) struct RawChat {
     #[serde(default)]
     harness_session_harness: Option<String>,
     #[serde(default)]
+    native_fork: bool,
+    #[serde(default)]
     space_id: Option<String>,
     #[serde(default)]
     last_seen_at: Option<i64>,
@@ -789,6 +792,7 @@ impl From<RawChat> for Chat {
             harness_session_id: raw.harness_session_id,
             harness_session_cwd: raw.harness_session_cwd,
             harness_session_harness: raw.harness_session_harness,
+            native_fork: raw.native_fork,
             space_id: raw.space_id,
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
@@ -910,6 +914,7 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             harness_session_harness: None,
+            native_fork: false,
             parent_chat_id: Some("parent-chat".into()),
             space_id: None,
             last_seen_at: None,
