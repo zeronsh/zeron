@@ -56,6 +56,9 @@ pub struct TranscriptInput {
     /// The chats this workspace lists, for an agent message's sender: its
     /// live title and provider, and whether it opens.
     pub workspace: Option<Arc<zeron_client::workspace::WorkspaceSnapshot>>,
+    /// The chat whose transcript this is, when known: a coordinator's
+    /// report names its parent, and launches find their chats among its own.
+    pub chat_id: Option<String>,
 }
 
 /// The link an agent message's sender caption opens: that chat.
@@ -89,6 +92,57 @@ pub(crate) struct UserBubble {
     pub more: PText,
 }
 
+/// How a chat on a launch card is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LineStatus {
+    Working,
+    Done,
+    Failed,
+    /// Waiting on someone: a question.
+    Input,
+}
+
+impl LineStatus {
+    fn of(indicator: zeron_proto::ChatIndicator) -> Self {
+        use zeron_proto::ChatIndicator::*;
+        match indicator {
+            Working => Self::Working,
+            AwaitingInput => Self::Input,
+            Errored => Self::Failed,
+            Completed | Idle => Self::Done,
+        }
+    }
+}
+
+/// One chat's line on a launch card: its provider mark in a squircle, its
+/// name and (a lead's) the quiet line under it, and how it's doing. A lead
+/// line is a task's header (or a side chat's row); the others are a task's
+/// agents, their tiles centered under the lead's.
+pub(crate) struct CardLine {
+    /// `brand:<harness>`, or a chat glyph for an unknown provider.
+    pub mark: String,
+    pub title: PText,
+    pub subline: Option<PText>,
+    pub status: LineStatus,
+    /// A task's agents' marks, side by side; "+N" for the rest.
+    pub avatars: Vec<String>,
+    pub more: Option<PText>,
+    /// The chat it opens.
+    pub open: Option<String>,
+    pub lead: bool,
+}
+
+/// The card a Zeron launch draws: a task (its header, then its agents when
+/// open), or the side chats one call started, a line each.
+pub(crate) struct LaunchCard {
+    pub lines: Vec<CardLine>,
+    pub task: bool,
+    /// A task with agents: the chevron lists them.
+    pub toggles: bool,
+    pub open: bool,
+    pub pending: bool,
+}
+
 pub(crate) struct Chip {
     pub icon: &'static str,
     pub color: ColorRole,
@@ -113,6 +167,9 @@ pub(crate) enum Content {
     /// One muted line on the agent's side: `Message to [mark] Chat` for a
     /// message this chat's agent sent. Faded while sending.
     Caption { text: PText, pending: bool },
+    /// A task or side chats this chat started (`create_task`,
+    /// `create_chat(s)`), as a card.
+    Launch(LaunchCard),
     Image { reference: String },
     Working { since_ms: Option<i64>, streaming: bool },
     /// An agent visual: its height comes from its worker.
@@ -219,6 +276,10 @@ pub(crate) struct RowBuilder {
     /// Visual rows' links to their workers, by visual id (kept across
     /// rebuilds: the worker holds the same slot).
     pub visual_slots: HashMap<String, Arc<crate::visual::VisualSlot>>,
+    /// The chat whose transcript this is (see [`TranscriptInput::chat_id`]).
+    chat_id: Option<String>,
+    /// The workspace as of the last input: a mentioned chat's provider.
+    workspace: Option<Arc<WorkspaceSnapshot>>,
 }
 
 pub(crate) fn quick_hash(s: &str) -> u64 {
@@ -234,6 +295,8 @@ pub(crate) fn quick_hash(s: &str) -> u64 {
 impl RowBuilder {
     /// Rows for `input`, reusing every row whose source is unchanged.
     pub fn build(&mut self, ctx: &mut Ctx, input: &TranscriptInput) -> Vec<Placed> {
+        self.chat_id = input.chat_id.clone();
+        self.workspace = input.workspace.clone();
         let mut out: Vec<Placed> = Vec::with_capacity(self.entries.len() * 2 + 4);
         let mut live_entries: HashSet<&str> = HashSet::with_capacity(input.entries.len());
         let mut live_parts: HashSet<String> = HashSet::new();
@@ -341,6 +404,31 @@ impl RowBuilder {
             let mut h = None::<std::collections::hash_map::DefaultHasher>;
             for part in &entry.parts {
                 let MessagePart::Tool { call, .. } = part else { continue };
+                // The chats a launch started, as they go: names, providers,
+                // how each is doing, and a task's agents.
+                if let Some((chats, _)) = zeron_proto::chat_launches::launched_chats(call) {
+                    let h = h.get_or_insert_with(|| {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        gaps.hash(&mut h);
+                        h
+                    });
+                    for chat in &chats {
+                        if let Some(row) = launched_session(chat, self.chat_id.as_deref(), workspace) {
+                            (&row.title, &row.harness, row.indicator as u8).hash(h);
+                            for agent in children_of(&row.id, workspace) {
+                                (&agent.title, &agent.harness, agent.indicator as u8).hash(h);
+                            }
+                        }
+                    }
+                }
+                if let Some((_, _)) = zeron_proto::chat_launches::task_report(call) {
+                    let h = h.get_or_insert_with(|| {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        gaps.hash(&mut h);
+                        h
+                    });
+                    workspace.map(|ws| ws.revision).hash(h);
+                }
                 for message in zeron_proto::agent_messages::outgoing_messages(call).into_iter().flatten() {
                     let h = h.get_or_insert_with(|| {
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -434,6 +522,25 @@ impl RowBuilder {
                         let gap = gap_for(&rows, false);
                         let row = self.outgoing_row(ctx, &entry.id, &format!("{id}.m{mi}"), message, !*resolved, *is_error, workspace);
                         rows.push(Placed { core: Arc::new(row), gap });
+                    }
+                }
+                // A task or side chats this agent started: a card of its own.
+                MessagePart::Tool { id, call, is_error, resolved, .. }
+                    if let Some((chats, task)) = zeron_proto::chat_launches::launched_chats(call) =>
+                {
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    let gap = gap_for(&rows, false);
+                    let row = self.launch_row(ctx, &entry.id, id, &chats, task, !*resolved, *is_error, workspace);
+                    rows.push(Placed { core: Arc::new(row), gap });
+                }
+                // A coordinator's report to the chat that started its task.
+                MessagePart::Tool { id, call, resolved, .. }
+                    if let Some((status, message)) = zeron_proto::chat_launches::task_report(call) =>
+                {
+                    flush_tools(self, ctx, &mut rows, &mut tools, &mut group_ix, false);
+                    for core in self.report_rows(ctx, &entry.id, id, &status, &message, !*resolved, workspace) {
+                        let gap = gap_for(&rows, false);
+                        rows.push(Placed { core, gap });
                     }
                 }
                 MessagePart::Tool { call, .. } => {
@@ -613,12 +720,197 @@ impl RowBuilder {
         }
     }
 
+    /// This transcript is a task's coordinator's.
+    fn in_coordinator(&self, workspace: Option<&WorkspaceSnapshot>) -> bool {
+        self.chat_id
+            .as_deref()
+            .and_then(|id| workspace?.session(id))
+            .is_some_and(|row| row.is_task)
+    }
+
+    /// The card for a Zeron launch: a task (its header; its agents when
+    /// open) or the side chats one call started, as the workspace lists them.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_row(
+        &mut self,
+        ctx: &mut Ctx,
+        entry_id: &str,
+        part_id: &str,
+        chats: &[zeron_proto::chat_launches::LaunchedChat],
+        task: bool,
+        pending: bool,
+        failed: bool,
+        workspace: Option<&WorkspaceSnapshot>,
+    ) -> RowCore {
+        let key = row_key(&format!("{entry_id}#{part_id}"));
+        let title_style = ctx.typo.style(Family::Sans, Weight::Medium, false, 15.0);
+        let title_lh = ctx.typo.px(20.0);
+        let (ssize, slh) = TYPE.small;
+        let sub_style = ctx.typo.style(Family::Sans, Weight::Regular, false, ssize - 0.5);
+        let sub_lh = ctx.typo.px(slh - 1.0);
+        let more_style = ctx.typo.style(Family::Sans, Weight::Medium, false, 10.5);
+        let agent_style = ctx.typo.style(Family::Sans, Weight::Regular, false, 14.5);
+        let more_lh = ctx.typo.px(14.0);
+        let open_url = |id: &str| format!("{OPEN_CHAT_SCHEME}://open?id={id}");
+        let mut lines = Vec::new();
+        let mut copy = Vec::new();
+        let mut toggles = false;
+        let open = task && self.expanded.contains(&key);
+        // In a coordinator's transcript, the chats it starts are its agents.
+        let kind = if self.in_coordinator(workspace) { "Agent" } else { "Side chat" };
+        for chat in chats {
+            let row = launched_session(chat, self.chat_id.as_deref(), workspace);
+            let title = row
+                .filter(|row| row.has_title)
+                .map(|row| row.title.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| chat.title.clone());
+            let harness = row
+                .and_then(|row| row.harness.clone())
+                .or_else(|| chat.harness.map(|h| h.as_str().to_owned()));
+            let status = match row {
+                Some(row) => LineStatus::of(row.indicator),
+                None if pending => LineStatus::Working,
+                None if failed => LineStatus::Failed,
+                None => LineStatus::Done,
+            };
+            copy.push(title.clone());
+            if task {
+                let agents: Vec<&Arc<zeron_client::workspace::SessionRow>> =
+                    row.map(|row| children_of(&row.id, workspace)).unwrap_or_default();
+                let done = agents.iter().filter(|a| LineStatus::of(a.indicator) == LineStatus::Done).count();
+                let needs = agents.iter().any(|a| LineStatus::of(a.indicator) == LineStatus::Input) || status == LineStatus::Input;
+                let working = status == LineStatus::Working || agents.iter().any(|a| LineStatus::of(a.indicator) == LineStatus::Working);
+                let progress = if needs {
+                    "Needs your input".to_owned()
+                } else if status == LineStatus::Failed {
+                    "Failed".to_owned()
+                } else if working && agents.is_empty() {
+                    if row.is_none() { "Starting".to_owned() } else { "Planning".to_owned() }
+                } else if working && done == agents.len() {
+                    "Wrapping up".to_owned()
+                } else if working {
+                    format!("{done} of {} done", agents.len())
+                } else {
+                    "Done".to_owned()
+                };
+                let marks: Vec<String> = agents.iter().map(|a| mark_for(a.harness.as_deref())).collect();
+                let (shown, rest) = if marks.len() > 3 { (2, marks.len() - 2) } else { (marks.len(), 0) };
+                toggles = !agents.is_empty();
+                lines.push(CardLine {
+                    mark: mark_for(harness.as_deref()),
+                    title: prepare_plain(ctx, &title, title_style, title_lh, ColorRole::Text, WhiteSpace::Pre),
+                    subline: Some(prepare_plain(
+                        ctx,
+                        &format!("Task · {progress}"),
+                        sub_style,
+                        sub_lh,
+                        if needs { ColorRole::Accent } else if status == LineStatus::Failed { ColorRole::Danger } else { ColorRole::TextSecondary },
+                        WhiteSpace::Pre,
+                    )),
+                    status: if needs { LineStatus::Input } else if working { LineStatus::Working } else { status },
+                    avatars: marks[..shown].to_vec(),
+                    more: (rest > 0).then(|| prepare_plain(ctx, &format!("+{rest}"), more_style, more_lh, ColorRole::TextSecondary, WhiteSpace::Pre)),
+                    open: row.map(|row| open_url(&row.id)),
+                    lead: true,
+                });
+                if open {
+                    for agent in agents {
+                        let name = if agent.has_title { agent.title.clone() } else { "Agent".to_owned() };
+                        copy.push(name.clone());
+                        lines.push(CardLine {
+                            mark: mark_for(agent.harness.as_deref()),
+                            title: prepare_plain(ctx, &name, agent_style, title_lh, ColorRole::Text, WhiteSpace::Pre),
+                            subline: None,
+                            status: LineStatus::of(agent.indicator),
+                            avatars: Vec::new(),
+                            more: None,
+                            open: Some(open_url(&agent.id)),
+                            lead: false,
+                        });
+                    }
+                }
+            } else {
+                lines.push(CardLine {
+                    mark: mark_for(harness.as_deref()),
+                    title: prepare_plain(ctx, &title, title_style, title_lh, ColorRole::Text, WhiteSpace::Pre),
+                    subline: Some(prepare_plain(ctx, kind, sub_style, sub_lh, ColorRole::TextSecondary, WhiteSpace::Pre)),
+                    status,
+                    avatars: Vec::new(),
+                    more: None,
+                    open: row.map(|row| open_url(&row.id)),
+                    lead: true,
+                });
+            }
+        }
+        RowCore {
+            key,
+            version: next_version(),
+            kind: RowKind::Markdown,
+            entry_id: Arc::from(entry_id),
+            content: Content::Launch(LaunchCard { lines, task, toggles, open, pending }),
+            copy_text: if task { format!("Task: {}", copy.join(", ")) } else { copy.join(", ") },
+        }
+    }
+
+    /// A coordinator's report: `Reported to [mark] Chat · Done` (or "Asked a
+    /// question", "Blocked"), then its message as a quote: its opening
+    /// blocks only, as on the desktop; the coordinator's reply says it all.
+    #[allow(clippy::too_many_arguments)]
+    fn report_rows(
+        &mut self,
+        ctx: &mut Ctx,
+        entry_id: &str,
+        part_id: &str,
+        status: &str,
+        message: &str,
+        pending: bool,
+        workspace: Option<&WorkspaceSnapshot>,
+    ) -> Vec<Arc<RowCore>> {
+        // The chat that started the task: this coordinator's parent.
+        let parent = workspace.and_then(|ws| {
+            let me = ws.session(self.chat_id.as_deref()?)?;
+            ws.session(me.parent_chat_id.as_deref()?)
+        });
+        let title = parent
+            .filter(|row| row.has_title)
+            .map(|row| row.title.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_else(|| "the chat that started it".to_owned());
+        let word = match status {
+            "question" => "· Asked a question",
+            "blocked" => "· Blocked",
+            _ => "· Done",
+        };
+        let caption = chat_caption_with(
+            ctx,
+            "Reported to",
+            &title,
+            parent.and_then(|row| row.harness.as_deref()),
+            parent.map(|row| row.id.as_str()),
+            Some(word),
+        );
+        let mut out = vec![Arc::new(RowCore {
+            key: row_key(&format!("{entry_id}#{part_id}")),
+            version: next_version(),
+            kind: RowKind::Markdown,
+            entry_id: Arc::from(entry_id),
+            content: Content::Caption { text: caption, pending },
+            copy_text: format!("Reported to {title} {word}"),
+        })];
+        let preview = report_preview(message);
+        if !preview.trim().is_empty() {
+            let quoted: String = preview.lines().map(|line| format!("> {line}\n")).collect();
+            let pkey = format!("{entry_id}#{part_id}.msg");
+            out.extend(self.text_blocks(ctx, &pkey, &quoted, false).into_iter().map(|(_, core)| core));
+        }
+        out
+    }
+
     fn user_row(&mut self, ctx: &mut Ctx, id: &str, content: &str, pending: bool, workspace: Option<&WorkspaceSnapshot>) -> RowCore {
         let key = row_key(&format!("{id}#u"));
         // Chat events heading the prompt ride over the bubble as one caption;
         // a turn they started alone is the caption only.
         if let Some((events, typed)) = zeron_proto::chat_events::split_events(content) {
-            let caption = events_caption(ctx, &events, workspace);
+            let caption = events_caption(ctx, &events, workspace, self.in_coordinator(workspace));
             if typed.trim().is_empty() {
                 return RowCore {
                     key,
@@ -667,7 +959,9 @@ impl RowBuilder {
                 Some((mention.index, image.path.clone()))
             })
             .collect();
-        let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews);
+        let workspace = self.workspace.clone();
+        let harness_of = |id: &str| workspace.as_deref().and_then(|ws| ws.session(id)).and_then(|row| row.harness.clone());
+        let text = prepare_user_text(ctx, parsed.text.trim(), style, lh, &previews, &harness_of);
         // Copied text reads attachment chips as their plain label.
         let body = zeron_proto::attachment_mentions::attachment_mention_prompt(&parsed.text);
         let (msize, mlh) = TYPE.small;
@@ -742,7 +1036,7 @@ fn image_preview_link(reference: &str) -> String {
 /// files and folders (`zeron-file:`), skills and commands (`zeron-invoke:`),
 /// and attachments (`zeron-image:` / `zeron-attachment:`), in text order.
 /// `previews` pairs image chip numbers with the uploads they open.
-fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
+fn user_chips(body: &str, previews: &[(u32, String)], harness_of: &dyn Fn(&str) -> Option<String>) -> Vec<UserChip> {
     let mut chips: Vec<UserChip> = zeron_proto::file_mentions::file_mention_links(body)
         .into_iter()
         .map(|link| UserChip {
@@ -767,6 +1061,14 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
             .map(|(_, reference)| image_preview_link(reference)),
         label: mention.label,
     }));
+    // A chat mentioned with `@` (a task, its agent, a side chat): its
+    // provider's mark, and it opens the chat.
+    chips.extend(zeron_proto::chat_mentions::chat_mention_links(body).into_iter().map(|link| UserChip {
+        range: link.range,
+        icon: mark_for(harness_of(&link.chat_id).as_deref()),
+        open: Some(format!("{OPEN_CHAT_SCHEME}://open?id={}", link.chat_id)),
+        label: link.title,
+    }));
     chips.sort_by_key(|chip| chip.range.start);
     // Links never nest; drop any overlap rather than paint two chips at once.
     let mut end = 0;
@@ -782,8 +1084,15 @@ fn user_chips(body: &str, previews: &[(u32, String)]) -> Vec<UserChip> {
 
 /// User prompt text with its canonical links shown as atomic chips: the
 /// desktop's soft pill with an icon well, the label in the body font.
-fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, lh: f32, previews: &[(u32, String)]) -> PText {
-    let chips = user_chips(body, previews);
+fn prepare_user_text(
+    ctx: &mut Ctx,
+    body: &str,
+    style: super::style::Resolved,
+    lh: f32,
+    previews: &[(u32, String)],
+    harness_of: &dyn Fn(&str) -> Option<String>,
+) -> PText {
+    let chips = user_chips(body, previews, harness_of);
     if chips.is_empty() {
         return prepare_plain(ctx, body, style, lh, ColorRole::Text, WhiteSpace::PreWrap);
     }
@@ -932,16 +1241,51 @@ fn events_caption(
     ctx: &mut Ctx,
     events: &[zeron_proto::chat_events::EventRef],
     workspace: Option<&WorkspaceSnapshot>,
+    coordinator: bool,
 ) -> PText {
-    if let [event] = events {
+    use zeron_proto::chat_events::EventKind;
+    // What needs someone first, as on the desktop.
+    let rank = |kind: EventKind| match kind {
+        EventKind::TaskQuestion => 0,
+        EventKind::NeedsInput => 1,
+        EventKind::TaskBlocked => 2,
+        EventKind::Failed => 3,
+        EventKind::TaskDone => 4,
+        EventKind::Finished => 5,
+    };
+    let lead = events.iter().min_by_key(|e| rank(e.kind)).expect("events are never empty");
+    let same = events.iter().filter(|e| e.kind == lead.kind).count();
+    let verb = |kind: EventKind, many: bool| match (kind, many) {
+        (EventKind::Finished, _) => "finished",
+        (EventKind::Failed, _) => "failed",
+        (EventKind::NeedsInput, false) => "has a question",
+        (EventKind::NeedsInput, true) => "have questions",
+        (EventKind::TaskDone, false) => "is done",
+        (EventKind::TaskDone, true) => "are done",
+        (EventKind::TaskQuestion, false) => "needs a decision",
+        (EventKind::TaskQuestion, true) => "need decisions",
+        (EventKind::TaskBlocked, false) => "is blocked",
+        (EventKind::TaskBlocked, true) => "are blocked",
+    };
+    let others = events.len() - same;
+    let tail = |base: &str| if others > 0 { format!("{base} · {others} more") } else { base.to_owned() };
+    if same == 1 {
         let sender = zeron_proto::agent_messages::AgentSender {
-            chat_id: event.chat_id.clone(),
-            title: event.title.clone(),
+            chat_id: lead.chat_id.clone(),
+            title: lead.title.clone(),
         };
         let (title, harness, known) = sender_chat(&sender, workspace);
-        return chat_caption(ctx, "Update from", &title, harness.as_deref(), known.then_some(event.chat_id.as_str()));
+        return chat_caption_with(ctx, "", &title, harness.as_deref(), known.then_some(lead.chat_id.as_str()), Some(&tail(verb(lead.kind, false))));
     }
-    chat_caption(ctx, "Updates from", &format!("{} chats", events.len()), None, None)
+    let noun = match lead.kind {
+        EventKind::TaskDone | EventKind::TaskQuestion | EventKind::TaskBlocked => "tasks",
+        _ if coordinator => "agents",
+        _ => "side chats",
+    };
+    let harness = workspace
+        .and_then(|ws| ws.session(&lead.chat_id))
+        .and_then(|row| row.harness.clone());
+    chat_caption_with(ctx, "", &format!("{same} {noun}"), harness.as_deref(), None, Some(&tail(verb(lead.kind, true))))
 }
 
 /// `Message from [mark] Chat`, the desktop's caption over an agent-sent
@@ -956,6 +1300,19 @@ fn sender_caption(ctx: &mut Ctx, sender: &zeron_proto::agent_messages::AgentSend
 /// chats, the chat's provider mark (a chat glyph when unknown) beside its
 /// title, which opens chat `open`.
 fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, open: Option<&str>) -> PText {
+    chat_caption_with(ctx, lead, title, harness, open, None)
+}
+
+/// [`chat_caption`], with `tail` after the title (`· Done`, `finished`).
+/// An empty `lead` starts at the mark.
+fn chat_caption_with(
+    ctx: &mut Ctx,
+    lead: &str,
+    title: &str,
+    harness: Option<&str>,
+    open: Option<&str>,
+    tail: Option<&str>,
+) -> PText {
     let (size, lh) = TYPE.small;
     let regular = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
     let medium = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
@@ -963,12 +1320,21 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
     let mark = ctx.typo.px(14.0);
     // The mark rides a zero-width word joiner's padding, with a space on
     // either side, so it sits as far from the title as from the lead.
-    let text = format!("{lead} \u{2060} {title}");
-    let split = lead.len() + 1;
-    let spans = vec![
-        zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None },
-        zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None },
-    ];
+    let head = if lead.is_empty() { String::new() } else { format!("{lead} ") };
+    let mut text = format!("{head}\u{2060} {title}");
+    let split = head.len();
+    let mut spans = Vec::new();
+    if split > 0 {
+        spans.push(zeron_text::Span { range: 0..split, style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None });
+    }
+    let title_span = spans.len();
+    spans.push(zeron_text::Span { range: split..text.len(), style: medium.id, pad_start: mark + 4.0, pad_end: 0.0, atomic: false, inline_box: None });
+    if let Some(tail) = tail {
+        let start = text.len();
+        text.push(' ');
+        text.push_str(tail);
+        spans.push(zeron_text::Span { range: start..text.len(), style: regular.id, pad_start: 0.0, pad_end: 0.0, atomic: false, inline_box: None });
+    }
     let icon = harness.map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"));
     // One link (one tap target, one accessibility element): the chat.
     let paint = |link| super::markdown::SpanPaint { color: ColorRole::TextSecondary, decoration: super::display::Decoration::None, link, chip: false };
@@ -979,17 +1345,94 @@ fn chat_caption(ctx: &mut Ctx, lead: &str, title: &str, harness: Option<&str>, o
         &spans,
         &zeron_text::PrepareOptions { white_space: WhiteSpace::Pre, ..Default::default() },
     );
+    let mut paints: Vec<_> = (0..spans.len()).map(|_| paint(None)).collect();
+    paints[title_span] = paint(open.map(|_| 0));
     PText {
         p,
         lh,
         base: super::style::baseline(lh, regular),
-        paints: vec![paint(None), paint(open.map(|_| 0))],
+        paints,
         links: open.map(|id| format!("{OPEN_CHAT_SCHEME}://open?id={id}")).into_iter().collect(),
         chip: (0.0, 0.0),
         badges: Vec::new(),
-        marks: vec![(1, icon)],
+        marks: vec![(title_span, icon)],
         math: Vec::new(),
     }
+}
+
+/// The chat a launch started, as this workspace lists it: by the id the
+/// call came back with, else by title among `parent`'s children.
+fn launched_session<'a>(
+    chat: &zeron_proto::chat_launches::LaunchedChat,
+    parent: Option<&str>,
+    workspace: Option<&'a WorkspaceSnapshot>,
+) -> Option<&'a Arc<zeron_client::workspace::SessionRow>> {
+    let ws = workspace?;
+    if let Some(id) = chat.chat_id.as_deref() {
+        return ws.session(id);
+    }
+    let parent = parent?;
+    let mut matches = ws
+        .sessions
+        .values()
+        .filter(|row| row.parent_chat_id.as_deref() == Some(parent) && row.has_title && row.title == chat.title);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// A chat's children (a task's agents), in the order they started.
+fn children_of<'a>(chat_id: &str, workspace: Option<&'a WorkspaceSnapshot>) -> Vec<&'a Arc<zeron_client::workspace::SessionRow>> {
+    let Some(ws) = workspace else {
+        return Vec::new();
+    };
+    let mut rows: Vec<_> = ws
+        .sessions
+        .values()
+        .filter(|row| !row.archived && row.parent_chat_id.as_deref() == Some(chat_id))
+        .collect();
+    rows.sort_by_key(|row| (row.created_at_ms, row.id.clone()));
+    rows
+}
+
+/// A provider's mark for a widget: `brand:<harness>`, or a chat glyph.
+fn mark_for(harness: Option<&str>) -> String {
+    harness.filter(|h| !h.is_empty()).map_or_else(|| "bubble.left".to_owned(), |h| format!("brand:{h}"))
+}
+
+/// A report's opening blocks, whole: up to about 360 characters, never
+/// ending on a heading or a lead-in (`Changes:`) to what's left out.
+pub(crate) fn report_preview(message: &str) -> String {
+    const SHOWN: usize = 360;
+    let tree = zeron_markdown::parser::parse_full(message);
+    let mut shown = tree.blocks.iter().take_while(|top| top.range.end <= SHOWN).count().max(1);
+    while shown > 1 && shown < tree.blocks.len() && {
+        let top = &tree.blocks[shown - 1];
+        let text = message.get(top.range.clone()).unwrap_or_default().trim();
+        matches!(top.block, zeron_markdown::parser::Block::Heading { .. })
+            || text.ends_with(':')
+            || (text.len() < 40 && !text.ends_with('.'))
+    } {
+        shown -= 1;
+    }
+    match tree.blocks.get(shown.min(tree.blocks.len()).saturating_sub(1)) {
+        Some(last) => message.get(..last.range.end).unwrap_or(message).trim().to_owned(),
+        None => message.trim().to_owned(),
+    }
+}
+
+/// The entries draw a launch card or a report: worth rebuilding when the
+/// chats they name move on.
+pub(crate) fn shows_launches(entries: &[Arc<SessionMessageEntry>]) -> bool {
+    entries.iter().any(|entry| {
+        entry.role == MessageRole::Assistant
+            && entry.parts.iter().any(|part| match part {
+                MessagePart::Tool { call, .. } => {
+                    zeron_proto::chat_launches::launched_chats(call).is_some()
+                        || zeron_proto::chat_launches::task_report(call).is_some()
+                }
+                _ => false,
+            })
+    })
 }
 
 /// The provider-switch seam: "Switched from [logo] to [logo]", each
@@ -1132,6 +1575,7 @@ pub(crate) fn place_row(
             }
             h
         }
+        Content::Launch(card) => place_launch(card, px, x, top, cw, out),
         Content::Image { reference } => {
             let side = px.v(IMAGE).min(cw);
             if let Some(out) = out {
@@ -1164,6 +1608,117 @@ pub(crate) fn place_row(
         }
     };
     top + body
+}
+
+/// A launch card (see [`LaunchCard`]) on the desktop's grid: lead tiles at
+/// the card's padding, names after them, statuses and the chevron sharing a
+/// trailing column; an agent's tile is centered under its task's.
+fn place_launch(card: &LaunchCard, px: Px, x: f32, top: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
+    let pad = px.v(12.0);
+    let lead = px.v(28.0);
+    let gap = px.v(10.0);
+    let trail = px.v(24.0);
+    let avatar = px.v(20.0);
+    let avatar_gap = px.v(4.0);
+    let row_tile = px.v(20.0);
+    let agent_h = px.v(40.0);
+    let rule = px.v(0.5);
+    let line_h = |l: &CardLine| {
+        if l.lead {
+            pad * 2.0 + lead.max(l.title.lh + l.subline.as_ref().map_or(0.0, |s| s.lh))
+        } else {
+            agent_h
+        }
+    };
+    let h: f32 = card.lines.iter().map(line_h).sum();
+    let Some(out) = out.as_deref_mut() else {
+        return h;
+    };
+    out.fill(x, top, cw, h, px.v(14.0), ColorRole::AgentCard);
+    out.hairline(x, top, cw, h, px.v(14.0), ColorRole::AgentCardBorder);
+    let tile = |out: &mut DisplayBuilder, mark: &str, tx: f32, ty: f32, side: f32| {
+        out.fill(tx, ty, side, side, (side * 0.3).round(), ColorRole::AgentTile);
+        // Even, so the mark centers on whole pixels.
+        let m = (side * 0.31).round() * 2.0;
+        out.widget(
+            WidgetKind::Icon { name: mark.to_owned(), color: ColorRole::TextSecondary },
+            (tx + (side - m) / 2.0, ty + (side - m) / 2.0, m, m),
+            None,
+        );
+    };
+    let mut y = top;
+    for (i, l) in card.lines.iter().enumerate() {
+        let lh = line_h(l);
+        // A hairline between a card's chats, and under an open task's header.
+        if i > 0 && (l.lead || card.lines[i - 1].lead) {
+            out.fill(x, y, cw, rule, 0.0, ColorRole::AgentCardBorder);
+        }
+        let side = if l.lead { lead } else { row_tile };
+        tile(out, &l.mark, x + pad + (lead - side) / 2.0, y + (lh - side) / 2.0, side);
+        let mut right = x + cw - pad;
+        let slot_y = y + (lh - trail) / 2.0;
+        let mut link_right = right;
+        if l.lead && card.task && card.toggles {
+            // The chevron lists the agents; the rest of the line opens the task.
+            out.widget(WidgetKind::Chevron { expanded: card.open }, (right - trail + px.v(4.0), slot_y + px.v(4.0), trail - px.v(8.0), trail - px.v(8.0)), None);
+            out.widget(WidgetKind::Disclosure { expanded: card.open }, (right - trail - px.v(10.0), y, trail + px.v(10.0) + pad, lh), None);
+            link_right = right - trail - px.v(10.0);
+        } else {
+            match l.status {
+                LineStatus::Input => {
+                    let d = px.v(7.0);
+                    out.fill(right - (trail + d) / 2.0, slot_y + (trail - d) / 2.0, d, d, d / 2.0, ColorRole::Accent);
+                }
+                status => {
+                    let g = px.v(14.0);
+                    out.widget(
+                        WidgetKind::ToolStatus { running: status == LineStatus::Working, failed: status == LineStatus::Failed },
+                        (right - (trail + g) / 2.0, slot_y + (trail - g) / 2.0, g, g),
+                        None,
+                    );
+                }
+            }
+        }
+        right -= trail + gap;
+        // A task's agents, side by side; the last of four or more counts the rest.
+        let count = l.avatars.len() + usize::from(l.more.is_some());
+        if count > 0 {
+            let width = count as f32 * avatar + (count as f32 - 1.0) * avatar_gap;
+            let mut ax = right - width;
+            let ay = y + (lh - avatar) / 2.0;
+            for mark in &l.avatars {
+                tile(out, mark, ax, ay, avatar);
+                ax += avatar + avatar_gap;
+            }
+            if let Some(more) = &l.more {
+                out.fill(ax, ay, avatar, avatar, (avatar * 0.3).round(), ColorRole::AgentTile);
+                let tw = more.p.max_content_width();
+                place_text(more, ax + (avatar - tw) / 2.0, ay + (avatar - more.lh) / 2.0, tw + 1.0, Some(&mut *out));
+            }
+            right -= width + gap;
+        }
+        let text_x = x + pad + lead + gap;
+        let tw = (right - text_x).max(px.v(40.0));
+        if let Some(sub) = &l.subline {
+            let ty = y + (lh - l.title.lh - sub.lh) / 2.0;
+            place_text_lines(&l.title, text_x, ty, tw, 1, px, out);
+            place_text_lines(sub, text_x, ty + l.title.lh, tw, 1, px, out);
+        } else {
+            place_text_lines(&l.title, text_x, y + (lh - l.title.lh) / 2.0, tw, 1, px, out);
+        }
+        if let Some(url) = &l.open {
+            out.links.push(super::display::LinkHit {
+                x,
+                y,
+                w: (link_right - x).max(0.0),
+                h: lh,
+                url: url.clone(),
+                scroller: out.scroller,
+            });
+        }
+        y += lh;
+    }
+    h
 }
 
 /// Draw at most `max_lines` of `t`; returns the drawn height. Overflow
@@ -1305,6 +1860,11 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Caption { text, .. } => text.p.heap_bytes(),
+        Content::Launch(card) => card
+            .lines
+            .iter()
+            .map(|l| l.title.p.heap_bytes() + l.subline.as_ref().map_or(0, |s| s.p.heap_bytes()))
+            .sum(),
         Content::Notice(n) => n.text.p.heap_bytes(),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,

@@ -1098,6 +1098,13 @@ pub fn file_mention_link(path: String, is_dir: bool) -> String {
     zeron_proto::file_mentions::local_file_link(&path, is_dir)
 }
 
+/// The mention link for a chat (`[title](zeron-chat:id)`): the agent reads
+/// it as a chat it can open. `None` for an id the link can't carry.
+#[uniffi::export]
+pub fn chat_mention_link(chat_id: String, title: String) -> Option<String> {
+    zeron_proto::chat_mentions::chat_mention_link(&chat_id, &title)
+}
+
 /// Which session notifications this device wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct PushPrefs {

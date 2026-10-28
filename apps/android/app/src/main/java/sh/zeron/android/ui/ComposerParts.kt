@@ -13,6 +13,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -249,10 +251,87 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
 }
 
 /** Files matching the `@query` being typed, shown above the composer. */
+/** A chat the `@` menu offers: a task, one of its agents, or a side chat. */
+class MentionChat(
+    val id: String,
+    val title: String,
+    /** An agent's task: its row reads `Task › Agent`. */
+    val task: String?,
+    val harness: String?,
+    val kind: Kind,
+    val indicator: uniffi.zeron_core.ChatIndicator,
+    /** A task's agents' providers, for its marks. */
+    val agents: List<String?> = emptyList(),
+) {
+    enum class Kind { Task, Agent, SideChat }
+
+    val label: String get() = if (task != null) "$task › $title" else title
+}
+
+/** The `@` menu's tabs, like the desktop's. */
+enum class MentionTab(val title: String) { All("All"), Tasks("Tasks"), SideChats("Side chats"), Files("Files") }
+
+/**
+ * The chats `chatId` started that the `@` menu offers, in its order: each task
+ * followed by its agents (most recent task first), then side chats. In a
+ * task's coordinator, its own agents.
+ */
+fun mentionChats(model: sh.zeron.android.core.AppModel, chatId: String): List<MentionChat> {
+    fun title(row: uniffi.zeron_core.SessionRow) = if (row.hasTitle) row.title else "Untitled chat"
+    fun agentsOf(task: uniffi.zeron_core.SessionRow) = model.sideChats(task.id).sortedBy { it.createdAtMs }.map {
+        MentionChat(it.id, title(it), title(task), it.harness, MentionChat.Kind.Agent, it.indicator)
+    }
+    val me = model.row(chatId)
+    if (me?.isTask == true) return agentsOf(me)
+    val (tasks, sides) = model.sideChats(chatId).partition { it.isTask }
+    return tasks.sortedByDescending { it.createdAtMs }.flatMap { task ->
+        val agents = agentsOf(task)
+        // A task reads as what needs someone first, as on its card.
+        val indicator = when {
+            task.indicator == uniffi.zeron_core.ChatIndicator.AWAITING_INPUT || agents.any { it.indicator == uniffi.zeron_core.ChatIndicator.AWAITING_INPUT } -> uniffi.zeron_core.ChatIndicator.AWAITING_INPUT
+            task.indicator == uniffi.zeron_core.ChatIndicator.WORKING || agents.any { it.indicator == uniffi.zeron_core.ChatIndicator.WORKING } -> uniffi.zeron_core.ChatIndicator.WORKING
+            else -> task.indicator
+        }
+        listOf(MentionChat(task.id, title(task), null, task.harness, MentionChat.Kind.Task, indicator, agents.map { it.harness })) + agents
+    } + sides.sortedByDescending { it.lastActivityMs }.map { MentionChat(it.id, title(it), null, it.harness, MentionChat.Kind.SideChat, it.indicator) }
+}
+
+/** A squircle with a chat's provider mark. */
 @Composable
-fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<FileMatch>, modifier: Modifier = Modifier) {
+private fun MentionMark(harness: String?, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        contentAlignment = Alignment.Center,
+    ) { sh.zeron.android.design.HarnessMark(harness, size * 0.6f, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+/** How a mentioned chat is doing: working, waiting on a question, failed, or done. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun MentionStatus(indicator: uniffi.zeron_core.ChatIndicator) {
+    when (indicator) {
+        uniffi.zeron_core.ChatIndicator.WORKING -> androidx.compose.material3.LoadingIndicator(Modifier.size(20.dp))
+        uniffi.zeron_core.ChatIndicator.AWAITING_INPUT -> Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+        uniffi.zeron_core.ChatIndicator.ERRORED -> Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+        else -> ZIcon(ZIcons.Check, null, Modifier.size(15.dp), tint = successColor())
+    }
+}
+
+/**
+ * The `@` menu over the composer: this chat's tasks (each followed by its
+ * agents), side chats, and files, with tabs once there's a chat to mention.
+ */
+@Composable
+fun MentionSuggestions(
+    model: ComposerModel,
+    search: suspend (String) -> List<FileMatch>,
+    modifier: Modifier = Modifier,
+    chats: List<MentionChat> = emptyList(),
+) {
     val query = model.activeQuery()?.second
     var files by remember { mutableStateOf<List<FileMatch>>(emptyList()) }
+    var tab by remember { mutableStateOf(MentionTab.All) }
+    LaunchedEffect(query == null) { if (query == null) tab = MentionTab.All }
     LaunchedEffect(query) {
         if (query == null) {
             files = emptyList()
@@ -261,15 +340,92 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
         delay(120)
         files = runCatching { search(query) }.getOrDefault(emptyList()).take(5)
     }
-    AnimatedVisibility(query != null && files.isNotEmpty(), enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically(), modifier = modifier) {
+    fun norm(s: String) = s.filterNot { it.isWhitespace() }.lowercase()
+    val wanted = norm(query.orEmpty())
+    val matching = chats.filter { wanted.isEmpty() || norm(it.label).contains(wanted) }
+    val shownChats = when (tab) {
+        MentionTab.All -> matching
+        MentionTab.Tasks -> matching.filter { it.kind != MentionChat.Kind.SideChat }
+        MentionTab.SideChats -> matching.filter { it.kind == MentionChat.Kind.SideChat }
+        MentionTab.Files -> emptyList()
+    }
+    val shownFiles = if (tab == MentionTab.All || tab == MentionTab.Files) files else emptyList()
+    val visible = query != null && (files.isNotEmpty() || matching.isNotEmpty())
+    AnimatedVisibility(visible, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically(), modifier = modifier) {
         Surface(
             shape = RoundedCornerShape(24.dp),
             color = composerContainer(),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
         ) {
-            Column(Modifier.padding(6.dp)) {
-                files.forEach { file ->
+            Column(Modifier.padding(6.dp).heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                if (chats.isNotEmpty()) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MentionTab.entries.forEach { t ->
+                            androidx.compose.material3.FilterChip(
+                                selected = t == tab,
+                                onClick = { tab = t },
+                                label = { Text(t.title) },
+                            )
+                        }
+                    }
+                }
+                if (shownChats.isEmpty() && shownFiles.isEmpty()) {
+                    Text(
+                        when (tab) {
+                            MentionTab.Tasks -> if (wanted.isEmpty()) "No tasks in this chat" else "No matching tasks"
+                            MentionTab.SideChats -> if (wanted.isEmpty()) "No side chats in this chat" else "No matching side chats"
+                            else -> "No matching files"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    )
+                }
+                shownChats.forEach { chat ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable { model.insertChatMention(chat.id, chat.title) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        MentionMark(chat.harness, 26.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            chat.task?.let { task ->
+                                Text(task, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                Text(" › ", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.outline)
+                            }
+                            Text(chat.title, style = MaterialTheme.typography.bodyLargeEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                            val kind = when (chat.kind) {
+                                MentionChat.Kind.Task -> "Task"
+                                MentionChat.Kind.SideChat -> "Side chat"
+                                MentionChat.Kind.Agent -> null
+                            }
+                            kind?.let {
+                                Spacer(Modifier.width(8.dp))
+                                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            }
+                        }
+                        if (chat.agents.isNotEmpty()) {
+                            Spacer(Modifier.width(8.dp))
+                            val shown = if (chat.agents.size > 3) 2 else chat.agents.size
+                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                chat.agents.take(shown).forEach { MentionMark(it, 18.dp) }
+                                if (chat.agents.size > shown) {
+                                    Box(Modifier.size(18.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
+                                        Text("+${chat.agents.size - shown}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) { MentionStatus(chat.indicator) }
+                    }
+                }
+                shownFiles.forEach { file ->
                     val name = file.path.trimEnd('/').substringAfterLast('/')
                     val dir = file.path.trimEnd('/').substringBeforeLast('/', "")
                     Row(

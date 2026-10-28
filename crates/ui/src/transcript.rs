@@ -2108,69 +2108,22 @@ pub struct LaunchedChat {
 /// The chats a Zeron launch call starts, and whether it starts a task.
 /// `None` for any other call.
 fn launched_chats(call: &ToolCall) -> Option<(Vec<LaunchedChat>, bool)> {
-    let ToolCall::Mcp {
-        server,
-        tool,
-        input,
-    } = call
-    else {
-        return None;
-    };
-    if server != "zeron" {
-        return None;
-    }
-    let null = serde_json::Value::Null;
-    let input = input.as_ref().unwrap_or(&null);
-    let requests: Vec<&serde_json::Value> = match tool.as_str() {
-        "create_chat" | "create_task" => vec![input],
-        "create_chats" => input.get("requests")?.as_array()?.iter().collect(),
-        _ => return None,
-    };
-    let text = |value: &serde_json::Value, key: &str| {
-        value
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-    };
-    let chats = requests
-        .iter()
-        .map(|request| LaunchedChat {
-            chat_id: text(request, "chatId"),
-            title: text(request, "title")
-                .unwrap_or_else(|| if tool == "create_task" { "Task" } else { "Side chat" }.into())
-                .into(),
-            harness: text(request, "harness")
-                .and_then(|raw| serde_json::from_value(serde_json::Value::String(raw)).ok()),
-            model: text(request, "model").map(SharedString::from),
+    let (chats, task) = zeron_proto::chat_launches::launched_chats(call)?;
+    let chats = chats
+        .into_iter()
+        .map(|chat| LaunchedChat {
+            chat_id: chat.chat_id,
+            title: chat.title.into(),
+            harness: chat.harness,
+            model: chat.model.map(SharedString::from),
         })
-        .collect::<Vec<_>>();
-    (!chats.is_empty()).then_some((chats, tool == "create_task"))
+        .collect();
+    Some((chats, task))
 }
 
 /// A coordinator's `report` call: its status and message.
 fn task_report(call: &ToolCall) -> Option<(String, String)> {
-    let ToolCall::Mcp {
-        server,
-        tool,
-        input,
-    } = call
-    else {
-        return None;
-    };
-    if server != "zeron" || tool != "report" {
-        return None;
-    }
-    let input = input.as_ref();
-    let field = |key: &str| {
-        input
-            .and_then(|i| i.get(key))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    Some((field("status"), field("message")))
+    zeron_proto::chat_launches::task_report(call)
 }
 
 /// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs

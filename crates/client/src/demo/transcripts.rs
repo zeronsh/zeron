@@ -945,6 +945,132 @@ fn side(host: &str, now: i64) -> Vec<SessionMessageEntry> {
     ]
 }
 
+fn zeron_call(tool_name: &str, input: serde_json::Value) -> ToolCall {
+    ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: tool_name.into(),
+        input: Some(input),
+    }
+}
+
+fn events(list: &[(zeron_proto::chat_events::EventKind, &str, &str, &str)]) -> String {
+    let events: Vec<zeron_proto::chat_events::ChatEvent> = list
+        .iter()
+        .map(|(kind, chat_id, title, text)| zeron_proto::chat_events::ChatEvent {
+            kind: *kind,
+            chat_id: (*chat_id).into(),
+            title: (*title).into(),
+            text: (*text).into(),
+        })
+        .collect();
+    zeron_proto::chat_events::events_prompt(
+        &events,
+        &[],
+        zeron_proto::chat_events::Audience::Main { user_follows: false },
+    )
+}
+
+/// A chat that started a task and a side chat: the task's card, the side
+/// chat's, and what each reported waking it.
+fn sitekit(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    use zeron_proto::chat_events::EventKind::*;
+    vec![
+        user("m1", now - 2_400_000, "Harden sitekit. Run the audit as a task, and check the README on the side."),
+        assistant(
+            "m2",
+            host,
+            now - 2_380_000,
+            vec![
+                reasoning("r0", "An audit across four areas is a task; the README check stands alone."),
+                tool(
+                    "t1",
+                    zeron_call("create_task", serde_json::json!({"title": "Sitekit Audit", "harness": "claude-code", "model": "claude-haiku-5-5", "chatId": "task-sitekit-audit"})),
+                    false,
+                    None,
+                ),
+                tool(
+                    "t2",
+                    zeron_call("create_chats", serde_json::json!({"requests": [{"title": "README Accuracy", "harness": "codex", "chatId": "side-readme"}]})),
+                    false,
+                    None,
+                ),
+                text("t3", "I started **Sitekit Audit**, which splits the work across four agents, and a side chat that checks the README against the code. I'll tell you when they report."),
+            ],
+        ),
+        user("m3", now - 1_500_000, &events(&[(Finished, "side-readme", "README Accuracy", "Two claims don't match the code.")])),
+        assistant(
+            "m4",
+            host,
+            now - 1_480_000,
+            vec![text("t0", "README Accuracy finished: two claims don't match the code. The README says slugs keep accents (they're dropped), and that reading time is rounded minutes (it's a float).")],
+        ),
+        user("m5", now - 130_000, &events(&[(TaskQuestion, "task-sitekit-audit", "Sitekit Audit", "Should non-ASCII titles transliterate or keep Unicode letters?")])),
+        assistant(
+            "m6",
+            host,
+            now - 120_000,
+            vec![text("t0", "**Sitekit Audit needs a decision:** should non-ASCII titles transliterate (*café* → *cafe*) or keep their Unicode letters? The other audits are on track.")],
+        ),
+    ]
+}
+
+/// The task's coordinator: it starts its agents, hears them, and asks the
+/// chat that started it for a decision.
+fn sitekit_audit(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    use zeron_proto::chat_events::EventKind::*;
+    vec![
+        user("m1", now - 2_370_000, "Audit sitekit: slug Unicode handling, reading time accuracy, docs coverage and packaging. Report when it's done or you need a decision."),
+        assistant(
+            "m2",
+            host,
+            now - 2_350_000,
+            vec![
+                tool(
+                    "t1",
+                    zeron_call(
+                        "create_chats",
+                        serde_json::json!({"requests": [
+                            {"title": "Slug Unicode Audit", "harness": "claude-code", "chatId": "agent-slug"},
+                            {"title": "Reading Time Audit", "harness": "codex", "chatId": "agent-reading"},
+                            {"title": "Docs Coverage Audit", "harness": "claude-code", "chatId": "agent-docs"},
+                            {"title": "Packaging Audit", "harness": "claude-code", "chatId": "agent-pack"},
+                        ]}),
+                    ),
+                    false,
+                    None,
+                ),
+                text("t2", "Four agents are on it, one per area."),
+            ],
+        ),
+        user(
+            "m3",
+            now - 1_100_000,
+            &events(&[
+                (Finished, "agent-slug", "Slug Unicode Audit", "Accented letters are dropped."),
+                (Finished, "agent-docs", "Docs Coverage Audit", "Every function has a docstring."),
+            ]),
+        ),
+        assistant(
+            "m4",
+            host,
+            now - 140_000,
+            vec![
+                text("t0", "Slugs drop accented letters entirely. That's a product call, so I'm asking."),
+                tool(
+                    "t1",
+                    zeron_call(
+                        "report",
+                        serde_json::json!({"status": "question", "message": "Should non-ASCII titles transliterate (café → cafe) or keep their Unicode letters?\n\nThe slug audit found `slugify` drops accented letters entirely. Docs coverage is complete; reading time and packaging are still running."}),
+                    ),
+                    false,
+                    None,
+                ),
+                text("t2", "Waiting on that answer, and on Reading Time Audit."),
+            ],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -976,6 +1102,11 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
         ),
         "chat-side" => side(host, now),
+        "chat-sitekit" => sitekit(host, now),
+        "task-sitekit-audit" => sitekit_audit(host, now),
+        "agent-slug" => short(host, now, "Audit how slugify handles non-ASCII titles.", "Accented letters are dropped: `café` becomes `caf`. Titles with no ASCII letters become an empty slug."),
+        "agent-docs" => short(host, now, "Check docstring coverage.", "Every public function has a docstring. Two don't mention their return type."),
+        "side-readme" => short(host, now, "Check each README claim against the code.", "Two claims don't match: slugs drop accents, and reading time returns a float, not rounded minutes."),
         "chat-side-easing" => easing(host, now),
         "chat-oklch" => short(
             host,
