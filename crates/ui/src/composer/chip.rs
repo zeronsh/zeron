@@ -37,11 +37,24 @@ pub enum ChipKind {
 }
 
 /// What a chip's icon is painted from: a monochrome glyph tinted like the
-/// chip, or the file theme's own polychrome artwork, which tells formats and
-/// languages apart.
+/// chip, the file theme's own polychrome artwork, which tells formats and
+/// languages apart, or a chat's provider mark.
 pub(crate) enum ChipIcon {
     Glyph(&'static str),
     FileTheme(SharedString),
+    /// A chat's provider mark, in its brand color when it has one.
+    Brand(&'static str, Option<gpui::Hsla>),
+}
+
+/// A chat chip's icon: the chat's provider mark once its harness is known.
+pub(crate) fn chat_chip_icon(harness: Option<zeron_proto::HarnessId>) -> ChipIcon {
+    match harness {
+        Some(harness) => {
+            let (path, tint) = crate::pickers::harness_brand_icon(harness);
+            ChipIcon::Brand(path, tint)
+        }
+        None => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
+    }
 }
 
 /// The padding around the label in a chip's display `range`: the side
@@ -231,6 +244,16 @@ pub(crate) fn paint_chip(
                 None,
                 gpui::TransformationMatrix::default(),
                 theme.text_muted,
+                cx,
+            );
+        }
+        ChipIcon::Brand(path, tint) => {
+            let _ = window.paint_svg(
+                bounds,
+                (*path).into(),
+                None,
+                gpui::TransformationMatrix::default(),
+                tint.unwrap_or(theme.text_muted),
                 cx,
             );
         }

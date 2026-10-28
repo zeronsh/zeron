@@ -101,6 +101,9 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device, if any.
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// The chat coordinates a task its parent started: its children are the
+    /// task's agents.
+    pub is_task: bool,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
 }
@@ -435,6 +438,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     }
     row.send_state.hash(&mut h);
     row.parent_chat_id.hash(&mut h);
+    row.is_task.hash(&mut h);
     row.room_gen.hash(&mut h);
     h.finish()
 }
@@ -536,6 +540,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         pull_request: change_request_for_chat(chat, cx.change_requests).cloned(),
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
+        is_task: chat.is_coordinator(),
         room_gen: chat.room_gen.unwrap_or(1),
     };
     row.revision = hash_row(&row);

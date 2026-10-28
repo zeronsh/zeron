@@ -566,7 +566,7 @@ fn file_chips_use_the_file_theme_to_tell_formats_apart() {
     use crate::theme::Appearance::Dark;
     let themed = |kind, name| match chip_icon(kind, name, Dark) {
         ChipIcon::FileTheme(path) => path,
-        ChipIcon::Glyph(_) => panic!("{name} should use the file theme"),
+        ChipIcon::Glyph(_) | ChipIcon::Brand(..) => panic!("{name} should use the file theme"),
     };
     assert_ne!(
         themed(ChipKind::File, "README.md"),
@@ -789,4 +789,16 @@ fn clicking_an_image_chip_opens_the_picture_full_size(cx: &mut gpui::TestAppCont
             assert_eq!(preview.name.as_ref(), "Image 1.png");
         })
         .unwrap();
+}
+
+#[test]
+fn chat_chips_wear_their_provider_s_mark() {
+    assert!(matches!(
+        chat_chip_icon(Some(zeron_proto::HarnessId::ClaudeCode)),
+        ChipIcon::Brand(path, Some(_)) if path == crate::icons::CLAUDE_MARK
+    ));
+    assert!(matches!(
+        chat_chip_icon(None),
+        ChipIcon::Glyph(path) if path == crate::icons::CHAT_ROUND_LINE
+    ));
 }

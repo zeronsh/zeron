@@ -6432,6 +6432,23 @@ impl Transcript {
     /// progress of an upload still crossing to the host in place of the icon
     /// (the strip's thumbnails used to carry it), a warning for an image that
     /// can't be read back, and a click target opening a loaded image.
+    /// The harness of each chat a message's chips mention, for their marks.
+    fn chat_marks(
+        &self,
+        mentions: &[crate::composer::SentMentionSpan],
+        cx: &gpui::App,
+    ) -> HashMap<String, HarnessId> {
+        let state = self.state.read(cx);
+        mentions
+            .iter()
+            .filter(|span| span.kind == crate::composer::ChipKind::Chat)
+            .filter_map(|span| {
+                let chat = state.chats.iter().find(|chat| *chat.id == *span.path)?;
+                Some((chat.id.clone(), chat.config.as_ref()?.harness))
+            })
+            .collect()
+    }
+
     fn chip_overlays(
         &mut self,
         row_id: &SharedString,
@@ -6998,11 +7015,12 @@ impl Transcript {
                 None => user_bubble_text(
                     row_id,
                     text,
-                    mentions,
+                    mentions.clone(),
                     theme,
                     measured_h.clone(),
                     cx.entity_id(),
                     chip_overlays,
+                    self.chat_marks(&mentions, cx),
                     Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
                         this.open_chip_image(path, window, cx);
                     })),
@@ -10615,6 +10633,7 @@ fn user_bubble_text(
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
     overlays: Vec<ChipOverlay>,
+    chat_marks: HashMap<String, HarnessId>,
     open_image: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
 ) -> AnyElement {
     let runs = user_bubble_runs(&text, &mentions, theme);
@@ -10628,7 +10647,12 @@ fn user_bubble_text(
             (!overlays
                 .iter()
                 .any(|overlay| overlay.status.is_some() && overlay.range == span.range))
-            .then(|| crate::composer::chip_icon(span.kind, &span.path, theme.appearance))
+            .then(|| match span.kind {
+                crate::composer::ChipKind::Chat => crate::composer::chat_chip_icon(
+                    chat_marks.get(&*span.path).copied(),
+                ),
+                kind => crate::composer::chip_icon(kind, &span.path, theme.appearance),
+            })
         })
         .collect();
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();

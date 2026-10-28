@@ -507,6 +507,9 @@ pub struct SessionRow {
     /// Oldest unadopted send from this device (open sessions only).
     pub send_state: Option<SendState>,
     pub parent_chat_id: Option<String>,
+    /// A task's coordinator (its parent started the task): its children are
+    /// the task's agents, and it lists under Tasks rather than Side chats.
+    pub is_task: bool,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
 }
@@ -548,6 +551,7 @@ impl From<&zc::SessionRow> for SessionRow {
             pull_request: r.pull_request.as_ref().map(PullRequest::from),
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
+            is_task: r.is_task,
             room_gen: r.room_gen,
         }
     }
