@@ -545,6 +545,50 @@ async fn open_commands_report_background_work_and_killed_ones_do_not() {
     assert!(!turn.background_live(), "nothing left running");
 }
 
+/// A command that outlived its turn is listed as the person typed it, with
+/// its output; stopping it terminates its exec session.
+#[tokio::test]
+async fn a_background_command_is_listed_read_and_terminated() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("Yes");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = harness()
+        .run(request("scenario:background-terminate"), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+
+    let listed = processes.borrow_and_update().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].id, "bg");
+    assert_eq!(listed[0].command, "npm run dev");
+    assert_eq!(
+        turn.background_output("bg").expect("listed").text,
+        "ready on :3000"
+    );
+
+    assert!(turn.stop_background_process("bg"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the terminated command leaves the list");
+    assert!(!turn.background_live());
+}
+
 #[tokio::test]
 async fn rejected_steer_falls_back_to_a_follow_up_turn() {
     let (controls, steer, _token) = controls("Yes");

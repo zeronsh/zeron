@@ -76,6 +76,7 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod background_tray;
 mod todo_panel;
 pub(crate) mod tool_images;
 pub mod theme;

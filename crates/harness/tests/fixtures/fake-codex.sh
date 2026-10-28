@@ -271,9 +271,13 @@ case "$turnline" in
       fail_turn "$tid" "full access sent $unwanted"; exit 0
     fi
   done
-  for want in '"optOutNotificationMethods":[' '"turn/diff/updated"' '"item/commandExecution/outputDelta"'; do
+  for want in '"optOutNotificationMethods":[' '"turn/diff/updated"' '"item/fileChange/outputDelta"'; do
     has "$init_line" "$want" || { fail_turn "$tid" "initialize opt-out missing: $want"; exit 0; }
   done
+  # Command output stays on: a command that outlives its turn shows its tail.
+  if has "$init_line" '"item/commandExecution/outputDelta"'; then
+    fail_turn "$tid" "initialize opted out of command output"; exit 0
+  fi
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   # Deltas — both field spellings must be accepted.
@@ -428,6 +432,22 @@ case "$turnline" in
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-3"}}}'
   emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"completed"}}}'
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-3","status":"completed"}}}'
+  cat >/dev/null
+  ;;
+
+*scenario:background-terminate*)
+  # A command outliving its turn streams output, and a host stop terminates
+  # its exec session by processId; its item/completed follows the exit.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","command":"/usr/bin/zsh -lc '"'"'npm run dev'"'"'","processId":"codex-pty-7","status":"inProgress"}}}'
+  emit '{"method":"item/commandExecution/outputDelta","params":{"threadId":"th-1","turnId":"t-1","itemId":"bg","delta":"\u001b[32mready\u001b[0m on :3000\r\n"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  read -r stop || exit 1
+  has "$stop" '"method":"thread/backgroundTerminals/terminate"' || exit 9
+  has "$stop" '"processId":"codex-pty-7"' || exit 9
+  emit "{\"id\":$(rid "$stop"),\"result\":{\"terminated\":true}}"
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"failed","exitCode":143}}}'
   cat >/dev/null
   ;;
 

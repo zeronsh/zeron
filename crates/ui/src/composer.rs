@@ -6406,6 +6406,12 @@ pub struct Composer {
     pub(crate) todo_cache: crate::todo_panel::TodoCache,
     pub(crate) todo_panels: HashMap<String, crate::todo_panel::TodoPanelState>,
     pub(crate) todo_scroll: gpui::ScrollHandle,
+    /// The background-process tray: per-chat open state, the 1s tick that
+    /// runs only while it is expanded, and its scroll positions.
+    pub(crate) background_trays: HashMap<String, crate::background_tray::BackgroundTrayState>,
+    pub(crate) background_tick: Option<gpui::Task<()>>,
+    pub(crate) background_scroll: gpui::ScrollHandle,
+    pub(crate) background_output_scroll: gpui::ScrollHandle,
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
@@ -6705,6 +6711,10 @@ impl Composer {
             todo_cache: Default::default(),
             todo_panels: HashMap::new(),
             todo_scroll: gpui::ScrollHandle::new(),
+            background_trays: HashMap::new(),
+            background_tick: None,
+            background_scroll: gpui::ScrollHandle::new(),
+            background_output_scroll: gpui::ScrollHandle::new(),
             queue_shortcut_revealed: false,
             annotation_marks: Vec::new(),
             expanded_mode: false,
@@ -11518,12 +11528,18 @@ impl Render for Composer {
                 self.staged_comments(cx).len(),
             );
         // The checklist tray stacks above the queue (or directly above the
-        // composer), one step narrower than what follows it.
+        // composer), one step narrower than what follows it; the background
+        // processes' tray tops the stack, a step narrower again.
         let has_queue = !self.state.read(cx).queue.is_empty();
+        let todo = self.render_todo_panel(has_queue, window, cx);
+        let trays_below = usize::from(has_queue) + usize::from(todo.is_some());
         let container = container.when_some(
-            self.render_todo_panel(has_queue, window, cx),
-            |el, panel| el.child(motion::fade_quick("composer-todo", div().child(panel))),
+            self.render_background_tray(trays_below, window, cx),
+            |el, tray| el.child(motion::fade_quick("composer-background", div().child(tray))),
         );
+        let container = container.when_some(todo, |el, panel| {
+            el.child(motion::fade_quick("composer-todo", div().child(panel)))
+        });
         let container = container.when_some(
             self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
@@ -13334,6 +13350,7 @@ mod tests {
                 last_turn_outcome: None,
                 terminal_activity: None,
                 running_subagents: 0,
+                background_tasks: Vec::new(),
             }];
             state.selected_chat = Some("c".into());
             state.watch_clock_transitions(cx);

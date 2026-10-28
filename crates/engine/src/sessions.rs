@@ -486,6 +486,29 @@ impl SessionsEngine {
             .is_some_and(|h| h.turn.background_live())
     }
 
+    /// Ask the chat's runtime to stop one of its background processes. False
+    /// when no live runtime lists it (it ended meanwhile).
+    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|h| h.turn.stop_background_process(task_id))
+    }
+
+    /// The tail of one background process's output; `None` when no live
+    /// runtime lists it.
+    pub async fn background_task_output(
+        &self,
+        chat_id: &str,
+        task_id: &str,
+    ) -> Option<zeron_proto::BackgroundTaskOutput> {
+        let turn = lock(&self.inner.runs).get(chat_id)?.turn.clone();
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || turn.background_output(&task_id))
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
     /// `activeRuns`).
     pub fn active_count(&self) -> usize {
@@ -2060,6 +2083,33 @@ impl Inner {
         }
     }
 
+    /// Publish the background processes `chat_id`'s runtime runs, mirrored
+    /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
+    /// fresh while they run; an engine that stops beating took them with it.
+    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -2092,6 +2142,7 @@ impl Inner {
                     last_turn_outcome: None,
                     terminal_activity: None,
                     running_subagents: 0,
+                    background_tasks: Vec::new(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3857,6 +3908,8 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The runtime's background processes, published on the session row.
+    let mut background_processes = turn.watch_background_processes();
     // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -3993,6 +4046,11 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                Ok(()) = background_processes.changed() => {
+                    let tasks = background_processes.borrow_and_update().clone();
+                    inner.set_background_tasks(&chat_id, tasks);
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -4953,6 +5011,8 @@ async fn drive_run(
         }
     }
     inner.set_running_subagents(&chat_id, 0);
+    // The runtime is gone, and its background processes with it.
+    inner.set_background_tasks(&chat_id, Vec::new());
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own

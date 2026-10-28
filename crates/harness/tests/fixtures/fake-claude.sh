@@ -600,6 +600,28 @@ case "$first" in
   cat >/dev/null
   ;;
 
+*scenario:background-shell*)
+  # `Bash` with `run_in_background`: the roster lists it, its result names
+  # its output file, and it outlives the turn until `stop_task` (frame shapes
+  # live-verified 2.1.312).
+  out="${TMPDIR:-/tmp}/fake-claude-bgsh-$$.output"
+  printf 'listening on :5173\nready in 412 ms\n' >"$out"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-bgsh"}'
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_dev","name":"Bash","input":{"command":"npm run dev","description":"Start the dev server","run_in_background":true}}]},"parent_tool_use_id":null}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bgsh","task_type":"local_bash","description":"Start the dev server"}]}'
+  emit '{"type":"system","subtype":"task_started","task_id":"bgsh","tool_use_id":"toolu_dev","description":"Start the dev server","is_backgrounded":true,"task_type":"local_bash"}'
+  emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_dev\",\"type\":\"tool_result\",\"content\":\"Command running in background with ID: bgsh. Output is being written to: $out. You will be notified when it completes.\",\"is_error\":false}]},\"parent_tool_use_id\":null}"
+  emit '{"type":"result","subtype":"success","result":"started","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-bgsh"}'
+  read -r stop || exit 1
+  case "$stop" in *'"subtype":"stop_task"'*'"task_id":"bgsh"'*) ;; *) exit 10 ;; esac
+  rid=$(printf '%s\n' "$stop" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{}}}"
+  emit "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bgsh\",\"tool_use_id\":\"toolu_dev\",\"status\":\"stopped\",\"output_file\":\"$out\"}"
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+  rm -f "$out"
+  cat >/dev/null
+  ;;
+
 *scenario:interrupt*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-int"}'
   # Wedge without reading stdin — forces the SIGTERM escalation path.

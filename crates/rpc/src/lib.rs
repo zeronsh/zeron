@@ -210,6 +210,10 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
+    // A chat's background processes (`Session::background_tasks`) live in
+    // its host's runtime: `{chatId, taskId}`, relay-forwardable.
+    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";

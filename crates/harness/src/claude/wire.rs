@@ -638,6 +638,17 @@ pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
     .to_string()
 }
 
+/// Stop one background task (`stop_task`): the CLI kills it, then reports
+/// it `stopped` and the roster without it.
+pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "stop_task", "task_id": task_id },
+    })
+    .to_string()
+}
+
 /// Success reply to a CLI control request (`can_use_tool` allow/deny payloads).
 pub(crate) fn control_response_line(request_id: &str, response: Value) -> String {
     json!({
