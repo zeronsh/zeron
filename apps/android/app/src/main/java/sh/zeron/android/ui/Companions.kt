@@ -66,6 +66,7 @@ import sh.zeron.android.core.AppModel
 import sh.zeron.android.core.TerminalTab
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.SubagentRow
@@ -73,14 +74,34 @@ import uniffi.zeron_core.SubagentState
 import uniffi.zeron_core.TerminalPhase
 
 /** The companions sheet's sections (each chip opens its own). */
-enum class CompanionSection(val title: String) { Agents("Agents"), SideChats("Side chats"), Terminals("Terminals") }
+enum class CompanionSection(val title: String) { Tasks("Tasks"), Agents("Agents"), SideChats("Side chats"), Terminals("Terminals") }
 
-/** What's working alongside one session: its subagents, side chats and terminals. */
+/** A task this session started: its coordinator, and the agents it runs (in the order they started). */
 @Stable
-class Companions(val agents: List<SubagentRow>, val sideChats: List<SessionRow>, val terminals: List<TerminalTab>) {
+class TaskGroup(val task: SessionRow, val agents: List<SessionRow>) {
+    val working: Boolean get() = task.indicator == ChatIndicator.WORKING || agents.any { it.indicator == ChatIndicator.WORKING }
+    val needsInput: Boolean get() = task.indicator == ChatIndicator.AWAITING_INPUT || agents.any { it.indicator == ChatIndicator.AWAITING_INPUT }
+
+    /** How the task is going, as the desktop's task card says it. */
+    val progress: String get() {
+        val done = agents.count { it.indicator == ChatIndicator.COMPLETED || it.indicator == ChatIndicator.IDLE }
+        return when {
+            needsInput -> "Needs your input"
+            task.indicator == ChatIndicator.ERRORED -> "Failed"
+            working && agents.isEmpty() -> "Planning"
+            working && done == agents.size -> "Wrapping up"
+            working -> "$done of ${agents.size} done"
+            else -> "Done"
+        }
+    }
+}
+
+/** What's working alongside one session: its tasks, subagents, side chats and terminals. */
+@Stable
+class Companions(val tasks: List<TaskGroup>, val agents: List<SubagentRow>, val sideChats: List<SessionRow>, val terminals: List<TerminalTab>) {
     val runningAgents: Int get() = agents.count { it.state == SubagentState.RUNNING }
     val liveTerminals: Int get() = terminals.count { it.isLive }
-    val isEmpty: Boolean get() = agents.isEmpty() && sideChats.isEmpty() && terminals.isEmpty()
+    val isEmpty: Boolean get() = tasks.isEmpty() && agents.isEmpty() && sideChats.isEmpty() && terminals.isEmpty()
 }
 
 /**
@@ -90,11 +111,17 @@ class Companions(val agents: List<SubagentRow>, val sideChats: List<SessionRow>,
  */
 @Composable
 fun rememberCompanions(model: AppModel, chatId: String, includeSideChats: Boolean = true): Companions {
-    fun load() = Companions(
-        model.sessionSubagents(chatId),
-        if (includeSideChats) model.sideChats(chatId) else emptyList(),
-        model.terminals.tabs(chatId),
-    )
+    fun load(): Companions {
+        val children = if (includeSideChats) model.sideChats(chatId) else emptyList()
+        // Tasks list apart from side chats, each with its agents.
+        val (tasks, sides) = children.partition { it.isTask }
+        return Companions(
+            tasks.sortedByDescending { it.lastActivityMs }.map { t -> TaskGroup(t, model.sideChats(t.id).sortedBy { it.createdAtMs }) },
+            model.sessionSubagents(chatId),
+            sides,
+            model.terminals.tabs(chatId),
+        )
+    }
     var value by remember(chatId) { mutableStateOf(load()) }
     LaunchedEffect(chatId, includeSideChats) {
         val dirty = Channel<Unit>(Channel.CONFLATED)
@@ -123,6 +150,21 @@ fun CompanionStrip(c: Companions, onTap: (CompanionSection) -> Unit, modifier: M
         onTap(s)
     }
     Row(modifier.animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        AnimatedVisibility(c.tasks.isNotEmpty(), enter = fadeIn() + expandHorizontally(), exit = fadeOut() + shrinkHorizontally()) {
+            val working = c.tasks.count { it.working }
+            val waiting = c.tasks.any { it.needsInput }
+            CompanionChip(
+                icon = if (working > 0 && !waiting) null else ZIcons.Companions,
+                text = when {
+                    c.tasks.size == 1 -> c.tasks.first().progress
+                    working > 0 -> "$working tasks working"
+                    else -> "${c.tasks.size} tasks"
+                },
+                label = "${c.tasks.size} task${if (c.tasks.size == 1) "" else "s"}",
+                spinning = working > 0 && !waiting,
+                dot = if (waiting) MaterialTheme.colorScheme.primary else null,
+            ) { tap(CompanionSection.Tasks) }
+        }
         AnimatedVisibility(c.agents.isNotEmpty(), enter = fadeIn() + expandHorizontally(), exit = fadeOut() + shrinkHorizontally()) {
             val running = c.runningAgents
             CompanionChip(
@@ -255,14 +297,20 @@ fun CompanionsContent(
         // Live first, then newest.
         c.agents.withIndex().sortedWith(compareByDescending<IndexedValue<SubagentRow>> { it.value.state == SubagentState.RUNNING }.thenByDescending { it.index }).map { it.value }
     }
+    // One task open at a time: opening one closes the other.
+    var openTask by remember(chatId) { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
     LaunchedEffect(initialSection) {
         val section = initialSection ?: return@LaunchedEffect
-        // Items: title, [agents header + rows], side chats header + rows (or empty text + 2 actions), terminals…
+        // Items: title, [tasks header + task rows (+ the open one's agents)], [agents header + rows],
+        // side chats header + rows (or empty text + 2 actions), terminals…
         val first = if (showTitle) 1 else 0
-        val sides = first + if (agents.isNotEmpty()) agents.size + 1 else 0
+        val taskRows = c.tasks.sumOf { 1 + if (it.task.id == openTask) it.agents.size else 0 }
+        val agentsAt = first + if (c.tasks.isNotEmpty()) taskRows + 1 else 0
+        val sides = agentsAt + if (agents.isNotEmpty()) agents.size + 1 else 0
         val index = when (section) {
-            CompanionSection.Agents -> first
+            CompanionSection.Tasks -> first
+            CompanionSection.Agents -> agentsAt
             CompanionSection.SideChats -> sides
             CompanionSection.Terminals -> sides + 1 + if (c.sideChats.isEmpty()) 3 else c.sideChats.size
         }
@@ -277,10 +325,36 @@ fun CompanionsContent(
                     Text(title, style = MaterialTheme.typography.headlineSmallEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val running = c.runningAgents
                     Text(
-                        if (running > 0) "$running agent${if (running == 1) "" else "s"} working" else "Agents, side chats & terminals",
+                        when {
+                            running > 0 -> "$running agent${if (running == 1) "" else "s"} working"
+                            c.tasks.isNotEmpty() -> "Tasks, side chats & terminals"
+                            else -> "Agents, side chats & terminals"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (running > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+            if (c.tasks.isNotEmpty()) {
+                header(CompanionSection.Tasks)
+                c.tasks.forEach { group ->
+                    val open = group.task.id == openTask && group.agents.isNotEmpty()
+                    // The task and its open agents read as one segmented group.
+                    val count = 1 + if (open) group.agents.size else 0
+                    item("task/${group.task.id}") {
+                        TaskRow(
+                            group, open, count, Modifier.animateItem(),
+                            onToggle = {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                openTask = if (openTask == group.task.id) null else group.task.id
+                            },
+                        ) { dismissThen { onOpenSideChat(group.task.id) } }
+                    }
+                    if (open) {
+                        itemsIndexed(group.agents, key = { _, a -> "task/${group.task.id}/${a.id}" }) { i, agent ->
+                            TaskAgentRow(agent, i + 1, count, Modifier.animateItem()) { dismissThen { onOpenSideChat(agent.id) } }
+                        }
+                    }
                 }
             }
             if (agents.isNotEmpty()) {
@@ -410,6 +484,97 @@ private fun AgentRow(a: SubagentRow, index: Int, count: Int, now: Long, modifier
             null
         },
     ) { Text(a.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+}
+
+/** A squircle with a chat's provider mark (a task's agents, side by side). */
+@Composable
+private fun MarkTile(harness: String?, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        Modifier.size(size).clip(RoundedCornerShape(size * 0.3f)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        contentAlignment = Alignment.Center,
+    ) { sh.zeron.android.design.HarnessMark(harness, size * 0.6f, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+}
+
+/** A task's agents' marks: up to three, or two and "+N" for the rest. */
+@Composable
+private fun AgentMarks(agents: List<SessionRow>) {
+    val shown = if (agents.size > 3) 2 else agents.size
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        agents.take(shown).forEach { MarkTile(it.harness, 22.dp) }
+        if (agents.size > shown) {
+            Box(
+                Modifier.size(22.dp).clip(RoundedCornerShape(7.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                contentAlignment = Alignment.Center,
+            ) { Text("+${agents.size - shown}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+}
+
+/**
+ * A task: its coordinator's mark, its name, how it's going ("2 of 4 done"),
+ * its agents' marks, and a chevron listing them. The row opens the coordinator.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun TaskRow(group: TaskGroup, open: Boolean, count: Int, modifier: Modifier, onToggle: () -> Unit, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    SegmentedListItem(
+        onClick = onClick,
+        shapes = segmentedShapes(0, count),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+        modifier = modifier.padding(bottom = ListItemDefaults.SegmentedGap).semantics { contentDescription = "Task ${group.task.title}, ${group.progress}" },
+        leadingContent = { HarnessTile(group.task) },
+        supportingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (group.working && !group.needsInput) {
+                    LoadingIndicator(Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                }
+                // Under the Tasks heading: how it's going, without "Task ·".
+                Text(
+                    group.progress,
+                    color = when {
+                        group.needsInput -> scheme.primary
+                        group.task.indicator == ChatIndicator.ERRORED -> scheme.error
+                        else -> scheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        trailingContent = if (group.agents.isNotEmpty()) {
+            {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AgentMarks(group.agents)
+                    androidx.compose.material3.IconButton(onClick = onToggle, modifier = Modifier.size(40.dp)) {
+                        ZIcon(if (open) ZIcons.ChevronUp else ZIcons.ChevronDown, if (open) "Hide agents" else "Show agents", Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                    }
+                }
+            }
+        } else {
+            null
+        },
+    ) {
+        Text(group.task.title, style = if (group.task.unseen) MaterialTheme.typography.titleMediumEmphasized else MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** One of an open task's agents, in the task's group: its mark, its name, and how it's doing. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun TaskAgentRow(agent: SessionRow, index: Int, count: Int, modifier: Modifier, onClick: () -> Unit) {
+    SegmentedListItem(
+        onClick = onClick,
+        shapes = segmentedShapes(index, count),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+        modifier = modifier.padding(bottom = ListItemDefaults.SegmentedGap),
+        // Centered under the task's tile.
+        leadingContent = { Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { MarkTile(agent.harness, 30.dp) } },
+        trailingContent = { StatusLabel(agent) },
+    ) {
+        Text(if (agent.hasTitle) agent.title else "Agent", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)

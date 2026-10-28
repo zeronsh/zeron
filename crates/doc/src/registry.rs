@@ -1272,6 +1272,7 @@ impl RegistryDoc {
                 chat.room_gen.map(|g| json!(g)).unwrap_or(Value::Null),
             ),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+            ("role", opt_str(chat.role.map(|role| role.as_str()))),
         ]);
         self.write(KIND_CHATS, &chat.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1399,6 +1400,24 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("branch", json!(branch))]),
+        );
+        Ok(true)
+    }
+
+    /// Stamp what chat `chat_id` is to its parent (a task's coordinator).
+    pub fn set_chat_role(
+        &mut self,
+        chat_id: &str,
+        role: zeron_proto::ChatRole,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("role", json!(role.as_str()))]),
         );
         Ok(true)
     }
@@ -1714,6 +1733,7 @@ impl RegistryDoc {
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
+                    ("role", opt_str(chat.role.map(|role| role.as_str()))),
                 ]),
             );
         }

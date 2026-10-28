@@ -188,7 +188,10 @@ fun InspectorPageContent(model: AppModel, shell: TabletShellState, chatId: Strin
     when (page) {
         is InspectorPage.Companions -> Column(Modifier.fillMaxSize()) {
             val c = rememberCompanions(model, chatId)
-            val title = model.row(chatId)?.let { if (it.parentChatId != null) "Side chat" else it.title } ?: "Session"
+            val title = model.row(chatId)?.let { row ->
+                val partOfTask = row.isTask || row.parentChatId?.let { model.row(it)?.isTask } == true
+                if (row.parentChatId != null && !partOfTask) "Side chat" else row.title
+            } ?: "Session"
             Row(Modifier.fillMaxWidth().statusBarsPadding().padding(start = 20.dp, end = 12.dp, top = 8.dp, bottom = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleLargeEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)

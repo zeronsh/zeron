@@ -929,6 +929,16 @@ impl WorkspaceHost {
     /// Sidebar freshness on message persist: preview = first 120 chars of the last
     /// message's text. Claims the row first so a pre-workspace chat gains one.
     pub fn note_message(&self, chat_id: &str, text: &str) {
+        // Chat events are for the agent: a prompt they head previews as what
+        // the user wrote under them, and neither a turn they started alone
+        // nor its "nothing for you yet" reply is news for the sidebar.
+        let text = match zeron_proto::chat_events::split_events(text) {
+            Some((_, typed)) => typed,
+            None => text,
+        };
+        if text.trim().is_empty() || zeron_proto::chat_events::is_quiet_reply(text) {
+            return;
+        }
         // Annotation tokens carry their element as hex; previews read the label.
         let text = zeron_proto::annotation::annotation_display(text);
         let preview: String = text.chars().take(120).collect();
@@ -1110,6 +1120,7 @@ impl WorkspaceHost {
                 space_id: space.as_ref().map(|s| s.id.clone()),
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
+                role: None,
             })
         })?;
         Ok(())
@@ -1405,6 +1416,15 @@ impl WorkspaceHost {
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
     pub fn set_chat_branch(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
+    }
+
+    /// Stamp what chat `chat_id` is to its parent (a task's coordinator).
+    pub fn set_chat_role(
+        &self,
+        chat_id: &str,
+        role: zeron_proto::ChatRole,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_role(chat_id, role))?)
     }
 
     pub fn set_chat_source_context(

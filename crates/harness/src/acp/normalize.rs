@@ -160,6 +160,52 @@ fn arg_from_title(title: &str) -> Option<String> {
     }
 }
 
+/// A call to Zeron's own MCP server, typed as one so the transcript draws
+/// what it does (the chats it started, a coordinator's report) whichever
+/// agent made it. ACP has no field for the tool's name: agents put it in
+/// their `_meta` (Devin's `cognition.ai/inferenceToolName`), in `rawInput`,
+/// or in the title, each spelled their own way.
+fn zeron_call(update: &Value, raw: Option<&Value>) -> Option<ToolCall> {
+    let meta_names = update
+        .get("_meta")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| key.to_ascii_lowercase().ends_with("toolname"))
+        .filter_map(|(_, value)| value.as_str());
+    let names: Vec<&str> = meta_names
+        .chain(raw.and_then(|r| r.get("_toolName")).and_then(Value::as_str))
+        .chain(update.get("title").and_then(Value::as_str))
+        .collect();
+    let typed = |tool: &str| ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: tool.into(),
+        input: raw.cloned(),
+    };
+    if let Some(tool) = names.iter().find_map(|name| zeron_proto::agent::zeron_tool(name)) {
+        return Some(typed(tool));
+    }
+    // A name with no server in it (`create_task`, Windsurf-style
+    // `mcp0_create_task`): only the tools the transcript draws, and only
+    // with their own input.
+    let has = |key: &str| raw.is_some_and(|r| r.get(key).is_some());
+    names.iter().find_map(|name| {
+        let bare = name
+            .strip_prefix("mcp")
+            .and_then(|rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()).strip_prefix('_'))
+            .unwrap_or(*name);
+        let ours = match bare {
+            "create_task" => has("brief") && has("title"),
+            "create_chats" => raw
+                .and_then(|r| r.get("requests"))
+                .is_some_and(Value::is_array),
+            "report" => has("status") && has("message"),
+            _ => false,
+        };
+        ours.then(|| typed(bare))
+    })
+}
+
 /// Reduce an ACP tool call (kind + title + rawInput + locations + diff
 /// content) to the typed [`ToolCall`] zeron renders. Best-effort: agents vary
 /// in how much structure they put in `rawInput`, so every arm has a fallback.
@@ -178,6 +224,9 @@ pub(super) fn typed_call(update: &Value) -> ToolCall {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
     };
+    if let Some(call) = zeron_call(update, raw) {
+        return call;
+    }
     match kind {
         "execute" => ToolCall::Exec {
             command: raw_str("command")
@@ -504,6 +553,49 @@ pub(crate) fn preferred_allow_option(options: &[Value]) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn zeron_calls_are_typed_whichever_agent_names_them() {
+        let brief = json!({ "title": "Zeron Refactor", "brief": "Split the engine." });
+        let zeron = |call: ToolCall| match call {
+            ToolCall::Mcp { server, tool, input } => {
+                assert_eq!(server, "zeron");
+                assert_eq!(input.unwrap()["title"], "Zeron Refactor");
+                tool
+            }
+            other => panic!("not typed as Zeron's: {other:?}"),
+        };
+        // Devin: the tool's name rides its private meta, the title is prose.
+        let devin = json!({
+            "kind": "other",
+            "title": "Create Task",
+            "rawInput": brief,
+            "_meta": { "cognition.ai/inferenceToolName": "mcp_zeron_create_task" },
+        });
+        assert_eq!(zeron(typed_call(&devin)), "create_task");
+        // Gemini-style titles.
+        let titled = json!({
+            "kind": "other",
+            "title": "create_task (zeron MCP Server)",
+            "rawInput": brief,
+        });
+        assert_eq!(zeron(typed_call(&titled)), "create_task");
+        // An indexed name with no server, known by its input.
+        let indexed = json!({
+            "kind": "other",
+            "title": "Create Task",
+            "rawInput": brief,
+            "_meta": { "cognition.ai/inferenceToolName": "mcp0_create_task" },
+        });
+        assert_eq!(zeron(typed_call(&indexed)), "create_task");
+        // Someone else's `create_task` without our input stays theirs.
+        let theirs = json!({
+            "kind": "other",
+            "title": "create_task",
+            "rawInput": { "name": "Buy milk" },
+        });
+        assert!(matches!(typed_call(&theirs), ToolCall::Unknown { .. }));
+    }
 
     #[test]
     fn message_and_thought_chunks_map_to_deltas() {

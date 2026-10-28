@@ -62,6 +62,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
     assert_eq!(
         ids(&ws.front.recent),
         [
+            "chat-sitekit",
             "chat-visuals",
             "chat-cjk",
             "chat-home",
@@ -74,6 +75,13 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ids(ws.children("chat-veil")),
         ["chat-side-easing", "chat-side"]
     );
+    // A task: its coordinator under the chat that started it, its agents
+    // under the coordinator.
+    let task = ws.session("task-sitekit-audit").unwrap();
+    assert!(task.is_task);
+    assert_eq!(task.parent_chat_id.as_deref(), Some("chat-sitekit"));
+    assert_eq!(ws.children("task-sitekit-audit").len(), 4);
+    assert!(!ws.session("side-readme").unwrap().is_task);
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);

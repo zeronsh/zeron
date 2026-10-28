@@ -45,8 +45,8 @@ mod chip;
 pub use chip::ChipKind;
 use chip::*;
 pub(crate) use chip::{
-    CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
-    text_chip_label_offset,
+    CHIP_PAD_FAMILY, ChipIcon, chat_chip_icon, chip_icon, chip_pad_ranges, chip_text,
+    paint_chip, text_chip_label_offset,
 };
 
 // ---------------------------------------------------------------------------
@@ -1914,6 +1914,8 @@ pub enum ComposerInputEvent {
     MentionNavigate(isize),
     MentionAccept,
     MentionDismiss,
+    /// Shift-tab in an open `@` menu: its next tab.
+    MentionCycleScope,
     /// Images pasted from the clipboard (screenshots / copied image data) —
     /// the wrapper stages them as attachments (use-attachments.ts onPaste).
     PastedImages(Vec<gpui::Image>),
@@ -2164,6 +2166,8 @@ pub struct ComposerInput {
     /// picture. `None` outside the composer, where every attachment link is
     /// shown as a chip.
     attachment_chips: Option<HashMap<u32, ChipAttachment>>,
+    /// Each chat's harness, so a chat chip wears its provider's mark.
+    chat_marks: HashMap<String, HarnessId>,
     /// The draft the attachment chips belong to; copied chips carry it so a paste
     /// into another draft can tell it must not reuse their numbers.
     attachment_scope: String,
@@ -2259,6 +2263,7 @@ impl ComposerInput {
             mention_hits: Vec::new(),
             chip_press: None,
             attachment_chips: None,
+            chat_marks: HashMap::new(),
             attachment_scope: String::new(),
             mention_tooltip: MentionTooltipPhase::Hidden,
             hovered_annotation: None,
@@ -2503,6 +2508,18 @@ impl ComposerInput {
         cx.emit(ComposerInputEvent::Edited);
         cx.notify();
         true
+    }
+
+    /// The harness of each chat a chip may name; repaints only on a change.
+    pub(crate) fn set_chat_marks(
+        &mut self,
+        marks: HashMap<String, HarnessId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chat_marks != marks {
+            self.chat_marks = marks;
+            cx.notify();
+        }
     }
 
     /// Tell the editor which staged attachments its chips may reference (`None`
@@ -3838,7 +3855,9 @@ impl ComposerInput {
     }
 
     fn outdent_list(&mut self, _: &OutdentList, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mention_open || !self.indent_list(true, window, cx) {
+        if self.mention_open {
+            cx.emit(ComposerInputEvent::MentionCycleScope);
+        } else if !self.indent_list(true, window, cx) {
             cx.propagate();
         }
     }
@@ -5265,7 +5284,12 @@ impl gpui::Element for ComposerTextElement {
                 );
                 mention_chips.push((
                     chip_bounds,
-                    first_row.then(|| chip_icon(mention.kind, &mention.path, appearance)),
+                    first_row.then(|| match mention.kind {
+                        ChipKind::Chat => {
+                            chat_chip_icon(input.chat_marks.get(mention.path.as_str()).copied())
+                        }
+                        kind => chip_icon(kind, &mention.path, appearance),
+                    }),
                 ));
                 first_row = false;
                 let above_anchor = chip_bounds.top() - px(tooltip_height) - px(tooltip_gap);
@@ -6176,6 +6200,280 @@ struct FileMentionState {
     /// Full token text, not just the cursor-relative query: moving within a
     /// dismissed token keeps it closed, while any edit re-enables completion.
     dismissed: Option<(Range<usize>, String)>,
+    /// The tab the menu shows. A fresh `@` opens on All.
+    scope: MentionScope,
+}
+
+/// The `@` menu's tabs, like the command palette's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MentionScope {
+    #[default]
+    All,
+    Tasks,
+    SideChats,
+    Files,
+}
+
+impl MentionScope {
+    const ALL: [MentionScope; 4] = [Self::All, Self::Tasks, Self::SideChats, Self::Files];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Tasks => "Tasks",
+            Self::SideChats => "Side chats",
+            Self::Files => "Files",
+        }
+    }
+
+    fn next(self) -> Self {
+        let ix = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(ix + 1) % Self::ALL.len()]
+    }
+
+    fn shows_chats(self, kind: ChatMentionKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Tasks => kind != ChatMentionKind::SideChat,
+            Self::SideChats => kind == ChatMentionKind::SideChat,
+            Self::Files => false,
+        }
+    }
+
+    fn shows_files(self) -> bool {
+        matches!(self, Self::All | Self::Files)
+    }
+}
+
+/// What a chat the `@` menu offers is to the chat being written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatMentionKind {
+    /// A task this chat started (its coordinator).
+    Task,
+    /// One of a task's agents.
+    Agent,
+    SideChat,
+}
+
+/// A chat the `@` menu offers: this chat's tasks, their agents, and its
+/// side chats.
+#[derive(Clone, Debug, PartialEq)]
+struct ChatMentionRow {
+    chat_id: String,
+    title: String,
+    /// An agent's task, which its row leads with: `Task › Agent`.
+    task: Option<String>,
+    harness: Option<HarnessId>,
+    status: zeron_proto::ChatIndicator,
+    kind: ChatMentionKind,
+    /// A task's agents, drawn as its marks.
+    agents: Vec<crate::chat_avatars::Avatar>,
+}
+
+impl ChatMentionRow {
+    /// Its name in the menu, and what a query matches.
+    fn label(&self) -> String {
+        match &self.task {
+            Some(task) => format!("{task} › {}", self.title),
+            None => self.title.clone(),
+        }
+    }
+}
+
+/// The chats `selected` started that the `@` menu offers, in its order:
+/// each task followed by its agents, then side chats, most recent first.
+/// In a coordinator, its own agents. `query` keeps those whose name (an
+/// agent's with its task's) holds it, ignoring case and spaces.
+fn chat_mention_rows(
+    state: &crate::state::AppState,
+    selected: &str,
+    query: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<ChatMentionRow> {
+    use zeron_proto::ChatIndicator;
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let wanted = normalize(query);
+    let children = |parent: &str| -> Vec<&zeron_proto::Chat> {
+        let mut chats: Vec<&zeron_proto::Chat> = state
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(parent))
+            .collect();
+        chats.sort_by_key(|chat| chat.created_at);
+        chats
+    };
+    let title = |chat: &zeron_proto::Chat| {
+        chat.title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "Untitled chat".into())
+    };
+    let status = |chat: &zeron_proto::Chat| match state.display_status_for(chat, now) {
+        ChatIndicator::Idle => ChatIndicator::Completed,
+        status => status,
+    };
+    let row = |chat: &zeron_proto::Chat, kind, task: Option<String>| ChatMentionRow {
+        chat_id: chat.id.clone(),
+        title: title(chat),
+        task,
+        harness: chat.config.as_ref().map(|c| c.harness),
+        status: status(chat),
+        kind,
+        agents: Vec::new(),
+    };
+    let agents_of = |coordinator: &zeron_proto::Chat| -> Vec<ChatMentionRow> {
+        children(&coordinator.id)
+            .into_iter()
+            .map(|agent| row(agent, ChatMentionKind::Agent, Some(title(coordinator))))
+            .collect()
+    };
+    let mut rows = Vec::new();
+    if let Some(me) = state.chats.iter().find(|chat| chat.id == selected)
+        && me.is_coordinator()
+    {
+        rows.extend(agents_of(me));
+    } else {
+        let (tasks, sides): (Vec<_>, Vec<_>) = children(selected)
+            .into_iter()
+            .partition(|chat| chat.is_coordinator());
+        for task in tasks.into_iter().rev() {
+            let agents = agents_of(task);
+            let mut lead = row(task, ChatMentionKind::Task, None);
+            lead.agents = agents
+                .iter()
+                .map(|agent| crate::chat_avatars::Avatar {
+                    harness: agent.harness,
+                    status: agent.status,
+                })
+                .collect();
+            rows.push(lead);
+            rows.extend(agents);
+        }
+        let mut sides = sides;
+        sides.sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
+        rows.extend(
+            sides
+                .into_iter()
+                .map(|chat| row(chat, ChatMentionKind::SideChat, None)),
+        );
+    }
+    rows.retain(|row| wanted.is_empty() || normalize(&row.label()).contains(&wanted));
+    rows
+}
+
+/// A chat's row in the `@` menu: its mark in a squircle, its name (an
+/// agent's after its task's: `Task › Agent`), what it is, and how it's
+/// doing; a task also shows its agents' marks.
+fn chat_mention_row(
+    row: &ChatMentionRow,
+    ix: usize,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut App,
+) -> gpui::Div {
+    use zeron_proto::ChatIndicator;
+    const TILE: f32 = 16.0;
+    let dot = |color: gpui::Hsla| {
+        div()
+            .size(px(6.0))
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    };
+    let glyph = match row.status {
+        ChatIndicator::Working => crate::loaders::mini_glyph_spinner(
+            format!("mention-chat-{ix}"),
+            2.0,
+            theme.glyph,
+            view,
+            cx,
+        )
+        .into_any_element(),
+        ChatIndicator::AwaitingInput => dot(theme.accent),
+        ChatIndicator::Errored => dot(theme.danger),
+        ChatIndicator::Completed | ChatIndicator::Idle => crate::icons::icon(crate::icons::CHECK)
+            .size(px(12.0))
+            .text_color(theme.success.opacity(0.9))
+            .into_any_element(),
+    };
+    let detail = match row.kind {
+        ChatMentionKind::Task => "Task",
+        ChatMentionKind::Agent => "",
+        ChatMentionKind::SideChat => "Side chat",
+    };
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            crate::chat_avatars::tile(TILE, theme)
+                .child(crate::chat_avatars::mark(row.harness, TILE, theme)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .text_size(crate::typography::ui_rems(13.0))
+                .when_some(row.task.clone(), |el, task| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .max_w(gpui::relative(0.45))
+                            .truncate()
+                            .text_color(theme.text_muted)
+                            .child(task),
+                    )
+                    .child(div().flex_none().text_color(theme.text_faint).child("›"))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(row.title.clone()),
+                )
+                .when(!detail.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    )
+                }),
+        )
+        .when(!row.agents.is_empty(), |el| {
+            el.child(crate::chat_avatars::stack(&row.agents, 14.0, theme.surface_card, theme))
+        })
+        .child(
+            div()
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(glyph),
+        )
+}
+
+/// One row of the `@` menu.
+enum MentionEntry {
+    Attachment(AttachmentRow),
+    Chat(ChatMentionRow),
+    /// An index into the file results.
+    File(usize),
 }
 
 fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
@@ -6594,6 +6892,11 @@ impl Composer {
                     this.accept_slash(cx)
                 } else {
                     this.accept_mention(cx)
+                }
+            }
+            ComposerInputEvent::MentionCycleScope => {
+                if this.slash.token.is_none() {
+                    this.select_mention_scope(None, cx)
                 }
             }
             ComposerInputEvent::MentionDismiss => {
@@ -8074,7 +8377,7 @@ impl Composer {
         self.mention.token = token.clone();
         if !refining {
             self.mention.results.clear();
-            self.mention.active = (!self.mention_attachment_matches().is_empty()).then_some(0);
+            self.mention.active = (!self.mention_entries(cx).is_empty()).then_some(0);
             // Fresh open: the row stack restarts at the top.
             crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
         }
@@ -8128,10 +8431,9 @@ impl Composer {
                             // that the canonical reference format cannot encode.
                             results.retain(|result| local_path_is_safe(&result.path));
                             composer.mention.error = None;
-                            composer.mention.active = (!results.is_empty()
-                                || !composer.mention_attachment_matches().is_empty())
-                            .then_some(0);
                             composer.mention.results = results;
+                            composer.mention.active =
+                                (!composer.mention_entries(cx).is_empty()).then_some(0);
                             // New result set: the row stack restarts at the top.
                             crate::popover::reset_menu_scroll(
                                 &composer.mention_scroll,
@@ -8144,7 +8446,7 @@ impl Composer {
                         tracing::warn!(%err, "file mention search failed");
                         composer.mention.results.clear();
                         composer.mention.active =
-                            (!composer.mention_attachment_matches().is_empty()).then_some(0);
+                            (!composer.mention_entries(cx).is_empty()).then_some(0);
                         composer.mention.error = Some(mention_error_message(&err));
                     }
                 }
@@ -8156,8 +8458,65 @@ impl Composer {
         cx.notify();
     }
 
+    /// The chats this one started that match the typed `@` query.
+    fn mention_chat_rows(&self, cx: &App) -> Vec<ChatMentionRow> {
+        let Some(token) = self.mention.token.as_ref() else {
+            return Vec::new();
+        };
+        let state = self.state.read(cx);
+        let Some(selected) = state.selected_chat.as_deref() else {
+            return Vec::new();
+        };
+        chat_mention_rows(state, selected, &token.query, chrono::Utc::now())
+    }
+
+    /// Whether this chat has any task or side chat to mention, typed query
+    /// aside: the menu shows its tabs only then.
+    fn mention_has_chats(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state.selected_chat.as_deref().is_some_and(|selected| {
+            !chat_mention_rows(state, selected, "", chrono::Utc::now()).is_empty()
+        })
+    }
+
+    /// The `@` menu's rows on its current tab: staged attachments pinned
+    /// first, then tasks and their agents, side chats, and files.
+    fn mention_entries(&self, cx: &App) -> Vec<MentionEntry> {
+        let scope = self.mention.scope;
+        let mut entries: Vec<MentionEntry> = Vec::new();
+        if scope.shows_files() {
+            entries.extend(
+                self.mention_attachment_matches()
+                    .into_iter()
+                    .map(MentionEntry::Attachment),
+            );
+        }
+        entries.extend(
+            self.mention_chat_rows(cx)
+                .into_iter()
+                .filter(|row| scope.shows_chats(row.kind))
+                .map(MentionEntry::Chat),
+        );
+        if scope.shows_files() {
+            entries.extend((0..self.mention.results.len()).map(MentionEntry::File));
+        }
+        entries
+    }
+
+    /// Show the `@` menu's next tab (shift-tab), or `scope` when clicked.
+    fn select_mention_scope(&mut self, scope: Option<MentionScope>, cx: &mut Context<Self>) {
+        if self.mention.token.is_none() {
+            return;
+        }
+        self.mention.scope = scope.unwrap_or_else(|| self.mention.scope.next());
+        self.mention.active = (!self.mention_entries(cx).is_empty()).then_some(0);
+        crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
+        self.sync_mention_controls(cx);
+        cx.notify();
+    }
+
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let rows = self.mention_attachment_matches().len() + self.mention.results.len();
+        let rows = self.mention_entries(cx).len();
         self.mention.active = crate::popover::menu_step(self.mention.active, rows, delta);
         if let Some(active) = self.mention.active {
             // Keep the keyboard cursor visible in the scrolled row stack.
@@ -8218,25 +8577,40 @@ impl Composer {
         let Some(token) = self.mention.token.clone() else {
             return;
         };
-        let rows = self.mention_attachment_matches();
         let Some(active) = self.mention.active else {
             return;
         };
-        if let Some(row) = rows.get(active) {
-            let link = zeron_proto::attachment_mentions::attachment_mention_link(
-                row.index,
-                row.image.is_none().then_some(row.label.as_str()),
-            );
-            self.input.update(cx, |input, cx| {
-                input.replace_mention_link(token.range, &link, cx)
-            });
-        } else if let Some(result) = self.mention.results.get(active - rows.len()) {
-            let (path, is_dir) = (result.path.clone(), result.is_dir);
-            self.input.update(cx, |input, cx| {
-                input.replace_mention(token.range, &path, is_dir, cx)
-            });
-        } else {
-            return;
+        match self.mention_entries(cx).into_iter().nth(active) {
+            Some(MentionEntry::Attachment(row)) => {
+                let link = zeron_proto::attachment_mentions::attachment_mention_link(
+                    row.index,
+                    row.image.is_none().then_some(row.label.as_str()),
+                );
+                self.input.update(cx, |input, cx| {
+                    input.replace_mention_link(token.range, &link, cx)
+                });
+            }
+            Some(MentionEntry::Chat(row)) => {
+                // The chip names the chat alone; the menu showed its task.
+                let Some(link) =
+                    zeron_proto::chat_mentions::chat_mention_link(&row.chat_id, &row.title)
+                else {
+                    return;
+                };
+                self.input.update(cx, |input, cx| {
+                    input.replace_mention_link(token.range, &link, cx)
+                });
+            }
+            Some(MentionEntry::File(ix)) => {
+                let Some(result) = self.mention.results.get(ix) else {
+                    return;
+                };
+                let (path, is_dir) = (result.path.clone(), result.is_dir);
+                self.input.update(cx, |input, cx| {
+                    input.replace_mention(token.range, &path, is_dir, cx)
+                });
+            }
+            None => return,
         }
         self.reset_mention(None, cx);
         cx.notify();
@@ -8259,103 +8633,113 @@ impl Composer {
                 }),
             )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
-        let attachment_rows = self.mention_attachment_matches();
-        if self.mention.loading && self.mention.results.is_empty() && attachment_rows.is_empty() {
-            card = card.child(crate::popover::skeleton_rows(
-                "file-mention-loading",
-                theme,
-                3,
-                cx.entity_id(),
-                cx,
-            ));
-        } else if let Some(error) = self
-            .mention
-            .error
-            .clone()
-            .filter(|_| attachment_rows.is_empty())
-        {
+        let scope = self.mention.scope;
+        let entries = self.mention_entries(cx);
+        // Tabs, like the command palette's, once there is a task or side
+        // chat to mention.
+        if self.mention_has_chats(cx) {
             card = card.child(
                 div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.danger_muted)
-                    .child(error),
-            );
-        } else if self.mention.results.is_empty() && attachment_rows.is_empty() {
-            card = card.child(
-                div()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(if token.query.is_empty() {
-                        "No files available"
-                    } else {
-                        "No matching files"
-                    }),
-            );
-        } else {
-            let mut rows: Vec<gpui::AnyElement> =
-                Vec::with_capacity(attachment_rows.len() + self.mention.results.len());
-            // Staged attachments stay pinned above every file result.
-            for (ix, row) in attachment_rows.iter().enumerate() {
-                let selected = self.mention.active == Some(ix);
-                let (icon, detail) = match &row.image {
-                    Some(image) => (
-                        img(image.clone())
-                            .size(px(16.0))
-                            .rounded(px(3.0))
-                            .object_fit(ObjectFit::Cover)
-                            .into_any_element(),
-                        "Attached image",
-                    ),
-                    None => (
-                        crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&row.label),
-                            theme.appearance,
-                        )
-                        .size(px(16.0))
-                        .into_any_element(),
-                        "Attached file",
-                    ),
-                };
-                rows.push(
-                    crate::popover::menu_row(
-                        theme,
-                        selected,
-                        format!("attachment-mention-result-{ix}"),
-                    )
-                    .id(("attachment-mention-result", ix))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mention.active = Some(ix);
-                        this.accept_mention(cx);
+                    .flex_none()
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .border_b_1()
+                    .border_color(crate::theme::hairline(0.06))
+                    .children(MentionScope::ALL.into_iter().enumerate().map(|(ix, tab)| {
+                        crate::surface_chrome::tab(("mention-tab", ix), tab == scope, theme)
+                            .px(px(8.0))
+                            .role(gpui::Role::Tab)
+                            .aria_label(tab.label())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_mention_scope(Some(tab), cx)
+                            }))
+                            .child(tab.label())
                     }))
-                    .child(crate::popover::completion_row_content(
+                    .child(div().flex_1())
+                    .child(crate::popover::kbd_hint(
                         theme,
-                        icon,
-                        row.label.clone().into(),
-                        detail.into(),
-                    ))
-                    .into_any_element(),
-                );
-            }
-            let attachment_count = attachment_rows.len();
-            for (file_ix, result) in self.mention.results.iter().enumerate() {
-                let ix = attachment_count + file_ix;
-                let selected = self.mention.active == Some(ix);
-                let (directory, name) = match result.path.rsplit_once('/') {
-                    Some((directory, name)) => (directory.to_string(), name.to_string()),
-                    None => (String::new(), result.path.clone()),
+                        &crate::settings::badge_combo("shift-tab"),
+                    )),
+            );
+        }
+        let note = |text: SharedString, color| {
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(color)
+                .child(text)
+        };
+        if entries.is_empty() {
+            let searching = scope.shows_files() && self.mention.loading;
+            if searching {
+                card = card.child(crate::popover::skeleton_rows(
+                    "file-mention-loading",
+                    theme,
+                    3,
+                    cx.entity_id(),
+                    cx,
+                ));
+            } else if let Some(error) = self.mention.error.clone().filter(|_| scope.shows_files()) {
+                card = card.child(note(error, theme.danger_muted));
+            } else {
+                let filtered = !token.query.is_empty();
+                let text = match (scope, filtered) {
+                    (MentionScope::Tasks, false) => "No tasks in this chat",
+                    (MentionScope::Tasks, true) => "No matching tasks",
+                    (MentionScope::SideChats, false) => "No side chats in this chat",
+                    (MentionScope::SideChats, true) => "No matching side chats",
+                    (_, false) => "No files available",
+                    (_, true) => "No matching files",
                 };
-                rows.push(
-                    crate::popover::menu_row(theme, selected, format!("file-mention-result-{ix}"))
-                        .id(("file-mention-result", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mention.active = Some(ix);
-                            this.accept_mention(cx);
-                        }))
-                        .child(crate::popover::completion_row_content(
+                card = card.child(note(text.into(), theme.text_muted));
+            }
+        } else {
+            let view = cx.entity_id();
+            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(entries.len());
+            for (ix, entry) in entries.iter().enumerate() {
+                let selected = self.mention.active == Some(ix);
+                let row = match entry {
+                    MentionEntry::Attachment(row) => {
+                        let (icon, detail) = match &row.image {
+                            Some(image) => (
+                                img(image.clone())
+                                    .size(px(16.0))
+                                    .rounded(px(3.0))
+                                    .object_fit(ObjectFit::Cover)
+                                    .into_any_element(),
+                                "Attached image",
+                            ),
+                            None => (
+                                crate::file_icons::icon(
+                                    crate::file_icons::FileIconIdentity::file(&row.label),
+                                    theme.appearance,
+                                )
+                                .size(px(16.0))
+                                .into_any_element(),
+                                "Attached file",
+                            ),
+                        };
+                        crate::popover::completion_row_content(
+                            theme,
+                            icon,
+                            row.label.clone().into(),
+                            detail.into(),
+                        )
+                    }
+                    MentionEntry::Chat(row) => chat_mention_row(row, ix, theme, view, cx),
+                    MentionEntry::File(file_ix) => {
+                        let Some(result) = self.mention.results.get(*file_ix) else {
+                            continue;
+                        };
+                        let (directory, name) = match result.path.rsplit_once('/') {
+                            Some((directory, name)) => (directory.to_string(), name.to_string()),
+                            None => (String::new(), result.path.clone()),
+                        };
+                        crate::popover::completion_row_content(
                             theme,
                             crate::file_icons::icon(
                                 if result.is_dir {
@@ -8372,7 +8756,17 @@ impl Composer {
                             .into_any_element(),
                             name.into(),
                             directory.into(),
-                        ))
+                        )
+                    }
+                };
+                rows.push(
+                    crate::popover::menu_row(theme, selected, format!("mention-result-{ix}"))
+                        .id(("mention-result", ix))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mention.active = Some(ix);
+                            this.accept_mention(cx);
+                        }))
+                        .child(row)
                         .into_any_element(),
                 );
             }
@@ -8828,6 +9222,15 @@ impl Composer {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        let marks: HashMap<String, HarnessId> = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .filter_map(|chat| Some((chat.id.clone(), chat.config.as_ref()?.harness)))
+            .collect();
+        self.input
+            .update(cx, |input, cx| input.set_chat_marks(marks, cx));
         {
             let state = self.state.read(cx);
             // AppState also notifies at clock-only transitions, so a run that
@@ -12278,6 +12681,70 @@ mod attachment_chip_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mention_menu_offers_tasks_with_their_agents_then_side_chats() {
+        let chat = |id: &str, parent: Option<&str>, title: &str, minute: i64, coordinator: bool| {
+            let mut chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "deviceId": "dev",
+                "archived": false,
+                "createdAt": chrono::DateTime::from_timestamp(1_800_000_000 + minute * 60, 0),
+            }))
+            .unwrap();
+            chat.parent_chat_id = parent.map(str::to_owned);
+            chat.title = Some(title.into());
+            chat.role = coordinator.then_some(zeron_proto::ChatRole::Coordinator);
+            chat
+        };
+        let mut state = crate::state::AppState::new();
+        state.chats = vec![
+            chat("main", None, "Main", 0, false),
+            chat("side-old", Some("main"), "Slug Review", 1, false),
+            chat("task-a", Some("main"), "Sitekit Audit", 2, true),
+            chat("agent-1", Some("task-a"), "Docs Checker", 3, false),
+            chat("agent-2", Some("task-a"), "Packaging Checker", 4, false),
+            chat("task-b", Some("main"), "Zeron Refactor", 5, true),
+            chat("elsewhere", Some("other"), "Not Ours", 6, false),
+        ];
+        let now = chrono::Utc::now();
+        let rows = chat_mention_rows(&state, "main", "", now);
+        let labels: Vec<(String, ChatMentionKind)> =
+            rows.iter().map(|row| (row.label(), row.kind)).collect();
+        use ChatMentionKind::*;
+        assert_eq!(
+            labels,
+            vec![
+                ("Zeron Refactor".into(), Task),
+                ("Sitekit Audit".into(), Task),
+                ("Sitekit Audit › Docs Checker".into(), Agent),
+                ("Sitekit Audit › Packaging Checker".into(), Agent),
+                ("Slug Review".into(), SideChat),
+            ]
+        );
+        assert_eq!(rows[1].agents.len(), 2, "a task carries its agents' marks");
+        // A query finds an agent by its task's name, ignoring case and spaces.
+        let found: Vec<String> = chat_mention_rows(&state, "main", "sitekitaudit›pack", now)
+            .iter()
+            .map(ChatMentionRow::label)
+            .collect();
+        assert_eq!(found, vec!["Sitekit Audit › Packaging Checker"]);
+        // In a coordinator, its own agents.
+        let agents: Vec<String> = chat_mention_rows(&state, "task-a", "", now)
+            .iter()
+            .map(ChatMentionRow::label)
+            .collect();
+        assert_eq!(
+            agents,
+            vec!["Sitekit Audit › Docs Checker", "Sitekit Audit › Packaging Checker"]
+        );
+        // Tabs.
+        assert!(MentionScope::Tasks.shows_chats(Agent));
+        assert!(!MentionScope::Tasks.shows_chats(SideChat));
+        assert!(!MentionScope::Files.shows_chats(Task));
+        assert!(!MentionScope::SideChats.shows_files());
+        assert_eq!(MentionScope::Files.next(), MentionScope::All);
+    }
 
     pub(super) fn composer_focus_window(
         cx: &mut gpui::TestAppContext,

@@ -4830,6 +4830,12 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
                 .unwrap_or_else(|| "Agent".into()),
             input: (!input.is_null()).then(|| input.clone()),
         },
+        // MCP tools arrive as `<server>_<tool>`: Zeron's are typed as its.
+        name if zeron_proto::agent::zeron_tool(name).is_some() => ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: zeron_proto::agent::zeron_tool(name).unwrap_or_default().into(),
+            input: (!input.is_null()).then(|| input.clone()),
+        },
         _ => ToolCall::Unknown {
             name: name.to_owned(),
             input: (!input.is_null()).then(|| input.clone()),

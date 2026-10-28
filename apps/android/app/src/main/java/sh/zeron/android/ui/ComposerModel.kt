@@ -17,12 +17,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.zeron_core.FileMatch
 import uniffi.zeron_core.OutgoingAttachment
+import uniffi.zeron_core.chatMentionLink
 import uniffi.zeron_core.fileMentionLink
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** What an `@` token in the composer stands for. */
+sealed interface Mention {
+    data class File(val file: FileMatch) : Mention
+    data class Chat(val chatId: String, val title: String) : Mention
+}
 
 /** An image staged in the composer before sending (JPEG, long side ≤ 2560px). */
 class StagedImage(val id: String, val name: String, val bytes: ByteArray, val thumb: ImageBitmap) {
@@ -37,8 +44,8 @@ class StagedImage(val id: String, val name: String, val bytes: ByteArray, val th
 class ComposerModel(initial: String = "") {
     var value by mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     val images = mutableStateListOf<StagedImage>()
-    /** `@name` shown in the composer → the file it stands for. */
-    private val tokens = LinkedHashMap<String, FileMatch>()
+    /** `@name` shown in the composer → the file or chat it stands for. */
+    private val tokens = LinkedHashMap<String, Mention>()
 
     val text: String get() = value.text
     val hasContent: Boolean get() = value.text.isNotBlank() || images.isNotEmpty()
@@ -77,8 +84,18 @@ class ComposerModel(initial: String = "") {
         val parts = file.path.trim('/').split('/')
         var token = "@" + (parts.lastOrNull() ?: file.path)
         val existing = tokens[token]
-        if (existing != null && existing.path != file.path && parts.size > 1) token = "@" + parts.takeLast(2).joinToString("/")
-        tokens[token] = file
+        if (existing is Mention.File && existing.file.path != file.path && parts.size > 1) token = "@" + parts.takeLast(2).joinToString("/")
+        replaceQuery(start, token, Mention.File(file))
+    }
+
+    /** Replace the `@query` with a token for chat `chatId` (a task, its agent, a side chat). */
+    fun insertChatMention(chatId: String, title: String) {
+        val (start, _) = activeQuery() ?: return
+        replaceQuery(start, "@$title", Mention.Chat(chatId, title))
+    }
+
+    private fun replaceQuery(start: Int, token: String, mention: Mention) {
+        tokens[token] = mention
         val t = value.text
         val cursor = value.selection.start
         val next = t.substring(0, start) + token + " " + t.substring(cursor)
@@ -88,8 +105,13 @@ class ComposerModel(initial: String = "") {
     /** The text to send: live tokens become canonical `zeron-file:` links. */
     fun encoded(): String {
         var out = value.text
-        for ((token, file) in tokens.entries.sortedByDescending { it.key.length }) {
-            if (out.contains(token)) out = out.replace(token, fileMentionLink(file.path, file.isDir))
+        for ((token, mention) in tokens.entries.sortedByDescending { it.key.length }) {
+            if (!out.contains(token)) continue
+            val link = when (mention) {
+                is Mention.File -> fileMentionLink(mention.file.path, mention.file.isDir)
+                is Mention.Chat -> chatMentionLink(mention.chatId, mention.title) ?: continue
+            }
+            out = out.replace(token, link)
         }
         return out.trim()
     }

@@ -8,11 +8,40 @@ use crate::ToolCall;
 
 const PREFIX: &str = "[Message from Zeron chat ";
 const REPLY: &str = ". Reply to it with the Zeron `send_message` tool, chat ";
+/// A parent's message to its side chat. Like a subagent, a side chat reports
+/// only by finishing: Zeron hands its final reply to the parent when its turn
+/// ends, so it never messages the parent (which would steer it off what it
+/// is telling its user).
+const DELEGATED: &str = ", which started you. Zeron hands it your final reply when your turn ends; you can't message it, so finish your turn when you are done or stuck. Chat ";
+/// A coordinator's message to an agent of its task. Agents report by
+/// finishing too, but may message their coordinator mid-turn when they need
+/// a decision or are blocked.
+const COORDINATED: &str = ", the coordinator of your task. Zeron hands it your final reply when your turn ends. If you are blocked or need a decision before then, message it with the Zeron `send_message` tool. Chat ";
+/// The brief a chat hands the coordinator of a task it started.
+const TASKED: &str = ", which started this task and made you its coordinator. Chat ";
 
 /// `text` as sent from chat `chat_id`, labelled `Title (short-id)` (or the
 /// short id alone when untitled).
 pub fn agent_message(label: &str, chat_id: &str, text: &str) -> String {
     format!("{PREFIX}{label}{REPLY}{chat_id}.]\n\n{text}")
+}
+
+/// `text` as sent from chat `chat_id` to a side chat it started, labelled
+/// like [`agent_message`]. The header tells the side chat its reply goes back
+/// by itself.
+pub fn delegated_message(label: &str, chat_id: &str, text: &str) -> String {
+    format!("{PREFIX}{label}{DELEGATED}{chat_id}.]\n\n{text}")
+}
+
+/// `text` as sent from coordinator `chat_id` to an agent of its task.
+pub fn coordinated_message(label: &str, chat_id: &str, text: &str) -> String {
+    format!("{PREFIX}{label}{COORDINATED}{chat_id}.]\n\n{text}")
+}
+
+/// The brief `text` chat `chat_id` hands the coordinator of a task it
+/// started.
+pub fn task_brief(label: &str, chat_id: &str, text: &str) -> String {
+    format!("{PREFIX}{label}{TASKED}{chat_id}.]\n\n{text}")
 }
 
 /// The chat an agent-to-agent message came from: its id, and its title as the
@@ -29,7 +58,9 @@ pub struct AgentSender {
 pub fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
     let rest = text.strip_prefix(PREFIX)?;
     let (header, body) = rest.split_once("]\n\n")?;
-    let (label, id) = header.rsplit_once(REPLY)?;
+    let (label, id) = [REPLY, DELEGATED, COORDINATED, TASKED]
+        .into_iter()
+        .find_map(|sep| header.rsplit_once(sep))?;
     let id = id.strip_suffix('.')?;
     // Only the trailing short id goes; a title's own parens stay.
     let title = label
@@ -135,6 +166,29 @@ mod tests {
         assert_eq!((sender.title.as_str(), body), ("cd27c5c2", "hi"));
         assert!(agent_message_sender("[Message from Zeron chat x]\n\nhi").is_none());
     }
+
+    #[test]
+    fn every_header_names_its_sender() {
+        let id = "cd27c5c2-0000-4000-8000-000000000000";
+        for text in [
+            delegated_message("Release (cd27c5c2)", id, "Fix the tests."),
+            coordinated_message("Release (cd27c5c2)", id, "Fix the tests."),
+            task_brief("Release (cd27c5c2)", id, "Fix the tests."),
+        ] {
+            let (sender, body) = agent_message_sender(&text).unwrap();
+            assert_eq!(body, "Fix the tests.");
+            assert_eq!(
+                sender,
+                AgentSender {
+                    chat_id: id.into(),
+                    title: "Release".into(),
+                }
+            );
+        }
+        assert!(delegated_message("a", id, "x").contains("can't message it"));
+        assert!(coordinated_message("a", id, "x").contains("`send_message`"));
+    }
+
 
     #[test]
     fn reads_the_messages_a_send_call_sends() {

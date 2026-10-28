@@ -470,11 +470,57 @@ impl McpServer {
     /// and the driver launches it without its subagent tools.
     pub const SIDE_CHATS_ONLY_ENV: &'static str = "ZERON_SIDE_CHATS_ONLY";
 
+    /// What the chat on Zeron's own server is to the chat that started it,
+    /// when it has one: `side` (a side chat), `coordinator` (runs a task) or
+    /// `agent` (an agent of a task). Decides the tools and instructions it
+    /// gets. Absent for a chat nobody started.
+    pub const CHAT_ROLE_ENV: &'static str = "ZERON_CHAT_ROLE";
+
     pub fn side_chats_only(&self) -> bool {
         self.env
             .get(Self::SIDE_CHATS_ONLY_ENV)
             .is_some_and(|value| value == "1")
     }
+}
+
+/// The tool of Zeron's own MCP server that a provider's name for a call
+/// spells, if it is one. Providers spell MCP calls their own way:
+/// `mcp__zeron__create_task` (Claude Code), `zeron__create_task`,
+/// `zeron_create_task`, `mcp_zeron_create_task`, `mcp1_zeron_create_task`,
+/// `zeron.create_task`, `zeron/create_task`, `zeron: create_task`, or a
+/// title like `create_task (zeron MCP Server)`.
+pub fn zeron_tool(name: &str) -> Option<&str> {
+    let name = name.trim();
+    let is_tool = |tool: &str| {
+        !tool.is_empty()
+            && tool
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    // `mcp__`, `mcp_`, or an indexed `mcp1_`.
+    let bare = name
+        .strip_prefix("mcp__")
+        .or_else(|| {
+            name.strip_prefix("mcp")?
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .strip_prefix('_')
+        })
+        .unwrap_or(name);
+    if let Some(rest) = bare.strip_prefix("zeron") {
+        let tool = ["__", "_", ".", "/", ": ", ":"]
+            .iter()
+            .find_map(|sep| rest.strip_prefix(sep))?
+            .trim();
+        return is_tool(tool).then_some(tool);
+    }
+    // `create_task (zeron MCP Server)`, `create_task (zeron)`.
+    let (tool, server) = name.split_once(" (")?;
+    let server = server.strip_suffix(')')?.trim();
+    let server = server
+        .strip_suffix(" MCP Server")
+        .or_else(|| server.strip_suffix(" MCP server"))
+        .unwrap_or(server);
+    (server.eq_ignore_ascii_case("zeron") && is_tool(tool.trim())).then(|| tool.trim())
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -1252,3 +1298,41 @@ mod todo_item_tests {
         assert_eq!(TodoStatus::parse(""), TodoStatus::Pending);
     }
 }
+
+#[cfg(test)]
+mod zeron_tool_tests {
+    use super::zeron_tool;
+
+    #[test]
+    fn every_provider_spelling_names_the_tool() {
+        for name in [
+            "mcp__zeron__create_task",
+            "zeron__create_task",
+            "zeron_create_task",
+            "mcp_zeron_create_task",
+            "mcp1_zeron_create_task",
+            "zeron.create_task",
+            "zeron/create_task",
+            "zeron: create_task",
+            "create_task (zeron MCP Server)",
+            "create_task (zeron)",
+        ] {
+            assert_eq!(zeron_tool(name), Some("create_task"), "{name}");
+        }
+    }
+
+    #[test]
+    fn other_tools_and_servers_are_not_zeron_s() {
+        for name in [
+            "create_task",
+            "mcp__github__create_pr",
+            "zeronify",
+            "zeron",
+            "Read file (zeron)x",
+            "create task (zeron MCP Server)",
+        ] {
+            assert_eq!(zeron_tool(name), None, "{name}");
+        }
+    }
+}
+

@@ -193,6 +193,79 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
     assert!(frame.display(3).unwrap().text.ends_with(" b"));
 }
 
+#[test]
+fn launches_draw_as_cards_and_reports_as_a_caption() {
+    let tool = |id: &str, name: &str, input: serde_json::Value| MessagePart::Tool {
+        id: id.into(),
+        call: zeron_proto::ToolCall::Mcp { server: "zeron".into(), tool: name.into(), input: Some(input) },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+    };
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "a".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                tool("k1", "create_task", serde_json::json!({ "title": "Sitekit Audit", "harness": "claude-code" })),
+                tool("k2", "create_chats", serde_json::json!({ "requests": [{ "title": "README Accuracy" }, { "title": "Slug Review", "harness": "codex" }] })),
+                tool("k3", "report", serde_json::json!({ "status": "question", "message": format!("Transliterate or keep Unicode?\n\n## Details\n\nLong findings. {}", "More detail. ".repeat(40)) })),
+            ],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    // The task's card, the side chats' card, the report's caption and its quote.
+    assert_eq!(frame.row_count(), 4);
+    let task = frame.display(0).unwrap();
+    assert!(task.text.contains("Sitekit Audit") && task.text.contains("Task · "), "{}", task.text);
+    assert!(task.boxes.iter().any(|b| b.color == display::ColorRole::AgentCard));
+    assert!(task.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "brand:claude-code")));
+    let sides = frame.display(1).unwrap();
+    assert!(sides.text.contains("README Accuracy") && sides.text.contains("Slug Review"));
+    assert!(sides.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "brand:codex")));
+    let report = frame.display(2).unwrap();
+    assert!(report.text.starts_with("Reported to") && report.text.ends_with("· Asked a question"), "{}", report.text);
+    // The quote stops before the heading.
+    let quote = frame.display(3).unwrap();
+    assert!(quote.text.contains("Transliterate") && !quote.text.contains("Long findings"));
+}
+
+#[test]
+fn a_mentioned_chat_shows_as_a_chip_that_opens_it() {
+    let mut w = worker(390.0);
+    w.input = debug_input(
+        vec![DebugEntry { id: "u".into(), user: true, text: "[Packaging Audit](zeron-chat:agent-pack) what are you stuck on".into(), streaming: false }],
+        false,
+    );
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.text.contains("Packaging Audit") && !d.text.contains("zeron-chat"), "{}", d.text);
+    assert!(d.links.iter().any(|l| l.url == "zeron-chat://open?id=agent-pack"));
+}
+
+#[test]
+fn a_report_previews_its_opening_blocks_whole() {
+    // Short reports show whole; a long one stops before the lead-in to the rest.
+    assert_eq!(rows::report_preview("Short.\n\nChanges:\n\n- a"), "Short.\n\nChanges:\n\n- a");
+    let long = format!("Done. All tests pass.\n\nChanges:\n\n{}", "- a change worth listing\n".repeat(30));
+    assert_eq!(rows::report_preview(&long), "Done. All tests pass.");
+}
+
 fn transcript_one(text: &str) -> TranscriptInput {
     debug_input(vec![DebugEntry { id: "a".into(), user: false, text: text.into(), streaming: false }], false)
 }
@@ -561,7 +634,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None, chat_id: None };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();

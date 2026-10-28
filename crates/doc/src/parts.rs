@@ -425,6 +425,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id: pid,
+                    call,
                     is_error: e,
                     resolved,
                     output: out_slot,
@@ -437,6 +438,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 {
                     *e = *is_error;
                     *resolved = true;
+                    if let Some(text) = output.as_deref() {
+                        stamp_launched_chats(call, text);
+                    }
                     // Tool OUTPUTS never enter the doc (2026-08-10 product
                     // call: chips are one-liners — name + call info — like
                     // pre-output builds; the R2 sidecar is parked with them,
@@ -631,6 +635,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
 /// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
 /// identifiers the chip names the child by).
+/// and the title/harness/model of each chat a Zeron `create_chat(s)` call
+/// starts (see [`launch_badge`]: the transcript's line for them).
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -651,8 +657,17 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
             server: server.clone(),
             tool: tool.clone(),
-            input: spawn_badge(call),
+            input: spawn_badge(call).or_else(|| launch_badge(call)),
         },
+        // A driver that couldn't tell an MCP call from any other: Zeron's own
+        // tools are typed as its, so the transcript draws what they do.
+        ToolCall::Unknown { name, input } if zeron_proto::agent::zeron_tool(name).is_some() => {
+            sanitize_tool_call(&ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: zeron_proto::agent::zeron_tool(name).unwrap_or_default().into(),
+                input: input.clone(),
+            })
+        }
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
             input: spawn_badge(call),
@@ -686,6 +701,176 @@ fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
         })
         .collect();
     (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
+}
+
+/// What a Zeron `create_chat` / `create_chats` call keeps of its input: the
+/// short identifiers of each chat it starts (`title`, `harness`, `model`),
+/// so the transcript can show the chats it is starting before the call
+/// returns. Prompts stay in the run journal. A batch passed as a JSON string
+/// comes out as an array, so this is a fixpoint like [`spawn_badge`].
+fn launch_badge(call: &ToolCall) -> Option<serde_json::Value> {
+    const KEEP: [&str; 4] = ["title", "harness", "model", "chatId"];
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input: Some(input),
+    } = call
+    else {
+        return None;
+    };
+    if server != "zeron" {
+        return None;
+    }
+    let keep = |request: &serde_json::Value| {
+        let kept: serde_json::Map<String, serde_json::Value> = KEEP
+            .iter()
+            .filter_map(|key| {
+                let value = request.get(key)?.as_str()?.trim();
+                (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect();
+        serde_json::Value::Object(kept)
+    };
+    match tool.as_str() {
+        "create_chat" | "create_task" => {
+            Some(keep(input)).filter(|kept| kept.as_object().is_some_and(|o| !o.is_empty()))
+        }
+        "create_chats" => {
+            let parsed;
+            let requests = match input.get("requests")? {
+                serde_json::Value::String(raw) => {
+                    parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+                    parsed.as_array()?
+                }
+                value => value.as_array()?,
+            };
+            Some(serde_json::json!({ "requests": requests.iter().map(keep).collect::<Vec<_>>() }))
+        }
+        // Messages between chats are the transcript's record of who said
+        // what to whom (the receiving chat stores the text anyway): kept,
+        // clipped.
+        "send_message" => message_badge(input),
+        "send_messages" => {
+            let requests = input.get("requests")?.as_array()?;
+            Some(serde_json::json!({
+                "requests": requests.iter().filter_map(message_badge).collect::<Vec<_>>()
+            }))
+        }
+        // A coordinator's report to the chat that started its task.
+        "report" => {
+            let status = input.get("status")?.as_str()?;
+            let message = input.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+            Some(serde_json::json!({ "status": status, "message": clip_kept(message, 4000) }))
+        }
+        _ => None,
+    }
+}
+
+/// A `send_message` request as the doc keeps it: recipient and clipped text.
+fn message_badge(input: &serde_json::Value) -> Option<serde_json::Value> {
+    let chat = input.get("chat")?.as_str()?;
+    let text = input.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+    Some(serde_json::json!({ "chat": chat, "text": clip_kept(text, 2000) }))
+}
+
+/// `text` cut to `max` bytes on a char boundary, marked when cut. A fixpoint:
+/// clipping a clipped text changes nothing.
+fn clip_kept(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Stamp the ids of the chats a Zeron `create_chat`, `create_chats` or
+/// `create_task` call made, read off its result `output`, into its input
+/// (`chatId` on the call, or on each request), where [`launch_badge`] keeps
+/// them: outputs never enter the doc, and the transcript links each chat it
+/// shows to the chat itself.
+pub fn stamp_launched_chats(call: &mut ToolCall, output: &str) {
+    if let ToolCall::Unknown { name, input } = call
+        && let Some(tool) = zeron_proto::agent::zeron_tool(name)
+    {
+        *call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: input.take(),
+        };
+    }
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input: Some(input),
+    } = call
+    else {
+        return;
+    };
+    if server != "zeron" {
+        return;
+    }
+    let Some(result) = tool_json(output) else {
+        return;
+    };
+    let id_of = |value: &serde_json::Value| {
+        value
+            .get("chatId")
+            .or_else(|| value.get("taskId"))
+            .and_then(|id| id.as_str())
+            .map(str::to_owned)
+    };
+    match tool.as_str() {
+        "create_chat" | "create_task" => {
+            if let (Some(id), Some(map)) = (id_of(&result), input.as_object_mut()) {
+                map.insert("chatId".into(), id.into());
+            }
+        }
+        "create_chats" => {
+            let Some(results) = result.get("results").and_then(|r| r.as_array()) else {
+                return;
+            };
+            // The batch may have come as a JSON string; stamp a real array.
+            if let Some(serde_json::Value::String(raw)) = input.get("requests") {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+                    input["requests"] = parsed;
+                }
+            }
+            let Some(requests) = input.get_mut("requests").and_then(|r| r.as_array_mut()) else {
+                return;
+            };
+            for item in results {
+                let (Some(ix), Some(id)) = (
+                    item.get("index").and_then(|i| i.as_u64()),
+                    item.get("result").and_then(id_of),
+                ) else {
+                    continue;
+                };
+                if let Some(map) = requests.get_mut(ix as usize).and_then(|r| r.as_object_mut()) {
+                    map.insert("chatId".into(), id.into());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A tool's JSON result as its harness recorded it: the JSON itself, or MCP
+/// text content wrapping it.
+fn tool_json(output: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+    let content = value
+        .as_array()
+        .or_else(|| value.get("content").and_then(|c| c.as_array()));
+    if let Some(items) = content {
+        let text = items
+            .iter()
+            .find_map(|item| item.get("text").and_then(|t| t.as_str()))?;
+        return serde_json::from_str(text.trim()).ok();
+    }
+    Some(value)
 }
 
 /// Deterministic continuation id: `"{root}#c{n}"`.
@@ -1027,6 +1212,102 @@ mod tests {
             }
         );
         assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    /// A Zeron launch keeps each chat's title, harness and model — never its
+    /// prompt — so the transcript can name the chats it is starting.
+    #[test]
+    fn sanitize_keeps_the_chats_a_launch_names() {
+        let call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_chats".into(),
+            input: Some(serde_json::json!({ "requests": [
+                { "title": "Slug", "harness": "codex", "prompt": "a long private prompt", "wait": false },
+                { "prompt": "untitled" },
+            ]})),
+        };
+        let clean = sanitize_tool_call(&call);
+        let ToolCall::Mcp { input: Some(input), .. } = &clean else {
+            panic!("kept nothing");
+        };
+        assert_eq!(
+            input,
+            &serde_json::json!({ "requests": [{ "title": "Slug", "harness": "codex" }, {}] })
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+        let other = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "read_chat".into(),
+            input: Some(serde_json::json!({ "chat": "a", "limit": 9 })),
+        };
+        assert!(matches!(sanitize_tool_call(&other), ToolCall::Mcp { input: None, .. }));
+        let report = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "report".into(),
+            input: Some(serde_json::json!({ "status": "done", "message": "x".repeat(5000) })),
+        };
+        let clean = sanitize_tool_call(&report);
+        let ToolCall::Mcp { input: Some(input), .. } = &clean else {
+            panic!("kept nothing");
+        };
+        assert_eq!(input["status"], "done");
+        assert!(input["message"].as_str().unwrap().len() <= 4000);
+        assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    /// The chats a launch made get their ids from its result, which then
+    /// leaves: the doc keeps the ids beside the titles, never the output.
+    #[test]
+    fn an_untyped_zeron_call_is_typed_as_zeron_s() {
+        let call = ToolCall::Unknown {
+            name: "zeron_create_task".into(),
+            input: Some(serde_json::json!({"title": "Zeron Refactor", "brief": "secret plan"})),
+        };
+        let ToolCall::Mcp { server, tool, input } = sanitize_tool_call(&call) else {
+            panic!("not typed as Zeron's");
+        };
+        assert_eq!((server.as_str(), tool.as_str()), ("zeron", "create_task"));
+        let input = input.unwrap();
+        assert_eq!(input["title"], "Zeron Refactor");
+        assert!(input.get("brief").is_none(), "the brief stays out of the doc");
+    }
+
+    #[test]
+    fn a_launch_keeps_the_ids_of_the_chats_it_made() {
+        let mut call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_chats".into(),
+            input: Some(serde_json::json!({ "requests": [
+                { "title": "Schema Migrator", "prompt": "private" },
+                { "title": "Test Author", "prompt": "private" },
+            ]})),
+        };
+        let output = serde_json::json!([{ "type": "text", "text": serde_json::json!({ "results": [
+            { "index": 0, "isError": false, "result": { "chatId": "c-1" } },
+            { "index": 1, "isError": true, "error": "nope" },
+        ]}).to_string() }])
+        .to_string();
+        stamp_launched_chats(&mut call, &output);
+        let ToolCall::Mcp { input: Some(input), .. } = sanitize_tool_call(&call) else {
+            panic!("kept nothing");
+        };
+        assert_eq!(
+            input,
+            serde_json::json!({ "requests": [
+                { "title": "Schema Migrator", "chatId": "c-1" },
+                { "title": "Test Author" },
+            ]})
+        );
+        let mut task = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: "create_task".into(),
+            input: Some(serde_json::json!({ "title": "Zeron Refactor", "brief": "private" })),
+        };
+        stamp_launched_chats(&mut task, r#"{"taskId":"t-1","title":"Zeron Refactor"}"#);
+        let ToolCall::Mcp { input: Some(input), .. } = sanitize_tool_call(&task) else {
+            panic!("kept nothing");
+        };
+        assert_eq!(input, serde_json::json!({ "title": "Zeron Refactor", "chatId": "t-1" }));
     }
 
     /// A spawn keeps the two short identifiers its chip names the child by and

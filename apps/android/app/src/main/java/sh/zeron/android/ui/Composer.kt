@@ -251,9 +251,12 @@ fun Composer(
 
     Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
         if (c.queue.isNotEmpty()) QueuePanel(c.queue, handle, editingId, onEdit = ::beginEdit)
+        // The chats this one started, read when `@` opens the menu.
+        val mentioning = draft.activeQuery() != null
+        val chats = remember(mentioning, c.chatId) { if (mentioning) mentionChats(model, c.chatId) else emptyList() }
         MentionSuggestions(draft, search = { q ->
             client.searchFiles(c.host.deviceId, c.chatId, null, q)
-        })
+        }, chats = chats)
         error?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp, bottom = 6.dp))
         }

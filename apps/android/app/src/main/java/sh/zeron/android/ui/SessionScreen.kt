@@ -208,7 +208,8 @@ fun SessionScreen(
     val cloudOutOfCredits = isCloud && model.cloud.outOfCredits
     var nudges by remember { mutableIntStateOf(0) }
     LaunchedEffect(isCloud) { if (isCloud && model.cloud.info == null) model.cloud.refresh() }
-    val companions = rememberCompanions(model, chatId, includeSideChats = parentId == null)
+    // A task's coordinator lists its agents; other children share their parent's.
+    val companions = rememberCompanions(model, chatId, includeSideChats = parentId == null || row?.isTask == true)
     var companionsSheet by remember { mutableStateOf<CompanionSection?>(null) }
     var showCompanions by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -248,8 +249,10 @@ fun SessionScreen(
 
     val project = row?.project?.name ?: "No project"
     val parentTitle = remember(workspace, parentId) { parentId?.let { model.row(it)?.title } }
-    // A side chat heads itself as one, under its parent's title.
-    val headerTitle = if (parentId != null) "Side chat" else composer.title
+    // A side chat heads itself as one, under its parent's title; a task's
+    // coordinator and its agents go by their own names (a task's, a role's).
+    val partOfTask = remember(workspace, parentId) { row?.isTask == true || parentId?.let { model.row(it)?.isTask } == true }
+    val headerTitle = if (parentId != null && !partOfTask) "Side chat" else composer.title
     val subtitle = parentTitle ?: composer.host.name?.let { "$project @ $it" } ?: project
     var overflow by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
@@ -387,7 +390,7 @@ fun SessionScreen(
         CompanionsSheet(
             model,
             chatId,
-            title = if (parentId != null) "Side chat" else composer.title,
+            title = headerTitle,
             initialSection = companionsSheet,
             onDismiss = {
                 showCompanions = false

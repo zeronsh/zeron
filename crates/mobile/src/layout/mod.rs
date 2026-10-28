@@ -374,7 +374,10 @@ pub struct TranscriptView {
     /// A subagent's transcript being followed instead.
     subagent: Mutex<Option<crate::client_ffi::companions::SubagentFollow>>,
     visuals: Arc<crate::visual::VisualHub>,
+    /// Stops the attached session's workspace follower (see [`Self::attach`]).
+    follower: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
+
 
 /// Feeds a followed subagent's transcript to the layout worker.
 struct SubagentInput(Mutex<Sender<Msg>>);
@@ -389,6 +392,7 @@ impl zeron_client::SubagentSink for SubagentInput {
             working_since_ms: None,
             streaming: live,
             workspace: None,
+            chat_id: None,
         };
         let _ = self.0.lock().unwrap().send(Msg::Input(input));
     }
@@ -424,6 +428,7 @@ impl TranscriptView {
             tx: Mutex::new(tx),
             shared,
             watch: Mutex::new(None),
+            follower: Mutex::new(None),
             subagent: Mutex::new(None),
             visuals,
         })
@@ -453,6 +458,10 @@ impl TranscriptView {
         let tx = Mutex::new(self.tx.lock().unwrap().clone());
         // Agent messages' senders, by their live titles (read per snapshot).
         let workspace = client.clone();
+        // The last input, for the workspace follower below to re-send.
+        let last: Arc<Mutex<Option<TranscriptInput>>> = Arc::new(Mutex::new(None));
+        let latest = last.clone();
+        let session = chat_id.clone();
         let guard = handle.watch(move |snap| {
             let input = TranscriptInput {
                 entries: snap.transcript_messages(),
@@ -468,9 +477,43 @@ impl TranscriptView {
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
                 workspace: Some(workspace.client().workspace()),
+                chat_id: Some(session.clone()),
             };
+            *latest.lock().unwrap() = Some(input.clone());
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
+        // The chats this one started go on without it: a task's card says
+        // how its agents are doing while this chat sits idle. Re-send the
+        // last input when the workspace moves on and the transcript has a
+        // launch to show it (its rows rebuild; the rest are reused).
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(old) = self.follower.lock().unwrap().replace(stop.clone()) {
+            old.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let follow_tx = self.tx.lock().unwrap().clone();
+        let follow_client = client.clone();
+        std::thread::Builder::new()
+            .name("transcript-workspace".into())
+            .spawn(move || {
+                let mut seen = follow_client.client().workspace().revision;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(750));
+                    let ws = follow_client.client().workspace();
+                    if ws.revision == seen {
+                        continue;
+                    }
+                    seen = ws.revision;
+                    let Some(mut input) = last.lock().unwrap().clone() else { continue };
+                    if !rows::shows_launches(&input.entries) {
+                        continue;
+                    }
+                    input.workspace = Some(ws);
+                    if follow_tx.send(Msg::Input(input)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
         *self.watch.lock().unwrap() = Some(guard);
         true
     }
@@ -546,6 +589,9 @@ impl TranscriptView {
 
 impl Drop for TranscriptView {
     fn drop(&mut self) {
+        if let Some(stop) = self.follower.lock().unwrap().take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.visuals.shutdown();
         self.send(Msg::Shutdown);
     }
@@ -576,6 +622,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working_since_ms: None,
         streaming: working,
         workspace: None,
+        chat_id: None,
     }
 }
 
@@ -717,6 +764,7 @@ impl Worker {
             .is_some_and(|r| match &r.core.content {
                 rows::Content::Tools(t) => t.expanded,
                 rows::Content::User(u) => u.expanded,
+                rows::Content::Launch(l) => l.open,
                 _ => false,
             })
     }

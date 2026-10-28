@@ -34,6 +34,8 @@ pub(crate) struct DemoChat {
     pub seen: bool,
     pub archived: bool,
     pub parent: Option<&'static str>,
+    /// A task's coordinator (its children are the task's agents).
+    pub role: Option<zeron_proto::ChatRole>,
 }
 
 const MIN: i64 = 60_000;
@@ -61,6 +63,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         seen: true,
         archived: false,
         parent: None,
+        role: None,
     };
     vec![
         DemoChat {
@@ -231,6 +234,71 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 "Spring vs. power curve for the veil",
                 "Keep the curve; use the spring only for the follow scroll.",
             )
+        },
+        // A chat that started a task (a coordinator and its four agents,
+        // one waiting on a question) and a side chat.
+        DemoChat {
+            last_ago_ms: 2 * MIN,
+            created_ago_ms: 40 * MIN,
+            seen: false,
+            model: "claude-haiku-5-5",
+            ..chat(
+                "chat-sitekit",
+                Some("space-zeron"),
+                MAC,
+                "Sitekit hardening",
+                "Sitekit Audit needs a decision",
+            )
+        },
+        DemoChat {
+            parent: Some("chat-sitekit"),
+            role: Some(zeron_proto::ChatRole::Coordinator),
+            status: Some(SessionStatus::Working),
+            last_ago_ms: MIN,
+            created_ago_ms: 38 * MIN,
+            model: "claude-haiku-5-5",
+            ..chat("task-sitekit-audit", Some("space-zeron"), MAC, "Sitekit Audit", "Waiting on Reading Time Audit")
+        },
+        DemoChat {
+            parent: Some("task-sitekit-audit"),
+            last_ago_ms: 20 * MIN,
+            created_ago_ms: 37 * MIN,
+            model: "claude-haiku-5-5",
+            ..chat("agent-slug", Some("space-zeron"), MAC, "Slug Unicode Audit", "Accented letters are dropped")
+        },
+        DemoChat {
+            parent: Some("task-sitekit-audit"),
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            status: Some(SessionStatus::Working),
+            last_ago_ms: MIN,
+            created_ago_ms: 37 * MIN - 1_000,
+            ..chat("agent-reading", Some("space-zeron"), MAC, "Reading Time Audit", "Checking CJK word counts")
+        },
+        DemoChat {
+            parent: Some("task-sitekit-audit"),
+            last_ago_ms: 18 * MIN,
+            created_ago_ms: 37 * MIN - 2_000,
+            model: "claude-haiku-5-5",
+            ..chat("agent-docs", Some("space-zeron"), MAC, "Docs Coverage Audit", "Every function has a docstring")
+        },
+        DemoChat {
+            parent: Some("task-sitekit-audit"),
+            status: Some(SessionStatus::AwaitingInput),
+            last_ago_ms: 4 * MIN,
+            created_ago_ms: 37 * MIN - 3_000,
+            model: "claude-haiku-5-5",
+            ..chat("agent-pack", Some("space-zeron"), MAC, "Packaging Audit", "Add a pyproject.toml?")
+        },
+        DemoChat {
+            parent: Some("chat-sitekit"),
+            harness: Codex,
+            model: "gpt-5.6-terra",
+            reasoning: High,
+            last_ago_ms: 25 * MIN,
+            created_ago_ms: 38 * MIN - 500,
+            ..chat("side-readme", Some("space-zeron"), MAC, "README Accuracy", "Two claims don't match the code")
         },
         DemoChat {
             archived: true,
@@ -463,6 +531,7 @@ pub(crate) fn seed(
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
             parent_chat_id: demo.parent.map(str::to_owned),
+            role: demo.role,
         };
         doc.upsert_chat(&chat)?;
         if let Some(status) = demo.status {

@@ -751,6 +751,9 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    /// Decoded leniently: a newer peer's role costs the role, not the row.
+    #[serde(default)]
+    role: Option<serde_json::Value>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -793,6 +796,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            role: raw.role.and_then(|role| serde_json::from_value(role).ok()),
         }
     }
 }
@@ -911,6 +915,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: Some("parent-chat".into()),
+            role: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,

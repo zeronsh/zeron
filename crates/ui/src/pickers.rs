@@ -1130,6 +1130,7 @@ impl Pickers {
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
             | ComposerInputEvent::MentionAccept
+            | ComposerInputEvent::MentionCycleScope
             | ComposerInputEvent::MentionDismiss => {}
         });
         // Chat selection / config changes must re-render the chips (child views

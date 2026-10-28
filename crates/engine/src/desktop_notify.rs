@@ -8,7 +8,13 @@
 //!
 //! - one baseline per session; a row's first appearance seeds it silently,
 //!   so a boot or replay never rings;
-//! - side chats keep their baselines current but never ring;
+//! - side chats keep their baselines current and ring only when they wait
+//!   on an answer: their results go to the chat that started them, but a
+//!   question may need you. A task's coordinator and its agents never ring:
+//!   their questions go up the chain, and the chat that started the task is
+//!   the one that talks to you;
+//! - a turn that only took in chat events and had nothing for the user never
+//!   rings "Run finished";
 //! - preferences come from the app's `ui-settings.json` (read when a banner
 //!   is due, so changes apply at once): `notificationsEnabled`,
 //!   `notificationsBackgroundOnly`, `agentUpdateNotifications`;
@@ -239,6 +245,9 @@ fn update_key(device: &str, status: &HarnessUpdateStatus) -> Option<String> {
 }
 
 type Post = Box<dyn Fn(&str, &str, Option<&str>) + Send>;
+/// Whether chat `chat_id`'s latest turn only took in side-chat updates and
+/// ended with nothing for the user.
+type QuietTurn = Box<dyn Fn(&str) -> bool + Send>;
 
 /// The decision state, separate from the watches so it can be driven by tests.
 struct Notifier {
@@ -246,6 +255,7 @@ struct Notifier {
     device: String,
     focus: ViewportFocus,
     post: Post,
+    quiet_turn: QuietTurn,
     baselines: HashMap<String, SessionNotificationState>,
     connectivity: ConnectivityNotificationState,
     updates_seen: HashSet<String>,
@@ -258,6 +268,7 @@ impl Notifier {
             device,
             focus,
             post,
+            quiet_turn: Box::new(|_| false),
             baselines: HashMap::new(),
             connectivity: ConnectivityNotificationState::default(),
             updates_seen: HashSet::new(),
@@ -283,12 +294,18 @@ impl Notifier {
             let prev = self
                 .baselines
                 .insert(session.chat_id.clone(), status.clone());
-            // Side chats keep their baselines current but never ring.
-            if !chat.is_some_and(Chat::is_top_level) {
-                continue;
-            }
+            let top_level = chat.is_some_and(Chat::is_top_level);
+            let in_task = chat.is_some_and(|chat| {
+                chat.is_coordinator()
+                    || chat.parent_chat_id.as_deref().is_some_and(|parent| {
+                        chats.iter().any(|c| c.id == parent && c.is_coordinator())
+                    })
+            });
             if let Some(prev) = prev
                 && let Some(ping) = status.ping_since(&prev, false)
+                // A side chat rings only to ask; its results go to its parent.
+                && (top_level || (ping == Ping::Request && !in_task))
+                && !(ping == Ping::Done && (self.quiet_turn)(&session.chat_id))
             {
                 let title = chat
                     .and_then(|chat| chat.title.clone())
@@ -383,6 +400,12 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
         core.viewport_focus.clone(),
         Box::new(zeron_notify::post),
     );
+    let doc_host = core.doc_host.clone();
+    notifier.quiet_turn = Box::new(move |chat_id| {
+        doc_host
+            .ended_turn(chat_id)
+            .is_some_and(|turn| turn.quiet())
+    });
     tokio::spawn(async move {
         const UPDATE_DEBOUNCE: Duration = Duration::from_secs(1);
         // Seed every baseline silently.
@@ -663,6 +686,33 @@ mod tests {
         .expect("chat fixture");
         chat.parent_chat_id = parent.map(str::to_owned);
         chat
+    }
+
+    #[test]
+    fn side_chats_ring_only_to_ask_and_quiet_update_turns_never_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        notifier.quiet_turn = Box::new(|chat_id| chat_id == "a");
+        let now = chrono::Utc::now();
+        let chats = [chat("a", "Release", None), chat("side", "Tests", Some("a"))];
+        notifier.sessions(
+            &[session("a", Some("t1"), now), session("side", Some("s1"), now)],
+            &chats,
+            now,
+        );
+        let mut asking = session("side", Some("s1"), now);
+        asking.status = zeron_proto::SessionStatus::AwaitingInput;
+        // The parent took in an update and had nothing to say; the side chat
+        // asks a question.
+        notifier.sessions(&[session("a", Some("t2"), now), asking], &chats, now);
+        assert_eq!(
+            *posted.lock().unwrap(),
+            vec![(
+                "Tests".into(),
+                "Waiting on your input".into(),
+                Some("side".into())
+            )]
+        );
     }
 
     #[test]

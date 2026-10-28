@@ -18,6 +18,31 @@ fn field<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a Value> {
     keys.iter().find_map(|k| v.get(*k))
 }
 
+/// A Zeron launch call's (`create_chat(s)`, `create_task`) result text:
+/// it names the chats it made, which the transcript links to. Every other
+/// MCP result stays out of the doc.
+fn zeron_launch_result(item: &Value) -> Option<String> {
+    if str_field(item, &["server"]) != "zeron"
+        || !matches!(
+            str_field(item, &["tool"]).as_str(),
+            "create_chat" | "create_chats" | "create_task"
+        )
+    {
+        return None;
+    }
+    let result = item.get("result")?;
+    if let Some(structured) = result.get("structuredContent").filter(|v| v.is_object()) {
+        return Some(structured.to_string());
+    }
+    let text: Vec<&str> = result
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
 fn str_field(v: &Value, keys: &[&str]) -> String {
     field(v, keys)
         .and_then(Value::as_str)
@@ -548,7 +573,7 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             Phase::Completed => vec![AgentEvent::ToolResult {
                 id,
                 is_error: status == "failed",
-                output: None,
+                output: zeron_launch_result(item),
                 diff: None,
             }],
         },
