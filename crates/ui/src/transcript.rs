@@ -7522,14 +7522,7 @@ impl Transcript {
     ) -> AnyElement {
         let mut caption = user_caption(theme)
             .text_size(crate::typography::ui_rems(12.5))
-            .max_w(px(self.content_width))
-            // Came back to this chat: the return glyph, not an expander.
-            .child(
-                crate::icons::icon(crate::icons::RETURN)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            );
+            .max_w(px(self.content_width));
         // One phrase per kind of news, what needs someone first: a single
         // chat by name, several as their marks and a count.
         let order = [
@@ -7641,7 +7634,7 @@ impl Transcript {
         div().w_full().child(caption).into_any_element()
     }
 
-    /// A coordinator's report: `↗ Reported to [logo] Release · ✓ Done`, with
+    /// A coordinator's report: `Reported to [logo] Release · ✓ Done`, with
     /// the message beneath as a quiet quote, a few lines until opened.
     #[allow(clippy::too_many_arguments)]
     fn render_task_report(
@@ -7680,12 +7673,6 @@ impl Transcript {
         let parent_id = parent.as_ref().map(|(chat, _)| chat.id.clone());
         let header = user_caption(theme)
             .max_w(px(self.content_width))
-            .child(
-                crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            )
             .child(div().flex_none().child("Reported to"))
             .child(
                 div()

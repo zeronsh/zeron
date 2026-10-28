@@ -659,6 +659,15 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
             tool: tool.clone(),
             input: spawn_badge(call).or_else(|| launch_badge(call)),
         },
+        // A driver that couldn't tell an MCP call from any other: Zeron's own
+        // tools are typed as its, so the transcript draws what they do.
+        ToolCall::Unknown { name, input } if zeron_proto::agent::zeron_tool(name).is_some() => {
+            sanitize_tool_call(&ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: zeron_proto::agent::zeron_tool(name).unwrap_or_default().into(),
+                input: input.clone(),
+            })
+        }
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
             input: spawn_badge(call),
@@ -783,6 +792,15 @@ fn clip_kept(text: &str, max: usize) -> String {
 /// them: outputs never enter the doc, and the transcript links each chat it
 /// shows to the chat itself.
 pub fn stamp_launched_chats(call: &mut ToolCall, output: &str) {
+    if let ToolCall::Unknown { name, input } = call
+        && let Some(tool) = zeron_proto::agent::zeron_tool(name)
+    {
+        *call = ToolCall::Mcp {
+            server: "zeron".into(),
+            tool: tool.into(),
+            input: input.take(),
+        };
+    }
     let ToolCall::Mcp {
         server,
         tool,
@@ -1239,6 +1257,21 @@ mod tests {
 
     /// The chats a launch made get their ids from its result, which then
     /// leaves: the doc keeps the ids beside the titles, never the output.
+    #[test]
+    fn an_untyped_zeron_call_is_typed_as_zeron_s() {
+        let call = ToolCall::Unknown {
+            name: "zeron_create_task".into(),
+            input: Some(serde_json::json!({"title": "Zeron Refactor", "brief": "secret plan"})),
+        };
+        let ToolCall::Mcp { server, tool, input } = sanitize_tool_call(&call) else {
+            panic!("not typed as Zeron's");
+        };
+        assert_eq!((server.as_str(), tool.as_str()), ("zeron", "create_task"));
+        let input = input.unwrap();
+        assert_eq!(input["title"], "Zeron Refactor");
+        assert!(input.get("brief").is_none(), "the brief stays out of the doc");
+    }
+
     #[test]
     fn a_launch_keeps_the_ids_of_the_chats_it_made() {
         let mut call = ToolCall::Mcp {
