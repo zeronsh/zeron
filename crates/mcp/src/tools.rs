@@ -1694,6 +1694,9 @@ impl Tools {
                 model: args.model,
                 reasoning: args.reasoning,
                 sandbox: None,
+                // The coordinator inherits this chat's access (the ceiling).
+                access: None,
+                plan: false,
                 title: Some(title.to_owned()),
                 branch: args.branch.or_else(|| origin.branch.clone()),
                 cwd: args.cwd.or_else(|| origin.cwd.clone()),
