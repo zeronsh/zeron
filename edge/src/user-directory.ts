@@ -9,6 +9,10 @@
  * a delete leaves a tombstone (id, joined, deleted) with the profile cleared,
  * and nothing revives it.
  *
+ * Every user gets a user number (#1, #2, …) the first time they're recorded:
+ * stored, never changed or reused, and kept by a tombstone. Users recorded
+ * before numbers existed were numbered once, in join order.
+ *
  * `GET /admin/users[?format=csv]` (ADMIN_TOKEN) reads the table back.
  *
  * Badges: an operator defines a badge once (`POST /admin/badges`, id like
@@ -27,6 +31,10 @@ import { adminAuthorized } from "./cloud/billing";
 
 export const USER_DIRECTORY_NAME = "users1";
 
+/** A new row's user number. Conflict updates never set `user_number`, so a
+ * number is taken only on first insert. */
+const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)";
+
 /** The fields of a WorkOS user object this directory keeps (wire names). */
 export interface WorkOsUser {
   readonly id: string;
@@ -40,6 +48,8 @@ export interface WorkOsUser {
 
 export interface DirectoryUser {
   readonly userId: string;
+  /** 1 for the first user recorded; assigned once, never reused. */
+  readonly userNumber: number;
   readonly email: string | null;
   readonly name: string | null;
   readonly firstName: string | null;
@@ -79,7 +89,11 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS users (
       user_id TEXT PRIMARY KEY, email TEXT, first_name TEXT, last_name TEXT,
       profile_picture_url TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
+      deleted_at TEXT, recorded_at INTEGER NOT NULL, user_number INTEGER)`);
+    const columns = [...this.ctx.storage.sql.exec("SELECT name FROM pragma_table_info('users')")].map((row) => row.name);
+    if (!columns.includes("user_number")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN user_number INTEGER");
+    this.ctx.storage.sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_by_number ON users (user_number)");
+    this.numberUsers();
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS badges (
       badge_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, icon TEXT,
       created_at INTEGER NOT NULL)`);
@@ -87,6 +101,20 @@ export class UserDirectory extends DurableObject<Env> {
       user_id TEXT NOT NULL, badge_id TEXT NOT NULL, granted_at INTEGER NOT NULL, note TEXT,
       PRIMARY KEY (user_id, badge_id))`);
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS user_badges_by_badge ON user_badges (badge_id)");
+  }
+
+  /** Number every user still without one — the rows recorded before numbers
+   * existed — in join order, after the highest number held. */
+  private numberUsers(): void {
+    this.ctx.storage.transactionSync(() => {
+      let next = (this.ctx.storage.sql.exec("SELECT COALESCE(MAX(user_number), 0) AS n FROM users").one().n as number) + 1;
+      const unnumbered = [
+        ...this.ctx.storage.sql.exec("SELECT user_id FROM users WHERE user_number IS NULL ORDER BY created_at, user_id")
+      ];
+      for (const row of unnumbered) {
+        this.ctx.storage.sql.exec("UPDATE users SET user_number = ? WHERE user_id = ?", next++, row.user_id);
+      }
+    });
   }
 
   /** Define a badge, or rename/redescribe one (its id and creation time stay). */
@@ -177,11 +205,11 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Record a user's current profile; stale or post-delete writes are no-ops.
-   * Answers whether the row changed. */
+   * A new user takes the next user number. Answers whether the row changed. */
   upsert(user: WorkOsUser): boolean {
     const cursor = this.ctx.storage.sql.exec(
-      `INSERT INTO users (user_id, email, first_name, last_name, profile_picture_url, created_at, updated_at, recorded_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO users (user_id, email, first_name, last_name, profile_picture_url, created_at, updated_at, recorded_at, user_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
        ON CONFLICT (user_id) DO UPDATE SET
          email = excluded.email, first_name = excluded.first_name, last_name = excluded.last_name,
          profile_picture_url = excluded.profile_picture_url, created_at = excluded.created_at,
@@ -199,11 +227,13 @@ export class UserDirectory extends DurableObject<Env> {
     return cursor.rowsWritten > 0;
   }
 
-  /** Tombstone a deleted user: keep id + joined date, drop the profile and badges. */
+  /** Tombstone a deleted user: keep id, number and joined date, drop the
+   * profile and badges. */
   remove(user: WorkOsUser, deletedAt: string): void {
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec(
-      `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
+       VALUES (?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
        ON CONFLICT (user_id) DO UPDATE SET
          email = NULL, first_name = NULL, last_name = NULL, profile_picture_url = NULL,
          deleted_at = excluded.deleted_at, recorded_at = excluded.recorded_at`,
@@ -229,6 +259,7 @@ export class UserDirectory extends DurableObject<Env> {
       const name = [first, last].filter(Boolean).join(" ");
       return {
         userId: row.user_id as string,
+        userNumber: row.user_number as number,
         email: row.email as string | null,
         name: name || null,
         firstName: first,
@@ -427,9 +458,11 @@ export const handleUserDirectoryRoute = async (
     if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
     const users = await directory.list();
     if (url.searchParams.get("format") === "csv") {
-      const header = "user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges";
+      const header =
+        "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges";
       const rows = users.map((u) =>
         [
+          String(u.userNumber),
           u.userId,
           u.email,
           u.name,

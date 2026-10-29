@@ -1,6 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { signWorkOsPayload, verifyWorkOsSignature } from "../../src/user-directory";
+import { UserDirectory, signWorkOsPayload, verifyWorkOsSignature } from "../../src/user-directory";
 
 const SECRET = "workos_whsec_test";
 
@@ -33,6 +33,7 @@ type Listed = {
   count: number;
   users: {
     userId: string;
+    userNumber: number;
     email: string | null;
     name: string | null;
     profilePictureUrl: string | null;
@@ -105,8 +106,62 @@ describe("user directory", () => {
     const csv = await (
       await SELF.fetch("https://edge.test/admin/users?format=csv", { headers: { authorization: "Bearer test-admin-token" } })
     ).text();
-    expect(csv.split("\n")[0]).toBe("user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges");
-    expect(csv).toContain('user_csv,user_csv@example.com,"Grace, Jr.","Grace, Jr.",,');
+    expect(csv.split("\n")[0]).toBe(
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges"
+    );
+    const number = (await find("user_csv"))?.userNumber;
+    expect(csv).toContain(`\n${number},user_csv,user_csv@example.com,"Grace, Jr.","Grace, Jr.",,`);
+  });
+
+  it("gives each new user the next number, kept through updates and deletion", async () => {
+    await webhook("user.created", user("user_num1"));
+    await webhook("user.created", user("user_num2", { created_at: "2026-09-01T00:00:00.000Z" }));
+    const first = (await find("user_num1"))!.userNumber;
+    // Numbers follow when a user is recorded, not when they joined.
+    expect((await find("user_num2"))!.userNumber).toBe(first + 1);
+
+    await webhook("user.updated", user("user_num1", { first_name: "Renamed", updated_at: "2026-10-05T00:00:00.000Z" }));
+    await webhook("user.created", user("user_num1"));
+    await webhook("user.deleted", user("user_num1"));
+    expect(await find("user_num1")).toMatchObject({ userNumber: first, name: null });
+
+    // A user first seen through their deletion still takes a number.
+    await webhook("user.deleted", user("user_num3"));
+    expect((await find("user_num3"))!.userNumber).toBe(first + 2);
+
+    const numbers = ((await (await listUsers()).json()) as Listed).users.map((u) => u.userNumber);
+    expect(new Set(numbers).size).toBe(numbers.length);
+  });
+
+  it("numbers users recorded before numbers existed once, in join order", async () => {
+    const stub = env.USER_DIRECTORY!.get(env.USER_DIRECTORY!.idFromName("legacy-directory"));
+    await runInDurableObject(stub, (_instance: UserDirectory, state) => {
+      const sql = state.storage.sql;
+      // The table as it was before numbers.
+      sql.exec("DROP INDEX users_by_number");
+      sql.exec("ALTER TABLE users DROP COLUMN user_number");
+      const insert = (id: string, joined: string) =>
+        sql.exec(
+          "INSERT INTO users (user_id, created_at, updated_at, recorded_at) VALUES (?, ?, ?, ?)",
+          id,
+          joined,
+          joined,
+          Date.now()
+        );
+      insert("user_late", "2026-10-03T00:00:00.000Z");
+      insert("user_early", "2026-10-01T00:00:00.000Z");
+      insert("user_tie_b", "2026-10-02T00:00:00.000Z");
+      insert("user_tie_a", "2026-10-02T00:00:00.000Z");
+
+      const directory = new UserDirectory(state, env as never);
+      const numbered = () => Object.fromEntries(directory.list().map((u) => [u.userId, u.userNumber]));
+      expect(numbered()).toEqual({ user_early: 1, user_tie_a: 2, user_tie_b: 3, user_late: 4 });
+
+      // The next sign-up continues the sequence; a restart renumbers nothing.
+      directory.upsert(user("user_after") as never);
+      new UserDirectory(state, env as never);
+      expect(numbered()).toEqual({ user_early: 1, user_tie_a: 2, user_tie_b: 3, user_late: 4, user_after: 5 });
+    });
   });
 
   const admin = (path: string, body?: unknown, token = "test-admin-token") =>
