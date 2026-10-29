@@ -17,6 +17,7 @@ pinned Antigravity archive.
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
 | [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
+| [fx](https://fx.sh/docs) | `curl -fsSL https://fx.sh/setup.sh \| bash` | Manual setup (no native Windows installer) |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
 Unix shell commands run through `sh -c`, with PATH augmented from the user's login
@@ -85,3 +86,22 @@ The iOS app adds no Install action. `HarnessDescriptor.can_install` already has
 `#[serde(default)]` (`crates/engine/src/registry.rs`); iOS's `WireHarness: Decodable`
 in `apps/ios/Zeron/Sync/WorkspaceStore.swift` ignores unrecognized keys, including
 `canInstall`. `HarnessCatalog` continues consuming the existing mapped fields.
+
+## fx
+
+fx uses its native `fx acp` server. Install on macOS/Linux with
+`curl -fsSL https://fx.sh/setup.sh | bash`, then run `fx login` or `fx setup`
+in a terminal to configure the model provider. Zeron detects PATH and
+`~/.local/bin/fx`; `FX_EXECUTABLE` overrides the executable.
+
+Models and reasoning levels come from ACP. The provider selector is excluded
+from model discovery. Explicit model selections are sent to fx and errors
+propagate instead of silently running a different model. Skills use the existing
+host discovery for `.agents/skills`, `.claude/skills`, and `.fx/skills`.
+
+Zeron writes fx's `ask` policy before every prompt, including resumed sessions:
+some fx releases report ask while retaining a saved automatic policy. Zeron then
+decides permissions: Supervised presents requests to the user; Full access
+approves them. Streaming, tool calls, cancellation and session loading use the
+shared ACP driver. Login and updates remain CLI-managed; native Windows has no
+one-click installer.

@@ -2805,3 +2805,84 @@ async fn a_stopped_turn_keeps_the_agent_for_the_next_prompt() {
     drop(steer);
     assert!(next_event(&mut stream).await.is_none());
 }
+
+#[tokio::test]
+async fn fx_selects_models_and_enforces_policy_on_new_and_loaded_sessions() {
+    let harness = AcpHarness::fx().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+    );
+    let models = harness.models().await.unwrap();
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["model-a", "model-b"]
+    );
+    for resume in [None, Some("fx-session".to_string())] {
+        let mut req = request("hello");
+        req.model = Some("model-b".into());
+        req.resume = resume;
+        req.auto_approve = false;
+        req.access = AccessMode::Supervised;
+        let (control, sender, _) = controls();
+        drop(sender);
+        let events = run_to_end(&harness, req, control).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )));
+    }
+}
+
+#[tokio::test]
+async fn fx_rejected_model_never_falls_back_to_another_model() {
+    let harness = AcpHarness::fx().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+    );
+    let mut req = request("hello");
+    req.model = Some("rejected-model".into());
+    let (control, sender, _) = controls();
+    drop(sender);
+    let stream = harness.run(req, control).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    )));
+}
+
+#[tokio::test]
+async fn fx_permissions_follow_zeron_access_mode() {
+    for (access, answer, expected, question_count) in [
+        (AccessMode::Supervised, Some("No"), "deny", 1),
+        (AccessMode::Supervised, Some("Yes"), "allow", 1),
+        (AccessMode::FullAccess, Some("No"), "allow", 0),
+    ] {
+        let harness = AcpHarness::fx().with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+        );
+        let mut req = request("permission");
+        req.model = Some("model-b".into());
+        req.auto_approve = false;
+        req.access = access;
+        let (control, asked) = answering_controls(answer);
+        let events = run_to_end(&harness, req, control).await;
+        assert_eq!(asked.lock().unwrap().len(), question_count);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == expected))
+        );
+    }
+}

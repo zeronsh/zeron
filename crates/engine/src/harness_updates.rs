@@ -341,6 +341,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update"]),
             manual_command: "grok update",
         },
+        HarnessId::Fx => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Manual,
+            update_args: None,
+            manual_command: "curl -fsSL https://fx.sh/setup.sh | bash",
+        },
         HarnessId::Hermes => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Hermes,
