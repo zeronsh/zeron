@@ -1112,6 +1112,72 @@ async fn rename_worktree_branch_guards_and_collisions() {
 // RPC dispatch
 // ---------------------------------------------------------------------------
 
+/// #885: an agent screenshot saved outside every chat cwd (Claude Code keeps
+/// its scratchpad under the OS temp dir) must preview over
+/// `ReadAttachmentChunk` instead of "Image unavailable" — while the scratch
+/// dirs stay image-only and the jail still refuses everything else.
+#[tokio::test]
+async fn rpc_previews_agent_scratch_screenshots_outside_any_chat_cwd() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let core = assemble_with_mock(&tmp.path().join("data"), Vec::new());
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    // The issue's exact layout: %TEMP%\claude\<project>\<session>\shot.png
+    // (tempfile already stages under the OS temp dir).
+    let scratch = tempfile::Builder::new()
+        .prefix("claude")
+        .tempdir()
+        .expect("scratch");
+    let session_dir = scratch.path().join("proj").join("sess-1");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let shot = session_dir.join("m-chat-kb-light.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\nissue-885").expect("shot");
+    let chunk = client
+        .call(
+            methods::READ_ATTACHMENT_CHUNK,
+            serde_json::json!({ "path": shot, "offset": 0 }),
+        )
+        .await
+        .expect("scratch screenshot previews");
+    assert_eq!(chunk["mimeType"], "image/png");
+    assert_eq!(chunk["done"], true);
+
+    // …the scratch dirs are image-only, like every non-upload root…
+    let notes = session_dir.join("notes.txt");
+    std::fs::write(&notes, b"secret").expect("notes");
+    assert!(
+        client
+            .call(
+                methods::READ_ATTACHMENT_CHUNK,
+                serde_json::json!({ "path": notes, "offset": 0 })
+            )
+            .await
+            .is_err(),
+        "non-image in a scratch dir stays refused"
+    );
+
+    // …and an image outside uploads, chat cwds and the scratch dirs is still
+    // refused (the target dir is not a root on any platform).
+    let outside_dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("issue-885-outside-{}", std::process::id()));
+    std::fs::create_dir_all(&outside_dir).expect("outside dir");
+    let outside = outside_dir.join("other.png");
+    std::fs::write(&outside, b"\x89PNG\r\n\x1a\nnope").expect("outside");
+    assert!(
+        client
+            .call(
+                methods::READ_ATTACHMENT_CHUNK,
+                serde_json::json!({ "path": outside, "offset": 0 })
+            )
+            .await
+            .is_err(),
+        "an image outside every root stays refused"
+    );
+    let _ = std::fs::remove_dir_all(&outside_dir);
+
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn rpc_dispatch_for_m5c_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
