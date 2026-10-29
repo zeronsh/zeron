@@ -1163,8 +1163,14 @@ impl DocHost {
         let running = self
             .sessions()
             .map_or(0, |sessions| sessions.active_count());
+        // Sleeping stops the engine, and a parked chat's subagents with it.
+        let background = self
+            .sessions()
+            .map_or(0, |sessions| sessions.background_count());
         let busy = if running > 0 {
             Some(format!("{running} chat(s) have a turn in flight"))
+        } else if background > 0 {
+            Some(format!("{background} chat(s) have background work running"))
         } else if self.has_waiting_commands() {
             Some("a message is waiting to run".to_string())
         } else {

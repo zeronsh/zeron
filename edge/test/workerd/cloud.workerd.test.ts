@@ -519,6 +519,12 @@ describe("idle sleep, waking on sends and the awake cap", () => {
     await runDurableObjectAlarm(accountStub(u));
     expect((await session(u, chatId))?.state).toBe("ready"); // busy
 
+    // A parked chat's subagents still running hold it awake too.
+    expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0, backgroundRuns: 1 })).status).toBe(200);
+    await backdate();
+    await runDurableObjectAlarm(accountStub(u));
+    expect((await session(u, chatId))?.state).toBe("ready");
+
     expect((await call("POST", "/runner/heartbeat", bearer, { activeRuns: 0, clients: 0 })).status).toBe(200);
     await backdate();
     await runDurableObjectAlarm(accountStub(u));

@@ -207,6 +207,28 @@ fn installed_executable(exe: &Path, install: &zeron_update::InstallKind) -> Path
     }
 }
 
+/// The binary agents launch as their Zeron MCP server: this process's own
+/// image while it is still there, else the installation's current copy. An
+/// image an update replaced, or a sandbox moved aside, names a path the
+/// agent's next spawn of the server can't run (Linux even reports a deleted
+/// one as `"<path> (deleted)"`), and an agent whose server won't start has
+/// no Zeron tools for the rest of its session.
+pub(crate) fn mcp_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let raw = exe.to_string_lossy();
+    let deleted = raw.ends_with(" (deleted)");
+    let exe = match raw.strip_suffix(" (deleted)") {
+        Some(path) => PathBuf::from(path),
+        None => exe.clone(),
+    };
+    if !deleted && exe.exists() {
+        return Some(exe);
+    }
+    let installed = installed_executable(&exe, &zeron_update::detect_install());
+    tracing::info!(stale = %exe.display(), installed = %installed.display(), "this engine's image moved; agents launch the installed Zeron MCP");
+    installed.exists().then_some(installed)
+}
+
 /// The app was moved to the Trash or uninstalled: once nothing is running,
 /// stop — an engine left running from a deleted app would keep the Trash
 /// from emptying ("in use") with no app left to quit it. Updates keep the

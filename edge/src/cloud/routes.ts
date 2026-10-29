@@ -230,8 +230,14 @@ export const handleCloudRoute = async (
     if (activeRuns === undefined || clients === undefined) {
       return jsonError(400, "bad_request", "Expected {activeRuns, clients}.");
     }
+    // Newer engines also report background work (a parked chat's subagents)
+    // and runs waiting on an answer; older ones send neither.
+    const backgroundRuns = count(body.backgroundRuns) ?? 0;
+    const waitingRuns = Math.min(count(body.waitingRuns) ?? 0, activeRuns);
     const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
-    return rpc(() => accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, { activeRuns, clients }));
+    return rpc(() =>
+      accountStub(ns, runner.orgId, runner.userId).heartbeat(runner, { activeRuns, clients, backgroundRuns, waitingRuns })
+    );
   }
 
   const parts = url.pathname.split("/").filter(Boolean);
@@ -395,6 +401,11 @@ export const handleCloudRoute = async (
  * (nudges queue in the DeviceRoom and replay once the engine is back). Only
  * sends wake a session; dials (viewing a chat) never do. The DO is the
  * caller's own, so another user's device id is simply not found there.
+ *
+ * A Cloud machine's runner wakes a session too, but only one it started (its
+ * delegate): the agent there sent work to a side chat on a machine that went
+ * to sleep. The account DO checks the parentage, as it does for every other
+ * session action a runner takes.
  */
 export const autoWakeCloudDevice = (
   env: Pick<Env, "CLOUD_ACCOUNTS" | "CLOUD_ACCESS" | "AUTH_MODE">,
@@ -403,10 +414,14 @@ export const autoWakeCloudDevice = (
   deviceId: string
 ): void => {
   const ns = env.CLOUD_ACCOUNTS;
-  if (!ns || auth.kind !== "user" || !auth.orgId || !deviceId.startsWith(CLOUD_DEVICE_PREFIX)) return;
+  if (!ns || !auth.orgId || !deviceId.startsWith(CLOUD_DEVICE_PREFIX)) return;
+  if (auth.kind === "runner" && !auth.deviceId) return;
   // Off the beta list: nothing wakes (their machines stay asleep until deleted).
   if (!cloudOffered(env, auth)) return;
-  const caller = { orgId: auth.orgId, userId: auth.userId };
+  const caller =
+    auth.kind === "runner"
+      ? { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId }
+      : { orgId: auth.orgId, userId: auth.userId };
   ctx.waitUntil(
     accountStub(ns, caller.orgId, caller.userId)
       .autoWake(caller, deviceId)

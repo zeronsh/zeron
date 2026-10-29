@@ -969,10 +969,25 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), Engi
 struct HeartbeatBody {
     active_runs: usize,
     clients: usize,
+    background_runs: usize,
+    waiting_runs: usize,
 }
 
-/// Counts sessions with a turn in flight (the heartbeat's `activeRuns`).
-pub type ActiveRuns = Arc<dyn Fn() -> usize + Send + Sync>;
+/// What this machine's runs are doing, as the heartbeat reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunCounts {
+    /// Chats with a turn in flight: working, or parked on a question.
+    pub active: usize,
+    /// Of `active`, those parked on a question: they hold the machine, but a
+    /// parent chat waiting on them has something to hear.
+    pub waiting: usize,
+    /// Chats whose turn ended with background work still running (a parked
+    /// chat's subagents, background shells).
+    pub background: usize,
+}
+
+/// Reads [`RunCounts`] for the heartbeat.
+pub type ActiveRuns = Arc<dyn Fn() -> RunCounts + Send + Sync>;
 
 /// Relay requests served to remote devices since the last heartbeat — the
 /// heartbeat's `clients`. Filled by [`RelayActivity::wrap`] around the RPC
@@ -1061,10 +1076,14 @@ pub fn passive(method: &str) -> bool {
         || method == zeron_rpc::methods::SET_VIEWPORT_FOCUS
 }
 
-/// Post `{activeRuns, clients}` to `{edge}/runner/heartbeat` every `every`
-/// (first beat immediately).
+/// Post `{activeRuns, clients, backgroundRuns, waitingRuns}` to
+/// `{edge}/runner/heartbeat` every `every` (first beat immediately).
 ///
-/// - `activeRuns`: chats with a turn in flight right now.
+/// - `activeRuns`: chats with a turn in flight right now; `waitingRuns`, the
+///   ones among them parked on a question.
+/// - `backgroundRuns`: chats whose turn ended with background work still
+///   running. They keep the machine awake as a turn would: sleeping stops the
+///   engine, and the work with it.
 /// - `clients`: relay RPC REQUESTS served to remote devices since the
 ///   previous delivered heartbeat (see [`RelayActivity`]) — not open links or
 ///   sockets. A laptop that merely keeps a link or a watch stream open must
@@ -1092,15 +1111,20 @@ pub fn spawn_heartbeat(
                     continue;
                 }
             };
+            let runs = active_runs();
             let body = HeartbeatBody {
-                active_runs: active_runs(),
+                active_runs: runs.active,
                 clients: activity.take(),
+                background_runs: runs.background,
+                waiting_runs: runs.waiting,
             };
             match http.post(&url).bearer_auth(token).json(&body).send().await {
                 Ok(res) if res.status().is_success() => {
                     tracing::debug!(
                         active_runs = body.active_runs,
                         clients = body.clients,
+                        background_runs = body.background_runs,
+                        waiting_runs = body.waiting_runs,
                         "runner: heartbeat"
                     );
                 }
