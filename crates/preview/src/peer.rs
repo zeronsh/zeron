@@ -145,6 +145,7 @@ impl Peers {
         });
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
+                .with_runtime(crate::runtime::runtime())
                 .with_setting_engine(setting_engine())
                 .with_configuration(
                     RTCConfigurationBuilder::new()
