@@ -91,6 +91,10 @@ pub(crate) struct FileLinkRoot {
     /// The owner lives on this device — the file is on this disk, so the
     /// link menu's system-level rows (default app, file manager) apply.
     pub local: bool,
+    /// The linking chat's own folder (or its project's, when it records
+    /// none). Only this root resolves a bare or relative name: another
+    /// checkout's copy of `CONTEXT.md` is not the file the agent meant.
+    pub own: bool,
 }
 
 impl FileLinkRoot {
@@ -144,10 +148,10 @@ pub(crate) enum InlineCodePath {
 
 /// Resolve one inline code span under the file-link grammar and report what
 /// exists behind it: an absolute path (`~/` expanded to the home directory),
-/// then each root in order, then each context directory an earlier span in
-/// the same text part named. Only local roots are probed — a remote chat's
-/// checkout is not on this disk. A path shape with nothing behind it stays
-/// plain code.
+/// then the linking chat's own root, then each context directory an earlier
+/// span in the same text part named. Only local roots are probed; a remote
+/// chat's checkout is not on this disk. A path shape with nothing behind it
+/// stays plain code.
 pub(crate) fn resolve_inline_code_path(
     candidate: &str,
     roots: &[FileLinkRoot],
@@ -212,7 +216,7 @@ pub(crate) fn resolve_inline_code_path(
         return None;
     }
     let relative = safe_relative_path(Path::new(decoded))?;
-    for root in roots.iter().filter(|root| root.local) {
+    for root in roots.iter().filter(|root| root.local && root.own) {
         let path = Path::new(&root.root).join(&relative);
         match probes.kind(&path) {
             PathKind::File => return file(&path),
@@ -945,6 +949,7 @@ mod tests {
             chat: Some("chat".into()),
             root: root.to_string_lossy().into_owned(),
             local: true,
+            own: true,
         }];
         let mut probes = PathProbes::default();
         let target = |path: &Path| format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
@@ -996,8 +1001,41 @@ mod tests {
             chat: Some("chat".into()),
             root: root.to_string_lossy().into_owned(),
             local: false,
+            own: true,
         }];
         assert!(resolve_inline_code_path("Makefile", &remote, &[], &mut probes).is_none());
+    }
+
+    /// A bare name resolves in the linking chat's own folder only: another
+    /// project's copy of the same file is a different file.
+    #[cfg(unix)]
+    #[test]
+    fn inline_code_bare_names_never_fall_through_to_other_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("CONTEXT.md"), "x").unwrap();
+        let root = |path: &Path, own: bool| FileLinkRoot {
+            chat: own.then(|| "chat".into()),
+            root: path.to_string_lossy().into_owned(),
+            local: true,
+            own,
+        };
+        let roots = vec![root(&b, true), root(&a, false)];
+        assert_eq!(
+            resolve_inline_code_path("CONTEXT.md", &roots, &[], &mut PathProbes::default()),
+            None
+        );
+        // Once the own folder has the file, it links to that copy.
+        std::fs::write(b.join("CONTEXT.md"), "x").unwrap();
+        assert_eq!(
+            resolve_inline_code_path("CONTEXT.md", &roots, &[], &mut PathProbes::default()),
+            Some(InlineCodePath::File(format!(
+                "file://{}",
+                b.join("CONTEXT.md").to_string_lossy()
+            )))
+        );
     }
 
     #[test]
