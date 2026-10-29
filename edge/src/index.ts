@@ -51,6 +51,8 @@
  * User directory (user-directory.ts):
  *   POST /workos/webhook                — pre-bearer, WorkOS-signed user.* events
  *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
+ *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
+ *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";

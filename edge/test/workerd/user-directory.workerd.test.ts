@@ -31,7 +31,15 @@ const webhook = async (event: string, data: Record<string, unknown>, opts: { sec
 
 type Listed = {
   count: number;
-  users: { userId: string; email: string | null; name: string | null; profilePictureUrl: string | null; joinedAt: string; deletedAt: string | null }[];
+  users: {
+    userId: string;
+    email: string | null;
+    name: string | null;
+    profilePictureUrl: string | null;
+    joinedAt: string;
+    deletedAt: string | null;
+    badges: { id: string; grantedAt: number; note: string | null }[];
+  }[];
 };
 
 const listUsers = async (token = "test-admin-token") =>
@@ -97,7 +105,53 @@ describe("user directory", () => {
     const csv = await (
       await SELF.fetch("https://edge.test/admin/users?format=csv", { headers: { authorization: "Bearer test-admin-token" } })
     ).text();
-    expect(csv.split("\n")[0]).toBe("user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at");
+    expect(csv.split("\n")[0]).toBe("user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges");
     expect(csv).toContain('user_csv,user_csv@example.com,"Grace, Jr.","Grace, Jr.",,');
+  });
+
+  const admin = (path: string, body?: unknown, token = "test-admin-token") =>
+    SELF.fetch(`https://edge.test${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+
+  it("defines badges and grants them to users, once each", async () => {
+    expect((await admin("/admin/badges", undefined, "nope")).status).toBe(401);
+    expect((await admin("/admin/badges", { id: "Cloud Tester", name: "x" })).status).toBe(400);
+    expect((await admin("/admin/badges/grant", { badgeId: "nobody-defined", userIds: ["user_a"] })).status).toBe(404);
+
+    const defined = await admin("/admin/badges", { id: "early-bird", name: "Early Bird", description: "Here first" });
+    expect(await defined.json()).toMatchObject({ id: "early-bird", name: "Early Bird", description: "Here first", icon: null, holders: 0 });
+
+    await webhook("user.created", user("user_badge1"));
+    const first = await admin("/admin/badges/grant", { badgeId: "early-bird", userIds: ["user_badge1", "user_badge1"], note: "beta" });
+    expect(await first.json()).toEqual({ granted: 1 });
+    // Re-granting keeps the first grant.
+    expect(await (await admin("/admin/badges/grant", { badgeId: "early-bird", userIds: ["user_badge1"] })).json()).toEqual({ granted: 0 });
+    const held = (await find("user_badge1"))?.badges as { id: string; note: string | null }[];
+    expect(held).toMatchObject([{ id: "early-bird", note: "beta" }]);
+
+    // Renaming keeps holders.
+    await admin("/admin/badges", { id: "early-bird", name: "Early Bird 2", icon: "sparkle" });
+    const listed = (await (await admin("/admin/badges")).json()) as { badges: { id: string; name: string; icon: string | null; holders: number }[] };
+    expect(listed.badges.find((b) => b.id === "early-bird")).toMatchObject({ name: "Early Bird 2", icon: "sparkle", holders: 1 });
+
+    expect(await (await admin("/admin/badges/revoke", { badgeId: "early-bird", userIds: ["user_badge1"] })).json()).toEqual({ revoked: 1 });
+    expect((await find("user_badge1"))?.badges).toEqual([]);
+  });
+
+  it("grants a badge to every live user at once, and a delete drops it", async () => {
+    await webhook("user.created", user("user_all1"));
+    await webhook("user.created", user("user_all2"));
+    await admin("/admin/badges", { id: "cloud-tester", name: "Cloud Tester" });
+    const res = (await (await admin("/admin/badges/grant", { badgeId: "cloud-tester", userIds: "all" })).json()) as { granted: number };
+    expect(res.granted).toBeGreaterThanOrEqual(2);
+    expect((await find("user_all1"))?.badges).toMatchObject([{ id: "cloud-tester" }]);
+    // "all" is grant-only.
+    expect((await admin("/admin/badges/revoke", { badgeId: "cloud-tester", userIds: "all" })).status).toBe(400);
+
+    await webhook("user.deleted", user("user_all2"));
+    expect((await find("user_all2"))?.badges).toEqual([]);
   });
 });
