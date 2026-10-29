@@ -403,6 +403,8 @@ fn entry_events(entry: &Value) -> Vec<AgentEvent> {
                     output,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }

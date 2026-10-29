@@ -267,6 +267,8 @@ mod tests {
                 output: None,
                 diff: None,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         ];
         for reasoning in [false, true] {

@@ -160,6 +160,8 @@ impl Normalizer {
                 output,
                 diff,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             });
         }
         events
@@ -203,6 +205,8 @@ impl Normalizer {
                     output,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }
@@ -236,6 +240,8 @@ impl Normalizer {
                         .map(|text| cap(text, 16384)),
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }

@@ -1542,6 +1542,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                preview_paths,
                 ..
             } => {
                 // A message to another chat reads as one line naming the
@@ -1594,7 +1595,7 @@ pub fn rows_for_entry(
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
                     kind: ToolItemKind::Call,
-                    images: crate::tool_images::image_paths(call, output.as_deref()),
+                    images: crate::tool_images::chip_images(call, output.as_deref(), preview_paths),
                 };
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
@@ -13258,6 +13259,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         let entry = assistant(
             "a1",
@@ -14453,6 +14455,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         }
     }
 
@@ -14577,6 +14580,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         }
     }
 

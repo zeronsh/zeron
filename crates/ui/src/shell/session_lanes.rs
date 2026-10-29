@@ -743,6 +743,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         }
     }
 

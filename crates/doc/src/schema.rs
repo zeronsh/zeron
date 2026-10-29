@@ -149,6 +149,9 @@ struct DocPartJson {
     /// only when true): the UI says earlier output was trimmed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_truncated: Option<bool>,
+    /// Uploads copies of images embedded in a tool result (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_paths: Option<Vec<String>>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -203,6 +206,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_tail,
             exit_code,
             output_truncated,
+            preview_paths,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -228,6 +232,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_tail: subagent_tail.clone(),
             exit_code: *exit_code,
             output_truncated: output_truncated.then_some(true),
+            preview_paths: (!preview_paths.is_empty()).then(|| preview_paths.clone()),
             ..Default::default()
         },
         MessagePart::Input {
@@ -316,6 +321,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 subagent_tail: p.subagent_tail,
                 exit_code: p.exit_code,
                 output_truncated: p.output_truncated.unwrap_or(false),
+                preview_paths: p.preview_paths.unwrap_or_default(),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1094,6 +1100,18 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(truncated) = doc_part.output_truncated {
         map.insert("outputTruncated", truncated)?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     Ok(())
 }
 
@@ -1266,6 +1284,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
                 .get("outputTruncated")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
+            preview_paths: obj
+                .get("previewPaths")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1576,6 +1598,18 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(truncated) = doc_part.output_truncated {
         map.insert("outputTruncated", truncated)?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1878,6 +1912,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -1944,6 +1979,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1998,6 +2034,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            preview_paths: Vec::new(),
         };
         let parts = vec![
             tool(
@@ -2180,6 +2217,43 @@ mod tests {
     }
 
     #[test]
+    fn tool_preview_paths_round_trip_through_the_doc() {
+        let doc = SessionDoc::init("previews").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev", 1).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::ReadFile {
+                    path: "/tmp/shots/1.png".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                exit_code: None,
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/uploads/abc-image.png".into()],
+                image_payloads: Vec::new(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool { preview_paths, .. } => {
+                assert_eq!(preview_paths, &vec!["/uploads/abc-image.png".to_string()]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn segment_writer_streams_text_incrementally() {
         let doc = SessionDoc::init("chat-1").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
@@ -2207,6 +2281,8 @@ mod tests {
                 output: None,
                 diff: None,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         );
         writer.sync(&folded).unwrap();
@@ -2327,6 +2403,8 @@ mod tests {
                     new_text: "new\n".into(),
                 }),
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         );
         crate::parts::apply_sidecar_refs("chat-2", &mut folded);
@@ -2384,6 +2462,8 @@ mod tests {
         fold_event_into_parts(
             &mut folded,
             &AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "c1".into(),
                 is_error: true,
                 output: Some(full.clone()),
@@ -2457,6 +2537,7 @@ mod tests {
                 subagent_tail: None,
                 exit_code: None,
                 output_truncated: false,
+                preview_paths: Vec::new(),
             }],
             created_at: 1,
             device_id: "dev-a".into(),

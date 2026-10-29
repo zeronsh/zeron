@@ -4551,6 +4551,8 @@ fn part_snapshot_events(
                     output,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
             events

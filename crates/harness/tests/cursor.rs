@@ -307,6 +307,8 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
         output: None,
         diff: None,
         exit_code: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // The task spawn is a parent chip; its interior arrives tagged, never bare.

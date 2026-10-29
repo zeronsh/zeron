@@ -115,6 +115,24 @@ fn push_json_paths(out: &mut Vec<SharedString>, value: &serde_json::Value) {
     }
 }
 
+/// Paths the chip previews. A tool result that embedded image bytes names the
+/// uploads copies here; those replace paths the call printed, which may sit
+/// outside the attachment jail. An empty list keeps the call and output paths.
+pub(crate) fn chip_images(
+    call: &ToolCall,
+    output: Option<&str>,
+    preview_paths: &[String],
+) -> Arc<[SharedString]> {
+    if !preview_paths.is_empty() {
+        let mut out = Vec::new();
+        for path in preview_paths {
+            push_path(&mut out, path);
+        }
+        return out.into();
+    }
+    image_paths(call, output)
+}
+
 /// The image files a tool call touched, as reported (possibly relative to the
 /// chat's working directory). Computed once per row build, never per paint.
 pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedString]> {
@@ -654,6 +672,33 @@ mod tests {
         assert_eq!(
             paths(ToolCall::Exec { command: many }, None).len(),
             MAX_IMAGES_PER_TOOL
+        );
+    }
+
+    #[test]
+    fn stored_preview_paths_replace_the_named_file() {
+        let call = ToolCall::ReadFile {
+            path: "/tmp/shots/1.png".into(),
+        };
+        let stored = chip_images(
+            &call,
+            Some("also /tmp/other.png"),
+            &["/uploads/abc-image.png".into()],
+        );
+        assert_eq!(
+            stored
+                .iter()
+                .map(|path| path.to_string())
+                .collect::<Vec<_>>(),
+            vec!["/uploads/abc-image.png".to_string()]
+        );
+        let named = chip_images(&call, Some("also /tmp/other.png"), &[]);
+        assert_eq!(
+            named
+                .iter()
+                .map(|path| path.to_string())
+                .collect::<Vec<_>>(),
+            vec!["/tmp/shots/1.png".to_string(), "/tmp/other.png".to_string()]
         );
     }
 

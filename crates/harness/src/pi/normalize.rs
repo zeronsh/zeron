@@ -145,6 +145,8 @@ impl Normalizer {
                     output: output.map(|s| cap(&s, 16384)),
                     diff,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
             "compaction_end" => {
