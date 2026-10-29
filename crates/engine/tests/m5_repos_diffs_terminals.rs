@@ -1534,6 +1534,80 @@ async fn delete_space_cascades_chats_and_sessions() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forget_device_guards_self_online_and_owned_projects() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let folder = tmp.path().join("folder");
+    std::fs::create_dir_all(&folder).expect("folder");
+
+    let core = assemble(&tmp.path().join("data"));
+
+    let self_err = core
+        .workspace
+        .forget_device(&core.device_id)
+        .expect_err("this device is never forgettable");
+    assert!(self_err.to_string().contains("can not be forgotten"));
+
+    core.workspace.upsert_device_row(&zeron_proto::Device {
+        id: "dev-live".into(),
+        name: "live".into(),
+        platform: "linux".into(),
+        last_seen_at: Some(chrono::Utc::now()),
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    });
+    let online_err = core
+        .workspace
+        .forget_device("dev-live")
+        .expect_err("an online device is not forgettable");
+    assert!(online_err.to_string().contains("still online"));
+
+    core.workspace.upsert_device_row(&zeron_proto::Device {
+        id: "dev-old".into(),
+        name: "old".into(),
+        platform: "linux".into(),
+        last_seen_at: Some(
+            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(0).expect("epoch"),
+        ),
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    });
+    core.workspace
+        .create_space(
+            "space-old",
+            "dev-old",
+            &folder.to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("space row");
+    let owned_err = core
+        .workspace
+        .forget_device("dev-old")
+        .expect_err("a device that still owns a project is not forgettable");
+    assert!(owned_err.to_string().contains("Move or remove"));
+
+    core.workspace.delete_space("space-old").expect("delete");
+    let existed = core
+        .workspace
+        .forget_device("dev-old")
+        .expect("now forgettable");
+    assert!(existed);
+    assert!(
+        !core
+            .workspace
+            .read_devices()
+            .expect("devices")
+            .iter()
+            .any(|d| d.id == "dev-old")
+    );
+    core.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Diff sync (watchers + workspace branch upkeep) via EngineCore
 // ---------------------------------------------------------------------------

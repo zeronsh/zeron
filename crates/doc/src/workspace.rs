@@ -60,6 +60,14 @@ pub struct DeletedSpace {
     pub chat_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForgottenDevice {
+    pub existed: bool,
+    pub owned_spaces: usize,
+    pub owned_chats: usize,
+    pub deleted: bool,
+}
+
 /// A workspace doc handle: typed access over a LoroDoc with the schema above.
 pub struct WorkspaceDoc {
     doc: LoroDoc,

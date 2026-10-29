@@ -52,3 +52,13 @@ runs:
         # opt-level 0, so keep them out of the cache. Each job gets its own
         # cache (rust-cache keys on the job id by default).
         cache-workspace-crates: false
+    # The ort-sys build script downloads prebuilt ONNX Runtime binaries from
+    # the pyke CDN (voice transcription via parakeet-rs). That download has a
+    # 30-minute global timeout and occasionally stalls past it on hosted
+    # runners, failing the job at random; the extracted binaries are cached so
+    # the download runs only when the set of binaries changes. The `app` job
+    # saves the cache on main.
+    - name: Restore ONNX Runtime binaries
+      uses: ./.github/actions/ort-bin-cache
+      with:
+        mode: restore

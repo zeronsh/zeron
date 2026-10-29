@@ -762,6 +762,8 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    #[serde(rename_all = "camelCase")]
+    ForgetDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -1955,6 +1957,11 @@ impl EngineRpc {
             MutateParams::RenameDevice { device_id, name } => self
                 .workspace
                 .rename_device(&device_id, &name)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::ForgetDevice { device_id } => self
+                .workspace
+                .forget_device(&device_id)
                 .map_err(failed)
                 .map(drop),
             MutateParams::MarkChatSeen { chat_id, at } => {
@@ -4801,6 +4808,16 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_device_mutate_parses_camel_case_params() {
+        let params = serde_json::json!({ "op": "forgetDevice", "deviceId": "dev-1" });
+        let parsed: MutateParams = parse_params(params).expect("parses");
+        match parsed {
+            MutateParams::ForgetDevice { device_id } => assert_eq!(device_id, "dev-1"),
+            other => panic!("unexpected mutation: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
