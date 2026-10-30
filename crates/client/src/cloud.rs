@@ -424,9 +424,15 @@ impl Client {
     }
 
     /// `PUT /vault/{org}/credentials/{anthropic-key|openai-key}` — the user's
-    /// own API key, made the one Cloud uses (the subscription login steps
-    /// aside, as on desktop).
-    pub async fn vault_put_api_key(&self, provider: VaultProvider, key: &str) -> Result<()> {
+    /// own API key (an Anthropic key with the gateway or proxy it is for, if
+    /// any: [`VaultProvider::api_base_url`]), made the one Cloud uses (the
+    /// subscription login steps aside, as on desktop).
+    pub async fn vault_put_api_key(
+        &self,
+        provider: VaultProvider,
+        key: &str,
+        base_url: Option<&str>,
+    ) -> Result<()> {
         let login = match provider {
             VaultProvider::AnthropicKey => VaultProvider::Claude,
             VaultProvider::OpenaiKey => VaultProvider::Codex,
@@ -448,11 +454,17 @@ impl Client {
                 "That doesn't look like an API key (it contains spaces).".into(),
             ));
         }
+        let mut material = serde_json::json!({ "key": key });
+        if let Some(base_url) = provider
+            .api_base_url(base_url.unwrap_or_default())
+            .map_err(|error| ClientError::InvalidArgument(error.into()))?
+        {
+            material["baseUrl"] = base_url.into();
+        }
         if self.inner.is_demo() {
             return Ok(());
         }
-        self.put_credential(provider, serde_json::json!({ "key": key }), None)
-            .await?;
+        self.put_credential(provider, material, None).await?;
         self.vault_activate(login, None).await.map(drop)
     }
 

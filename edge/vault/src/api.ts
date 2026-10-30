@@ -144,7 +144,9 @@ export interface VaultStatusView {
  *   Running Claude Code on the user's own Cloud device with their subscription is
  *   permitted for Zeron under its arrangement with Anthropic; grants go only to the
  *   unmodified Claude Code CLI on the user's own devices.
- * - `anthropic-key` / `openai-key`: `{ key }`.
+ * - `anthropic-key` / `openai-key`: `{ key }`. An Anthropic key may add
+ *   `baseUrl` (https, no trailing `/v1`): the LLM gateway or proxy Claude Code
+ *   sends its requests to instead of Anthropic's API.
  * - `github`: not uploadable; use the device flow. The resulting user token
  *   stays in the vault: `github` grants are App installation tokens.
  */
@@ -152,7 +154,7 @@ export type VaultMaterial =
   | { readonly authJson: Record<string, unknown> }
   | { readonly claudeAiOauth: Record<string, unknown> }
   | { readonly oauthToken: string; readonly expiresAt?: number }
-  | { readonly key: string };
+  | { readonly key: string; readonly baseUrl?: string };
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
@@ -209,6 +211,9 @@ export interface Grant {
   readonly subscriptionType?: string;
   /** Codex: id_token (the CLI's auth.json requires it). */
   readonly idToken?: string;
+  /** `anthropic-key`: the base URL the key is for (`ANTHROPIC_BASE_URL`),
+   * when it names one. */
+  readonly baseUrl?: string;
   /** GitHub login / account email, for display. */
   readonly account?: string;
   readonly generation: number;

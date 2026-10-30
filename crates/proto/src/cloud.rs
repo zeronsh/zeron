@@ -315,6 +315,123 @@ impl VaultProvider {
             VaultProvider::OpenaiKey => "openai-key",
         }
     }
+
+    /// Whether this provider's API key may name its own base URL. Only
+    /// `anthropic-key`: Claude Code then sends its requests to
+    /// `ANTHROPIC_BASE_URL` (an LLM gateway or proxy) instead of Anthropic's
+    /// API.
+    pub fn takes_base_url(self) -> bool {
+        self == VaultProvider::AnthropicKey
+    }
+
+    /// The base URL typed beside this provider's API key, as the vault keeps
+    /// it: trimmed, without trailing slashes; `Ok(None)` when left empty.
+    /// Claude Code appends `/v1/messages` itself, so a trailing `/v1` would
+    /// double it. Errors are user-facing; the vault checks the same rules
+    /// (`edge/vault/src/providers/keys.ts`).
+    pub fn api_base_url(self, raw: &str) -> Result<Option<String>, &'static str> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        if !self.takes_base_url() {
+            return Err("Only an Anthropic API key takes a base URL.");
+        }
+        if raw.len() > 512 || !raw.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err("That doesn't look like a URL.");
+        }
+        if !raw
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        {
+            return Err("Use an https:// base URL — the key is sent with every request.");
+        }
+        let url = raw.trim_end_matches('/');
+        let rest = url.get(8..).unwrap_or_default();
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        if authority.is_empty() {
+            return Err("That base URL has no host.");
+        }
+        if authority.contains('@') {
+            return Err("Leave credentials out of the base URL.");
+        }
+        if rest.contains(['?', '#']) {
+            return Err("A base URL can't have a query or a fragment.");
+        }
+        let path = &rest[authority.len()..];
+        if path.len() >= 3 && path[path.len() - 3..].eq_ignore_ascii_case("/v1") {
+            return Err("Leave /v1 off the base URL — Claude Code adds /v1/messages itself.");
+        }
+        Ok(Some(url.to_string()))
+    }
+
+    /// The base URL field's verdict as the user types it — every app's
+    /// API-key form shows this under the field, so a refusal reads the same
+    /// on the desktop and the phone as from [`Self::api_base_url`].
+    pub fn check_base_url(self, raw: &str) -> BaseUrlCheck {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return BaseUrlCheck::Empty;
+        }
+        // "h", "http", "https:/" are on their way to a URL: calling them wrong
+        // would flash red at every keystroke of the scheme.
+        if "https://".starts_with(&raw.to_ascii_lowercase()) {
+            return BaseUrlCheck::Typing;
+        }
+        match self.api_base_url(raw) {
+            Ok(Some(url)) => BaseUrlCheck::Ready(url),
+            Ok(None) => BaseUrlCheck::Empty,
+            Err(why) => BaseUrlCheck::Refused(why),
+        }
+    }
+}
+
+/// What Claude Code appends to `ANTHROPIC_BASE_URL` for every request.
+pub const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
+
+/// A base URL field, read as it is typed ([`VaultProvider::check_base_url`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseUrlCheck {
+    /// Nothing typed.
+    Empty,
+    /// Part of `https://` so far: no verdict until there is a host.
+    Typing,
+    /// Refused, in [`VaultProvider::api_base_url`]'s words.
+    Refused(&'static str),
+    /// The base URL as the vault will keep it.
+    Ready(String),
+}
+
+/// The host of a base URL as [`VaultProvider::api_base_url`] keeps it, the
+/// way the vault's label will name it (`new URL(…).host`: lowercase, the
+/// default port dropped). Pure.
+pub fn base_url_host(url: &str) -> String {
+    let rest = url.get("https://".len()..).unwrap_or_default();
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    host.strip_suffix(":443")
+        .unwrap_or(host)
+        .to_ascii_lowercase()
+}
+
+/// The last four characters a stored key is labelled by (`…81e5`), once
+/// there is enough of a key for the vault to take it (8 characters). Pure.
+pub fn api_key_suffix(key: &str) -> Option<String> {
+    let chars: Vec<char> = key.trim().chars().collect();
+    (chars.len() >= 8).then(|| {
+        let last: String = chars[chars.len() - 4..].iter().collect();
+        format!("…{last}")
+    })
+}
+
+/// The vault's label for a stored API key, split into the key's last four
+/// characters (`…abcd`) and the host of the base URL it names, if any — the
+/// vault writes `…abcd · llm-gateway.example.com`
+/// (`edge/vault/src/providers/keys.ts`). Never secret material.
+pub fn api_key_label(label: &str) -> (&str, Option<&str>) {
+    match label.split_once(" · ") {
+        Some((suffix, host)) if !host.is_empty() => (suffix, Some(host)),
+        _ => (label, None),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -489,6 +606,112 @@ mod tests {
             let wire = serde_json::to_value(provider).unwrap();
             assert_eq!(wire, serde_json::Value::String(provider.as_str().into()));
         }
+    }
+
+    #[test]
+    fn only_an_anthropic_key_takes_a_base_url_and_it_is_kept_as_typed() {
+        let anthropic = |raw| VaultProvider::AnthropicKey.api_base_url(raw);
+        assert_eq!(anthropic("   "), Ok(None), "empty is Anthropic's own API");
+        assert_eq!(
+            anthropic(" https://llm-gateway.example.com/ "),
+            Ok(Some("https://llm-gateway.example.com".into()))
+        );
+        assert_eq!(
+            anthropic("HTTPS://gateway.ai.cloudflare.com/v1/acct/gw/anthropic//"),
+            Ok(Some(
+                "HTTPS://gateway.ai.cloudflare.com/v1/acct/gw/anthropic".into()
+            ))
+        );
+        assert_eq!(
+            anthropic("https://[::1]:8443/proxy"),
+            Ok(Some("https://[::1]:8443/proxy".into()))
+        );
+        for (raw, why) in [
+            ("http://llm-gateway.example.com", "https://"),
+            ("llm-gateway.example.com", "https://"),
+            ("https://", "no host"),
+            ("https:///v1/messages", "no host"),
+            ("https://user:secret@gw.example.com", "credentials"),
+            ("https://gw.example.com/?key=1", "query"),
+            ("https://gw.example.com/#top", "query"),
+            ("https://gw.example.com/v1", "/v1"),
+            ("https://gw.example.com/anthropic/V1/", "/v1"),
+            ("https://gw.example.com/a b", "look like a URL"),
+            ("https://gw.exämple.com", "look like a URL"),
+        ] {
+            let error = anthropic(raw).unwrap_err();
+            assert!(error.contains(why), "{raw:?}: {error}");
+        }
+        assert!(anthropic(&format!("https://gw.example.com/{}", "a".repeat(512))).is_err());
+        assert_eq!(VaultProvider::OpenaiKey.api_base_url(""), Ok(None));
+        assert!(
+            VaultProvider::OpenaiKey
+                .api_base_url("https://api.openai.com")
+                .is_err()
+        );
+        assert!(VaultProvider::AnthropicKey.takes_base_url());
+        assert!(!VaultProvider::Claude.takes_base_url());
+    }
+
+    #[test]
+    fn an_api_key_label_names_its_gateway_host() {
+        assert_eq!(
+            api_key_label("…81e5 · llm-gateway.example.com:8443"),
+            ("…81e5", Some("llm-gateway.example.com:8443"))
+        );
+        assert_eq!(api_key_label("…81e5"), ("…81e5", None));
+        assert_eq!(api_key_label("…81e5 · "), ("…81e5 · ", None));
+    }
+
+    #[test]
+    fn a_base_url_is_judged_only_once_it_has_a_host() {
+        let check = |raw| VaultProvider::AnthropicKey.check_base_url(raw);
+        assert_eq!(check("  "), BaseUrlCheck::Empty);
+        for typing in ["h", "HTTP", "https:/", "https://"] {
+            assert_eq!(check(typing), BaseUrlCheck::Typing, "{typing:?}");
+        }
+        assert_eq!(
+            check(" https://llm-gateway.example.com/ "),
+            BaseUrlCheck::Ready("https://llm-gateway.example.com".into())
+        );
+        let BaseUrlCheck::Refused(why) = check("http://llm-gateway.example.com") else {
+            panic!("http is refused");
+        };
+        assert!(why.contains("https://"), "{why}");
+        assert!(matches!(
+            check("https://llm-gateway.example.com/v1"),
+            BaseUrlCheck::Refused(why) if why.contains("/v1")
+        ));
+        assert!(matches!(
+            VaultProvider::OpenaiKey.check_base_url("https://api.openai.com"),
+            BaseUrlCheck::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn a_gateway_is_named_by_its_host_as_the_vault_labels_it() {
+        assert_eq!(
+            base_url_host("https://llm-gateway.example.com"),
+            "llm-gateway.example.com"
+        );
+        assert_eq!(
+            base_url_host("https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic"),
+            "gateway.ai.cloudflare.com"
+        );
+        assert_eq!(base_url_host("https://[::1]:8443/proxy"), "[::1]:8443");
+        assert_eq!(
+            base_url_host("HTTPS://LLM-Gateway.Example.com:443/a"),
+            "llm-gateway.example.com"
+        );
+    }
+
+    #[test]
+    fn a_key_is_echoed_by_the_characters_the_vault_labels_it_by() {
+        assert_eq!(api_key_suffix("sk-ant"), None, "too short to store");
+        assert_eq!(
+            api_key_suffix(" sk-gateway-7d1f4c0a2b9e81e5\n").as_deref(),
+            Some("…81e5")
+        );
     }
 
     #[test]

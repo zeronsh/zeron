@@ -942,7 +942,8 @@ export class VaultAccount extends DurableObject<Env> {
       ...(material.idToken ? { idToken: material.idToken } : {}),
       ...(material.account ? { account: material.account } : {}),
       ...(material.scopes ? { scopes: [...material.scopes] } : {}),
-      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {})
+      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {}),
+      ...(material.baseUrl ? { baseUrl: material.baseUrl } : {})
     };
   }
 

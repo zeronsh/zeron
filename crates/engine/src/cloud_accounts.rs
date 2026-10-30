@@ -256,9 +256,17 @@ fn to_agent_account(
         None => (Vec::new(), None, None, None),
     };
     // The vault's `account` is an email for an identified login, else a
-    // label (a Claude login stored without its profile names its plan).
+    // label (a Claude login stored without its profile names its plan; an
+    // API key, its last characters and the host of any gateway it is for).
     let label = account.account.as_deref();
     let label_is_email = label.is_some_and(|l| l.contains('@'));
+    let (key_suffix, gateway) = match label.filter(|_| api_key) {
+        Some(label) => {
+            let (suffix, gateway) = zeron_proto::api_key_label(label);
+            (Some(suffix), gateway)
+        }
+        None => (None, None),
+    };
     AgentAccount {
         id: format!("{}:{}", provider.as_str(), account.slot),
         harness,
@@ -272,7 +280,7 @@ fn to_agent_account(
         },
         plan_label: plan.or_else(|| account.plan.clone()).or_else(|| {
             if api_key {
-                Some(format!("API key {}", label.unwrap_or_default()))
+                key_suffix.map(str::to_string)
             } else {
                 label.filter(|_| !label_is_email).map(plan_name)
             }
@@ -285,7 +293,12 @@ fn to_agent_account(
         } else {
             usage_error
         },
-        display_name: account.display_name.clone(),
+        // A key has no identity of its own: the row names the kind of key,
+        // as Antigravity's rows do.
+        display_name: account
+            .display_name
+            .clone()
+            .or_else(|| api_key.then(|| key_name(provider).to_string())),
         organization: account.organization.clone(),
         auth_kind: Some(if api_key {
             AgentAuthKind::ApiKey
@@ -295,6 +308,15 @@ fn to_agent_account(
         switchable: !reconnect,
         saved_at: Some(account.updated_at),
         provider: None,
+        gateway: gateway.map(str::to_string),
+    }
+}
+
+/// What a Cloud card calls a stored key.
+fn key_name(provider: VaultProvider) -> &'static str {
+    match provider {
+        VaultProvider::OpenaiKey => "OpenAI API key",
+        _ => "Anthropic API key",
     }
 }
 
@@ -532,6 +554,30 @@ mod tests {
         );
         assert_eq!(key.email, None);
         assert_eq!(key.auth_kind, Some(AgentAuthKind::ApiKey));
+        assert_eq!(key.display_name.as_deref(), Some("Anthropic API key"));
+        assert_eq!(key.gateway, None);
+        // A key for a gateway: the vault's label names its host, which the
+        // row shows apart from the key's last characters.
+        let mut gateway = vault("k2", "api-key", true);
+        gateway.plan = None;
+        gateway.account = Some("…abcd · llm-gateway.example.com".into());
+        let gateway = to_agent_account(
+            HarnessId::ClaudeCode,
+            VaultProvider::AnthropicKey,
+            &gateway,
+            true,
+            None,
+        );
+        assert_eq!(gateway.plan_label.as_deref(), Some("…abcd"));
+        assert_eq!(gateway.gateway.as_deref(), Some("llm-gateway.example.com"));
+        let openai = to_agent_account(
+            HarnessId::Codex,
+            VaultProvider::OpenaiKey,
+            &vault("k3", "api-key", false),
+            false,
+            None,
+        );
+        assert_eq!(openai.display_name.as_deref(), Some("OpenAI API key"));
         // A Claude login stored without its profile: its label is the plan.
         let mut bare = vault("a3", "oauth", true);
         bare.email = None;

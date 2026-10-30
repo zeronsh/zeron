@@ -390,6 +390,7 @@ fn demo_accounts() -> AgentAccountsSnapshot {
         switchable: true,
         saved_at: None,
         provider: None,
+        gateway: None,
     };
     let mut accounts = vec![
         account(

@@ -326,9 +326,11 @@ final class CloudStore {
         refreshAccounts()
     }
 
-    func saveKey(_ key: String, for agent: Agent) async throws {
+    /// `baseUrl`: the LLM gateway or proxy an Anthropic key is for (nil or
+    /// empty: Anthropic's own API).
+    func saveKey(_ key: String, baseUrl: String?, for agent: Agent) async throws {
         guard let client else { return }
-        try await client.vaultPutApiKey(provider: agent.key, key: key)
+        try await client.vaultPutApiKey(provider: agent.key, key: key, baseUrl: baseUrl)
         refreshAccounts()
     }
 

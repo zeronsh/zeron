@@ -33,10 +33,11 @@
 //!   rewritten by the background refresher ~10 min before `expiresAt`;
 //!   (2) else a native sandbox login (`claude auth login` wrote a real refresh
 //!   token) is left alone; (3) else an `anthropic-key` grant (the user's own
-//!   API key) becomes `ANTHROPIC_API_KEY`; else the run fails with Claude's
-//!   own not-logged-in error. A native login the grant displaces is backed up
-//!   (`{data_dir}/cloud/claude-native-credentials.json`) and restored when the
-//!   grant goes away.
+//!   API key) becomes `ANTHROPIC_API_KEY`, and the gateway or proxy the key
+//!   is for, if it names one, `ANTHROPIC_BASE_URL`; else the run fails with
+//!   Claude's own not-logged-in error. A native login the grant displaces is
+//!   backed up (`{data_dir}/cloud/claude-native-credentials.json`) and
+//!   restored when the grant goes away.
 //! - **GitHub**: a `github` grant — a one-hour GitHub App installation token
 //!   for the installation on the session repository's owner (the user's own
 //!   GitHub token never leaves the vault) — becomes a git credential store at
@@ -133,6 +134,10 @@ pub struct Grant {
     /// Claude: `pro` / `max` / … as Claude Code records it.
     #[serde(default)]
     pub subscription_type: Option<String>,
+    /// `anthropic-key`: where Claude Code sends its requests instead of
+    /// Anthropic's API (`ANTHROPIC_BASE_URL`).
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub generation: i64,
 }
@@ -517,7 +522,12 @@ impl CredentialBroker {
             },
             HarnessId::ClaudeCode => match self.prepare_claude().await {
                 Some(key) => {
-                    request.env.insert("ANTHROPIC_API_KEY".into(), key);
+                    request
+                        .env
+                        .insert("ANTHROPIC_API_KEY".into(), key.access_token);
+                    if let Some(base_url) = key.base_url {
+                        request.env.insert("ANTHROPIC_BASE_URL".into(), base_url);
+                    }
                 }
                 None if self.claude_has_login() => {}
                 None => return Err(CLAUDE_NOT_SIGNED_IN.into()),
@@ -683,9 +693,10 @@ impl CredentialBroker {
     }
 
     /// Resolve Claude Code's credential for a spawn (see the module docs).
-    /// Returns the `ANTHROPIC_API_KEY` to inject, if that is the resolution;
-    /// a subscription grant goes to the CLI's own credential file instead.
-    pub async fn prepare_claude(&self) -> Option<String> {
+    /// Returns the `anthropic-key` grant to inject (`ANTHROPIC_API_KEY`, and
+    /// its `ANTHROPIC_BASE_URL`), if that is the resolution; a subscription
+    /// grant goes to the CLI's own credential file instead.
+    pub async fn prepare_claude(&self) -> Option<Grant> {
         match self.grant_for_run(VaultProvider::Claude).await {
             GrantOutcome::Granted(grant) => {
                 if self.write_claude_credentials(&grant).await {
@@ -701,7 +712,7 @@ impl CredentialBroker {
             return None;
         }
         match self.grant_for_run(VaultProvider::AnthropicKey).await {
-            GrantOutcome::Granted(grant) => Some(grant.access_token),
+            GrantOutcome::Granted(grant) => Some(grant),
             _ => None,
         }
     }
@@ -1661,6 +1672,7 @@ mod tests {
             account: Some("u@example.com".into()),
             scopes: None,
             subscription_type: None,
+            base_url: None,
             generation: 3,
         }
     }

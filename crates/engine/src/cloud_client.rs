@@ -494,11 +494,14 @@ impl CloudClient {
     }
 
     /// `PUT /vault/{orgId}/credentials/{provider}` with
-    /// `{material: {key}, authorizedDevices}` — the user's own API key.
+    /// `{material: {key, baseUrl?}, authorizedDevices}` — the user's own API
+    /// key, and for an Anthropic key the gateway or proxy it is for
+    /// ([`VaultProvider::api_base_url`]).
     pub async fn put_api_key(
         &self,
         provider: VaultProvider,
         key: &str,
+        base_url: Option<&str>,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
         if !matches!(
@@ -519,12 +522,15 @@ impl CloudClient {
                 "That doesn't look like an API key (it contains spaces).".into(),
             ));
         }
-        self.put_credential(
-            provider,
-            serde_json::json!({ "key": key }),
-            authorized_devices,
-        )
-        .await
+        let mut material = serde_json::json!({ "key": key });
+        if let Some(base_url) = provider
+            .api_base_url(base_url.unwrap_or_default())
+            .map_err(|error| EngineError::Other(error.into()))?
+        {
+            material["baseUrl"] = base_url.into();
+        }
+        self.put_credential(provider, material, authorized_devices)
+            .await
     }
 
     /// `PUT /vault/{orgId}/credentials/codex` with
@@ -826,6 +832,8 @@ struct PutKeyParams {
     provider: VaultProvider,
     key: String,
     #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
     authorized_devices: Vec<String>,
 }
 
@@ -961,7 +969,12 @@ pub(crate) async fn dispatch(
         methods::VAULT_PUT_API_KEY => {
             let p: PutKeyParams = params(raw)?;
             let status = cloud
-                .put_api_key(p.provider, &p.key, p.authorized_devices)
+                .put_api_key(
+                    p.provider,
+                    &p.key,
+                    p.base_url.as_deref(),
+                    p.authorized_devices,
+                )
                 .await
                 .map_err(failed)?;
             // A new key is the account Cloud uses from now on — machines
@@ -1650,42 +1663,89 @@ mod tests {
             .put_api_key(
                 VaultProvider::AnthropicKey,
                 "  sk-ant-secret\n",
+                Some("  "),
                 vec!["cloud-1".into()],
             )
             .await
             .unwrap();
         assert!(saved.available);
-        let put = edge
+        // A key behind a gateway: its base URL rides with it, normalized.
+        client
+            .put_api_key(
+                VaultProvider::AnthropicKey,
+                "sk-ant-secret",
+                Some(" https://llm-gateway.example.com/ "),
+                vec!["cloud-1".into()],
+            )
+            .await
+            .unwrap();
+        let puts: Vec<_> = edge
             .requests()
             .into_iter()
-            .find(|r| r.method == "PUT")
-            .unwrap();
+            .filter(|r| r.method == "PUT")
+            .map(|r| r.body)
+            .collect();
         assert_eq!(
-            put.body,
-            serde_json::json!({
-                "material": {"key": "sk-ant-secret"},
-                "authorizedDevices": ["cloud-1"]
-            })
+            puts,
+            [
+                serde_json::json!({
+                    "material": {"key": "sk-ant-secret"},
+                    "authorizedDevices": ["cloud-1"]
+                }),
+                serde_json::json!({
+                    "material": {"key": "sk-ant-secret", "baseUrl": "https://llm-gateway.example.com"},
+                    "authorizedDevices": ["cloud-1"]
+                }),
+            ]
+        );
+        // The RPC's `baseUrl` (what Settings sends) is the one read.
+        let p: PutKeyParams = serde_json::from_value(serde_json::json!({
+            "provider": "anthropic-key",
+            "key": "sk-ant-secret",
+            "baseUrl": "https://llm-gateway.example.com",
+        }))
+        .unwrap();
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://llm-gateway.example.com")
         );
 
         // Validation happens before any network call.
         let before = edge.requests().len();
-        for (provider, key) in [
-            (VaultProvider::Codex, "sk-1"),
-            (VaultProvider::Github, "ghp_1"),
-            (VaultProvider::AnthropicKey, "   "),
-            (VaultProvider::OpenaiKey, "sk 1"),
+        for (provider, key, base_url) in [
+            (VaultProvider::Codex, "sk-1", None),
+            (VaultProvider::Github, "ghp_1", None),
+            (VaultProvider::AnthropicKey, "   ", None),
+            (VaultProvider::OpenaiKey, "sk 1", None),
+            (
+                VaultProvider::AnthropicKey,
+                "sk-1",
+                Some("http://llm-gateway.example.com"),
+            ),
+            (
+                VaultProvider::AnthropicKey,
+                "sk-1",
+                Some("https://llm-gateway.example.com/v1"),
+            ),
+            (
+                VaultProvider::OpenaiKey,
+                "sk-1",
+                Some("https://api.openai.com"),
+            ),
         ] {
             assert!(
-                client.put_api_key(provider, key, vec![]).await.is_err(),
-                "{provider:?} {key:?} must be refused"
+                client
+                    .put_api_key(provider, key, base_url, vec![])
+                    .await
+                    .is_err(),
+                "{provider:?} {key:?} {base_url:?} must be refused"
             );
         }
         assert_eq!(edge.requests().len(), before);
 
         // Error mapping: edge message, then code/status fallbacks.
         let rejected = client
-            .put_api_key(VaultProvider::OpenaiKey, "sk-bad", vec![])
+            .put_api_key(VaultProvider::OpenaiKey, "sk-bad", None, vec![])
             .await
             .unwrap_err();
         assert_eq!(rejected.to_string(), "That key was rejected by OpenAI.");
@@ -1746,7 +1806,7 @@ mod tests {
             assert!(!client.usage(None, None).await.unwrap().available);
             assert!(!client.vault_status().await.unwrap().available);
             let error = client
-                .put_api_key(VaultProvider::AnthropicKey, "sk-1", vec![])
+                .put_api_key(VaultProvider::AnthropicKey, "sk-1", None, vec![])
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("sign"), "{error}");

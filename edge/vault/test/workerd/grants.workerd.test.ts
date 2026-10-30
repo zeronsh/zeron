@@ -28,6 +28,33 @@ describe("grants", () => {
     expect(grant.expiresAt).toBeGreaterThanOrEqual(before + 60 * 60_000);
   });
 
+  it("grants an Anthropic key's base URL beside it; the same key uploaded again replaces it", async () => {
+    const { userId, caller, device } = await withKey();
+    const gateway = "https://llm-gateway.example.com";
+    const status = value(
+      await vault().putCredential(caller, "anthropic-key", {
+        material: { key: KEY, baseUrl: `${gateway}/` },
+        authorizedDevices: [device.deviceId]
+      })
+    );
+    const connection = status.connections.find((c) => c.provider === "anthropic-key");
+    expect(connection).toMatchObject({ account: "…0001 · llm-gateway.example.com", accounts: 1 });
+    const grant = value(await vault().grant(caller, await signedGrant(device, userId, "anthropic-key")));
+    expect(grant).toMatchObject({ accessToken: KEY, baseUrl: gateway, generation: 2 });
+
+    // Uploaded again without one: back to Anthropic's own API, same account.
+    value(
+      await vault().putCredential(caller, "anthropic-key", {
+        material: { key: KEY },
+        authorizedDevices: [device.deviceId]
+      })
+    );
+    const direct = value(await vault().grant(caller, await signedGrant(device, userId, "anthropic-key")));
+    expect(direct.baseUrl).toBeUndefined();
+    expect(direct.account).toBe("…0001");
+    expect(value(await vault().accounts(caller, "anthropic-key"))).toHaveLength(1);
+  });
+
   it("works end to end through the VaultApi entrypoint (real RPC)", async () => {
     const { userId, caller, device } = await withKey();
     const grant = await exports.VaultApi.grant(caller, await signedGrant(device, userId, "anthropic-key"));

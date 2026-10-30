@@ -16,19 +16,20 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, Context, Entity, Focusable, Hsla, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, prelude::*,
+    px,
 };
 use std::time::Duration;
 
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, CLOUD_ACCOUNTS_DEVICE, HarnessId, VaultProvider,
+    AgentAccount, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode, AgentLoginPoll,
+    AgentLoginStart, AgentLoginStatus, CLOUD_ACCOUNTS_DEVICE, HarnessId, VaultProvider,
 };
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
+use crate::settings::cloud_key::{self, KeyDialog, KeyEndpoint, KeyField};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -251,6 +252,26 @@ pub fn cloud_api_key(harness: HarnessId) -> Option<(VaultProvider, &'static str)
     }
 }
 
+/// `VaultPutApiKey` params for a key saved from a Cloud card: the base URL
+/// only when the key is for a gateway (the engine checks it again,
+/// `VaultProvider::api_base_url`). Pure.
+pub fn api_key_params(
+    provider: VaultProvider,
+    key: &str,
+    base_url: Option<&str>,
+    device: &str,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "provider": provider.as_str(),
+        "key": key,
+        "authorizedDevices": [device],
+    });
+    if let Some(base_url) = base_url {
+        params["baseUrl"] = base_url.into();
+    }
+    params
+}
+
 /// Accounts of one provider, in the engine's order (slot creation). No
 /// active-first re-sort: switching accounts must not move the switched-to
 /// card — the Active badge already says which one is live, and a list that
@@ -275,6 +296,55 @@ pub fn mark_switched(snapshot: &mut AgentAccountsSnapshot, account: &AgentAccoun
             row.active = row.id == account.id;
         }
     }
+}
+
+/// Where a gateway key's requests go, standing where a login's meters
+/// would: the host over what it is, on the meters' two 16px lines so the
+/// row keeps a login's height.
+fn render_gateway(host: &str, ix: usize, theme: &Theme) -> AnyElement {
+    div()
+        .id(("account-gateway", ix))
+        .w(px(USAGE_COLUMN_WIDTH))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .tooltip(widgets::text_tooltip(format!(
+            "Claude Code sends this key's requests to {host}"
+        )))
+        .child(
+            div()
+                .h(px(16.0))
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    crate::icons::icon(crate::icons::GLOBAL)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(host.to_string())),
+                ),
+        )
+        .child(
+            div()
+                .h(px(16.0))
+                .pl(px(19.0))
+                .flex()
+                .items_center()
+                .text_size(crate::typography::ui_rems(11.5))
+                .text_color(theme.text_muted)
+                .child("LLM gateway"),
+        )
+        .into_any_element()
 }
 
 /// One mini meter line of the usage column: label, a short bar, percent.
@@ -402,16 +472,6 @@ impl LoginFlow {
     }
 }
 
-/// Cloud's inline API-key field under a provider's accounts.
-struct ApiKeyEntry {
-    harness: HarnessId,
-    input: Entity<ComposerInput>,
-    saving: bool,
-    error: Option<SharedString>,
-    focus_pending: bool,
-    _events: Subscription,
-}
-
 /// The last accounts list per target device (`None` = this device), shared
 /// by every accounts view so a re-opened Settings paints instantly and
 /// revalidates in place instead of flashing a skeleton.
@@ -441,7 +501,8 @@ pub struct AccountsPage {
     row_menu: popover::Popup<String>,
     login: Option<LoginFlow>,
     login_attempts: u64,
-    api_key: Option<ApiKeyEntry>,
+    /// Cloud's "Add … API key" dialog, while open.
+    api_key: Option<KeyDialog>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
@@ -1050,34 +1111,49 @@ impl AccountsPage {
 
     // ---- Cloud API keys ----
 
+    /// Open the card's "Add … API key" dialog ([`cloud_key`]).
     fn open_api_key(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        let Some((_, label)) = cloud_api_key(harness) else {
+        let Some((provider, _)) = cloud_api_key(harness) else {
             return;
         };
-        let input = cx.new(|cx| {
-            ComposerInput::new(label, cx)
-                .with_single_line()
-                .with_masked()
-        });
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.save_api_key(cx);
-            }
-        });
-        self.api_key = Some(ApiKeyEntry {
-            harness,
-            input,
-            saving: false,
-            error: None,
-            focus_pending: true,
-            _events: events,
-        });
+        self.api_key = Some(KeyDialog::open(provider, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_api_key(&mut self, cx: &mut Context<Self>) {
+        if self.api_key.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Where the key's requests go; a gateway's base URL takes the keyboard.
+    pub(crate) fn choose_key_endpoint(&mut self, endpoint: KeyEndpoint, cx: &mut Context<Self>) {
+        let Some(dialog) = self.api_key.as_mut().filter(|dialog| !dialog.saving) else {
+            return;
+        };
+        if dialog.endpoint != endpoint {
+            dialog.endpoint = endpoint;
+            dialog.error = None;
+            dialog.focus = Some(match endpoint {
+                KeyEndpoint::Gateway => KeyField::BaseUrl,
+                KeyEndpoint::Direct => KeyField::Key,
+            });
+        }
+        cx.notify();
+    }
+
+    /// A keystroke in the dialog: the last Save's complaint is about text
+    /// that just changed, so it goes; the live checks repaint.
+    pub(crate) fn api_key_edited(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.api_key.as_mut() {
+            dialog.error = None;
+        }
         cx.notify();
     }
 
     /// Store the key for Cloud. It becomes the card's active account, so
     /// Cloud machines use it from their next turn.
-    fn save_api_key(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_api_key(&mut self, cx: &mut Context<Self>) {
         let (engine, device) = {
             let state = self.state.read(cx);
             let device = state
@@ -1087,35 +1163,34 @@ impl AccountsPage {
                 .or_else(|| state.cloud_account_device().map(|d| d.id.clone()));
             (state.engine().cloned(), device)
         };
-        let Some(entry) = self.api_key.as_mut() else {
+        let Some(dialog) = self.api_key.as_ref() else {
             return;
         };
-        if entry.saving {
+        if dialog.saving {
             return;
         }
-        let Some((provider, _)) = cloud_api_key(entry.harness) else {
-            return;
-        };
-        let key = entry.input.read(cx).text().trim().to_string();
-        let problem = if key.is_empty() {
-            Some("Paste a key first.")
-        } else if device.is_none() {
-            Some("Turn Cloud on in Settings → Cloud first.")
-        } else {
-            None
-        };
-        let (Some(engine), Some(device), None) = (engine, device, problem) else {
-            entry.error = problem.map(Into::into);
-            cx.notify();
-            return;
-        };
-        entry.saving = true;
-        entry.error = None;
-        let params = serde_json::json!({
-            "provider": provider.as_str(),
-            "key": key,
-            "authorizedDevices": [device],
+        let provider = dialog.provider;
+        let submission = dialog.submission(cx).and_then(|submission| {
+            device
+                .clone()
+                .map(|device| (submission, device))
+                .ok_or("Turn Cloud on in Settings → Cloud first.")
         });
+        let Some(dialog) = self.api_key.as_mut() else {
+            return;
+        };
+        let (engine, ((key, base_url), device)) = match (engine, submission) {
+            (Some(engine), Ok(submission)) => (engine, submission),
+            (None, Ok(_)) => return,
+            (_, Err(why)) => {
+                dialog.error = Some(why.into());
+                cx.notify();
+                return;
+            }
+        };
+        dialog.saving = true;
+        dialog.error = None;
+        let params = api_key_params(provider, &key, base_url.as_deref(), &device);
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -1128,9 +1203,9 @@ impl AccountsPage {
                         page.load(force_usage_for(LoadTrigger::PostAction), cx);
                     }
                     Err(error) => {
-                        if let Some(entry) = page.api_key.as_mut() {
-                            entry.saving = false;
-                            entry.error = Some(error.to_string().into());
+                        if let Some(dialog) = page.api_key.as_mut() {
+                            dialog.saving = false;
+                            dialog.error = Some(error.to_string().into());
                         }
                     }
                 }
@@ -1139,76 +1214,6 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
-    }
-
-    /// The masked key field, under the card's add row.
-    fn render_api_key_entry(
-        &self,
-        harness: HarnessId,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let entry = self.api_key.as_ref().filter(|e| e.harness == harness)?;
-        let saving = entry.saving;
-        Some(
-            div()
-                .pb(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(div().flex_1().min_w(px(160.0)).child(popover::dialog_field(
-                            entry.input.clone().into_any_element(),
-                        )))
-                        .child(
-                            widgets::action_button(theme, widgets::ActionTone::Quiet)
-                                .id("accounts-api-key-cancel")
-                                .role(gpui::Role::Button)
-                                .tab_index(0)
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                .on_click(cx.listener(|page, _, _, cx| {
-                                    page.api_key = None;
-                                    cx.notify();
-                                }))
-                                .child("Cancel"),
-                        )
-                        .child(
-                            widgets::action_button(theme, widgets::ActionTone::Solid)
-                                .id("accounts-api-key-save")
-                                .role(gpui::Role::Button)
-                                .tab_index(0)
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                .when(saving, |el| el.opacity(0.5))
-                                .when(!saving, |el| {
-                                    el.on_click(cx.listener(|page, _, _, cx| page.save_api_key(cx)))
-                                })
-                                .child(if saving { "Saving…" } else { "Save key" }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "Stored encrypted in your account for Cloud. It becomes the account \
-                             Cloud machines use.",
-                        )),
-                )
-                .when_some(entry.error.clone(), |el, error| {
-                    el.child(
-                        div()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.danger_muted.opacity(0.9))
-                            .child(error),
-                    )
-                })
-                .into_any_element(),
-        )
     }
 
     /// Sign in with the provider's first option (a failed run's "Log in").
@@ -1304,10 +1309,18 @@ impl AccountsPage {
                 .as_deref()
                 .is_none_or(|email| !org.starts_with(email))
         });
-        let mut meta: Vec<AnyElement> = [account.plan_label.clone(), organization]
+        let api_key = account.auth_kind == Some(AgentAuthKind::ApiKey);
+        // A key's label is its last characters (`…81e5`): set in the key's
+        // monospace, it reads as part of a key rather than as prose.
+        let plan = account.plan_label.clone().map(|plan| {
+            div()
+                .when(api_key, |el| el.font_family(theme.font_mono.clone()))
+                .child(SharedString::from(plan))
+                .into_any_element()
+        });
+        let mut meta: Vec<AnyElement> = plan
             .into_iter()
-            .flatten()
-            .map(|fragment| div().child(SharedString::from(fragment)).into_any_element())
+            .chain(organization.map(|org| div().child(SharedString::from(org)).into_any_element()))
             .collect();
         if account.active {
             meta.push(
@@ -1318,9 +1331,15 @@ impl AccountsPage {
             );
         }
         // Meters XOR the reason they're missing — the reason joins the meta
-        // line, so a failed probe never changes the row's height.
-        let usage: AnyElement = if account.usage_windows.is_empty() {
-            meta.extend(self.render_usage_missing(account, theme));
+        // line, so a failed probe never changes the row's height. A key has
+        // no plan usage to miss: a gateway key shows where its requests go
+        // in the meters' place instead, any other key nothing at all.
+        let usage: AnyElement = if let Some(host) = account.gateway.as_ref().filter(|_| api_key) {
+            render_gateway(host, ix, theme)
+        } else if account.usage_windows.is_empty() {
+            if !api_key || account.usage_error.is_some() {
+                meta.extend(self.render_usage_missing(account, theme));
+            }
             div()
                 .w(px(USAGE_COLUMN_WIDTH))
                 .flex_none()
@@ -1345,14 +1364,29 @@ impl AccountsPage {
                 .into_any_element()
         };
 
-        // Avatar: the account's initial on a soft disc; the live account gets
-        // an accent ring with a hairline of air between ring and disc.
-        let initial: SharedString = email
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
+        // Avatar: the account's initial on a soft disc — a key's glyph for a
+        // key, which has no name to take an initial from; the live account
+        // gets an accent ring with a hairline of air between ring and disc.
+        let ink = if account.active {
+            theme.text
+        } else {
+            theme.text_muted
+        };
+        let mark: AnyElement = if api_key {
+            crate::icons::icon(crate::icons::KEY_MINIMALISTIC)
+                .size(px(13.0))
+                .text_color(ink)
+                .into_any_element()
+        } else {
+            SharedString::from(
+                email
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_else(|| "?".into()),
+            )
+            .into_any_element()
+        };
         let avatar = div()
             .flex_none()
             .size(px(32.0))
@@ -1376,12 +1410,8 @@ impl AccountsPage {
                     .justify_center()
                     .text_size(crate::typography::ui_rems(11.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if account.active {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .child(initial),
+                    .text_color(ink)
+                    .child(mark),
             );
 
         let menu_open = self.row_menu.get() == Some(&account.id);
@@ -1882,8 +1912,7 @@ impl AccountsPage {
                     let api_key = self
                         .targets_cloud()
                         .then(|| cloud_api_key(harness))
-                        .flatten()
-                        .filter(|_| self.api_key.is_none());
+                        .flatten();
                     let add_row = (empty || !keeps_one_login(harness)).then(|| {
                         div()
                             .py(px(8.0))
@@ -1941,7 +1970,6 @@ impl AccountsPage {
                         .flex_col()
                         .children(rows)
                         .children(add_row)
-                        .children(self.render_api_key_entry(harness, theme, cx))
                         .into_any_element()
                 }
             };
@@ -2019,12 +2047,18 @@ impl Render for AccountsPage {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
-        let dialog = self.render_login_dialog(window.viewport_size(), cx);
-        if let Some(entry) = self.api_key.as_mut()
-            && std::mem::take(&mut entry.focus_pending)
+        if let Some(dialog) = self.api_key.as_mut()
+            && let Some(field) = dialog.focus.take()
+            && let Some(handle) = dialog.focus_handle(field, cx)
         {
-            window.focus(&entry.input.focus_handle(cx), cx);
+            window.focus(&handle, cx);
         }
+        let viewport = window.viewport_size();
+        let dialog = self.render_login_dialog(viewport, cx).or_else(|| {
+            self.api_key
+                .as_ref()
+                .map(|dialog| cloud_key::render_dialog(dialog, viewport, window, cx))
+        });
         if let Some(harness) = self.embedded_harness {
             return self.render_embedded_provider(harness, &theme, now, dialog, cx);
         }
@@ -2350,6 +2384,69 @@ impl Render for AccountsPage {
     }
 }
 
+/// The API-key dialog as a fixture scene opens it (`cloud-api-key-fixture`).
+#[cfg(feature = "cloud-api-key-fixture")]
+pub struct KeyDialogScene {
+    pub harness: HarnessId,
+    pub key: &'static str,
+    /// The gateway endpoint, with this typed as its base URL.
+    pub gateway: Option<&'static str>,
+    /// The field holding the keyboard.
+    pub focus_base_url: bool,
+    pub saving: bool,
+    pub error: Option<&'static str>,
+}
+
+/// Fixture hooks (`cloud-api-key-fixture`): Cloud's card holding
+/// `accounts`, its API-key dialog open as `dialog` describes.
+#[cfg(feature = "cloud-api-key-fixture")]
+impl AccountsPage {
+    pub fn fixture_cloud_api_key(
+        &mut self,
+        accounts: Vec<AgentAccount>,
+        dialog: Option<KeyDialogScene>,
+        cx: &mut Context<Self>,
+    ) {
+        self.snapshot = Loadable::Ready(AgentAccountsSnapshot {
+            accounts,
+            warnings: Vec::new(),
+        });
+        self.api_key = None;
+        if let Some(scene) = dialog {
+            self.open_api_key(scene.harness, cx);
+            if let Some(gateway) = scene.gateway {
+                self.choose_key_endpoint(KeyEndpoint::Gateway, cx);
+                if let Some(field) = self.api_key.as_ref().and_then(|d| d.base_url.clone()) {
+                    field.update(cx, |field, cx| field.set_text(gateway, cx));
+                }
+            }
+            if let Some(dialog) = self.api_key.as_mut() {
+                dialog
+                    .key
+                    .update(cx, |input, cx| input.set_text(scene.key, cx));
+                dialog.focus = Some(if scene.focus_base_url {
+                    KeyField::BaseUrl
+                } else {
+                    KeyField::Key
+                });
+                dialog.saving = scene.saving;
+            }
+            // After the typing's own edit events, which clear any error.
+            let error = scene.error.map(SharedString::from);
+            let page = cx.entity();
+            cx.defer(move |cx| {
+                page.update(cx, |page, cx| {
+                    if let Some(dialog) = page.api_key.as_mut() {
+                        dialog.error = error;
+                    }
+                    cx.notify();
+                })
+            });
+        }
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2548,6 +2645,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: provider.map(str::to_string),
+            gateway: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2700,6 +2798,7 @@ mod tests {
             switchable,
             saved_at: None,
             provider: Some("openai".into()),
+            gateway: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2738,11 +2837,13 @@ mod tests {
             .unwrap();
     }
 
-    /// Cloud's cards take an API key beside sign-ins; the key field refuses
-    /// an empty key and a Cloud that isn't on, and the sign-in says where the
-    /// login goes.
+    /// Cloud's cards take an API key beside sign-ins, in a dialog of its
+    /// own: an Anthropic key may go to a gateway, whose base URL is held to
+    /// the engine's rules before Save; Save refuses an empty key and a Cloud
+    /// that isn't on; a saved gateway key's row says where it goes; and the
+    /// sign-in says where the login goes.
     #[gpui::test]
-    fn cloud_cards_add_api_keys_inline(cx: &mut gpui::TestAppContext) {
+    fn cloud_cards_add_api_keys_in_a_dialog(cx: &mut gpui::TestAppContext) {
         assert_eq!(
             cloud_api_key(HarnessId::ClaudeCode).map(|(p, _)| p),
             Some(VaultProvider::AnthropicKey)
@@ -2752,7 +2853,28 @@ mod tests {
             Some(VaultProvider::OpenaiKey)
         );
         assert_eq!(cloud_api_key(HarnessId::Cursor), None);
+        assert_eq!(
+            api_key_params(
+                VaultProvider::AnthropicKey,
+                "sk-ant-test",
+                Some("https://llm-gateway.example.com"),
+                "cloud-1"
+            ),
+            serde_json::json!({"provider": "anthropic-key", "key": "sk-ant-test",
+                "baseUrl": "https://llm-gateway.example.com", "authorizedDevices": ["cloud-1"]})
+        );
+        assert_eq!(
+            api_key_params(VaultProvider::AnthropicKey, "sk-ant-test", None, "cloud-1"),
+            serde_json::json!({"provider": "anthropic-key", "key": "sk-ant-test",
+                "authorizedDevices": ["cloud-1"]}),
+            "Anthropic's own API sends no base URL"
+        );
         let window = page(cx);
+        let error = |page: &AccountsPage| {
+            page.api_key
+                .as_ref()
+                .and_then(|dialog| dialog.error.as_deref().map(str::to_string))
+        };
         window
             .update(cx, |page, _, cx| {
                 page.set_target_device(Some(CLOUD_ACCOUNTS_DEVICE.into()), cx);
@@ -2763,32 +2885,78 @@ mod tests {
                         id: "anthropic-key:a1".into(),
                         harness: HarnessId::ClaudeCode,
                         email: None,
-                        plan_label: Some("API key …abcd".into()),
+                        plan_label: Some("…abcd".into()),
                         active: true,
                         usage_windows: vec![],
                         usage_fetched_at: None,
                         usage_error: None,
-                        display_name: None,
+                        display_name: Some("Anthropic API key".into()),
                         organization: None,
                         auth_kind: Some(zeron_proto::AgentAuthKind::ApiKey),
                         switchable: true,
                         saved_at: None,
                         provider: None,
+                        gateway: Some("llm-gateway.example.com".into()),
                     }],
                     warnings: vec![],
                 });
-                page.open_api_key(HarnessId::ClaudeCode, cx);
-                page.save_api_key(cx);
-                assert_eq!(
-                    page.api_key.as_ref().and_then(|e| e.error.as_deref()),
-                    Some("Paste a key first.")
+                page.open_api_key(HarnessId::Codex, cx);
+                assert!(
+                    page.api_key.as_ref().unwrap().base_url.is_none(),
+                    "an OpenAI key takes no base URL"
                 );
-                let input = page.api_key.as_ref().unwrap().input.clone();
-                input.update(cx, |input, cx| input.set_text("sk-ant-test", cx));
+                page.open_api_key(HarnessId::ClaudeCode, cx);
+                let dialog = page.api_key.as_ref().unwrap();
+                assert!(dialog.base_url.is_some());
+                assert_eq!(
+                    dialog.endpoint,
+                    KeyEndpoint::Direct,
+                    "Anthropic's API first"
+                );
+                assert_eq!(dialog.focus, Some(KeyField::Key));
+                page.save_api_key(cx);
+                assert_eq!(error(page).as_deref(), Some("Paste a key first."));
+                let key = page.api_key.as_ref().unwrap().key.clone();
+                key.update(cx, |input, cx| input.set_text("sk-ant-test", cx));
                 page.save_api_key(cx);
                 assert_eq!(
-                    page.api_key.as_ref().and_then(|e| e.error.as_deref()),
+                    error(page).as_deref(),
                     Some("Turn Cloud on in Settings → Cloud first.")
+                );
+
+                // A gateway: its base URL takes the keyboard, and Save
+                // holds out for one the engine would keep.
+                page.choose_key_endpoint(KeyEndpoint::Gateway, cx);
+                let dialog = page.api_key.as_ref().unwrap();
+                assert_eq!(dialog.focus, Some(KeyField::BaseUrl));
+                assert_eq!(dialog.error, None, "a new choice drops the old complaint");
+                assert_eq!(
+                    dialog.base_url_check(cx),
+                    Some(zeron_proto::BaseUrlCheck::Empty)
+                );
+                page.save_api_key(cx);
+                assert!(error(page).unwrap().contains("base URL"));
+                let base_url = page.api_key.as_ref().unwrap().base_url.clone().unwrap();
+                base_url.update(cx, |input, cx| {
+                    input.set_text("http://llm-gateway.example.com", cx)
+                });
+                page.save_api_key(cx);
+                assert!(error(page).unwrap().contains("https://"));
+                base_url.update(cx, |input, cx| {
+                    input.set_text(" https://llm-gateway.example.com/ ", cx)
+                });
+                assert_eq!(
+                    page.api_key.as_ref().unwrap().submission(cx),
+                    Ok((
+                        "sk-ant-test".into(),
+                        Some("https://llm-gateway.example.com".into())
+                    ))
+                );
+                // Back to Anthropic's API: the typed URL stays out of it.
+                page.choose_key_endpoint(KeyEndpoint::Direct, cx);
+                assert_eq!(
+                    page.api_key.as_ref().unwrap().submission(cx),
+                    Ok(("sk-ant-test".into(), None))
                 );
                 page.login = Some(waiting(HarnessId::ClaudeCode, 1));
             })
@@ -2797,7 +2965,18 @@ mod tests {
             .unwrap();
         window
             .update(cx, |page, _, cx| {
-                assert!(page.dismiss_on_escape(cx), "escape closes the key field");
+                page.login = None;
+                page.choose_key_endpoint(KeyEndpoint::Gateway, cx);
+                assert!(page.api_key.is_some());
+            })
+            .unwrap();
+        // The dialog itself paints — its route preview too — over the card
+        // and its gateway row.
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |page, _, cx| {
+                assert!(page.dismiss_on_escape(cx), "escape closes the dialog");
                 assert!(page.api_key.is_none());
             })
             .unwrap();
@@ -2856,6 +3035,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: None,
+            gateway: None,
         };
         let snapshot = AgentAccountsSnapshot {
             accounts: vec![
