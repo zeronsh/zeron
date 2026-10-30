@@ -21,7 +21,9 @@ pub(crate) struct LossyLines<R> {
 impl<R: AsyncRead + Unpin> LossyLines<R> {
     pub(crate) fn new(reader: R) -> Self {
         Self {
-            reader: BufReader::new(reader),
+            // Bigger than a typical stream-json line, so a refill is not one
+            // read per line. The default is 8 KiB.
+            reader: BufReader::with_capacity(64 * 1024, reader),
             pending: Vec::new(),
         }
     }
