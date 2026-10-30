@@ -349,6 +349,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -363,6 +364,7 @@ async fn kill_crash_recovers_resume_from_journal_and_stamps_aborted() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         store
@@ -786,6 +788,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         doc.push_message(&SessionMessageEntry {
@@ -800,6 +803,7 @@ async fn fresh_crash_auto_resumes_and_notes_the_interruption() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         store
@@ -924,6 +928,7 @@ async fn a_crash_before_the_reply_reached_disk_still_auto_resumes() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         store
@@ -1024,6 +1029,7 @@ async fn a_crash_recovers_the_conversation_through_a_symlinked_folder() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
         .unwrap();
         store

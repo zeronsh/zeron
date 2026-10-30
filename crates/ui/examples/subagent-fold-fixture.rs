@@ -58,6 +58,7 @@ fn entries(device: &str) -> Vec<SessionMessageEntry> {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         },
         SessionMessageEntry {
             id: "a1".into(),
@@ -81,6 +82,7 @@ fn entries(device: &str) -> Vec<SessionMessageEntry> {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         },
     ]
 }

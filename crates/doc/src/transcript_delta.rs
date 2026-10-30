@@ -169,6 +169,8 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         || prev.device_id != next.device_id
         || prev.status != next.status
         || prev.continuation_of != next.continuation_of
+        || prev.duration_ms != next.duration_ms
+        || prev.finished_at != next.finished_at
         || prev.parts.len() != next.parts.len()
     {
         return None;
@@ -361,6 +363,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
@@ -416,6 +419,23 @@ mod tests {
             other => panic!("expected delta, got {other:?}"),
         }
         apply(&[a.clone(), b0], &[a, b1]);
+    }
+
+    #[test]
+    fn a_settling_tick_is_never_a_bare_text_append() {
+        // The final flush grows the text AND stamps the turn's end; a
+        // text-only append would drop `finishedAt` on the wire.
+        let b0 = entry("b", "almost");
+        let mut b1 = entry("b", "almost done");
+        b1.finished_at = Some(4_000);
+        match diff_transcript(&[b0.clone()], &[b1.clone()]) {
+            TranscriptFrame::Delta { upsert, append, .. } => {
+                assert!(append.is_empty(), "the end travels as an upsert");
+                assert_eq!(upsert.len(), 1);
+            }
+            other => panic!("expected delta, got {other:?}"),
+        }
+        apply(&[b0], &[b1]);
     }
 
     #[test]
@@ -545,6 +565,7 @@ mod context_update_tests {
             status: Some(crate::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));

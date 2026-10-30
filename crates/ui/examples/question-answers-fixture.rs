@@ -140,6 +140,7 @@ fn transcript(device: &str) -> Vec<SessionMessageEntry> {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
     vec![
         entry(

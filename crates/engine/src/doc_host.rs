@@ -898,6 +898,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
     }
 
@@ -941,6 +942,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })?;
         self.doc.mark_provider_switched()?;
         Ok(true)
@@ -977,7 +979,7 @@ impl ChatDocHandle {
                     .doc
                     .set_message_status(&entry.id, MessageStatus::Aborted)?
             {
-                let part_id = format!("{}-recovery", entry.id);
+                let part_id = zeron_doc::recovery_part_id(&entry.id);
                 if let Err(err) = self.doc.append_error_part(&entry.id, &part_id, note) {
                     tracing::warn!(chat = %self.chat_id, error = %err, "recovery note append failed");
                 }
@@ -6270,6 +6272,7 @@ mod transfer_progress_tests {
                     status: None,
                     continuation_of: None,
                     duration_ms: None,
+                    finished_at: None,
                 })
                 .unwrap();
         }
