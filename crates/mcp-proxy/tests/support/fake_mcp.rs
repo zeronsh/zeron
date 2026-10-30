@@ -142,6 +142,11 @@ async fn main() {
                         .await
                         .unwrap();
                 }
+                if name == env("FAKE_DETACHED_REQUEST_ON") {
+                    let server_id = format!("detached:{}", sampling.len());
+                    sampling.insert(server_id.clone(), Value::Null);
+                    tx.send(json!({"jsonrpc":"2.0","id":server_id,"method":"sampling/createMessage","params":{"messages":[],"maxTokens":10}})).await.unwrap();
+                }
                 if name == env("FAKE_SAMPLING_ON") {
                     let server_id = format!("sample:{}", sampling.len());
                     sampling.insert(server_id.clone(), id);
@@ -158,6 +163,9 @@ async fn main() {
             }
             "" => {
                 if let Some(original) = sampling.remove(id.as_str().unwrap_or("")) {
+                    if original.is_null() {
+                        continue;
+                    }
                     tx.send(reply(original, json!({"content":[{"type":"text","text":v["result"].to_string()}],"isError":false}))).await.unwrap();
                 }
                 continue;

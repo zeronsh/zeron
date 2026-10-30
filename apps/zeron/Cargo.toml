@@ -25,6 +25,7 @@ zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 zeron-mcp.workspace = true
+zeron-mcp-proxy.workspace = true
 zeron-notify.workspace = true
 tokio.workspace = true
 clap.workspace = true

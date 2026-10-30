@@ -13585,6 +13585,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-mcp",
+ "zeron-mcp-proxy",
  "zeron-notify",
  "zeron-rpc",
  "zeron-ui",
@@ -13755,6 +13756,20 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-visual",
+]
+
+[[package]]
+name = "zeron-mcp-proxy"
+version = "0.2.130"
+dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

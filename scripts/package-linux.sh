@@ -23,9 +23,11 @@ TARBALL="$STAGE.tar.gz"
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
   cargo build --release -p zeron
+  cargo build --release -p zeron-mcp-proxy --bin zeron-mcp-proxy
   BIN="$ROOT/target/release/zeron"
 else
   cargo build -p zeron
+  cargo build -p zeron-mcp-proxy --bin zeron-mcp-proxy
   BIN="$ROOT/target/debug/zeron"
 fi
 # The background engine the app starts: sessions keep running with the app
@@ -36,6 +38,7 @@ rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/zeron"
 install -m 755 "$ENGINE_BIN" "$STAGE/zeron-engine"
+install -m 755 "$(dirname "$BIN")/zeron-mcp-proxy" "$STAGE/zeron-mcp-proxy"
 install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"

@@ -23,10 +23,12 @@ APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
 cargo build --release -p zeron
+cargo build --release -p zeron-mcp-proxy --bin zeron-mcp-proxy
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+install -m 755 "$ROOT/target/release/zeron-mcp-proxy" "$APP/Contents/MacOS/zeron-mcp-proxy"
 # The background engine the app starts (sessions keep running with the app
 # closed); its own process, named for Activity Monitor.
 install -m 755 "$ROOT/target/release/zeron-engine" "$APP/Contents/MacOS/Zeron Engine"
@@ -56,6 +58,7 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # (No --deep: Apple deprecated it. Nested code is signed first, inside out:
   # the engine, then the bundle that seals it.)
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.engine "$APP/Contents/MacOS/Zeron Engine"
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" --identifier sh.zeron.app.mcp-proxy "$APP/Contents/MacOS/zeron-mcp-proxy"
   codesign --entitlements "$ROOT/dist/macos/Zeron.entitlements" --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still

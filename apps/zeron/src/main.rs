@@ -58,6 +58,12 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Lazily launch and proxy one stdio MCP server.
+    #[command(disable_help_flag = true)]
+    McpProxy {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -93,6 +99,11 @@ fn main() -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     attach_parent_console();
+    // Preserve the command's literal `--` and avoid loading app logging before
+    // replacing this image with the small packaged proxy.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("mcp-proxy")) {
+        return zeron_app::run_mcp_proxy(std::env::args().skip(2).collect());
+    }
     let cli = Cli::parse();
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
@@ -116,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         zeron_app::init_logging(
             long_running,
             mode,
-            matches!(&cli.command, Some(Command::Mcp)),
+            matches!(&cli.command, Some(Command::Mcp | Command::McpProxy { .. })),
         );
     }
     if long_running {
@@ -154,6 +165,7 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(quiesce_cli(config.ipc_port, &config.data_dir))
         }
         Some(Command::Mcp) => zeron_app::run_mcp(),
+        Some(Command::McpProxy { args }) => zeron_app::run_mcp_proxy(args),
         Some(Command::Engine) => zeron_app::background::run(),
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
