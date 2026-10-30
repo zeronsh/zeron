@@ -50,7 +50,7 @@
       { "name": "CLOUD_ACCOUNTS", "class_name": "CloudAccount" },
       // index1 — every user who ever had Cloud (billing walk list).
       { "name": "CLOUD_INDEX", "class_name": "CloudIndex" },
-      // users1 — every WorkOS user's profile + join date (user-directory.ts).
+      // users1 — every WorkOS user and organization (user-directory.ts).
       { "name": "USER_DIRECTORY", "class_name": "UserDirectory" }
     ]
   },
@@ -127,10 +127,13 @@
     //                           user/org ids (comma or space separated). Unset ⇒
     //                           nobody. A secret so it changes without a deploy.
     //   ADMIN_TOKEN             operator bearer for GET /admin/cloud/usage and
-    //                           GET /admin/users (unset ⇒ those routes 404)
+    //                           GET /admin/users, /admin/organizations (unset ⇒
+    //                           those routes 404)
     //   WORKOS_WEBHOOK_SECRET   signing secret of the WorkOS webhook endpoint
     //                           https://<edge>/workos/webhook, subscribed to
-    //                           user.created, user.updated, user.deleted
+    //                           user.created, user.updated, user.deleted,
+    //                           organization.created/updated/deleted,
+    //                           organization_membership.created/updated/deleted
     //   STRIPE_SECRET_KEY       Stripe API key (billing; src/cloud/stripe.ts)
     //   STRIPE_WEBHOOK_SECRET   signing secret of the webhook endpoint
     //                           https://<edge>/stripe/webhook, subscribed to

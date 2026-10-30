@@ -49,8 +49,9 @@
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
  *
  * User directory (user-directory.ts):
- *   POST /workos/webhook                — pre-bearer, WorkOS-signed user.* events
+ *   POST /workos/webhook                — pre-bearer, WorkOS-signed user, org and membership events
  *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
+ *   GET  /admin/organizations[?format=csv] — ADMIN_TOKEN (every org with its members)
  *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
  *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
  */
