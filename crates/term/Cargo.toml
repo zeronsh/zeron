@@ -7,6 +7,12 @@ publish.workspace = true
 
 # The terminal emulator core without a renderer — alacritty's Term + vte as a
 # pure state machine, plus local echo prediction. The desktop panel and the
-# mobile core both paint it.
+# mobile core both paint it. With `ghostty`, the desktop's emulator on
+# Ghostty's libghostty-vt sits beside it (`zeron_term::ghostty`); the mobile
+# apps keep alacritty's, which is `Send` and builds for Android.
+[features]
+ghostty = ["dep:ghostty-vt"]
+
 [dependencies]
 alacritty_terminal.workspace = true
+ghostty-vt = { workspace = true, optional = true }
