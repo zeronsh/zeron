@@ -359,6 +359,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--self"]),
             manual_command: "pi update --self",
         },
+        HarnessId::Omp => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("@oh-my-pi/pi-coding-agent"),
+            update_args: Some(&["update"]),
+            manual_command: "omp update",
+        },
         HarnessId::Opencode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Opencode,
@@ -1573,11 +1579,14 @@ impl HarnessUpdateCoordinator {
                 }
             }
             UpdatePlan::MuseLauncher(launcher) => match self.begin_install(harness, &cancel) {
-                Ok(()) => {
-                    run_command_output_env(&launcher, &["--version"], UPDATE_TIMEOUT, MUSE_UPDATE_ENV)
-                        .await
-                        .map(drop)
-                }
+                Ok(()) => run_command_output_env(
+                    &launcher,
+                    &["--version"],
+                    UPDATE_TIMEOUT,
+                    MUSE_UPDATE_ENV,
+                )
+                .await
+                .map(drop),
                 Err(error) => Err(error),
             },
             UpdatePlan::Homebrew(package) => match resolve_brew(&package.brew) {
@@ -2971,7 +2980,8 @@ fn is_muse_launcher(path: &Path) -> bool {
         return false;
     }
     let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    std::fs::metadata(&real).is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 128 * 1024)
+    std::fs::metadata(&real)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 128 * 1024)
         && std::fs::read(&real).is_ok_and(|bytes| {
             let text = String::from_utf8_lossy(&bytes);
             text.contains("muse-code/launcher-") && text.contains("MUSE_SYNC_UPDATE")
@@ -3341,6 +3351,16 @@ esac
             provider(HarnessId::Pi).latest,
             LatestSource::Npm("@earendil-works/pi-coding-agent")
         ));
+    }
+
+    #[test]
+    fn omp_checks_its_own_package_and_updates_itself() {
+        let spec = provider(HarnessId::Omp);
+        assert!(matches!(
+            spec.latest,
+            LatestSource::Npm("@oh-my-pi/pi-coding-agent")
+        ));
+        assert_eq!(spec.update_args, Some(&["update"][..]));
     }
 
     #[test]

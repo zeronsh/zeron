@@ -28,6 +28,9 @@ pub enum HarnessId {
     /// Meta's Muse Code agent, driven natively over the Muse Session Protocol
     /// (MSP: `muse` speaking JSON-RPC on stdio).
     Muse,
+    /// Oh My Pi (omp.sh), the Pi fork, driven over its native JSONL RPC
+    /// dialect (`omp --mode rpc-ui`).
+    Omp,
     /// Test harness; never shown in production pickers.
     Mock,
 }
@@ -46,6 +49,7 @@ impl HarnessId {
         HarnessId::Opencode,
         HarnessId::Antigravity,
         HarnessId::Muse,
+        HarnessId::Omp,
         HarnessId::Mock,
     ];
 
@@ -63,6 +67,7 @@ impl HarnessId {
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Muse => "muse",
+            HarnessId::Omp => "omp",
             HarnessId::Mock => "mock",
         }
     }

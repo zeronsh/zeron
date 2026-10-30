@@ -1052,6 +1052,7 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
     (zeron_proto::HarnessId::Hermes, "Hermes"),
     (zeron_proto::HarnessId::Fx, "fx"),
     (zeron_proto::HarnessId::Pi, "Pi"),
+    (zeron_proto::HarnessId::Omp, "Oh My Pi"),
     (zeron_proto::HarnessId::Opencode, "OpenCode"),
 ];
 
