@@ -1,16 +1,12 @@
 //! The Pull requests route's side pane: opened pull requests as tabs beside
-//! the board, so the list stays in view while one is inspected.
+//! the board, so the list stays in view while one is inspected. It is the
+//! route's right column in the shared panel layout (see `panel_layout`):
+//! the board is its content column, and the two split the width like the
+//! conversation and the chat's right pane.
 
 use super::*;
 use crate::pull_request_detail::PullRequestDetailPage;
-use crate::settings::PULL_REQUEST_PANE_DEFAULT;
 
-/// Drag marker for the pull request pane's resize handle.
-pub(super) struct PullRequestPaneResize;
-
-/// Width the board keeps beside a hand-sized pane. Below this plus the
-/// pane's own minimum the pane covers the board instead of squeezing both.
-pub(super) const PULL_REQUEST_BOARD_MIN: f32 = 360.0;
 /// Opening more closes the least recently viewed tab.
 pub(super) const PULL_REQUEST_TABS_MAX: usize = 8;
 
@@ -56,9 +52,8 @@ pub(super) struct PullRequestPane {
     pub(super) open: bool,
     /// Takeover: the pane covers the board, as the detail did before tabs.
     pub(super) expanded: bool,
-    pub(super) tween: Option<WidthTween>,
-    pub(super) edge_bounce: Option<motion::ResizeEdgeBounce>,
-    pub(super) resize_edge: Option<motion::ResizeEdge>,
+    /// The layout's recency rank, against the sidebar's.
+    pub(super) opened_at: u64,
     pub(super) tab_scroll: gpui::ScrollHandle,
     /// Live drag-over state while a tab is dragged along the strip.
     drag: Option<RightTabDragState>,
@@ -119,17 +114,6 @@ impl PullRequestPane {
     }
 }
 
-/// The pane's width budget: a hand-sized pane leaves the board its minimum;
-/// when even that cannot fit, the pane takes the whole content area.
-fn pull_request_pane_width(available: f32, preferred: f32, expanded: bool) -> f32 {
-    let max = (available - PULL_REQUEST_BOARD_MIN).max(0.0);
-    if expanded || max < RIGHT_PANE_MIN {
-        available
-    } else {
-        preferred.clamp(RIGHT_PANE_MIN, max)
-    }
-}
-
 impl Shell {
     /// The board's side pane shows: on its route, with at least one tab.
     pub(super) fn pull_request_pane_open(&self) -> bool {
@@ -138,63 +122,25 @@ impl Shell {
             && !self.pull_request_pane.tabs.is_empty()
     }
 
-    fn pull_request_pane_available(&self) -> f32 {
-        (self.viewport_width - self.sidebar_now()).max(0.0)
-    }
-
-    /// Whether the pane can be resized by hand: not in takeover, and the
-    /// window leaves room for the board beside it.
-    pub(super) fn pull_request_pane_resizable(&self) -> bool {
-        !self.pull_request_pane.expanded
-            && self.pull_request_pane_available() - PULL_REQUEST_BOARD_MIN >= RIGHT_PANE_MIN
-    }
-
-    pub(super) fn pull_request_pane_target(&self) -> f32 {
-        if !self.pull_request_pane_open() {
-            return 0.0;
-        }
-        pull_request_pane_width(
-            self.pull_request_pane_available(),
-            self.settings.pull_request_pane_width,
-            self.pull_request_pane.expanded,
-        )
-    }
-
-    pub(super) fn pull_request_pane_visible_width(&self) -> f32 {
-        if !matches!(self.route, Route::PullRequests) {
-            return 0.0;
-        }
-        let now = self.eval_tween(
-            self.pull_request_pane.tween,
-            self.pull_request_pane_target(),
-        ) + self.eval_resize_edge_bounce(
-            self.pull_request_pane.edge_bounce,
-            self.pull_request_pane_open() && self.pull_request_pane_resizable(),
-        );
-        now.max(0.0).min(self.pull_request_pane_available())
-    }
-
-    /// Animate the pane to its current target from wherever it is now.
-    fn retarget_pull_request_pane(&mut self, from: f32) {
-        self.pull_request_pane.edge_bounce = None;
-        self.pull_request_pane.resize_edge = None;
-        self.finish_pane_resize(PaneResizeKind::PullRequests);
-        self.pull_request_pane.tween = Some(WidthTween::new(from, self.pull_request_pane_target()));
-    }
-
-    /// Show or hide the pane, keeping its tabs. A no-op when already there.
+    /// Show or hide the pane, keeping its tabs, like the chat's right pane:
+    /// it eases from what is painted and splits the width with the board.
+    /// Asking for a pane the window fit hides brings it forward.
     pub(super) fn set_pull_request_pane_open(&mut self, open: bool, cx: &mut Context<Self>) {
         let open = open && !self.pull_request_pane.tabs.is_empty();
-        if self.pull_request_pane.open == open {
+        if !matches!(self.route, Route::PullRequests) {
+            // Off its route the pane is not laid out; the next visit shows
+            // it at rest.
+            self.pull_request_pane.open = open;
+            self.pull_request_pane.expanded &= open;
             return;
         }
-        let from = self.pull_request_pane_visible_width();
-        self.pull_request_pane.open = open;
-        if !open {
-            // Reopening at full bleed with the board gone reads as broken.
-            self.pull_request_pane.expanded = false;
+        if self.pull_request_pane.open == open {
+            if open {
+                self.promote_hidden_panel(AuxiliaryPanel::Right, cx);
+            }
+            return;
         }
-        self.retarget_pull_request_pane(from);
+        self.transition_right_column(open, |shell| shell.pull_request_pane.open = open, cx);
         self.sync_pull_request_selection(cx);
         cx.notify();
     }
@@ -354,9 +300,10 @@ impl Shell {
     }
 
     /// The ⌘W cascade on this route: close the active tab while the pane
-    /// shows. Returns true when the close was consumed.
+    /// is on screen, not while the window fit hides it, like the chat
+    /// pane's. Returns true when the close was consumed.
     pub(super) fn close_active_pull_request_tab(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.pull_request_pane_open() {
+        if !(self.pull_request_pane_open() && self.right_column_shown()) {
             return false;
         }
         let Some(ix) = self.pull_request_pane.active_index() else {
@@ -478,20 +425,14 @@ impl Shell {
         ))
     }
 
-    /// The titlebar toggle: hide or reveal the pane, keeping its tabs.
+    /// The titlebar toggle: hide or reveal the pane, keeping its tabs. A
+    /// pane the window fit hides is brought forward rather than closed,
+    /// like the chat pane's toggle.
     pub(super) fn toggle_pull_request_pane(&mut self, cx: &mut Context<Self>) {
-        self.set_pull_request_pane_open(!self.pull_request_pane.open, cx);
-    }
-
-    /// Takeover: the pane covers the board, and back to its own width.
-    pub(super) fn toggle_pull_request_pane_expand(&mut self, cx: &mut Context<Self>) {
-        if !self.pull_request_pane_open() {
+        if self.pull_request_pane_open() && self.promote_hidden_panel(AuxiliaryPanel::Right, cx) {
             return;
         }
-        let from = self.pull_request_pane_visible_width();
-        self.pull_request_pane.expanded = !self.pull_request_pane.expanded;
-        self.retarget_pull_request_pane(from);
-        cx.notify();
+        self.set_pull_request_pane_open(!self.pull_request_pane.open, cx);
     }
 
     /// Close one tab; closing the last collapses the pane.
@@ -523,82 +464,24 @@ impl Shell {
         self.pull_request_pane = PullRequestPane::default();
     }
 
-    pub(super) fn on_pull_request_pane_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<PullRequestPaneResize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let viewport = f32::from(window.viewport_size().width);
-        let width = viewport - f32::from(event.event.position.x);
-        let max = (self.pull_request_pane_available() - PULL_REQUEST_BOARD_MIN).max(0.0);
-        if max < RIGHT_PANE_MIN {
-            return;
-        }
-        let sample = motion::resize_drag_sample(
-            width,
-            RIGHT_PANE_MIN,
-            max,
-            self.pull_request_pane.resize_edge,
-            self.reduced_motion,
-        );
-        self.settings.pull_request_pane_width = sample.width;
-        self.pane_resize_dragging = Some(PaneResizeKind::PullRequests);
-        if sample.starts_bounce {
-            self.pull_request_pane.edge_bounce = sample.edge.map(motion::ResizeEdgeBounce::new);
-        } else if sample.edge.is_none() {
-            self.pull_request_pane.edge_bounce = None;
-        }
-        self.pane_resize_active = sample
-            .edge
-            .is_none()
-            .then_some(PaneResizeKind::PullRequests);
-        self.pull_request_pane.resize_edge = sample.edge;
-        self.pull_request_pane.tween = None;
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// The seam's resize handle, when the pane can be sized by hand.
-    pub(super) fn pull_request_pane_handle(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<gpui::Div>> {
-        (self.pull_request_pane_open()
-            && self.pull_request_pane_resizable()
-            && !self.tween_active(self.pull_request_pane.tween))
-        .then(|| {
-            self.resize_handle(
-                "pull-request-pane-resize",
-                PaneResizeKind::PullRequests,
-                || PullRequestPaneResize,
-                |shell, _| {
-                    shell.settings.pull_request_pane_width = PULL_REQUEST_PANE_DEFAULT;
-                    shell.pull_request_pane.edge_bounce = None;
-                },
-                cx,
-            )
-            .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
-        })
-    }
-
     /// The pane: the active tab's detail view in the right pane's flush
-    /// panel, clipped to the animated width.
+    /// panel, masked and laid out like the chat's right pane.
     pub(super) fn render_pull_request_pane(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let visible = self.pull_request_pane_visible_width();
-        if !self.tween_active(self.pull_request_pane.tween) {
+        let exiting = self.fit_exit_width(1).is_some();
+        if !self.tween_active(self.right_tween) && !exiting {
             self.pull_request_pane.closing = None;
-            if visible <= 0.0 {
-                return Empty.into_any_element();
-            }
+        }
+        if !self.horizontal_fit().right && !exiting {
+            return Empty.into_any_element();
         }
         let theme = Theme::of(cx).clone();
-        let target = self.pull_request_pane_target();
-        let covers_board = target >= self.pull_request_pane_available() - 0.5;
+        let target = self.right_target(cx);
+        let content_width = self.right_content_width(target);
+        let expanded = self.right_column_expanded();
         let corner = Self::window_corner_radius(window);
         let content = match self
             .active_pull_request_page()
@@ -607,7 +490,10 @@ impl Shell {
             // The pull request's title and actions sit in the pane's own
             // toolbar row; its tabs live in the titlebar band above.
             Some(page) => {
-                let toolbar = page.update(cx, |page, cx| page.toolbar(cx));
+                let toolbar = page.update(cx, |page, cx| {
+                    page.seed_width(content_width);
+                    page.toolbar(cx)
+                });
                 div()
                     .size_full()
                     .flex()
@@ -630,11 +516,9 @@ impl Shell {
             .size_full()
             .flex()
             .flex_col()
-            // Covering the board, the pane's left edge is the sidebar seam,
-            // which already carries a hairline.
-            .when(!covers_board, |el| {
-                el.border_l_1().border_color(theme.border)
-            })
+            // In takeover the pane's left edge is the sidebar seam, which
+            // already carries a hairline.
+            .when(!expanded, |el| el.border_l_1().border_color(theme.border))
             .when(corner > 0.0, |el| {
                 el.rounded_tr(px(corner)).rounded_br(px(corner))
             })
@@ -644,24 +528,16 @@ impl Shell {
             // row; the pane's own chrome starts below it.
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
-        let transition = self.active_tween_endpoints(self.pull_request_pane.tween);
-        let content_width = stable_panel_content_width(target, transition).max(visible);
-        div()
-            .h_full()
-            .flex_none()
-            .relative()
-            .overflow_hidden()
-            .w(px(visible))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(content_width))
-                    .child(panel),
-            )
-            .into_any_element()
+        let edge_offset = self.eval_resize_edge_bounce(
+            self.right_edge_bounce,
+            self.pull_request_pane_open() && !expanded,
+        );
+        self.right_pane_container(
+            target,
+            self.right_visible_width(cx),
+            edge_offset,
+            div().h_full().relative().child(panel).into_any_element(),
+        )
     }
 }
 
@@ -841,9 +717,12 @@ impl Shell {
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
         let sidebar_now = self.sidebar_now();
         let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
-        let open = self.pull_request_pane_open();
-        let pane_width = self.pull_request_pane_visible_width();
-        let covers_board = open && pane_width >= self.pull_request_pane_available() - 0.5;
+        // Open and not hidden by the window fit. The strip follows the
+        // painted pane while it opens or resizes; a closing pane drops its
+        // strip at once.
+        let open = self.right_column_shown();
+        let pane_width = self.right_visible_width(cx);
+        let covers_board = open && pane_width >= (self.viewport_width - sidebar_now).max(0.0) - 0.5;
         // Covering the board, the tabs start at the pane's own gutter off the
         // sidebar seam, clear of the window-control cluster (the chat pane's
         // takeover inset).
@@ -864,7 +743,6 @@ impl Shell {
         };
         let has_tabs = !self.pull_request_pane.tabs.is_empty();
         let expanded = self.pull_request_pane.expanded;
-        let can_expand = expanded || self.pull_request_pane_resizable();
         let mut controls = div()
             .id("pull-request-titlebar-controls")
             .flex_none()
@@ -896,24 +774,20 @@ impl Shell {
                             .overflow_hidden()
                             .child(tabs),
                     )
-                    .when(can_expand, |el| {
-                        el.child(
-                            header_icon_button(
-                                "expand-pull-request-pane",
-                                super::tabs::right_pane_expand_icon(expanded),
-                                if expanded {
-                                    "Collapse panel"
-                                } else {
-                                    "Expand panel"
-                                },
-                                &theme,
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_pull_request_pane_expand(cx)
-                                }),
-                            )
-                            .debug_selector(|| "expand-pull-request-pane".into()),
+                    .child(
+                        header_icon_button(
+                            "expand-pull-request-pane",
+                            super::tabs::right_pane_expand_icon(expanded),
+                            if expanded {
+                                "Collapse panel"
+                            } else {
+                                "Expand panel"
+                            },
+                            &theme,
+                            cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
                         )
-                    }),
+                        .debug_selector(|| "expand-pull-request-pane".into()),
+                    ),
             );
         }
         if has_tabs {
@@ -964,23 +838,5 @@ mod tests {
         assert_eq!(tabs_to_close(4, 1, TabCloseAction::Left), [0]);
         assert_eq!(tabs_to_close(4, 1, TabCloseAction::Right), [2, 3]);
         assert!(tabs_to_close(1, 0, TabCloseAction::Others).is_empty());
-    }
-
-    #[test]
-    fn pane_leaves_the_board_its_minimum_or_covers_it() {
-        // Room for both: the preferred width, kept clear of the board.
-        assert_eq!(pull_request_pane_width(1400.0, 640.0, false), 640.0);
-        assert_eq!(
-            pull_request_pane_width(1000.0, 900.0, false),
-            1000.0 - PULL_REQUEST_BOARD_MIN
-        );
-        assert_eq!(
-            pull_request_pane_width(1400.0, 100.0, false),
-            RIGHT_PANE_MIN
-        );
-        // Too narrow for both: the pane covers the board.
-        assert_eq!(pull_request_pane_width(600.0, 640.0, false), 600.0);
-        // Takeover always covers it.
-        assert_eq!(pull_request_pane_width(1400.0, 640.0, true), 1400.0);
     }
 }

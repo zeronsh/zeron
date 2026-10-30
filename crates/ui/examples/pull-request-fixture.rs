@@ -294,10 +294,11 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 500).await;
                     shot(cx, "12c-sticky-dark")?;
                     cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
-                    window.update(cx, |_, w, _| w.resize(size(px(600.), px(848.))))?;
+                    // The app's narrowest window.
+                    window.update(cx, |_, w, _| w.resize(size(px(900.), px(848.))))?;
                     detail.update(cx, |d, cx| d.fixture_select_tab(0, cx));
                     pause(cx, 800).await;
-                    shot(cx, "13-summary-600-light")?;
+                    shot(cx, "13-summary-900-light")?;
                     Ok(())
                 }
                 .await;
