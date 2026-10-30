@@ -528,28 +528,27 @@ mod tests {
         assert_eq!(lit(), Some(Target::Shortcut(ShortcutId::ToggleSidebar)));
     }
 
-    /// A pick leaves the keyboard in the field, for the next one: Appshots,
-    /// which takes it as it opens, leaves it there, and so does a click,
-    /// which Settings would take it on. Appshots shows only where it captures
-    /// (`appshots::is_desktop`); elsewhere search hides its page.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[gpui::test]
-    fn a_pick_keeps_the_keyboard_in_the_field(cx: &mut TestAppContext) {
-        let (shell, cx, _dir) = open_settings(cx);
-        search_for("destination", cx);
-        assert_eq!(
-            active_hit(&shell, cx),
-            Some(Target::Setting(SettingId::AppshotDestination))
-        );
+    /// Picks `setting`, the top hit for `query`, by Enter and then by a
+    /// click, and holds that each opens `section` with the keyboard left in
+    /// the field.
+    fn picks_keep_the_keyboard(
+        query: &str,
+        setting: SettingId,
+        section: SettingsSection,
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+    ) {
+        search_for(query, cx);
+        assert_eq!(active_hit(shell, cx), Some(Target::Setting(setting)));
         cx.simulate_keystrokes("enter");
         draw(cx);
         draw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Appshots));
+            assert_eq!(shell.route, Route::Settings(section));
         });
-        assert!(field_focused(&shell, cx));
-        // Back on General, the keyboard elsewhere: a click on an Appshots
-        // hit opens it, and the field has the keyboard.
+        assert!(field_focused(shell, cx));
+        // Back on General, the keyboard elsewhere: a click on the hit opens
+        // it, and the field has the keyboard.
         shell.update(cx, |shell, cx| {
             shell.open_settings(SettingsSection::General, cx)
         });
@@ -558,15 +557,58 @@ mod tests {
             window.focus(&settings, cx);
         });
         draw(cx);
-        assert!(!field_focused(&shell, cx));
+        assert!(!field_focused(shell, cx));
         let hit = cx.debug_bounds("settings-search-hit-0").expect("a hit");
         cx.simulate_click(hit.center(), gpui::Modifiers::none());
         draw(cx);
         draw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Appshots));
+            assert_eq!(shell.route, Route::Settings(section));
         });
-        assert!(field_focused(&shell, cx));
+        assert!(field_focused(shell, cx));
+    }
+
+    /// A pick leaves the keyboard in the field, for the next one, and so
+    /// does a click, which Settings would take it on.
+    #[gpui::test]
+    fn a_pick_keeps_the_keyboard_in_the_field(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_settings(cx);
+        picks_keep_the_keyboard(
+            "autosave",
+            SettingId::Autosave,
+            SettingsSection::Files,
+            &shell,
+            cx,
+        );
+    }
+
+    /// Appshots takes the keyboard as it opens, but not from a pick. Where
+    /// it has no page (Windows), the search finds none of it.
+    #[gpui::test]
+    fn appshots_leaves_a_pick_the_keyboard(cx: &mut TestAppContext) {
+        let (shell, cx, _dir) = open_settings(cx);
+        if crate::appshots::is_desktop() {
+            picks_keep_the_keyboard(
+                "destination",
+                SettingId::AppshotDestination,
+                SettingsSection::Appshots,
+                &shell,
+                cx,
+            );
+            return;
+        }
+        for query in ["appshot", "destination", "capture"] {
+            search_for(query, cx);
+            shell.read_with(cx, |shell, _| {
+                let search = shell.settings_search.as_ref().expect("the field");
+                let appshots: Vec<_> = search
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.entry.section == SettingsSection::Appshots)
+                    .collect();
+                assert_eq!(appshots, Vec::<&Hit>::new(), "{query:?}");
+            });
+        }
     }
 
     /// A dialog over the page keeps the keyboard: ⌘F waits until it closes.
