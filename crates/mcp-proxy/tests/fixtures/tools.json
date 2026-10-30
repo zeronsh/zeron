@@ -1,0 +1,4 @@
+[
+  {"name":"echo","description":"Echo a test call","inputSchema":{"type":"object"}},
+  {"name":"sample","description":"Request client sampling","inputSchema":{"type":"object"}}
+]
