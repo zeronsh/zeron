@@ -1,0 +1,454 @@
+[
+  {
+    "slug": "violet-dusk",
+    "number": 1,
+    "title": "VIOLET DUSK",
+    "finish": "VELVET ASCENT",
+    "layers": [
+      {
+        "file": "violet-dusk/sky.webp",
+        "depth": 0
+      },
+      {
+        "file": "violet-dusk/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "violet-dusk/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "aurora",
+    "number": 2,
+    "title": "AURORA",
+    "finish": "POLAR WHISPER",
+    "layers": [
+      {
+        "file": "aurora/sky.webp",
+        "depth": 0
+      },
+      {
+        "file": "aurora/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "aurora/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "blossom",
+    "number": 3,
+    "title": "BLOSSOM",
+    "finish": "PETAL REVERIE",
+    "layers": [
+      {
+        "file": "blossom/sky.webp",
+        "depth": 0
+      },
+      {
+        "file": "blossom/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "blossom/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "blossom/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "lighthouse",
+    "number": 4,
+    "title": "LIGHTHOUSE",
+    "finish": "PEARL BEACON",
+    "layers": [
+      {
+        "file": "lighthouse/sky.webp",
+        "depth": 0
+      },
+      {
+        "file": "lighthouse/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "lighthouse/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "dunes",
+    "number": 5,
+    "title": "MOON DUNES",
+    "finish": "SILKEN DRIFT",
+    "layers": [
+      {
+        "file": "dunes/sky.webp",
+        "depth": 0
+      },
+      {
+        "file": "dunes/detail.webp",
+        "depth": 1
+      },
+      {
+        "file": "dunes/far.webp",
+        "depth": 2
+      },
+      {
+        "file": "dunes/near.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "canyon",
+    "number": 6,
+    "title": "CANYON",
+    "finish": "AMBER ECHO",
+    "layers": [
+      {
+        "file": "canyon/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "canyon/mid.webp",
+        "depth": 1
+      },
+      {
+        "file": "canyon/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "canyon/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "ravine",
+    "number": 7,
+    "title": "RAVINE",
+    "finish": "JADE WHISPER",
+    "layers": [
+      {
+        "file": "ravine/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "ravine/mid.webp",
+        "depth": 1
+      },
+      {
+        "file": "ravine/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "ravine/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "forest",
+    "number": 8,
+    "title": "FOREST",
+    "finish": "GILDED HUSH",
+    "layers": [
+      {
+        "file": "forest/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "forest/mid.webp",
+        "depth": 1
+      },
+      {
+        "file": "forest/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "forest/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "bamboo",
+    "number": 9,
+    "title": "BAMBOO",
+    "finish": "EMERALD STILLNESS",
+    "layers": [
+      {
+        "file": "bamboo/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "bamboo/mid.webp",
+        "depth": 1
+      },
+      {
+        "file": "bamboo/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "bamboo/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "kelp",
+    "number": 10,
+    "title": "KELP",
+    "finish": "TIDAL REVERIE",
+    "layers": [
+      {
+        "file": "kelp/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "kelp/mid.webp",
+        "depth": 1
+      },
+      {
+        "file": "kelp/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "kelp/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "lotus",
+    "number": 11,
+    "title": "LOTUS",
+    "finish": "OPAL STILLNESS",
+    "layers": [
+      {
+        "file": "lotus/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "lotus/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "lotus/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "icebergs",
+    "number": 12,
+    "title": "ICEBERGS",
+    "finish": "GLACIAL PRISM",
+    "layers": [
+      {
+        "file": "icebergs/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "icebergs/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "icebergs/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "wheat",
+    "number": 13,
+    "title": "WHEAT",
+    "finish": "HONEY CADENCE",
+    "layers": [
+      {
+        "file": "wheat/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "wheat/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "wheat/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "volcano",
+    "number": 14,
+    "title": "CALDERA",
+    "finish": "EMBER VEIL",
+    "layers": [
+      {
+        "file": "volcano/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "volcano/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "volcano/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "salt-flats",
+    "number": 15,
+    "title": "SALT BLOOM",
+    "finish": "ROSE MIRAGE",
+    "layers": [
+      {
+        "file": "salt-flats/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "salt-flats/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "salt-flats/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "terraces",
+    "number": 16,
+    "title": "RICE TERRACES",
+    "finish": "VERDANT RHYTHM",
+    "layers": [
+      {
+        "file": "terraces/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "terraces/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "terraces/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "crystals",
+    "number": 17,
+    "title": "CRYSTAL HOLLOW",
+    "finish": "AMETHYST CHIME",
+    "layers": [
+      {
+        "file": "crystals/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "crystals/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "crystals/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "surf",
+    "number": 18,
+    "title": "SEA GLASS",
+    "finish": "FOAM ARABESQUE",
+    "layers": [
+      {
+        "file": "surf/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "surf/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "surf/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "mycelium",
+    "number": 19,
+    "title": "MYCELIUM",
+    "finish": "LUMEN HUSH",
+    "layers": [
+      {
+        "file": "mycelium/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "mycelium/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "mycelium/near.webp",
+        "depth": 2
+      }
+    ]
+  },
+  {
+    "slug": "saturnine",
+    "number": 20,
+    "title": "RINGED SILENCE",
+    "finish": "CELESTIAL LILT",
+    "layers": [
+      {
+        "file": "saturnine/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "saturnine/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "saturnine/near.webp",
+        "depth": 2
+      },
+      {
+        "file": "saturnine/detail.webp",
+        "depth": 3
+      }
+    ]
+  },
+  {
+    "slug": "black-hole",
+    "number": 21,
+    "title": "BLACK HOLE",
+    "finish": "EVENTIDE HALO",
+    "layers": [
+      {
+        "file": "black-hole/back.webp",
+        "depth": 0
+      },
+      {
+        "file": "black-hole/far.webp",
+        "depth": 1
+      },
+      {
+        "file": "black-hole/near.webp",
+        "depth": 2
+      }
+    ]
+  }
+]
