@@ -114,6 +114,8 @@ export interface Env {
   RUNNER_JWT_PUBLIC_KEY?: string;
   /** Operator bearer for /admin/cloud/usage (secret). Unset ⇒ route 404s. */
   ADMIN_TOKEN?: string;
+  /** Public card reads per client IP (card-gate.ts). Unset ⇒ unlimited. */
+  CARD_READS?: RateLimit;
 }
 
 /** APNs settings, when push is set up for this deployment. */

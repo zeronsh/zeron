@@ -29,19 +29,36 @@
  * code. Grants name a user id, not a directory row, so a user can hold a
  * badge before their first webhook lands.
  *
+ * Usernames: a member card's URL (card-routes.ts). `usernames` holds every
+ * name ever given, lowercase, keyed by name, so a name can't be held twice
+ * however claims race. A user's name is the row without `retired_at`; a
+ * retired row keeps its name out of circulation, so no one takes over a
+ * deleted user's URL. The scene count a card derives from (card.ts) is stored
+ * on the user at their first name, not with the name: a rename or a new claim
+ * after an operator's clear keeps the card. Operators set or clear names at
+ * `POST /admin/usernames/{set|clear}`.
+ *
  * Writes are one row per sign-up or profile change, so a single instance is
  * not a hotspot.
  */
 import { DurableObject } from "cloudflare:workers";
+import { CARD_SCENES, cardFirstName, deriveCard, type CardFace } from "./card";
+import { forgetCard } from "./card-cache";
 import type { Env } from "./env";
 import { json, jsonError } from "./http";
 import { adminAuthorized } from "./cloud/billing";
+import { foldUsername } from "./username";
 
 export const USER_DIRECTORY_NAME = "users1";
 
 /** A new row's user number. Conflict updates never set `user_number`, so a
  * number is taken only on first insert. */
 const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)";
+
+/** Availability checks and claims one user may make a minute. */
+const USERNAME_ATTEMPTS_PER_MINUTE = 60;
+/** Users tracked at once; past this the window starts over for everyone. */
+const MAX_TRACKED_ATTEMPTS = 10_000;
 
 /** The fields of a WorkOS user object this directory keeps (wire names). */
 export interface WorkOsUser {
@@ -67,9 +84,37 @@ export interface DirectoryUser {
   readonly joinedAt: string;
   readonly updatedAt: string;
   readonly deletedAt: string | null;
+  /** Null until they claim one, and once it's cleared or they're deleted. */
+  readonly username: string | null;
   /** Badges held, oldest grant first. */
   readonly badges: readonly UserBadge[];
 }
+
+/** Everything the public can read about a member, in this order. New fields
+ * here are public: no email, user id, surname, picture, org, operator note or
+ * timestamp, ever (usernames.workerd.test.ts pins the exact set). */
+export interface PublicCard extends CardFace {
+  readonly username: string;
+  /** `cardFirstName`: never a surname or an initial. */
+  readonly firstName: string;
+  readonly userNumber: number;
+  /** `YYYY-MM-DD`, UTC. */
+  readonly joinedOn: string;
+  /** Oldest grant first. */
+  readonly badges: readonly { readonly id: string; readonly name: string; readonly icon: string | null }[];
+}
+
+/** Why a username wasn't given. Only an operator sees `username_retired`
+ * apart from `username_taken`. */
+export type UsernameError =
+  | "rate_limited"
+  | "unknown_user"
+  | "deleted_user"
+  | "already_claimed"
+  | "username_taken"
+  | "username_retired";
+
+export type UsernameResult = { readonly error?: undefined; readonly card: PublicCard } | { readonly error: UsernameError };
 
 export interface Badge {
   /** Stable id, e.g. `cloud-tester`. */
@@ -148,6 +193,10 @@ const fullName = (first: string | null, last: string | null): string | null =>
   [first, last].filter(Boolean).join(" ") || null;
 
 export class UserDirectory extends DurableObject<Env> {
+  /** In memory: this is the one instance, so it sees every attempt, and an
+   * eviction only forgives a window. */
+  private readonly usernameAttempts = new Map<string, { windowStart: number; count: number }>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -158,6 +207,13 @@ export class UserDirectory extends DurableObject<Env> {
     if (!columns.includes("user_number")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN user_number INTEGER");
     this.ctx.storage.sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_by_number ON users (user_number)");
     this.numberUsers();
+    if (!columns.includes("card_scenes")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_scenes INTEGER");
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS usernames (
+      username TEXT PRIMARY KEY, user_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, retired_at INTEGER,
+      CHECK (length(username) BETWEEN 3 AND 20 AND username GLOB '[a-z0-9]*' AND username NOT GLOB '*[^a-z0-9_-]*'))`);
+    this.ctx.storage.sql.exec(
+      "CREATE UNIQUE INDEX IF NOT EXISTS usernames_live_by_user ON usernames (user_id) WHERE retired_at IS NULL"
+    );
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS badges (
       badge_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, icon TEXT,
       created_at INTEGER NOT NULL)`);
@@ -298,8 +354,10 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tombstone a deleted user: keep id, number and joined date, drop the
-   * profile and badges. */
-  remove(user: WorkOsUser, deletedAt: string): void {
+   * profile and badges, and retire their username. Answers that name. */
+  remove(user: WorkOsUser, deletedAt: string): string | null {
+    const username = this.username(user.id);
+    this.retireUsername(user.id);
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
     this.ctx.storage.sql.exec(
       `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
@@ -313,6 +371,136 @@ export class UserDirectory extends DurableObject<Env> {
       deletedAt,
       Date.now()
     );
+    return username;
+  }
+
+  /** The user's name, or null. */
+  username(userId: string): string | null {
+    const [row] = this.ctx.storage.sql
+      .exec("SELECT username FROM usernames WHERE user_id = ? AND retired_at IS NULL", userId)
+      .toArray();
+    return (row?.username as string | undefined) ?? null;
+  }
+
+  private retireUsername(userId: string): void {
+    this.ctx.storage.sql.exec("UPDATE usernames SET retired_at = ? WHERE user_id = ? AND retired_at IS NULL", Date.now(), userId);
+  }
+
+  /** Whether `userId` used up their attempts this minute (and count this one). */
+  private overAttemptLimit(userId: string): boolean {
+    const now = Date.now();
+    const seen = this.usernameAttempts.get(userId);
+    if (seen && now - seen.windowStart < 60_000) return ++seen.count > USERNAME_ATTEMPTS_PER_MINUTE;
+    if (this.usernameAttempts.size >= MAX_TRACKED_ATTEMPTS) this.usernameAttempts.clear();
+    this.usernameAttempts.set(userId, { windowStart: now, count: 1 });
+    return false;
+  }
+
+  /** Why this user can't hold a name, if any. */
+  private userRefusal(userId: string): "unknown_user" | "deleted_user" | undefined {
+    const [row] = this.ctx.storage.sql.exec("SELECT deleted_at FROM users WHERE user_id = ?", userId).toArray();
+    if (!row) return "unknown_user";
+    return row.deleted_at === null ? undefined : "deleted_user";
+  }
+
+  /** The stored scene count is set once, by the user's first name. */
+  private freezeCardScenes(userId: string, scenes: number): void {
+    this.ctx.storage.sql.exec("UPDATE users SET card_scenes = COALESCE(card_scenes, ?) WHERE user_id = ?", scenes, userId);
+  }
+
+  /** Whether a name is free; undefined past the attempt limit. A retired name
+   * isn't, and reads no differently from a held one. */
+  checkUsername(userId: string, username: string): boolean | undefined {
+    if (this.overAttemptLimit(userId)) return undefined;
+    return this.ctx.storage.sql.exec("SELECT 1 FROM usernames WHERE username = ?", username).toArray().length === 0;
+  }
+
+  /** A user takes their one name, `scenes` being today's count. The same claim
+   * again succeeds, so a client can retry one whose answer it lost. */
+  claimUsername(userId: string, username: string, scenes: number): UsernameResult {
+    if (this.overAttemptLimit(userId)) return { error: "rate_limited" };
+    return this.ctx.storage.transactionSync((): UsernameResult => {
+      const refusal = this.userRefusal(userId);
+      if (refusal) return { error: refusal };
+      const held = this.username(userId);
+      if (held) return held === username ? { card: this.card(username)! } : { error: "already_claimed" };
+      const taken =
+        this.ctx.storage.sql
+          .exec(
+            "INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING username",
+            username,
+            userId,
+            Date.now()
+          )
+          .toArray().length === 0;
+      if (taken) return { error: "username_taken" };
+      this.freezeCardScenes(userId, scenes);
+      return { card: this.card(username)! };
+    });
+  }
+
+  /** An operator gives a user a name, retiring any they held. A name retired
+   * from this same user comes back to them; one held by or retired from anyone
+   * else stays where it is. */
+  setUsername(userId: string, username: string, scenes: number): UsernameResult {
+    return this.ctx.storage.transactionSync((): UsernameResult => {
+      const refusal = this.userRefusal(userId);
+      if (refusal) return { error: refusal };
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, retired_at FROM usernames WHERE username = ?", username).toArray();
+      if (row && row.user_id !== userId) return { error: row.retired_at === null ? "username_taken" : "username_retired" };
+      this.retireUsername(userId);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO usernames (username, user_id, claimed_at) VALUES (?, ?, ?)
+         ON CONFLICT (username) DO UPDATE SET retired_at = NULL`,
+        username,
+        userId,
+        Date.now()
+      );
+      this.freezeCardScenes(userId, scenes);
+      return { card: this.card(username)! };
+    });
+  }
+
+  /** An operator takes a user's name away. It stays retired unless `release`
+   * frees it for someone else. Answers the name, or null if they held none. */
+  clearUsername(userId: string, release: boolean): string | null {
+    const username = this.username(userId);
+    if (!username) return null;
+    if (release) this.ctx.storage.sql.exec("DELETE FROM usernames WHERE username = ?", username);
+    else this.retireUsername(userId);
+    return username;
+  }
+
+  /** The public card behind a name; undefined unless a live user holds it. */
+  card(username: string): PublicCard | undefined {
+    const [row] = this.ctx.storage.sql
+      .exec(
+        `SELECT u.user_id, u.user_number, u.first_name, u.created_at, u.card_scenes
+         FROM usernames n JOIN users u ON u.user_id = n.user_id
+         WHERE n.username = ? AND n.retired_at IS NULL AND u.deleted_at IS NULL`,
+        username
+      )
+      .toArray();
+    if (!row) return undefined;
+    const badges = this.ctx.storage.sql
+      .exec(
+        `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
+         WHERE ub.user_id = ? ORDER BY ub.granted_at, ub.badge_id`,
+        row.user_id
+      )
+      .toArray();
+    // Field by field, never spread from a row: a new column must not go public.
+    const { scene, holo, sky } = deriveCard(row.user_id as string, row.card_scenes as number);
+    return {
+      username,
+      firstName: cardFirstName(row.first_name as string | null, username),
+      userNumber: row.user_number as number,
+      joinedOn: new Date(row.created_at as string).toISOString().slice(0, 10),
+      badges: badges.map((b) => ({ id: b.badge_id as string, name: b.name as string, icon: b.icon as string | null })),
+      scene,
+      holo,
+      sky
+    };
   }
 
   list(): DirectoryUser[] {
@@ -323,7 +511,13 @@ export class UserDirectory extends DurableObject<Env> {
       held.push({ id: row.badge_id as string, grantedAt: row.granted_at as number, note: row.note as string | null });
       badges.set(userId, held);
     }
-    return [...this.ctx.storage.sql.exec("SELECT * FROM users ORDER BY created_at")].map((row) => {
+    return [
+      ...this.ctx.storage.sql.exec(
+        `SELECT u.*, n.username FROM users u
+         LEFT JOIN usernames n ON n.user_id = u.user_id AND n.retired_at IS NULL
+         ORDER BY u.created_at`
+      )
+    ].map((row) => {
       const first = row.first_name as string | null;
       const last = row.last_name as string | null;
       return {
@@ -337,6 +531,7 @@ export class UserDirectory extends DurableObject<Env> {
         joinedAt: row.created_at as string,
         updatedAt: row.updated_at as string,
         deletedAt: row.deleted_at as string | null,
+        username: row.username as string | null,
         badges: badges.get(row.user_id as string) ?? []
       };
     });
@@ -667,9 +862,41 @@ const handleBadgeRoute = async (
 };
 
 /**
+ * `/admin/usernames`:
+ *   POST /set   {userId, username}  — give or change a name; reserved names are
+ *                                     allowed here, retired ones are not
+ *   POST /clear {userId, release?}  — answers {cleared}, the name taken away.
+ *                                     It stays retired unless `release` frees it.
+ */
+const handleUsernameAdminRoute = async (
+  request: Request,
+  directory: DurableObjectStub<UserDirectory>,
+  action: string
+): Promise<Response> => {
+  if (action !== "set" && action !== "clear") return jsonError(404, "not_found", "Not found.");
+  if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+  const body = await readJson(request);
+  const userId = body?.userId;
+  if (typeof userId !== "string" || !USER_ID_RE.test(userId)) return jsonError(400, "bad_request", "Expected {userId, …}.");
+  if (action === "clear") {
+    const cleared = await directory.clearUsername(userId, body?.release === true);
+    if (cleared) await forgetCard(cleared);
+    return json({ cleared });
+  }
+  const username = foldUsername(body?.username);
+  if (!username) return jsonError(400, "bad_request", "Expected {userId, username (3–20 letters, digits, _ or -)}.");
+  const previous = await directory.username(userId);
+  const result = await directory.setUsername(userId, username, CARD_SCENES);
+  if (result.error === "unknown_user") return jsonError(404, result.error, "That user isn't in the directory.");
+  if (result.error) return jsonError(409, result.error, "That username can't go to this user.");
+  await Promise.all([forgetCard(username), previous && forgetCard(previous)]);
+  return json(result.card);
+};
+
+/**
  * `POST /workos/webhook` (WorkOS-signed, no bearer), `GET /admin/users`,
- * `GET /admin/organizations` and `/admin/badges[/grant|/revoke]` (ADMIN_TOKEN)
- * — routed BEFORE the bearer gate. Events other than the created, updated and
+ * `GET /admin/organizations`, `/admin/badges[/grant|/revoke]` and
+ * `/admin/usernames/{set|clear}` (ADMIN_TOKEN) — routed BEFORE the bearer gate. Events other than the created, updated and
  * deleted of users, organizations and memberships are acknowledged so WorkOS
  * stops retrying.
  */
@@ -680,7 +907,13 @@ export const handleUserDirectoryRoute = async (
 ): Promise<Response | undefined> => {
   const badgeAction =
     url.pathname === "/admin/badges" ? "" : url.pathname.startsWith("/admin/badges/") ? url.pathname.slice(14) : undefined;
-  if (url.pathname === "/admin/users" || url.pathname === "/admin/organizations" || badgeAction !== undefined) {
+  const usernameAction = url.pathname.startsWith("/admin/usernames/") ? url.pathname.slice(17) : undefined;
+  if (
+    url.pathname === "/admin/users" ||
+    url.pathname === "/admin/organizations" ||
+    badgeAction !== undefined ||
+    usernameAction !== undefined
+  ) {
     if (!env.ADMIN_TOKEN) return json({ error: "not_found" }, 404);
     if (!(await adminAuthorized(request, env.ADMIN_TOKEN))) {
       return jsonError(401, "unauthenticated", "Admin token required.");
@@ -688,6 +921,7 @@ export const handleUserDirectoryRoute = async (
     const directory = userDirectoryStub(env);
     if (!directory) return jsonError(503, "unavailable", "The user directory isn't set up on this server.");
     if (badgeAction !== undefined) return handleBadgeRoute(request, directory, badgeAction);
+    if (usernameAction !== undefined) return handleUsernameAdminRoute(request, directory, usernameAction);
     if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET only.");
     const csv = url.searchParams.get("format") === "csv";
     if (url.pathname === "/admin/organizations") {
@@ -716,7 +950,7 @@ export const handleUserDirectoryRoute = async (
     if (!csv) return json({ count: users.length, users });
     return csvResponse(
       "zeron-users.csv",
-      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges",
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username",
       users.map((u) => [
         String(u.userNumber),
         u.userId,
@@ -728,7 +962,8 @@ export const handleUserDirectoryRoute = async (
         u.joinedAt,
         u.updatedAt,
         u.deletedAt,
-        u.badges.map((b) => b.id).join(";") || null
+        u.badges.map((b) => b.id).join(";") || null,
+        u.username
       ])
     );
   }
@@ -771,7 +1006,11 @@ export const handleUserDirectoryRoute = async (
     case "user.deleted": {
       const user = parseUser(event.data);
       if (!user) return jsonError(400, "bad_request", "Event data must be a WorkOS user.");
-      return apply(() => (event.event === "user.deleted" ? directory.remove(user, deletedAt) : directory.upsert(user)));
+      if (event.event !== "user.deleted") return apply(() => directory.upsert(user));
+      return apply(async () => {
+        const username = await directory.remove(user, deletedAt);
+        if (username) await forgetCard(username);
+      });
     }
     case "organization.created":
     case "organization.updated":

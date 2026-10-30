@@ -39,6 +39,7 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-07-01",
         r2Buckets: ["BLOBS", "RELEASES"],
+        ratelimits: { CARD_READS: { namespace_id: "1", simple: { limit: 60, period: 60 } } },
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },

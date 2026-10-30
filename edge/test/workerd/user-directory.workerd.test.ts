@@ -164,7 +164,7 @@ describe("user directory", () => {
       await SELF.fetch("https://edge.test/admin/users?format=csv", { headers: { authorization: "Bearer test-admin-token" } })
     ).text();
     expect(csv.split("\n")[0]).toBe(
-      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges"
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username"
     );
     const number = (await find("user_csv"))?.userNumber;
     expect(csv).toContain(`\n${number},user_csv,user_csv@example.com,"Grace, Jr.","Grace, Jr.",,`);

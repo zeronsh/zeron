@@ -54,11 +54,20 @@
  *   GET  /admin/organizations[?format=csv] — ADMIN_TOKEN (every org with its members)
  *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
  *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
+ *   POST /admin/usernames/{set|clear}   — ADMIN_TOKEN (give or take a username)
+ *
+ * Member cards (card-routes.ts):
+ *   GET  /cards/:username               — pre-bearer, a card as JSON
+ *   GET  /@:username                    — pre-bearer, a card's page (also routed from zeron.sh)
+ *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
+ *   GET|POST /username, GET /username/check — user bearer (claim, availability)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
+import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
+import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
@@ -147,6 +156,8 @@ export default {
     if (runnerRouted) return runnerRouted;
     const usersRouted = await handleUserDirectoryRoute(request, env, url);
     if (usersRouted) return usersRouted;
+    const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (cardRouted) return cardRouted;
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
@@ -166,6 +177,9 @@ export default {
       const fake = env.AUTH_MODE === "dev" ? sandboxProvider(env, "fake") : undefined;
       return fake instanceof FakeProvider ? json({ sandboxes: fake.snapshot() }) : json({ error: "not_found" }, 404);
     }
+
+    const usernameRouted = await handleUsernameRoute(request, env, auth, url);
+    if (usernameRouted) return usernameRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);
     if (cloudRouted) return cloudRouted;

@@ -124,7 +124,7 @@ export const handleAuthRoute = async (
 
 /** Query params land verbatim in the page — escape them. (WorkOS codes/states
  * are URL-safe tokens, but this URL accepts anything.) */
-const escapeHtml = (s: string): string =>
+export const escapeHtml = (s: string): string =>
   s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
