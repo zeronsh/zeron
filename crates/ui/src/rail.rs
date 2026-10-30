@@ -481,7 +481,7 @@ impl Transcript {
         self.begin_scroll_navigation();
         // Row 0 carries the chrome inside its own top gap; every other row
         // lands `inset` below the viewport top, like a freshly-sent prompt.
-        let inset = Self::own_send_inset(target);
+        let inset = self.own_send_inset(target);
         let landing = ListOffset {
             item_ix: target,
             offset_in_item: px(-inset),
@@ -730,9 +730,8 @@ impl Transcript {
         // (user report). Walk forward over measured rows whose tops are at or
         // above the reading line; unmeasured rows (None bounds) stop the walk,
         // leaving the raw top row — the pre-fix behavior.
-        let read_top = f32::from(self.list_state().viewport_bounds().top())
-            + crate::transcript::OWN_SEND_TOP_INSET_PX
-            + 0.5;
+        let read_top =
+            f32::from(self.list_state().viewport_bounds().top()) + self.own_send_top_inset() + 0.5;
         let top_row = if self.is_glued() {
             // Glued to the bottom the list reports no row bounds; place them
             // from the end instead.
@@ -756,7 +755,7 @@ impl Transcript {
         // chrome lights its tick; with none on screen (a long reply), the
         // prompt being read stays lit.
         let viewport = self.list_state().viewport_bounds();
-        let view_top = f32::from(viewport.top()) + crate::transcript::OWN_SEND_TOP_INSET_PX;
+        let view_top = f32::from(viewport.top()) + self.own_send_top_inset();
         let view_bottom = f32::from(viewport.bottom()) - self.bottom_clearance();
         let in_view: Vec<bool> = tick_rows
             .iter()
@@ -776,7 +775,7 @@ impl Transcript {
         // The rail centres in the band between the titlebar and the bottom
         // chrome. Pre-layout the viewport reads 0; assume a typical height
         // for that one frame rather than collapsing the stack.
-        let band_top = crate::transcript::OWN_SEND_TOP_INSET_PX;
+        let band_top = self.own_send_top_inset();
         let band_bottom = self.bottom_clearance();
         let viewport_h = match f32::from(viewport.size.height) {
             h if h > 0.0 => h,
