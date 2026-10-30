@@ -194,7 +194,7 @@ fun VoiceSettingsScreen(controller: VoiceController, onBack: () -> Unit) {
                             MenuSection(
                                 null,
                                 (listOf<String?>(null) + s.styles).map { style ->
-                                    MenuChoice(VoiceController.styleLabel(style), style == selectedStyle) {
+                                    MenuChoice(VoiceController.styleLabel(style), style == selectedStyle, fixed = style == null) {
                                         haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
                                         controller.selectStyle(style)
                                     }
