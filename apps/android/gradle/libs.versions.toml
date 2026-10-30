@@ -11,6 +11,7 @@ coroutines = "1.11.0"
 jna = "5.19.1"
 browser = "1.10.0"
 coreSplashscreen = "1.2.0"
+junit = "4.13.2"
 # Google WebRTC M150 (same milestone as the iOS stasel/WebRTC 150 pin), audio only.
 webrtc = "150.7871.01"
 
@@ -32,6 +33,7 @@ compose-foundation = { group = "androidx.compose.foundation", name = "foundation
 compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
 webrtc = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
 
 [plugins]

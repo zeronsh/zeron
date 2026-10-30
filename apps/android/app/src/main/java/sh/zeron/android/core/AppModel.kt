@@ -398,6 +398,7 @@ class AppModel(private val app: Application) {
         lastDeliveryActivity = 0L
         terminals.signOut()
         cloud.reset()
+        sh.zeron.android.ui.DeviceAccountsCache.reset()
         _client.value?.shutdown()
         _client.value = null
         _workspace.value = null

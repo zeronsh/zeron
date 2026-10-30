@@ -186,7 +186,20 @@ impl CoreClient {
         device_id: String,
     ) -> CoreResult<Vec<DeviceAccountInfo>> {
         let client = self.client.clone();
-        on_runtime(async move { client.device_agent_accounts(&device_id).await })
+        on_runtime(async move { client.device_agent_accounts(&device_id, false).await })
+            .await
+            .map(accounts)
+    }
+
+    /// [`Self::device_agent_accounts`] with each login's plan usage probed
+    /// now rather than served from the computer's cache (slower: up to a
+    /// minute) — what a usage meter asks for when it opens.
+    pub async fn device_agent_usage(
+        &self,
+        device_id: String,
+    ) -> CoreResult<Vec<DeviceAccountInfo>> {
+        let client = self.client.clone();
+        on_runtime(async move { client.device_agent_accounts(&device_id, true).await })
             .await
             .map(accounts)
     }

@@ -104,8 +104,14 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
         is AccountsTarget.Device -> rules.name.ifEmpty { target.label }
     }
 
-    var deviceAccounts by remember { mutableStateOf<List<DeviceAccountInfo>?>(null) }
+    // Shared with the composer's usage pill: a switch here shows there, and the reverse.
+    val deviceAccounts: List<DeviceAccountInfo>? = (target as? AccountsTarget.Device)?.let { t -> client?.let { DeviceAccountsCache.get(it, t.deviceId) } }
+    fun keep(list: List<DeviceAccountInfo>) {
+        val t = target as? AccountsTarget.Device ?: return
+        client?.let { DeviceAccountsCache.put(it, t.deviceId, list) }
+    }
     var loadError by remember { mutableStateOf<String?>(null) }
+    var refreshing by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<String?>(null) }
     var signing by remember { mutableStateOf<SignInState?>(null) }
     var signJob by remember { mutableStateOf<Job?>(null) }
@@ -113,18 +119,23 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
     var codeRequest by remember { mutableStateOf<CompletableDeferred<String?>?>(null) }
     var removing by remember { mutableStateOf<Account?>(null) }
 
-    suspend fun load() {
+    /** The computer's list (what it has first, on a first visit), then with usage probed now. */
+    suspend fun load(explicit: Boolean = false) {
         when (target) {
             is AccountsTarget.Cloud -> cloud.refreshAccounts()
             is AccountsTarget.Device -> {
                 val c = client ?: return
+                refreshing = true
                 try {
-                    deviceAccounts = c.deviceAgentAccounts(target.deviceId)
+                    if (DeviceAccountsCache.get(c, target.deviceId) == null) DeviceAccountsCache.load(c, target.deviceId, force = false)
                     loadError = null
+                    DeviceAccountsCache.load(c, target.deviceId, force = true, explicit = explicit)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     loadError = CloudStore.message(e)
+                } finally {
+                    refreshing = false
                 }
             }
         }
@@ -201,7 +212,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
         run(a.id) {
             when (target) {
                 is AccountsTarget.Cloud -> { cloudAccount(a)?.let { cloud.activate(it, a.cloudProvider!!) } }
-                is AccountsTarget.Device -> { deviceAccounts = c.deviceActivateAccount(target.deviceId, target.harness, a.id) }
+                is AccountsTarget.Device -> keep(c.deviceActivateAccount(target.deviceId, target.harness, a.id))
             }
         }
     }
@@ -211,7 +222,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
         run(a.id) {
             when (target) {
                 is AccountsTarget.Cloud -> { cloudAccount(a)?.let { cloud.remove(it, a.cloudProvider!!) } }
-                is AccountsTarget.Device -> { deviceAccounts = c.deviceForgetAccount(target.deviceId, target.harness, a.id) }
+                is AccountsTarget.Device -> keep(c.deviceForgetAccount(target.deviceId, target.harness, a.id))
             }
         }
     }
@@ -236,7 +247,8 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
             if (start.pasteCode) {
                 model.browser.open(context, start.url)
                 val code = askForCode() ?: throw CancellationException("No code")
-                deviceAccounts = c.deviceLoginComplete(t.deviceId, start.loginId, code)
+                keep(c.deviceLoginComplete(t.deviceId, start.loginId, code))
+                load()
                 return
             }
             var opened = false
@@ -304,7 +316,16 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
     // Leaving the page ends a computer's sign-in rather than polling behind it.
     DisposableEffect(Unit) { onDispose { signJob?.cancel() } }
 
-    CloudPage(title, deviceName, onBack) {
+    CloudPage(
+        title, deviceName, onBack,
+        actions = {
+            // Plan usage moves as agents run: probe it again now.
+            if (target is AccountsTarget.Device && rules.reportsUsage) {
+                if (refreshing) LoadingIndicator(Modifier.size(40.dp))
+                else TonalCircleButton(ZIcons.Refresh, "Refresh usage", onClick = { scope.launch { load(explicit = true) } })
+            }
+        },
+    ) {
         val footer = listOfNotNull(
             rules.note,
             when (target) {

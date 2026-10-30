@@ -110,6 +110,10 @@ fun Composer(
     beforeSend: () -> Boolean = { true },
     /** Open the model picker once (a debug launch extra, for screenshots). */
     openModelPicker: Boolean = false,
+    /** The agent's logins on the chat's computer: the usage pill and its quick switcher. */
+    accounts: AccountUsageState? = null,
+    /** The agent's accounts page (the switcher's "Manage accounts"). */
+    onManageAccounts: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     // The model picker lives here, not in the chips: those leave with the expanded card.
@@ -277,7 +281,7 @@ fun Composer(
             focusRequester = focus,
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
-            SessionChips(client, c, row, onOpenPicker = { picker = true })
+            SessionChips(client, c, row, onOpenPicker = { picker = true }, accounts = accounts, onError = { model.toast(it) }, onManageAccounts = onManageAccounts)
         }
     }
 }
@@ -318,7 +322,15 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
 }
 
 @Composable
-private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?, onOpenPicker: () -> Unit) {
+private fun SessionChips(
+    client: CoreClient,
+    c: ComposerState,
+    row: SessionRow?,
+    onOpenPicker: () -> Unit,
+    accounts: AccountUsageState?,
+    onError: (String) -> Unit,
+    onManageAccounts: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
@@ -340,6 +352,8 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?,
     // No model of its own: it runs the provider's default, so that's the one named.
     val fallback = remember(harness) { fallbackModels(harness).firstOrNull() }
     val modelLabel = row?.modelLabel ?: fallback?.label ?: row?.harnessLabel
+    // Plan usage of the login the agent runs on, with a quick account switcher.
+    PlanUsageChip(accounts, c.contextUsage, onError, onManageAccounts)
     if (modelLabel != null) {
         ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = onOpenPicker)
     }
@@ -369,18 +383,14 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?,
             ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
         }
     }
-    val tokens = c.contextUsage?.tokens
-    val window = c.contextUsage?.window
-    if (tokens != null && window != null && window > 0u) {
-        val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) {
-            ContextChip(
-                "${(fraction * 100).toInt()}% context",
-                leading = { ZIcon(if (fraction >= 0.85) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
-                onClick = {},
-                tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+    val fraction = contextChipFraction(c.contextUsage, planUsageShown(accounts))
+    if (fraction != null) {
+        ContextChip(
+            "${(fraction * 100).toInt()}% context",
+            leading = { ZIcon(if (fraction >= 0.85f) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
+            onClick = {},
+            tint = if (fraction >= 0.85f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
