@@ -434,8 +434,13 @@ describe("the card's page", () => {
     const res = await SELF.fetch("https://edge.test/@xssholder");
     const html = await res.text();
     expect(html).not.toContain("<script>alert");
-    expect(html.match(/<\/script>/g)).toHaveLength(1);
+    // The page's own scripts and no other: the data block and the page's
+    // module (apps/card-web/site/pages.mjs); the name can't add one.
+    expect(html.match(/<script/g)).toHaveLength(2);
+    expect(html.match(/<\/script>/g)).toHaveLength(2);
+    expect(html).toContain('<script type="module" src="https://edge.test/card/card-page.js"></script>');
     expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(res.headers.get("content-security-policy")).toContain("script-src 'self'");
     const data = /id="card">(.*?)<\/script>/s.exec(html)?.[1];
     expect(JSON.parse(data!).firstName).toBe("<script>alert(1)</script>");
   });

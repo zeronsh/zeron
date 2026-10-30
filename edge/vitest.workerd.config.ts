@@ -38,7 +38,8 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
-        r2Buckets: ["BLOBS", "RELEASES"],
+        compatibilityFlags: ["nodejs_compat"],
+        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
         ratelimits: { CARD_READS: { namespace_id: "1", simple: { limit: 60, period: 60 } } },
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
@@ -59,7 +60,7 @@ export default defineConfig({
         serviceBindings: {
           VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
         },
-        r2Buckets: ["BLOBS", "RELEASES"],
+        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
         bindings: {
           AUTH_MODE: "dev",
           WORKOS_CLIENT_ID: "test-only",

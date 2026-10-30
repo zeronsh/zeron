@@ -116,6 +116,11 @@ export interface Env {
   ADMIN_TOKEN?: string;
   /** Public card reads per client IP (card-gate.ts). Unset ⇒ unlimited. */
   CARD_READS?: RateLimit;
+  /** The cards' still pictures (card-image.ts), keyed by the public card. */
+  CARD_IMAGES?: R2Bucket;
+  /** Browser Run, which draws a card's picture from its player page. Unset ⇒
+   * pictures not yet in CARD_IMAGES answer 404. */
+  BROWSER?: Fetcher;
 }
 
 /** APNs settings, when push is set up for this deployment. */

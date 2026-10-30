@@ -3,9 +3,14 @@
  * once: there is no self-service rename, and operators fix mistakes through
  * `/admin/usernames` (user-directory.ts).
  *
- * Public, routed before the bearer gate:
- *   GET /cards/:username  — a card as JSON, CORS-open
- *   GET /@:username       — a card's page (`zeron.sh/@*` routes here)
+ * Public, routed before the bearer gate (every route through card-gate.ts):
+ *   GET /cards/:username          — a card as JSON, CORS-open
+ *   GET /@:username               — a card's page (`zeron.sh/@*` routes here): the
+ *                                   card drawn by apps/card-web, with X's Player Card
+ *                                   and Open Graph tags, so a post shows it
+ *   GET /@:username/player        — the card alone, the iframe X shows in a post
+ *   GET /@:username/card.png      — its still picture (card-image.ts)
+ * The pages' script, style, fonts and art are static assets at /card/*.
  *
  * Signed in, routed after the gate, so a Cloud runner's token is refused
  * (runner-policy.ts): the user id is always the token's `sub`, never input.
@@ -13,10 +18,11 @@
  *   GET  /username/check?username=  — {available, reason?: invalid|reserved|taken}
  *   POST /username {username}       — claim; a repeat of the same claim succeeds
  */
+import { renderPlayer, renderShare, urlsFor } from "../../apps/card-web/site/pages.mjs";
 import type { Verified } from "./auth";
 import { CARD_TTL_SECONDS, MISSING_CARD_TTL_SECONDS, cacheCard, cachedCard, forgetCard } from "./card-cache";
-import { escapeHtml } from "./auth-routes";
 import { CARD_SCENES } from "./card";
+import { cardImage } from "./card-image";
 import type { Env } from "./env";
 import { json, jsonError, readJsonBody } from "./http";
 import { foldUsername, isReservedUsername } from "./username";
@@ -25,30 +31,41 @@ import { userDirectoryStub, type PublicCard } from "./user-directory";
 const MAX_CLAIM_BODY = 1024;
 
 const PAGE_PATH = /^\/(?:@|%40)/i;
-const PAGE_NAME = /^\/(?:@|%40)([^/]*)\/?$/i;
+/** `/@name`, `/@name/player` or `/@name/card.png`. */
+const PAGE_NAME = /^\/(?:@|%40)([^/]*)(?:\/(player|card\.png))?\/?$/i;
+
+/** The X handle the share page names as the card's site. */
+const X_SITE = "@zeron";
+
+/** What the pages may load: their own script, style, fonts and art, no
+ * inline script; the player may be framed by X (and ourselves), the page
+ * by ourselves alone. */
+const PAGE_SOURCES = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'";
+export const PAGE_CSP = `${PAGE_SOURCES}; frame-ancestors 'self'`;
+export const PLAYER_CSP = `${PAGE_SOURCES}; frame-ancestors 'self' https://x.com https://*.x.com https://twitter.com https://*.twitter.com`;
 
 const unavailable = (): Response => jsonError(503, "unavailable", "The user directory isn't set up on this server.");
 
-/**
- * The page at `/@username`. For now the card's fields as plain text; this is
- * the seam for `apps/card-web`, which replaces the markup and reads the same
- * fields from the `#card` data block. Member-written text lands in this page,
- * on the landing site's origin: it's escaped, and no script may run.
- */
-const cardPage = (card: PublicCard): Response => {
-  const name = escapeHtml(card.firstName);
-  const data = JSON.stringify(card).replaceAll("<", "\\u003c");
-  return page(
-    200,
-    CARD_TTL_SECONDS,
-    `${name} — Zeron`,
-    `<h1>${name}</h1>
-<p>@${escapeHtml(card.username)} · #${card.userNumber} · joined ${escapeHtml(card.joinedOn)}</p>
-<script type="application/json" id="card">${data}</script>`
-  );
+/** A card's HTML, as apps/card-web renders it: the share page or the player
+ * (`kind`), from the request's own origin, so staging's pages name staging's
+ * player and picture and zeron.sh's name zeron.sh's. */
+const cardPage = (card: PublicCard, kind: "page" | "player", site: string): Response => {
+  const urls = urlsFor(card, site);
+  const html = kind === "player" ? renderPlayer(card, urls) : renderShare(card, urls, { site: X_SITE });
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": `public, max-age=${CARD_TTL_SECONDS}`,
+      "content-security-policy": kind === "player" ? PLAYER_CSP : PAGE_CSP,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "strict-origin-when-cross-origin"
+    }
+  });
 };
 
-const page = (status: number, ttl: number, title: string, body: string): Response =>
+/** A page for a name no one holds: plain, and not for search engines. */
+const missingPage = (): Response =>
   new Response(
     `<!doctype html>
 <html lang="en">
@@ -56,7 +73,7 @@ const page = (status: number, ttl: number, title: string, body: string): Respons
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>${title}</title>
+<title>No card here — Zeron</title>
 <style>
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; text-align: center;
          background: #0a0a0a; color: #ededed; font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; }
@@ -64,13 +81,13 @@ const page = (status: number, ttl: number, title: string, body: string): Respons
   p { color: #a1a1a1; margin: 0; }
 </style>
 </head>
-<body><main>${body}</main></body>
+<body><main><h1>No card here</h1><p>No one has this username.</p></main></body>
 </html>`,
     {
-      status,
+      status: 404,
       headers: {
         "content-type": "text/html; charset=utf-8",
-        "cache-control": `public, max-age=${ttl}`,
+        "cache-control": `public, max-age=${MISSING_CARD_TTL_SECONDS}`,
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
         "x-content-type-options": "nosniff"
       }
@@ -87,7 +104,8 @@ const cardJson = (card: PublicCard | null): Response =>
     }
   });
 
-/** `/cards/:username` and `/@:username`; undefined when neither. */
+/** `/cards/:username`, `/@:username`, `/@:username/player` and
+ * `/@:username/card.png`; undefined when none of these. */
 export const handlePublicCardRoute = async (
   request: Request,
   env: Env,
@@ -99,7 +117,10 @@ export const handlePublicCardRoute = async (
   if (!isPage && parts[0] !== "cards") return undefined;
   if (request.method !== "GET" && request.method !== "HEAD") return jsonError(405, "method_not_allowed", "GET only.");
 
-  const username = foldUsername(isPage ? PAGE_NAME.exec(url.pathname)?.[1] : parts.length === 2 ? parts[1] : undefined);
+  const page = isPage ? PAGE_NAME.exec(url.pathname) : null;
+  if (isPage && !page) return missingPage();
+  const kind = page?.[2]?.toLowerCase() === "player" ? "player" : page?.[2]?.toLowerCase() === "card.png" ? "image" : "page";
+  const username = foldUsername(isPage ? page?.[1] : parts.length === 2 ? parts[1] : undefined);
   let card: PublicCard | null = null;
   if (username) {
     const cached = await cachedCard(username);
@@ -113,8 +134,9 @@ export const handlePublicCardRoute = async (
     }
   }
   if (!isPage) return cardJson(card);
-  if (card) return cardPage(card);
-  return page(404, MISSING_CARD_TTL_SECONDS, "No card here — Zeron", "<h1>No card here</h1><p>No one has this username.</p>");
+  if (!card) return kind === "page" ? missingPage() : jsonError(404, "not_found", "No one has this username.");
+  if (kind === "image") return cardImage(card, env, ctx, url.origin);
+  return cardPage(card, kind, url.origin);
 };
 
 /** `/username[/check]`, past the bearer gate; undefined when neither. */
