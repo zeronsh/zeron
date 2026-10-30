@@ -32,6 +32,11 @@ pub enum NativeEvent {
     Vsync,
     /// The page's pointer changed; see `Surface::cursor`.
     Cursor,
+    /// The icon a finished `page` declares.
+    Favicon {
+        page: String,
+        url: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +229,13 @@ fn common_packet(route: &Route, kind: u8, data: Vec<u8>) -> Option<NativeEvent> 
         b'M' => NativeEvent::Menu(serde_json::from_slice(&data).ok()?),
         b'C' => NativeEvent::Clipboard(String::from_utf8_lossy(&data).into_owned()),
         b'N' => NativeEvent::NewTab(String::from_utf8_lossy(&data).into_owned()),
+        b'O' => {
+            let icon: Value = serde_json::from_slice(&data).ok()?;
+            NativeEvent::Favicon {
+                page: icon["page"].as_str()?.to_owned(),
+                url: icon["url"].as_str()?.to_owned(),
+            }
+        }
         b'J' => {
             let value: Option<Value> = serde_json::from_slice(&data).ok();
             #[cfg(feature = "browser-fixture")]
@@ -241,7 +253,10 @@ fn deliver(route: &Route, event: NativeEvent) {
     // accumulates video frames or blocks the engine; frame and vsync state is
     // read from the route, so a dropped wakeup loses nothing.
     match event {
-        NativeEvent::NewTab(_) | NativeEvent::Clipboard(_) | NativeEvent::Menu(_) => {
+        NativeEvent::NewTab(_)
+        | NativeEvent::Clipboard(_)
+        | NativeEvent::Menu(_)
+        | NativeEvent::Favicon { .. } => {
             let _ = route.tx.blocking_send(event);
         }
         _ => {
@@ -984,6 +999,7 @@ impl super::BrowserSurface {
                 }
                 return;
             }
+            NativeEvent::Favicon { page, url } => self.fetch_favicon(page, url, cx),
             NativeEvent::Frame | NativeEvent::Changed => {
                 let mut page = native.state();
                 if page.url.is_none() {
@@ -991,6 +1007,14 @@ impl super::BrowserSurface {
                 }
                 if page.error.is_some() {
                     page.loading = false;
+                }
+                // A navigation or reload drops the old page's icon.
+                if page.url != self.page.url || (!self.page.loading && page.loading) {
+                    if let Some(image) = self.favicon.take() {
+                        cx.defer(move |cx| gpui::ImageSource::Image(image).evict(None, cx));
+                    }
+                    self.favicon_generation += 1;
+                    self.favicon_task = None;
                 }
                 if !self.address.focus_handle(cx).is_focused(window) {
                     if let Some(url) = &page.url {

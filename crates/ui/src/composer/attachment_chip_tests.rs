@@ -566,7 +566,7 @@ fn file_chips_use_the_file_theme_to_tell_formats_apart() {
     use crate::theme::Appearance::Dark;
     let themed = |kind, name| match chip_icon(kind, name, Dark) {
         ChipIcon::FileTheme(path) => path,
-        ChipIcon::Glyph(_) => panic!("{name} should use the file theme"),
+        ChipIcon::Glyph(_) | ChipIcon::Favicon(_) => panic!("{name} should use the file theme"),
     };
     assert_ne!(
         themed(ChipKind::File, "README.md"),
