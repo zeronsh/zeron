@@ -31,6 +31,11 @@ const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
 const GITHUB_REPOSITORY_QUERY: &str =
     "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// GitHub's REST API never lists more of a pull request's commits than this.
+const GITHUB_PR_COMMITS_LIMIT: usize = 250;
+const GITHUB_PR_COMMITS_PAGE: usize = 100;
+/// Cache key prefix of SHA-pinned commit patches.
+const COMMIT_DIFF_KEY: &str = "commit-diff:";
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
 const GITHUB_SEARCH_QUERY: &str = "query($search: String!, $owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) { nameWithOwner } search(query: $search, type: ISSUE, first: 50, after: $after) { issueCount pageInfo { hasNextPage endCursor } nodes { ... on PullRequest { author { login } headRefOid viewerDidAuthor viewerLatestReviewRequest { id } reviewRequests(first: 100) { nodes { id } pageInfo { hasNextPage } } statusCheckRollup { commit { oid } state contexts { totalCount checkRunCountsByState { state count } statusContextCountsByState { state count } } } number title url state isDraft mergeable reviewDecision createdAt updatedAt additions deletions repository { nameWithOwner } } } } }";
@@ -378,6 +383,8 @@ impl GitHubCli {
                 Err(_) if refresh => Duration::ZERO,
                 Err(_) => Duration::from_secs(60),
                 Ok(_) if refresh => Duration::from_secs(15),
+                // A commit's patch never changes.
+                Ok(_) if key.starts_with(COMMIT_DIFF_KEY) => Duration::from_secs(24 * 60 * 60),
                 Ok(_) => Duration::from_secs(5 * 60),
             };
             let fresh = entry.1.elapsed() < ttl;
@@ -553,15 +560,105 @@ impl GitHubCli {
         })
     }
 
-    async fn fetch_revision_diff(&self, url: &str, head: &str, base: &str) -> PrResult {
+    /// A PR's commits, newest first. The head revision keys the cache so a
+    /// push is never answered from the previous listing.
+    pub async fn commits(
+        &self,
+        url: &str,
+        refresh: bool,
+        head: Option<&str>,
+    ) -> Result<zeron_proto::ChangeRequestCommits, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if head.is_some_and(|oid| !zeron_proto::change_request_assessment::valid_head_oid(oid)) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let github = self.clone();
+        let key = format!("commits:{url}:{}", head.unwrap_or_default());
+        let value = self
+            .cached_pr_request(key, refresh, async move {
+                let commits = github.fetch_commits(&url).await?;
+                serde_json::to_value(commits).map_err(|_| ChangeRequestError::Decode)
+            })
+            .await?;
+        serde_json::from_value(value).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    /// Pages through `pulls/{n}/commits`. GitHub lists at most
+    /// [`GITHUB_PR_COMMITS_LIMIT`] commits, oldest first; one page per call
+    /// keeps each response well under the output cap.
+    async fn fetch_commits(
+        &self,
+        url: &str,
+    ) -> Result<zeron_proto::ChangeRequestCommits, ChangeRequestError> {
         let parsed = reqwest::Url::parse(url).map_err(|_| ChangeRequestError::Decode)?;
         let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        let mut commits = Vec::new();
+        for page in 1..=GITHUB_PR_COMMITS_LIMIT.div_ceil(GITHUB_PR_COMMITS_PAGE) {
+            let output = self
+                .runner
+                .run(ProcessRequest {
+                    args: vec![
+                        "api".into(),
+                        format!(
+                            "repos/{}/{}/pulls/{}/commits?per_page={GITHUB_PR_COMMITS_PAGE}&page={page}",
+                            parts[0], parts[1], parts[3]
+                        ),
+                    ],
+                    ..github_request()
+                })
+                .await
+                .map_err(classify_run_error)?;
+            if !output.success {
+                return Err(classify_github_failure(&output.stderr));
+            }
+            if output.stdout_truncated {
+                return Err(ChangeRequestError::Decode);
+            }
+            let rows: Vec<GhPullRequestCommit> =
+                serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+            let last = rows.len() < GITHUB_PR_COMMITS_PAGE;
+            commits.extend(rows.into_iter().map(GhPullRequestCommit::into_history));
+            if last {
+                break;
+            }
+        }
+        let truncated = commits.len() >= GITHUB_PR_COMMITS_LIMIT;
+        commits.reverse();
+        Ok(zeron_proto::ChangeRequestCommits { commits, truncated })
+    }
+
+    /// One commit's patch against its first parent, as GitHub renders it.
+    pub async fn commit_diff(
+        &self,
+        url: &str,
+        sha: &str,
+        refresh: bool,
+    ) -> Result<String, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if !zeron_proto::change_request_assessment::valid_head_oid(sha) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let parsed = reqwest::Url::parse(&url).map_err(|_| ChangeRequestError::Decode)?;
+        let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        let endpoint = format!("repos/{}/{}/commits/{sha}", parts[0], parts[1]);
+        let github = self.clone();
+        let value = self
+            .cached_pr_request(
+                format!("{COMMIT_DIFF_KEY}{endpoint}"),
+                refresh,
+                async move { github.fetch_patch(endpoint).await },
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|_| ChangeRequestError::Decode)
+    }
+
+    async fn fetch_patch(&self, endpoint: String) -> PrResult {
         let output = self
             .runner
             .run(ProcessRequest {
                 args: vec![
                     "api".into(),
-                    format!("repos/{}/{}/compare/{base}...{head}", parts[0], parts[1]),
+                    endpoint,
                     "-H".into(),
                     "Accept: application/vnd.github.diff".into(),
                 ],
@@ -578,6 +675,16 @@ impl GitHubCli {
         Ok(serde_json::Value::String(
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ))
+    }
+
+    async fn fetch_revision_diff(&self, url: &str, head: &str, base: &str) -> PrResult {
+        let parsed = reqwest::Url::parse(url).map_err(|_| ChangeRequestError::Decode)?;
+        let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        self.fetch_patch(format!(
+            "repos/{}/{}/compare/{base}...{head}",
+            parts[0], parts[1]
+        ))
+        .await
     }
 
     /// Fetch one PR without requiring a local checkout or executing shell text.
@@ -1484,6 +1591,57 @@ struct GhRepoView {
 #[derive(Debug, Deserialize)]
 struct GhBranchRef {
     name: String,
+}
+
+/// One row of `GET repos/{o}/{r}/pulls/{n}/commits`.
+#[derive(Debug, Deserialize)]
+struct GhPullRequestCommit {
+    sha: String,
+    #[serde(default)]
+    parents: Vec<GhCommitParent>,
+    commit: GhGitCommit,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhCommitParent {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhGitCommit {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    author: Option<GhGitSignature>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct GhGitSignature {
+    name: String,
+    email: String,
+    date: String,
+}
+
+impl GhPullRequestCommit {
+    fn into_history(self) -> zeron_proto::GitHistoryCommit {
+        let author = self.commit.author.unwrap_or_default();
+        zeron_proto::GitHistoryCommit {
+            sha: self.sha,
+            parent_shas: self.parents.into_iter().map(|parent| parent.sha).collect(),
+            subject: self
+                .commit
+                .message
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            author_name: author.name,
+            author_email: author.email,
+            authored_at: author.date,
+            refs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2850,6 +3008,130 @@ mod tests {
                 .is_err()
         );
         assert_eq!(runner.requests()[0].args.last().unwrap(), "--color=never");
+    }
+
+    #[tokio::test]
+    async fn pr_commits_page_newest_first_and_key_cache_by_head() {
+        use serde_json::json;
+        let url = "https://github.com/a/b/pull/7";
+        let head = "b".repeat(40);
+        let row = |sha: String, parents: Vec<String>, message: &str| {
+            json!({
+                "sha": sha,
+                "parents": parents.into_iter().map(|sha| json!({"sha": sha})).collect::<Vec<_>>(),
+                "commit": {
+                    "message": message,
+                    "author": {"name": "Ada", "email": "ada@example.com", "date": "2026-09-01T10:00:00Z"}
+                }
+            })
+        };
+        let full: Vec<_> = (0..GITHUB_PR_COMMITS_PAGE)
+            .map(|index| row(format!("{index:040x}"), Vec::new(), "filler"))
+            .collect();
+        let tail = vec![
+            row("c".repeat(40), vec!["1".repeat(40)], "First\n\nBody"),
+            row(
+                "d".repeat(40),
+                vec!["c".repeat(40), "e".repeat(40)],
+                "Merge main",
+            ),
+        ];
+        let runner = FakeProcessRunner::with_responses([
+            command_success(serde_json::to_vec(&full).unwrap()),
+            command_success(serde_json::to_vec(&tail).unwrap()),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let listed = github.commits(url, false, Some(&head)).await.unwrap();
+        assert_eq!(listed.commits.len(), GITHUB_PR_COMMITS_PAGE + 2);
+        assert!(!listed.truncated);
+        let newest = &listed.commits[0];
+        assert_eq!(newest.sha, "d".repeat(40));
+        assert_eq!(newest.parent_shas, ["c".repeat(40), "e".repeat(40)]);
+        assert_eq!(newest.subject, "Merge main");
+        assert_eq!(listed.commits[1].subject, "First");
+        assert_eq!(listed.commits[1].author_email, "ada@example.com");
+        assert_eq!(listed.commits[1].authored_at, "2026-09-01T10:00:00Z");
+        let requests = runner.requests();
+        assert_eq!(
+            requests[0].args,
+            ["api", "repos/a/b/pulls/7/commits?per_page=100&page=1"]
+        );
+        assert_eq!(
+            requests[1].args,
+            ["api", "repos/a/b/pulls/7/commits?per_page=100&page=2"]
+        );
+        // Same head: cached. Invalid heads never reach GitHub.
+        github.commits(url, false, Some(&head)).await.unwrap();
+        assert!(github.commits(url, false, Some("--help")).await.is_err());
+        assert_eq!(runner.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pr_commit_diff_is_pinned_by_sha_and_cached() {
+        let sha = "c".repeat(40);
+        let mut truncated = command_success("partial").unwrap();
+        truncated.stdout_truncated = true;
+        let runner = FakeProcessRunner::with_responses([
+            command_success("diff --git a/x b/x\n"),
+            Ok(truncated),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let url = "https://github.com/a/b/pull/7";
+        assert_eq!(
+            github.commit_diff(url, &sha, false).await.unwrap(),
+            "diff --git a/x b/x\n"
+        );
+        assert_eq!(
+            runner.requests()[0].args,
+            [
+                "api",
+                &format!("repos/a/b/commits/{sha}"),
+                "-H",
+                "Accept: application/vnd.github.diff"
+            ]
+        );
+        // Reopening the same commit reuses its patch; a refresh does not.
+        github.commit_diff(url, &sha, false).await.unwrap();
+        assert_eq!(runner.requests().len(), 1);
+        // Older than the five-minute detail TTL, still served.
+        for entry in &mut github.pr_cache.lock().await.entries {
+            entry.1 = Instant::now()
+                .checked_sub(Duration::from_secs(30 * 60))
+                .unwrap();
+        }
+        github.commit_diff(url, &sha, false).await.unwrap();
+        assert_eq!(runner.requests().len(), 1);
+        assert!(github.commit_diff(url, &sha, true).await.is_err());
+        assert_eq!(runner.requests().len(), 2);
+        for sha in ["--help", "abc", "../../x"] {
+            assert!(github.commit_diff(url, sha, false).await.is_err());
+        }
+        assert_eq!(runner.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pr_commits_flag_githubs_listing_cap() {
+        let page = |count: usize, offset: usize| {
+            let rows: Vec<_> = (0..count)
+                .map(|index| {
+                    serde_json::json!({
+                        "sha": format!("{:040x}", index + offset),
+                        "commit": {"message": "m", "author": null}
+                    })
+                })
+                .collect();
+            command_success(serde_json::to_vec(&rows).unwrap())
+        };
+        let runner =
+            FakeProcessRunner::with_responses([page(100, 0), page(100, 100), page(50, 200)]);
+        let listed = GitHubCli::with_runner(runner.clone())
+            .commits("https://github.com/a/b/pull/7", false, None)
+            .await
+            .unwrap();
+        assert_eq!(listed.commits.len(), GITHUB_PR_COMMITS_LIMIT);
+        assert!(listed.truncated);
+        assert_eq!(runner.requests().len(), 3);
+        assert!(listed.commits[0].author_name.is_empty());
     }
 
     fn command_failure(stderr: &str) -> Result<ProcessOutput, ProcessRunError> {
