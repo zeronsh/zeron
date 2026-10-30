@@ -574,10 +574,10 @@ impl SessionDoc {
             .get_list("messages")
             .get_deep_value()
             .to_json_value();
-        let raw: Vec<serde_json::Value> = serde_json::from_value(messages)?;
+        let raw = json_array(messages)?;
         Ok(raw
-            .into_iter()
-            .filter_map(|v| match entry_from_json(v) {
+            .iter()
+            .filter_map(|v| match decode_entry_value(v) {
                 Ok(entry) => Some(entry),
                 Err(err) => {
                     tracing::warn!(
@@ -624,7 +624,7 @@ impl SessionDoc {
                 remaining -= 1;
             }
             value["parts"] = serde_json::Value::Array(tail);
-            if let Ok(entry) = entry_from_json(value) {
+            if let Ok(entry) = decode_entry_value(&value) {
                 entries.push(entry);
             }
         }
@@ -652,7 +652,7 @@ impl SessionDoc {
             .get_list("commands")
             .get_deep_value()
             .to_json_value();
-        let raw: Vec<serde_json::Value> = serde_json::from_value(commands)?;
+        let raw = json_array(commands)?;
         Ok(raw
             .into_iter()
             .filter_map(|v| match serde_json::from_value(v) {
@@ -1078,15 +1078,30 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     Ok(())
 }
 
+/// The elements of a list container's deep value. A non-array stays the same
+/// `Json` error `from_value::<Vec<Value>>` raised, without rebuilding the tree
+/// on the happy path.
+fn json_array(v: serde_json::Value) -> Result<Vec<serde_json::Value>, DocError> {
+    match v {
+        serde_json::Value::Array(items) => Ok(items),
+        other => serde_json::from_value(other).map_err(DocError::from),
+    }
+}
+
 /// Decode ONE `messages` entry map's deep JSON value (same strict-then-salvage
 /// policy as [`SessionDoc::read_entries`]). The per-entry seam for viewers
 /// that keep an incremental transcript mirror: they re-decode only the entry
 /// maps a commit touched instead of materializing the whole list.
 pub fn decode_entry_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
-    entry_from_json(v)
+    decode_entry_value(&v)
 }
 
-fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
+/// [`decode_entry_json`] over a borrowed value: the strict parse reads through
+/// `&Value` instead of cloning the whole entry tree first, and the salvage
+/// path reuses the same borrow. This is the one decoder behind
+/// [`SessionDoc::read_entries`] and the incremental transcript mirror, so both
+/// produce identical entries by construction.
+pub fn decode_entry_value(v: &serde_json::Value) -> Result<SessionMessageEntry, DocError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct RawEntry {
@@ -1103,7 +1118,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         #[serde(default)]
         duration_ms: Option<i64>,
     }
-    match serde_json::from_value::<RawEntry>(v.clone()) {
+    match RawEntry::deserialize(v) {
         Ok(raw) => Ok(SessionMessageEntry {
             id: raw.id,
             role: raw.role,
@@ -1129,7 +1144,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
 /// salvaged individually — a part missing `kind` is inferred from its
 /// content shape, and only truly contentless parts are dropped.
 fn salvage_entry(
-    v: serde_json::Value,
+    v: &serde_json::Value,
     strict_err: serde_json::Error,
 ) -> Result<SessionMessageEntry, DocError> {
     let Some(obj) = v.as_object() else {
@@ -1145,13 +1160,13 @@ fn salvage_entry(
     let id = str_field("id").unwrap_or_else(|| format!("recovered-{stable_hash:016x}"));
     let role = obj
         .get("role")
-        .and_then(|r| serde_json::from_value::<MessageRole>(r.clone()).ok())
+        .and_then(|r| MessageRole::deserialize(r).ok())
         .unwrap_or(MessageRole::Assistant);
     let mut parts = Vec::new();
     let mut dropped_parts = 0usize;
     if let Some(raw_parts) = obj.get("parts").and_then(|p| p.as_array()) {
         for (ix, part) in raw_parts.iter().enumerate() {
-            match serde_json::from_value::<DocPartJson>(part.clone()) {
+            match DocPartJson::deserialize(part) {
                 Ok(p) => parts.push(from_doc_part(p)),
                 Err(_) => match salvage_part(part, &id, ix) {
                     Some(p) => parts.push(p),
@@ -1175,7 +1190,7 @@ fn salvage_entry(
         device_id: str_field("deviceId").unwrap_or_default(),
         status: obj
             .get("status")
-            .and_then(|s| serde_json::from_value(s.clone()).ok()),
+            .and_then(|s| MessageStatus::deserialize(s).ok()),
         continuation_of: str_field("continuationOf"),
         duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
     })
@@ -1214,7 +1229,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
     }
     if let Some(call) = obj
         .get("call")
-        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .and_then(|c| Deserialize::deserialize(c).ok())
     {
         return Some(MessagePart::Tool {
             id,
@@ -2442,12 +2457,12 @@ mod tests {
                 { "id": "p3", "kind": "text", "text": "well-formed" }
             ]
         });
-        let entry = entry_from_json(v.clone()).expect("salvaged");
+        let entry = decode_entry_json(v.clone()).expect("salvaged");
         assert!(
             entry.id.starts_with("recovered-"),
             "deterministic stand-in id"
         );
-        let again = entry_from_json(v).expect("salvaged again");
+        let again = decode_entry_json(v).expect("salvaged again");
         assert_eq!(entry.id, again.id, "recovered id is stable across reads");
         assert_eq!(entry.role, MessageRole::Assistant);
         assert_eq!(entry.created_at, 123);
@@ -2467,22 +2482,22 @@ mod tests {
             "createdAt": 1,
             "parts": [ { "id": "t1", "call": { "kind": "exec", "command": "ls" }, "output": "x" } ]
         });
-        let entry = entry_from_json(v).expect("salvaged");
+        let entry = decode_entry_json(v).expect("salvaged");
         assert!(matches!(
             &entry.parts[0],
             MessagePart::Tool { resolved: true, .. }
         ));
 
         // Only non-objects are truly unsalvageable.
-        assert!(entry_from_json(serde_json::json!("garbage")).is_err());
-        assert!(entry_from_json(serde_json::json!(42)).is_err());
+        assert!(decode_entry_json(serde_json::json!("garbage")).is_err());
+        assert!(decode_entry_json(serde_json::json!(42)).is_err());
 
         // Well-formed entries take the strict path unchanged.
         let v = serde_json::json!({
             "id": "m1", "role": "user", "createdAt": 5, "deviceId": "d",
             "parts": [ { "id": "p", "kind": "text", "text": "hi" } ]
         });
-        let entry = entry_from_json(v).expect("strict");
+        let entry = decode_entry_json(v).expect("strict");
         assert_eq!(entry.id, "m1");
     }
 }
@@ -2522,5 +2537,334 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+}
+
+/// D1 oracle: the pre-optimization decoder (clone + `from_value` at every
+/// level) kept verbatim as the reference the borrowed decoder must match on
+/// malformed, torn and newer-schema entries.
+#[cfg(test)]
+mod decoder_equivalence_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn legacy_decode(v: Value) -> Result<SessionMessageEntry, DocError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawEntry {
+            id: String,
+            role: MessageRole,
+            #[serde(default)]
+            parts: Vec<DocPartJson>,
+            created_at: i64,
+            device_id: String,
+            #[serde(default)]
+            status: Option<MessageStatus>,
+            #[serde(default)]
+            continuation_of: Option<String>,
+            #[serde(default)]
+            duration_ms: Option<i64>,
+        }
+        match serde_json::from_value::<RawEntry>(v.clone()) {
+            Ok(raw) => Ok(SessionMessageEntry {
+                id: raw.id,
+                role: raw.role,
+                parts: raw.parts.into_iter().map(from_doc_part).collect(),
+                created_at: raw.created_at,
+                device_id: raw.device_id,
+                status: raw.status,
+                continuation_of: raw.continuation_of,
+                duration_ms: raw.duration_ms,
+            }),
+            Err(strict_err) => legacy_salvage(v, strict_err),
+        }
+    }
+
+    fn legacy_salvage(
+        v: Value,
+        strict_err: serde_json::Error,
+    ) -> Result<SessionMessageEntry, DocError> {
+        let Some(obj) = v.as_object() else {
+            return Err(DocError::Json(strict_err));
+        };
+        let stable_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            v.to_string().hash(&mut hasher);
+            hasher.finish()
+        };
+        let str_field = |key: &str| obj.get(key).and_then(|x| x.as_str()).map(str::to_owned);
+        let id = str_field("id").unwrap_or_else(|| format!("recovered-{stable_hash:016x}"));
+        let role = obj
+            .get("role")
+            .and_then(|r| serde_json::from_value::<MessageRole>(r.clone()).ok())
+            .unwrap_or(MessageRole::Assistant);
+        let mut parts = Vec::new();
+        if let Some(raw_parts) = obj.get("parts").and_then(|p| p.as_array()) {
+            for (ix, part) in raw_parts.iter().enumerate() {
+                match serde_json::from_value::<DocPartJson>(part.clone()) {
+                    Ok(p) => parts.push(from_doc_part(p)),
+                    Err(_) => {
+                        if let Some(p) = legacy_salvage_part(part, &id, ix) {
+                            parts.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(SessionMessageEntry {
+            id,
+            role,
+            parts,
+            created_at: obj.get("createdAt").and_then(|x| x.as_i64()).unwrap_or(0),
+            device_id: str_field("deviceId").unwrap_or_default(),
+            status: obj
+                .get("status")
+                .and_then(|s| serde_json::from_value(s.clone()).ok()),
+            continuation_of: str_field("continuationOf"),
+            duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
+        })
+    }
+
+    fn legacy_salvage_part(part: &Value, entry_id: &str, ix: usize) -> Option<MessagePart> {
+        let obj = part.as_object()?;
+        let id = obj
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{entry_id}#recovered-{ix}"));
+        if obj.get("kind").and_then(|v| v.as_str()) == Some("image") {
+            let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+            return Some(image_part(
+                id,
+                field("path"),
+                field("name"),
+                field("mimeType"),
+            ));
+        }
+        if let Some(reasoning) = obj.get("reasoning").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Reasoning {
+                id,
+                text: reasoning.to_owned(),
+            });
+        }
+        if let Some(text) = obj.get("text").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Text {
+                id,
+                text: text.to_owned(),
+            });
+        }
+        if let Some(call) = obj
+            .get("call")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+        {
+            return Some(MessagePart::Tool {
+                id,
+                call,
+                is_error: obj
+                    .get("isError")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+                resolved: obj
+                    .get("resolved")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true),
+                output: obj
+                    .get("output")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned),
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            });
+        }
+        if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Error {
+                id,
+                message: message.to_owned(),
+            });
+        }
+        None
+    }
+
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn valid_entry() -> Value {
+        json!({
+            "id": "m1", "role": "assistant", "createdAt": 5, "deviceId": "d1",
+            "status": "streaming", "continuationOf": "m0", "durationMs": 12,
+            "parts": [
+                { "id": "p1", "kind": "text", "text": "héllo wörld" },
+                { "id": "p2", "kind": "reasoning", "reasoning": "hmm" },
+                { "id": "p3", "kind": "tool", "call": { "id": "c", "name": "Bash", "input": {"cmd": "ls"} },
+                  "resolved": true, "isError": false, "output": "ok", "outputBytes": 2 },
+                { "id": "p4", "kind": "image", "path": "/a.png", "name": "a", "mimeType": "image/png" },
+                { "id": "p5", "kind": "error", "message": "boom" }
+            ]
+        })
+    }
+
+    fn junk(rng: &mut Xorshift) -> Value {
+        match rng.below(9) {
+            0 => Value::Null,
+            1 => json!(true),
+            2 => json!(-7),
+            3 => json!(1.5),
+            4 => json!("späce"),
+            5 => json!([]),
+            6 => json!({}),
+            7 => json!([1, "a", null]),
+            _ => json!({ "nested": { "deep": [1, 2, { "x": null }] } }),
+        }
+    }
+
+    fn mutate(v: &mut Value, rng: &mut Xorshift, depth: usize) {
+        match v {
+            Value::Object(map) => {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                if keys.is_empty() {
+                    return;
+                }
+                let key = keys[rng.below(keys.len())].clone();
+                match rng.below(5) {
+                    0 => {
+                        map.remove(&key);
+                    }
+                    1 => {
+                        map.insert(key, junk(rng));
+                    }
+                    2 if depth < 3 => {
+                        if let Some(child) = map.get_mut(&key) {
+                            mutate(child, rng, depth + 1);
+                        }
+                    }
+                    3 => {
+                        map.insert(format!("extra{}", rng.below(4)), junk(rng));
+                    }
+                    _ => {
+                        if let Some(child) = map.get_mut(&key) {
+                            *child = Value::String(format!("{key}-\u{1F600}"));
+                        }
+                    }
+                }
+            }
+            Value::Array(items) => {
+                if items.is_empty() {
+                    items.push(junk(rng));
+                    return;
+                }
+                let ix = rng.below(items.len());
+                match rng.below(4) {
+                    0 => {
+                        items.remove(ix);
+                    }
+                    1 => items[ix] = junk(rng),
+                    2 if depth < 3 => mutate(&mut items[ix], rng, depth + 1),
+                    _ => items.push(junk(rng)),
+                }
+            }
+            other => *other = junk(rng),
+        }
+    }
+
+    fn assert_same(v: &Value) {
+        let old = legacy_decode(v.clone());
+        let new = decode_entry_value(v);
+        match (&old, &new) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b, "decoders diverged on {v}"),
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "errors diverged on {v}"),
+            _ => panic!("decoders diverged on {v}: old={old:?} new={new:?}"),
+        }
+        // The owned entry point must stay a thin wrapper.
+        let owned = decode_entry_json(v.clone());
+        assert_eq!(owned.is_ok(), new.is_ok());
+    }
+
+    #[test]
+    fn borrowed_decoder_matches_legacy_on_malformed_and_torn_entries() {
+        let torn = [
+            // Entry map imported before the update that fills its fields.
+            json!({}),
+            json!({ "parts": [] }),
+            json!({ "id": "only-id" }),
+            json!({ "id": "x", "role": "user" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1 }),
+            // Part map imported before its fields.
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ {} ] }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p" } ] }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "tool" } ] }),
+            // Newer-schema role/status/kind.
+            json!({ "id": "x", "role": "alien", "createdAt": 1, "deviceId": "d", "status": "warp" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "hologram", "text": "t" } ] }),
+            // Wrong scalar types.
+            json!({ "id": 5, "role": "user", "createdAt": "1", "deviceId": null }),
+            json!({ "id": "x", "role": "user", "createdAt": 1.5, "deviceId": "d", "durationMs": "long" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": "none" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": { "0": {} } }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "tool", "outputBytes": -1 } ] }),
+            // Salvage branches: reasoning, image, call (parseable and not), message.
+            json!({ "role": "assistant", "parts": [
+                { "id": "a", "reasoning": "r" }, { "kind": "image", "path": "/p" },
+                { "id": "c", "call": { "id": "1", "name": "Bash", "input": {} } },
+                { "id": "c2", "call": "garbage" }, { "id": "m", "message": "oops" },
+                { "id": "e", "text": 7 }, { "opaque": [1, 2] }, 5, null, "str"
+            ] }),
+            // Non-objects are unsalvageable.
+            Value::Null,
+            json!("garbage"),
+            json!(42),
+            json!([1, 2]),
+            json!(true),
+        ];
+        for v in &torn {
+            assert_same(v);
+        }
+        assert_same(&valid_entry());
+    }
+
+    #[test]
+    fn borrowed_decoder_matches_legacy_on_mutated_corpus() {
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            for _ in 0..150 {
+                let mut v = valid_entry();
+                for _ in 0..1 + rng.below(4) {
+                    mutate(&mut v, &mut rng, 0);
+                }
+                assert_same(&v);
+            }
+        }
+    }
+
+    #[test]
+    fn read_paths_reject_non_arrays_like_from_value() {
+        for v in [Value::Null, json!({}), json!("s"), json!(3)] {
+            let err = json_array(v.clone()).unwrap_err().to_string();
+            let old = serde_json::from_value::<Vec<Value>>(v)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, format!("json: {old}"));
+        }
+        assert_eq!(json_array(json!([1, 2])).unwrap().len(), 2);
     }
 }
