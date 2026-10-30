@@ -56,6 +56,7 @@ import uniffi.zeron_core.parseAuthCallback
 import uniffi.zeron_core.workosAuthorizeUrl
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 
 /** How the app was launched (adb extras mirror the iOS launch arguments). */
 data class LaunchOptions(
@@ -203,7 +204,16 @@ class AppModel(private val app: Application) {
         private set
 
     val isDemo: Boolean get() = _client.value?.isDemo() == true
-    private var refreshScheduled = false
+    private val snapshots = SnapshotScheduler<CoreClient, WorkspaceSnapshot>(
+        background = Executors.newSingleThreadExecutor { Thread(it, "zeron-workspace").apply { isDaemon = true } },
+        main = { main.post(it) },
+        currentClient = { _client.value },
+        published = { _workspace.value },
+        setPublished = { _workspace.value = it },
+        revisionOf = { it.revision },
+        clientRevision = { it.workspaceRevision() },
+        build = { it.workspace() },
+    )
     /** The pending sign-in's OAuth `state` (persisted: the process may die while the browser is up). */
     private var authState: String?
         get() = settings.getString("authState", null)
@@ -437,19 +447,20 @@ class AppModel(private val app: Application) {
         }
     }
 
-    /** Coalesce bursts of registry frames into one rebuild per loop turn. */
+    /**
+     * Registry frames rebuild the snapshot off the main thread: the FFI build
+     * copies every row (archived ones too) and arrives continuously while an
+     * agent works, which cost the home page frames.
+     */
     private fun scheduleRefresh() {
-        if (refreshScheduled) return
-        refreshScheduled = true
-        main.post {
-            refreshScheduled = false
-            refreshWorkspace()
-        }
+        val client = _client.value ?: return
+        snapshots.schedule(client, ::sweepFreshSideChats)
     }
 
+    /** Rebuild now, on the main thread (explicit refreshes the caller reads back). */
     fun refreshWorkspace() {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        snapshots.refresh(client)
         sweepFreshSideChats()
     }
 
