@@ -1529,6 +1529,15 @@ impl DocHost {
         Ok(())
     }
 
+    /// Last explicit navigation onto `chat_id`, or 0 when this host has never
+    /// focused it. The parked-process cap keeps the highest ranks.
+    pub(crate) fn focus_of(&self, chat_id: &str) -> u64 {
+        lock(&self.inner.handles)
+            .get(chat_id)
+            .map(|handle| handle.last_focus.load(Ordering::Acquire))
+            .unwrap_or(0)
+    }
+
     /// Materialize one authoritative local document without acquiring a network
     /// connection. Durable publication is installed before exposing any writer.
     pub fn open_local(&self, chat_id: &str) -> Result<Arc<ChatDocHandle>, EngineError> {

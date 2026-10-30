@@ -202,6 +202,9 @@ struct RunHandle {
     /// server, so with no IPC port served ([`Inner::zeron_mcp`] returns
     /// `None`) the provider keeps its subagents.
     side_chats_only: bool,
+    /// Between turns (`idle_since` is set). The warm-process cap reads this
+    /// from any session without joining its driver. A live turn stores false.
+    parked: std::sync::atomic::AtomicBool,
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -1116,6 +1119,7 @@ impl SessionsEngine {
                 credential,
                 binary,
                 side_chats_only,
+                parked: std::sync::atomic::AtomicBool::new(idle),
             },
         );
         drop(runs);
@@ -2201,6 +2205,62 @@ impl Inner {
     /// The doc host, once wired. `None` before assembly or after retirement.
     fn doc_host(&self) -> Option<DocHost> {
         lock(&self.doc_host).clone()
+    }
+
+    fn focus_rank(&self, chat_id: &str) -> u64 {
+        self.doc_host()
+            .map(|host| host.focus_of(chat_id))
+            .unwrap_or(0)
+    }
+
+    /// A chat the user navigates to in a chat list. Another chat's worker
+    /// (`parent_chat_id`) is driven by its parent over MCP and is never
+    /// focused, so focus order says nothing about whether it is next. A chat
+    /// whose row is not known here is treated the same way.
+    fn user_facing_chat(&self, chat_id: &str) -> bool {
+        self.workspace().is_some_and(|ws| {
+            !ws.parent_unknown(chat_id)
+                && ws
+                    .chat(chat_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| chat.is_top_level())
+        })
+    }
+
+    /// `chat_id` is parked, idle past the grace, and outside the most recently
+    /// focused warm set. Background work, voice, orchestrators and side chats
+    /// are not in that set: they neither count toward the cap nor get reaped
+    /// by it.
+    fn parked_over_cap(&self, chat_id: &str) -> bool {
+        let cap = parked_session_cap();
+        if cap == 0 {
+            return false;
+        }
+        let parked = {
+            let runs = lock(&self.runs);
+            runs.iter()
+                .filter(|(id, handle)| {
+                    handle.parked.load(std::sync::atomic::Ordering::Acquire)
+                        && !handle.turn.background_live()
+                        && !handle.voice_active.live()
+                        && !zeron_proto::voice::is_orchestrator_chat(id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        let parked = parked
+            .into_iter()
+            .filter(|id| self.user_facing_chat(id))
+            .collect::<Vec<_>>();
+        let ranked = parked
+            .into_iter()
+            .map(|id| ParkedRank {
+                focus: self.focus_rank(&id),
+                chat_id: id,
+            })
+            .collect();
+        parked_overflow(ranked, cap).iter().any(|id| id == chat_id)
     }
 
     /// A message the user already sent follows the turn that is ending
@@ -3486,6 +3546,70 @@ fn cursor_unstarted_history(
     ))
 }
 
+/// How many user-facing persistent sessions may sit parked between turns.
+/// The three most recently focused stay warm: the chat on screen plus two to
+/// switch between, so a switch-and-send does not cold-start any of them.
+/// Older parked CLIs exit and their docs can leave the LRU. Side chats keep
+/// the 30-minute window. `ZERON_PARKED_SESSION_CAP=0` disables the cap (the
+/// idle reaper still applies).
+const PARKED_SESSION_CAP: usize = 3;
+
+fn parked_session_cap() -> usize {
+    std::env::var("ZERON_PARKED_SESSION_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(PARKED_SESSION_CAP)
+}
+
+/// A session idle for less than this stays up even when it is over the cap,
+/// so coming back to an older chat within a few minutes does not pay a CLI
+/// cold start. `ZERON_PARKED_OVERFLOW_MS` overrides.
+const PARKED_OVERFLOW_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+fn parked_overflow_grace() -> std::time::Duration {
+    std::env::var("ZERON_PARKED_OVERFLOW_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(PARKED_OVERFLOW_GRACE)
+}
+
+#[derive(Clone)]
+struct ParkedRank {
+    chat_id: String,
+    focus: u64,
+}
+
+/// Chat ids to reap: everything past the `cap` highest focuses. Equal focus
+/// keeps the lower chat id. Cap 0 disables the cap.
+fn parked_overflow(mut parked: Vec<ParkedRank>, cap: usize) -> Vec<String> {
+    if cap == 0 || parked.len() <= cap {
+        return Vec::new();
+    }
+    parked.sort_by(|left, right| {
+        right
+            .focus
+            .cmp(&left.focus)
+            .then(left.chat_id.cmp(&right.chat_id))
+    });
+    parked
+        .into_iter()
+        .skip(cap)
+        .map(|parked| parked.chat_id)
+        .collect()
+}
+
+fn mark_run_parked(inner: &Inner, chat_id: &str, run_id: &str, parked: bool) {
+    if let Some(handle) = lock(&inner.runs)
+        .get(chat_id)
+        .filter(|handle| handle.run_id == run_id)
+    {
+        handle
+            .parked
+            .store(parked, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -4046,6 +4170,39 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    mark_run_parked(&inner, &chat_id, &run_id, idle_since.is_some());
+                    // Parked-process cap. The 30-minute reaper still owns a
+                    // session the user may return to; this only drops CLIs
+                    // past the most recently focused few, after a grace so a
+                    // quick pass through an older chat does not cold-start it.
+                    // Same clean exit as the idle reaper: cancel the harness
+                    // token and break Idle. Never the Interrupted path. Work
+                    // that just ended holds it off the same way it holds the
+                    // idle reaper.
+                    if idle_since.is_some_and(|at| at.elapsed() >= parked_overflow_grace())
+                        && !held_for_background
+                        && reap_deferred_until
+                            .is_none_or(|until| tokio::time::Instant::now() >= until)
+                        && subagents.is_empty()
+                        && !turn.background_live()
+                        && !resume_state.voice_active.live()
+                        && !zeron_proto::voice::is_orchestrator_chat(&chat_id)
+                        && !inner.has_pending_steers(&chat_id, &run_id)
+                        && inner.parked_over_cap(&chat_id)
+                    {
+                        tracing::info!(
+                            chat = %chat_id,
+                            "reaping parked session over the warm cap"
+                        );
+                        if let Some(token) = lock(&inner.runs)
+                            .get(&chat_id)
+                            .filter(|h| h.run_id == run_id)
+                            .map(|h| h.interrupt_token.clone())
+                        {
+                            token.cancel();
+                        }
+                        break SessionStatus::Idle;
+                    }
                     continue;
                 }
                 Ok(()) = background_processes.changed() => {
@@ -4249,6 +4406,7 @@ async fn drive_run(
                     entry_id = new_id();
                     segment_started = now_ms();
                     idle_since = Some(tokio::time::Instant::now());
+                    mark_run_parked(&inner, &chat_id, &run_id, true);
                     reap_deferred_until = None;
                     self_continued_turn = false;
                     inner.set_status_with_completion(
@@ -4551,6 +4709,7 @@ async fn drive_run(
                     "parked session resumed by self-continued agent output"
                 );
                 idle_since = None;
+                mark_run_parked(&inner, &chat_id, &run_id, false);
                 self_continued_turn = true;
                 // The park cleared the fold; rotate to a fresh entry and
                 // fall through — this event is the new segment's first part.
@@ -4563,10 +4722,12 @@ async fn drive_run(
                         if resume_state.idle && !saw_session_started => {}
                     AgentEvent::Steered { .. } => {
                         idle_since = None;
+                        mark_run_parked(&inner, &chat_id, &run_id, false);
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     AgentEvent::Done { .. } => {
                         idle_since = None;
+                        mark_run_parked(&inner, &chat_id, &run_id, false);
                     }
                     // A question with NO turn behind it (post-turn permission
                     // noise): answer it empty right here. Un-parking into
@@ -4959,6 +5120,7 @@ async fn drive_run(
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
+                mark_run_parked(&inner, &chat_id, &run_id, true);
                 reap_deferred_until = None;
                 self_continued_turn = false;
                 // Accepted steers still own this runtime. Publishing Idle
@@ -5094,6 +5256,38 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parked_overflow_keeps_the_most_recently_focused_sessions() {
+        let ranks = vec![
+            ParkedRank {
+                chat_id: "a".into(),
+                focus: 1,
+            },
+            ParkedRank {
+                chat_id: "d".into(),
+                focus: 3,
+            },
+            ParkedRank {
+                chat_id: "b".into(),
+                focus: 3,
+            },
+            ParkedRank {
+                chat_id: "c".into(),
+                focus: 2,
+            },
+        ];
+        assert!(parked_overflow(ranks.clone(), 0).is_empty());
+        assert!(parked_overflow(ranks.clone(), 4).is_empty());
+        assert!(parked_overflow(ranks.clone(), 5).is_empty());
+        let mut kept_two = parked_overflow(ranks.clone(), 2);
+        kept_two.sort();
+        assert_eq!(kept_two, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(
+            parked_overflow(ranks, 1),
+            vec!["d".to_string(), "c".to_string(), "a".to_string()]
+        );
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {

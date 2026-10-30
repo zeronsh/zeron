@@ -2002,6 +2002,27 @@ impl AppState {
         self.transcript_baselines.get(doc_id)
     }
 
+    /// Prepared rows for `chat_id`, including a chat that just moved into the
+    /// revisit cache. `select_chat` parks the allocation there before the
+    /// transcript's sync runs, and a warm switch has to find that same `Arc`.
+    pub(crate) fn prepared_for(
+        &self,
+        chat_id: &str,
+    ) -> Option<Arc<crate::transcript::PreparedTranscript>> {
+        self.prepared_transcripts.get(chat_id).cloned().or_else(|| {
+            self.transcript_cache
+                .iter()
+                .find(|cached| cached.chat_id == chat_id)
+                .and_then(|cached| cached.prepared.clone())
+        })
+    }
+
+    pub(crate) fn has_pending_echoes(&self, chat_id: &str) -> bool {
+        self.echoes
+            .get(chat_id)
+            .is_some_and(|echoes| !echoes.is_empty())
+    }
+
     pub fn receive_transcript_update(
         &mut self,
         update: zeron_doc::TranscriptUpdate,
@@ -2028,6 +2049,22 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
         if history_pending && self.transcript_replayed {
+            return Ok(());
+        }
+        // The watch's authoritative reset often repeats the transcript the
+        // revisit cache just restored. Rebuilding it (and the laid-out list
+        // keyed off this revision) is the chat-switch hitch. Context usage
+        // can move without any entry change; that still has to reach the
+        // composer, and it does not rebuild rows.
+        if !history_pending
+            && self.transcript_replayed
+            && let TranscriptFrame::Reset { reset } = &update.frame
+            && reset == &self.transcript
+        {
+            if self.context_usage != update.context_usage {
+                self.context_usage = update.context_usage;
+                cx.notify();
+            }
             return Ok(());
         }
         let old_prepared = self
@@ -5662,6 +5699,47 @@ mod tests {
                 state.transcript[0].id, "full",
                 "revisit must preserve the cache"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn identical_opening_reset_keeps_the_rendered_transcript(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let full = vec![user_entry("full")];
+            let update = |entries: &[SessionMessageEntry]| zeron_doc::TranscriptUpdate {
+                frame: TranscriptFrame::reset(entries),
+                context_usage: None,
+                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(entries)),
+            };
+            state.select_chat(Some("chat".into()), cx);
+            state
+                .receive_opening_transcript_update(update(&full), false, cx)
+                .unwrap();
+            assert!(state.transcript_replayed);
+            let revision = state.transcript_revision;
+            let allocation = state.transcript.as_ptr();
+            state
+                .receive_opening_transcript_update(update(&full), false, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript_revision, revision,
+                "an unchanged reset must not rebuild the transcript"
+            );
+            assert_eq!(state.transcript.as_ptr(), allocation);
+            assert_eq!(state.transcript[0].id, "full");
+            state
+                .receive_opening_transcript_update(update(&[user_entry("newer")]), false, cx)
+                .unwrap();
+            assert_ne!(state.transcript_revision, revision);
+            assert_eq!(state.transcript[0].id, "newer");
+            // A preview tail still must not replace the complete view.
+            let revision = state.transcript_revision;
+            state
+                .receive_opening_transcript_update(update(&[user_entry("tail")]), true, cx)
+                .unwrap();
+            assert_eq!(state.transcript_revision, revision);
+            assert_eq!(state.transcript[0].id, "newer");
         });
     }
 
