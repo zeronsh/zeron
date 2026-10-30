@@ -582,8 +582,11 @@ impl Shell {
         };
         let top = self.lifted_sidebar_section_y(drag) - drag.top;
         let over = section_drop_index(top, &drag.heights, drag.from);
-        if let Some(drag) = self.sidebar_section_drag.as_mut() {
+        if let Some(drag) = self.sidebar_section_drag.as_mut()
+            && drag.over != over
+        {
             drag.over = over;
+            crate::haptics::reorder_step();
         }
     }
 
@@ -1255,12 +1258,17 @@ mod tests {
         // The first move lifts the section where it sits; it then follows.
         cx.simulate_mouse_move(from + nudge, Some(MouseButton::Left), none);
         cx.update(|_, cx| assert!(cx.has_active_drag(), "section drag never started"));
+        let haptics_before = crate::haptics::step_count();
         cx.simulate_mouse_move(to, Some(MouseButton::Left), none);
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("sidebar-lifted-section").is_some(),
             "the section lifts while it drags"
         );
+        // One detent for the new slot, none while it rests there.
+        cx.simulate_mouse_move(to + nudge, Some(MouseButton::Left), none);
+        cx.run_until_parked();
+        assert_eq!(crate::haptics::step_count() - haptics_before, 1);
         cx.simulate_mouse_up(to, MouseButton::Left, none);
         cx.run_until_parked();
         assert_eq!(order(&mut cx), ["b", "c", "a"]);
@@ -1278,6 +1286,39 @@ mod tests {
         window
             .update(&mut cx, |shell, _, _| {
                 assert!(shell.sidebar_section_drag.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn pinned_reorder_gives_one_detent_per_slot_change(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                let payload = SidebarSessionDrag {
+                    chat_id: "pin".into(),
+                    visible_ids: std::sync::Arc::new(vec![
+                        "pin".into(),
+                        "other".into(),
+                        "regular".into(),
+                    ]),
+                    filter: None,
+                    profile_key: "local".into(),
+                };
+                let before = crate::haptics::step_count();
+                // Lifting in place is silent; each new slot is one detent.
+                shell.update_pinned_session_drag(&payload, 0, cx);
+                assert_eq!(crate::haptics::step_count() - before, 0);
+                shell.update_pinned_session_drag(&payload, 2, cx);
+                shell.update_pinned_session_drag(&payload, 2, cx);
+                shell.update_pinned_session_drag(&payload, 1, cx);
+                assert_eq!(crate::haptics::step_count() - before, 2);
+                // Out of range cancels without a detent.
+                shell.update_pinned_session_drag(&payload, 3, cx);
+                assert!(shell.pinned_session_drag.is_none());
+                assert_eq!(crate::haptics::step_count() - before, 2);
             })
             .unwrap();
     }
