@@ -22,3 +22,40 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'package(zeron-harness) & test(mcp_injection_reaches_isolated_server_processes)'
 retries = 2
+
+# Windows used to run the zeron-ui library with `cargo test --test-threads=1`:
+# every test in one process, where native platform state (fonts, DirectWrite,
+# the message loop) is shared. nextest gives each test its own process, so they
+# run side by side there too. If one turns out to share state across processes,
+# put just it in a max-threads = 1 test group.
+
+# preview `discovery` tests bind the fixed port 7331 and serialize with a mutex,
+# which does nothing when every test is its own process (nextest): one at a time.
+[test-groups.preview-discovery]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'binary_id(zeron-preview::discovery)'
+test-group = 'preview-discovery'
+
+# `ci`: pull requests and main (NEXTEST_PROFILE=ci). Leaves out slow and soak
+# tests, which the scheduled runs (default profile) still run:
+#   engine doc_host sync at 48-chat scale and against the real 30 s quantum /
+#     10 s idle grace (the ~16 small sync_lifecycle tests cover the policy);
+#   harness codex: an app server that keeps dying (sleeps the real 1+3+8 s backoff);
+#   preview `leak` (RSS growth under churn) and the two discovery tests that
+#     assert nothing happens during a 5-7 s sleep.
+# The cursor_shim stress test runs 14 rounds instead of 100 (ZERON_STRESS_ROUNDS).
+[profile.ci]
+default-filter = '''
+not (
+  (package(zeron-engine) & (
+    test(=doc_host::sync_lifecycle_tests::cold_jobs_get_a_real_timed_turn_without_any_writer_ending)
+    | test(=doc_host::sync_lifecycle_tests::slow_checkpoints_survive_idle_grace_with_all_slots_occupied)
+    | test(/^doc_host::sync_lifecycle_tests::forty_eight_/)))
+  | (binary_id(zeron-harness::codex) & test(=an_app_server_that_keeps_dying_reports_what_it_printed))
+  | binary_id(zeron-preview::leak)
+  | (binary_id(zeron-preview::discovery) & (test(=a_discovered_server_is_probed_once_not_every_cycle)
+      | test(=authentication_callbacks_receive_no_discovery_connections)))
+)
+'''

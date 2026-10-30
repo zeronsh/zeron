@@ -1,33 +1,16 @@
 name: Linux installer
 
+# Called by ci.yml when the installers or the desktop entry change.
 on:
-  pull_request:
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'edge/src/install.sh'
-      - 'scripts/package-linux.sh'
-      - 'scripts/test-linux-desktop-entry.sh'
-      - 'scripts/ci/apt-install.sh'
-      - 'dist/zeron.desktop'
-      - 'dist/zeron.png'
-      - '.github/workflows/linux-installer.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
 
 permissions:
   contents: read
-
-concurrency:
-  group: linux-installer-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   desktop-entry:
@@ -42,3 +25,9 @@ jobs:
       # Both installers, offline, under a throwaway HOME (no network, no systemd).
       - name: Installers write a valid launcher entry
         run: scripts/test-linux-desktop-entry.sh
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-desktop-entry

@@ -1,0 +1,239 @@
+name: CI
+
+# The one entry point for pull request, main and merge queue checks.
+#
+#   plan    which suites this change needs, and the runners they will use
+#           (scripts/ci/plan.py). A suite, or a single Windows or voice job,
+#           that already passed on the same inputs is skipped
+#           (scripts/ci/reuse.py; every job records its pass as its last
+#           step). Pull requests get the fast tier: Windows,
+#           macOS, voice and Android only when the change looks platform
+#           specific, and the Windows packaging, iOS simulator and macOS
+#           fixtures only for their own files; the `ci:full` label (then
+#           re-run) or the CI_PR_TIER=full repository variable runs everything.
+#           Main, the merge queue and manual runs get the full tier; the
+#           nightly schedule runs everything, slow tests included. Voice and
+#           the Linux browser fixture run only nightly, manually or with
+#           `ci:full`. Fork pull requests reuse only main's passes.
+#   admit   waits until every runner the run needs is free, so that once a
+#           run starts, none of its jobs queues behind another run's
+#           (scripts/ci/admit.py). Its name carries the reservation; other runs
+#           read it from there.
+#   suites  the reusable workflows, all started together once admitted.
+#   result  "CI result": one check to require in the ruleset and merge queue.
+#
+# Repository variables (all optional):
+#   CI_PR_TIER           fast (default) or full, for pull requests
+#   CI_BUDGET_TOTAL      hosted runners all CI runs may hold at once (20, the org limit)
+#   CI_BUDGET_MACOS      ... macOS runners (5, the org limit)
+#   CI_BUDGET_WINDOWS    ... Windows runners (10)
+#   CI_ADMISSION         off: start at once, as before
+#   CI_DEBOUNCE_SECONDS  wait for further pushes to a pull request first (60)
+#   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)
+#   CI_FORK_REUSE        own: fork pull requests also reuse their own earlier passes
+#                        (safe once the merge queue, which reuses nothing, is required)
+#
+# Labels (adding one needs the triage role): ci:full (every suite, nothing
+# reused), ci:priority (front of the admission queue), ci:lock (a full run's
+# runners kept for the pull request until merged, closed, unlabelled or
+# CI_LOCK_HOURS). ci-emergency.yml locks a pull request and cancels the rest.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+  # Nightly: every suite and job in full (slow tests and fixtures included), nothing reused.
+  schedule:
+    - cron: '23 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to a pull request cancels its previous run, admitted or still
+  # waiting, which releases everything that run held.
+  group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read  # earlier passes (Actions cache entries)
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+      reservation: ${{ steps.plan.outputs.reservation }}
+      tier: ${{ steps.plan.outputs.tier }}
+      keys: ${{ steps.plan.outputs.keys }}
+      skip: ${{ steps.plan.outputs.skip }}
+      flags: ${{ steps.plan.outputs.flags }}
+      pr: ${{ steps.plan.outputs.pr }}
+    steps:
+      # The Rust sources too: the fingerprints scan them for files they read from
+      # outside their packages. (~30 MB; root files such as Cargo.lock come with cone mode.)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: |
+            scripts/ci
+            scripts/tests
+            .github
+            crates
+            apps/zeron
+      - name: Planner and admission tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+      - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_PR_TIER: ${{ vars.CI_PR_TIER }}
+          CI_FORK_REUSE: ${{ vars.CI_FORK_REUSE }}
+        run: python3 -I scripts/ci/plan.py
+
+  admit:
+    name: "admit [${{ needs.plan.outputs.reservation }}]${{ needs.plan.outputs.pr != '' && format(' #{0}', needs.plan.outputs.pr) || '' }}"
+    needs: plan
+    runs-on: ubuntu-24.04
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: scripts/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ needs.plan.outputs.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I scripts/ci/admit.py
+
+  linux-core:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).core
+    uses: ./.github/workflows/ui-tests.yml
+    with:
+      core: true
+      ui: false
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).core || '' }}
+
+  linux-ui:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).ui
+    uses: ./.github/workflows/ui-tests.yml
+    with:
+      core: false
+      ui: true
+      browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
+
+  cursor:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).cursor
+    uses: ./.github/workflows/cursor-compatibility.yml
+    with:
+      rust-tests: false
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).cursor || '' }}
+
+  edge:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).edge
+    uses: ./.github/workflows/preview-tests.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
+
+  installer:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).installer
+    uses: ./.github/workflows/linux-installer.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).installer || '' }}
+
+  voice:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).voice
+    uses: ./.github/workflows/voice-tests.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).voice || '' }}
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).voice || fromJSON('[]')) }}
+
+  windows:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).windows
+    uses: ./.github/workflows/windows.yml
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).windows || '' }}
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).windows || fromJSON('[]')) }}
+
+  macos:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).macos
+    uses: ./.github/workflows/macos.yml
+    with:
+      native: true
+      frame-source: false
+      ios: false
+      fixtures: ${{ contains(fromJSON(needs.plan.outputs.flags).macos || fromJSON('[]'), 'fixtures') }}
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).macos || '' }}
+
+  frame-source:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).frame_source
+    uses: ./.github/workflows/macos.yml
+    with:
+      native: false
+      frame-source: true
+      ios: false
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).frame_source || '' }}
+
+  ios:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).ios
+    uses: ./.github/workflows/macos.yml
+    with:
+      native: false
+      frame-source: false
+      ios: true
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).ios || fromJSON('[]')) }}
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).ios || '' }}
+
+  android:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.suites).android
+    uses: ./.github/workflows/android.yml
+    # Only what android.yml uses, and only on pushes to main, which publish: pull
+    # requests and the merge queue (code not on main yet) sign with a debug key.
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ github.event_name == 'push' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name == 'push' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+      ANDROID_KEY_ALIAS: ${{ github.event_name == 'push' && secrets.ANDROID_KEY_ALIAS || '' }}
+      ANDROID_KEY_PASSWORD: ${{ github.event_name == 'push' && secrets.ANDROID_KEY_PASSWORD || '' }}
+      CLOUDFLARE_API_TOKEN: ${{ github.event_name == 'push' && secrets.CLOUDFLARE_API_TOKEN || '' }}
+    with:
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).android || '' }}
+
+  result:
+    name: CI result
+    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | python3 -c 'import json,sys; [print(k.ljust(13), v["result"]) for k, v in json.load(sys.stdin).items()]'
+          test "$FAILED" = false

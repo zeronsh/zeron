@@ -1,71 +1,49 @@
 name: Preview networking
+
+# Called by ci.yml when edge/ changes. The Rust networking tests run in
+# core-tests (ui-tests.yml, Linux) and macos-native (macos.yml); this keeps the
+# edge coordinator and the credential vault (edge/vault, its own package), in
+# one job: each takes seconds, a runner of its own cost more than the tests.
 on:
-  pull_request:
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
-  push:
-    branches: [main]
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
+  workflow_call:
+    inputs:
+      pass-key:
+        description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
+        type: string
+        default: ''
+
 permissions:
   contents: read
-concurrency:
-  group: preview-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # The Rust networking tests run in `core-tests` (ui-tests.yml, Linux) and
-  # `macos-native` (macos.yml); this workflow keeps the edge coordinator.
-  coordinator:
-    runs-on: ubuntu-latest
+  edge:
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: edge
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: edge/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-  # The credential vault (edge/vault) has its own package and tests; run them
-  # whenever it (or this workflow) changes.
-  vault:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: edge/vault
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: detect vault changes
-        id: changed
-        working-directory: .
-        shell: bash
+          cache-dependency-path: |
+            edge/package-lock.json
+            edge/vault/package-lock.json
+      - name: Coordinator
+        working-directory: edge
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          else
-            base="${{ github.event.before }}"
-          fi
-          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null \
-            || git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(edge/vault/|\.github/workflows/preview-tests\.yml)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: actions/setup-node@v4
-        if: steps.changed.outputs.changed == 'true'
+          npm ci
+          npm run typecheck
+          npm test
+      - name: Credential vault
+        if: ${{ !cancelled() }}
+        working-directory: edge/vault
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: edge/vault/package-lock.json
-      - if: steps.changed.outputs.changed == 'true'
-        run: npm ci
-      - if: steps.changed.outputs.changed == 'true'
-        run: npm run typecheck
-      - if: steps.changed.outputs.changed == 'true'
-        run: npm test
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-edge
