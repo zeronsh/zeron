@@ -14179,15 +14179,24 @@ impl Render for Shell {
                 // A run finishing while you're LOOKING at the session must not
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
-                // one extra frame settles it).
+                // one extra frame settles it). The side chat the right pane
+                // shows beside it is looked at too; its lane row reads this
+                // state, so the seen mark goes through it as well.
                 if window_active {
-                    let unseen_selected = {
+                    let side_chat = self.side_chat_on_screen(cx);
+                    let unseen: Vec<String> = {
                         let s = self.state.read(cx);
-                        s.selected_chat_row()
-                            .filter(|c| zeron_proto::view::has_unseen_activity(c, s.session_for(&c.id)))
+                        s.selected_chat
+                            .iter()
+                            .chain(&side_chat)
+                            .filter_map(|id| s.chats.iter().find(|c| &c.id == id))
+                            .filter(|c| {
+                                zeron_proto::view::has_unseen_activity(c, s.session_for(&c.id))
+                            })
                             .map(|c| c.id.clone())
+                            .collect()
                     };
-                    if let Some(chat_id) = unseen_selected {
+                    for chat_id in unseen {
                         self.state
                             .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
                     }
@@ -19218,6 +19227,12 @@ impl Shell {
     }
     pub fn fixture_appshots_sidebar(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.settings.sidebar_collapsed = collapsed;
+        cx.notify();
+    }
+    /// Where a drag leaves the surface host's divider: opening a surface
+    /// splits the width evenly.
+    pub fn fixture_right_pane_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.settings.right_pane_width = width;
         cx.notify();
     }
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
