@@ -477,28 +477,44 @@ fn exit_progress(since: std::time::Instant) -> f32 {
 /// primitive ignores `element_opacity`, so without this the glass slab would
 /// hold full strength through the fade and pop off at unmount.
 fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
+    frosted_layer(exit, content, true)
+}
+
+/// Frost for a notice that stays up until its own control dismisses it.
+/// Unlike [`frosted_menu`], a press outside the card still reaches the
+/// control under the pointer.
+fn frosted_notice(exit: Option<f32>, content: AnyElement) -> AnyElement {
+    frosted_layer(exit, content, false)
+}
+
+fn frosted_layer(exit: Option<f32>, content: AnyElement, consume_outside: bool) -> AnyElement {
     let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
     // Outside-dismiss listeners run during capture. Consume that same press
     // during bubble, after dismissal, so content behind the menu cannot act
     // on it too. The following click can reach that content normally.
-    let guard = gpui::canvas(
-        |_, _, _| (),
-        |bounds, _, window, _| {
-            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
-                if phase == gpui::DispatchPhase::Bubble && !bounds.contains(&event.position) {
-                    cx.stop_propagation();
-                }
-            });
-        },
-    )
-    .absolute()
-    .inset_0();
+    // A notice that does not dismiss on an outside press must not install
+    // this: the listener is window-wide, and it would swallow every click
+    // until the notice itself was closed.
+    let guard = consume_outside.then(|| {
+        gpui::canvas(
+            |_, _, _| (),
+            |bounds, _, window, _| {
+                window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Bubble && !bounds.contains(&event.position) {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    });
     crate::frost::frosted(
         CARD_RADIUS,
         blur,
         div()
             .relative()
-            .child(guard)
+            .children(guard)
             .child(content)
             .into_any_element(),
     )
@@ -791,6 +807,40 @@ pub fn anchored_menu_above_end(
 ) -> AnyElement {
     let exit = closing.map(exit_progress);
     let content = frosted_menu(exit, content);
+    div()
+        .absolute()
+        .top_0()
+        .right_0()
+        .size_0()
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(Anchor::BottomRight)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(menu_motion_from(
+                        id.into(),
+                        exit,
+                        div().occlude().pb(px(6.0)).child(content),
+                        MENU_TRAVEL,
+                    )),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
+        .into_any_element()
+}
+
+/// [`anchored_menu_above_end`] for a notice that stays until it is dismissed
+/// from its own control. Presses outside the card keep working; the card
+/// itself still occludes, so a click on the notice does not fall through to
+/// the trigger.
+pub fn anchored_notice_above_end(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    let content = frosted_notice(exit, content);
     div()
         .absolute()
         .top_0()
