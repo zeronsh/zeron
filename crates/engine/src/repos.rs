@@ -275,6 +275,8 @@ impl Repos {
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
     async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
         let mut cmd = tokio::process::Command::new("git");
+        // Git hooks may need the user's shell tools.
+        zeron_harness::compose_login_shell_path(&mut cmd);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
