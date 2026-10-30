@@ -206,6 +206,7 @@ impl ImageView {
         &self,
         image: Arc<Image>,
         natural: Size<Pixels>,
+        viewport_hint: Option<Size<Pixels>>,
         on_image_click: Option<ImageClick>,
         plate: Option<gpui::Hsla>,
         _window: &mut Window,
@@ -214,10 +215,14 @@ impl ImageView {
         let natural = size(f32::from(natural.width), f32::from(natural.height));
         {
             let mut state = self.0.borrow_mut();
-            let bounds = state.bounds;
+            // The canvas measures a frame late; fit the first frame to the caller's box.
+            let viewport = match viewport_hint {
+                Some(hint) if state.bounds.is_empty() => hint,
+                _ => state.bounds.size,
+            };
             state.geometry.resize(
                 natural,
-                size(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+                size(f32::from(viewport.width), f32::from(viewport.height)),
             );
         }
         let geometry = self.0.borrow().geometry;
@@ -461,6 +466,32 @@ mod tests {
         assert!(state.dragged);
         state.pointer_down(point(px(200.0), px(150.0)));
         assert!(!state.dragged);
+    }
+    #[gpui::test]
+    fn reopened_viewer_fits_the_hint_until_the_canvas_measures(cx: &mut gpui::TestAppContext) {
+        let view = ImageView::default();
+        let image = Arc::new(Image::from_bytes(gpui::ImageFormat::Png, Vec::new()));
+        let cx = cx.add_empty_window();
+        let render = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                view.render(
+                    image.clone(),
+                    size(px(1000.0), px(500.0)),
+                    Some(size(px(500.0), px(300.0))),
+                    None,
+                    None,
+                    window,
+                    cx,
+                );
+            })
+        };
+        view.0.borrow_mut().bounds = Bounds::new(Point::default(), size(px(800.0), px(600.0)));
+        render(cx);
+        assert_eq!(view.test_scale(), 0.8, "measured bounds win over the hint");
+        view.reset();
+        render(cx);
+        assert_eq!(view.test_scale(), 0.5, "a reopen fits the hint, not 0×0");
+        assert_eq!(view.0.borrow().geometry.image_origin(), point(0.0, 25.0));
     }
     #[cfg(target_os = "linux")]
     #[test]
