@@ -1770,6 +1770,11 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
         ctx,
     ));
     bindings.push(KeyBinding::new(
+        &format!("shift-{word_edit_prefix}-backspace"),
+        DeleteWordLeft,
+        ctx,
+    ));
+    bindings.push(KeyBinding::new(
         &format!("{word_edit_prefix}-delete"),
         DeleteWordRight,
         ctx,
@@ -1862,6 +1867,11 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     ];
     palette_bindings.push(KeyBinding::new(
         &format!("{word_edit_prefix}-backspace"),
+        DeleteWordLeft,
+        palette,
+    ));
+    palette_bindings.push(KeyBinding::new(
+        &format!("shift-{word_edit_prefix}-backspace"),
         DeleteWordLeft,
         palette,
     ));
@@ -12380,6 +12390,61 @@ mod tests {
                     .unwrap(),
                 ""
             );
+        }
+    }
+
+    #[gpui::test]
+    fn shifted_word_backspace_deletes_words_and_selections_in_all_input_contexts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            init(cx, ComposerSendBehavior::default());
+        });
+        let prefix = if cfg!(target_os = "macos") {
+            "alt"
+        } else {
+            "ctrl"
+        };
+        for context in [
+            GENERIC_COMPOSER_CONTEXT,
+            MESSAGE_COMPOSER_CONTEXT,
+            PALETTE_SEARCH_CONTEXT,
+        ] {
+            let handle = cx.add_window(|window, cx| {
+                let input = ComposerInput::with_context("", context, cx);
+                window.focus(&input.focus_handle, cx);
+                input
+            });
+            for keystroke in [
+                format!("{prefix}-backspace"),
+                format!("shift-{prefix}-backspace"),
+            ] {
+                for (text, selection, expected) in [
+                    ("hello café", 11..11, "hello "),
+                    ("one two three", 7..7, "one  three"),
+                    ("hello world", 1..3, "hlo world"),
+                    ("hello", 0..0, "hello"),
+                    ("", 0..0, ""),
+                ] {
+                    handle
+                        .update(cx, |input, _, cx| {
+                            input.set_text(text, cx);
+                            input.move_to(selection.start, cx);
+                            input.extend_selection(selection.end, cx);
+                        })
+                        .unwrap();
+                    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                        .unwrap();
+                    cx.simulate_keystrokes(handle.into(), &keystroke);
+                    handle
+                        .read_with(cx, |input, _| {
+                            assert_eq!(input.text(), expected, "{context}: {keystroke}, {text:?}");
+                        })
+                        .unwrap();
+                }
+            }
         }
     }
 
