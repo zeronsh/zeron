@@ -5901,16 +5901,22 @@ mod tests {
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let registry = Arc::new(HarnessRegistry::new());
-            let claude_exe = rows.as_ref().map(|_| {
-                let exe = dir.path().join(if cfg!(windows) { "claude.exe" } else { "claude" });
-                std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-                }
-                exe
-            });
+            let claude_exe = (rows.is_some() || (harness_id == HarnessId::ClaudeCode && !channel))
+                .then(|| {
+                    let exe = dir.path().join(if cfg!(windows) {
+                        "claude.exe"
+                    } else {
+                        "claude"
+                    });
+                    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                    }
+                    exe
+                });
             let fixture = Arc::new(HibernationFixture {
                 launches: Default::default(),
                 conversation: Default::default(),
@@ -5939,7 +5945,7 @@ mod tests {
             core.registry.set_mcp_prefs(prefs);
             let mut request = request();
             request.cwd = dir.path().to_string_lossy().into_owned();
-            if let Some(rows) = rows {
+            if let Some(exe) = &fixture.claude_exe {
                 use zeron_harness::claude::mcp_capture::{
                     ClaudeMcpSnapshot, FingerprintInputs, SnapshotStore,
                 };
@@ -5952,18 +5958,20 @@ mod tests {
                 request
                     .env
                     .insert("HOME".into(), dir.path().to_string_lossy().into_owned());
-                let key = FingerprintInputs::for_run(Some(dir.path()), &request.env)
-                    .unwrap()
-                    .key(fixture.claude_exe.as_ref().unwrap())
-                    .unwrap();
-                SnapshotStore::new(&core.registry.data_dir().unwrap())
-                    .save(&ClaudeMcpSnapshot::new(
-                        key,
-                        rows.into_iter()
-                            .map(|row| serde_json::from_value(row).unwrap())
-                            .collect(),
-                    ))
-                    .unwrap();
+                if let Some(rows) = rows {
+                    let key = FingerprintInputs::for_run(Some(dir.path()), &request.env)
+                        .unwrap()
+                        .key(exe)
+                        .unwrap();
+                    SnapshotStore::new(&core.registry.data_dir().unwrap())
+                        .save(&ClaudeMcpSnapshot::new(
+                            key,
+                            rows.into_iter()
+                                .map(|row| serde_json::from_value(row).unwrap())
+                                .collect(),
+                        ))
+                        .unwrap();
+                }
             }
             core.sessions
                 .dispatch("sleep", harness_id, request.clone(), None)
@@ -6465,6 +6473,43 @@ mod tests {
         };
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("channel-live"), "irrelevant-to-codex").unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_without_a_snapshot_keeps_upstream_idle_reaper_parity() {
+        for manual in [true, false] {
+            let t =
+                HibernationTest::configured(false, false, 10, HarnessId::ClaudeCode, None, None).await;
+            if manual {
+                assert_eq!(t.core.sessions.hibernate_idle(), 1);
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(601)).await;
+                tokio::time::resume();
+            }
+            t.wait(zeron_proto::RuntimeState::Hibernated).await;
+            t.core.sessions.shutdown().await;
+        }
+    }
+    #[tokio::test]
+    async fn hibernation_claude_stale_plugin_snapshot_keeps_upstream_parity() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            None,
+        )
+        .await;
+        assert!(!t.core.sessions.hibernate("sleep"));
+        std::fs::write(
+            t._dir.path().join("claude-config/settings.json"),
+            r#"{"enableAllProjectMcpServers":true}"#,
+        )
+        .unwrap();
         assert!(t.core.sessions.hibernate("sleep"));
         t.wait(zeron_proto::RuntimeState::Hibernated).await;
         t.core.sessions.shutdown().await;

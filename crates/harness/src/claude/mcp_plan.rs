@@ -115,7 +115,8 @@ fn declares_channel(v: &serde_json::Value) -> bool {
 
 /// V-8: channel_enable requires a marketplace plugin (source=plugin, even
 /// when scope=dynamic). Other server sources cannot deliver Claude channels.
-/// Missing/stale captures and plugin rows without per-run proof stay awake.
+/// Missing/stale captures keep upstream reaper parity. A fresh, launch-bound
+/// capture holds only plugin rows without affirmative per-run non-channel proof.
 pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path) -> bool {
     let load = || {
         let inputs = FingerprintInputs::for_run(
@@ -126,8 +127,8 @@ pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path
         let key = inputs.key(exe).ok()?;
         if let Some(run) = request.env.get("ZERON_RUN_ID") {
             // Bind to the configuration this runtime actually launched with.
-            // A later capture after a config edit cannot clear an old runtime's
-            // channel protection (the CLI may still own the old servers).
+            // A later capture after a config edit cannot classify an older
+            // runtime. Without fresh launch-bound evidence, use upstream parity.
             let dir = data_dir.join("run/mcp").join(run);
             std::fs::create_dir_all(&dir).ok()?;
             let path = dir.join("hibernate-capture");
@@ -154,7 +155,7 @@ pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path
         }
         SnapshotStore::new(data_dir).load(&key)
     };
-    load().is_some_and(|snapshot| {
+    load().is_none_or(|snapshot| {
         snapshot
             .servers
             .iter()
@@ -464,7 +465,7 @@ mod tests {
         );
     }
     #[test]
-    fn hibernation_requires_fresh_snapshot_and_per_run_proof_only_for_plugins() {
+    fn hibernation_without_a_fresh_launch_snapshot_keeps_upstream_parity() {
         let root = tempfile::tempdir().unwrap();
         let exe = root.path().join("claude");
         std::fs::write(&exe, "fake-cli").unwrap();
@@ -481,12 +482,15 @@ mod tests {
         request
             .env
             .insert("HOME".into(), root.path().to_string_lossy().into_owned());
-        assert!(!hibernation_safe(&exe, &request, root.path()));
+        assert!(hibernation_safe(&exe, &request, root.path()));
         let key = FingerprintInputs::for_run(Some(root.path()), &request.env)
             .unwrap()
             .key(&exe)
             .unwrap();
         let store = SnapshotStore::new(root.path());
+        std::fs::create_dir_all(store.path(&key).parent().unwrap()).unwrap();
+        std::fs::write(store.path(&key), "failed capture").unwrap();
+        assert!(hibernation_safe(&exe, &request, root.path()));
         store
             .save(&ClaudeMcpSnapshot::new(key.clone(), vec![]))
             .unwrap();
@@ -544,32 +548,36 @@ mod tests {
         )
         .unwrap();
         assert!(!hibernation_safe(&exe, &request, root.path()));
-        // A fresh capture for edited config must not reclassify an old runtime.
+        // Bind a fresh plugin capture to this runtime: unknown capability holds it.
         request
             .env
             .insert("ZERON_RUN_ID".into(), "bound-runtime".into());
-        store
-            .save(&ClaudeMcpSnapshot::new(key.clone(), vec![]))
-            .unwrap();
-        assert!(hibernation_safe(&exe, &request, root.path()));
-        // Changing a fingerprinted config invalidates even a channel-free capture.
-        store.save(&ClaudeMcpSnapshot::new(key, vec![])).unwrap();
+        request.mcp_plan = None;
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        // A config edit makes the capture stale: return to upstream reaper parity.
         std::fs::write(
             config.join("settings.json"),
             r#"{"enableAllProjectMcpServers":true}"#,
         )
         .unwrap();
-        assert!(!hibernation_safe(&exe, &request, root.path()));
+        assert!(hibernation_safe(&exe, &request, root.path()));
         let edited = FingerprintInputs::for_run(Some(root.path()), &request.env)
             .unwrap()
             .key(&exe)
             .unwrap();
-        store.save(&ClaudeMcpSnapshot::new(edited, vec![])).unwrap();
-        assert!(!hibernation_safe(&exe, &request, root.path()));
+        let plugin = serde_json::from_value(serde_json::json!({
+            "name":"edited-plugin", "status":"connected", "source":"plugin"
+        }))
+        .unwrap();
+        store
+            .save(&ClaudeMcpSnapshot::new(edited, vec![plugin]))
+            .unwrap();
+        // Fresh evidence for another launch must not block this older runtime.
+        assert!(hibernation_safe(&exe, &request, root.path()));
         request
             .env
             .insert("ZERON_RUN_ID".into(), "new-runtime".into());
-        assert!(hibernation_safe(&exe, &request, root.path()));
+        assert!(!hibernation_safe(&exe, &request, root.path()));
     }
     #[test]
     #[cfg(not(target_os = "linux"))]

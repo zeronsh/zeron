@@ -46,15 +46,20 @@ source=plugin identifies those rows, including plugins whose scope is dynamic.
 User, project, local and dynamic non-plugin sources (including Zeron's own server
 and absolute-path native servers such as reins mcp) cannot hold Claude channels.
 
-A fresh Claude snapshot is required. Only plugin-sourced rows need affirmative
-per-run NonChannel evidence from the proxy; missing, failed or Channel records
-hold the runtime. Snapshot capability claims alone cannot clear a plugin row.
+Missing, stale or failed Claude snapshots do not block hibernation: this keeps
+upstream reaper behavior when capture is unavailable, including unsupported CLIs
+and capture errors/timeouts. Every other idle/work safety guard still applies.
+Only a fresh, launch-bound snapshot that positively identifies a plugin-sourced
+server adds channel protection. That plugin requires affirmative per-run
+NonChannel evidence from the proxy; unknown, failed or Channel records hold the
+runtime. Fresh snapshots containing only non-plugin servers allow hibernation.
+Snapshot capability claims alone cannot clear a plugin row.
 The engine checks this policy again at selection and final claim, so late plugin
 channel discovery holds an already parked runtime. Proxy-wide channel-live
 markers do not gate hibernation: they can describe non-plugin advertisements.
 Evidence stays bound to the launch configuration; a later capture after a config
-edit cannot clear an older runtime's channel protection. No channel leases or
-ownership changes are introduced.
+edit cannot classify an older runtime. A stale launch capture restores upstream
+hibernation behavior. No channel leases or ownership changes are introduced.
 
 Memory pressure is sampled every ten seconds. Linux uses MemAvailable below the
 larger of 2 GiB and ten percent of MemTotal (never more than a quarter of

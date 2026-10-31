@@ -818,7 +818,7 @@ impl Harness for ClaudeHarness {
     }
     fn hibernation_safe(&self, request: &RunRequest, data_dir: &std::path::Path) -> bool {
         self.executable_path()
-            .is_some_and(|exe| mcp_plan::hibernation_safe(&exe, request, data_dir))
+            .is_none_or(|exe| mcp_plan::hibernation_safe(&exe, request, data_dir))
     }
 
     /// The `interrupt` control request ends the turn and the CLI keeps
