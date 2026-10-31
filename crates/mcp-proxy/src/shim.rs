@@ -270,9 +270,9 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
                 } else {
                     std::env::var(k).ok()
                 };
-                (k.clone(), value)
+                Some((k.clone(), value?))
             })
-            .collect();
+            .collect::<Option<_>>()?;
         let identity = crate::cache::hash(&serde_json::json!({"v":1,"snapshot":launch.key,
             "command":real.canonicalize().ok()?,"binary":crate::cache::binary_id(&real.canonicalize().ok()?),
             "args":config.args,"env":effective_env}));

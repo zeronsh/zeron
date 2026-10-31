@@ -5627,26 +5627,94 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
+    struct McpReuseFixture {
+        launches: Arc<Mutex<Vec<Option<zeron_proto::McpPlan>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for McpReuseFixture {
+        fn id(&self) -> HarnessId {
+            HarnessId::ClaudeCode
+        }
+        fn display_name(&self) -> &str {
+            "MCP reuse fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[]
+        }
+        fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
+            zeron_harness::ClaudeHarness::new().same_runtime(live, next)
+        }
+        fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+            zeron_harness::ClaudeHarness::new().reconfigures_in_place(live, next)
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            mut controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            use futures::StreamExt;
+            let generation = {
+                let mut launches = lock(&self.launches);
+                launches.push(request.mcp_plan);
+                launches.len()
+            };
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let _ = tx.send(Ok(AgentEvent::SessionStarted {
+                    harness: HarnessId::ClaudeCode,
+                    model: "offline".into(),
+                    tools: vec![],
+                    cwd: request.cwd,
+                    session_id: format!("fixture-{generation}"),
+                    assistant_message_id: "first".into(),
+                }));
+                let _ = tx.send(Ok(done(DoneStatus::Completed)));
+                loop {
+                    tokio::select! {
+                        _=controls.interrupt.cancelled() => break,
+                        msg=controls.steering.recv() => {
+                            if msg.is_none() { break; }
+                            let _=tx.send(Ok(AgentEvent::Steered { assistant_message_id:None,next_assistant_message_id:None }));
+                            if tx.send(Ok(done(DoneStatus::Completed))).is_err() { break; }
+                        }
+                    }
+                }
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+
     #[tokio::test]
     async fn mcp_plan_prefs_change_replaces_runtime_and_unchanged_plan_reuses_it() {
         let temp = tempfile::tempdir().unwrap();
+        let launches = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(McpReuseFixture {
+            launches: launches.clone(),
+        }));
         let core = crate::EngineCore::assemble_with_profile(
             crate::EngineProfile::local(temp.path()).unwrap(),
-            Arc::new(HarnessRegistry::new()),
+            registry,
             HarnessId::ClaudeCode,
             None,
         )
         .unwrap();
         core.workspace
-            .create_chat(
-                "main",
-                None,
-                Some(&core.device_id),
-                None,
-                Some("/work".into()),
-            )
+            .create_chat("main", None, Some(&core.device_id), None, None)
             .unwrap();
-        let inner = &core.sessions.inner;
         let mut prefs = core.registry.mcp_prefs();
         prefs.lazy = true;
         prefs.servers.insert(
@@ -5654,58 +5722,68 @@ mod tests {
             zeron_proto::McpServerChoice::Lazy,
         );
         core.registry.set_mcp_prefs(prefs.clone());
-        let mut live = request();
-        inner.apply_mcp_plan(
-            &mut live,
-            "main",
-            "live-run",
-            HarnessId::ClaudeCode,
-            Some("1"),
-        );
-        let runtime = RuntimeConfig::new(
-            HarnessId::ClaudeCode,
-            &live,
-            Arc::new(zeron_harness::ClaudeHarness::new()),
-        );
-        // A client request has no plan. Dispatch stamps before route(), using
-        // the live run's id; unchanged prefs must retain the parked runtime.
-        let mut incoming = request();
-        inner.apply_mcp_plan(
-            &mut incoming,
-            "main",
-            "live-run",
-            HarnessId::ClaudeCode,
-            Some("1"),
-        );
-        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), Some(false));
+        let mut request = request();
+        request.cwd = temp.path().to_string_lossy().into_owned();
+        let wait_parked = |expected| {
+            let core = &core;
+            let launches = &launches;
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while lock(launches).len() != expected
+                        || !core
+                            .sessions
+                            .session_status("main")
+                            .is_some_and(|s| s.status == SessionStatus::Idle)
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("runtime must park");
+            }
+        };
+        let first = core
+            .sessions
+            .dispatch("main", HarnessId::ClaudeCode, request.clone(), None)
+            .await
+            .unwrap();
+        wait_parked(1).await;
+        // Client plans are skipped on the wire. Only dispatch's host stamp can
+        // make the incoming request match the parked process's configuration.
+        assert!(request.mcp_plan.is_none());
+        let unchanged = core
+            .sessions
+            .dispatch("main", HarnessId::ClaudeCode, request.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(first, unchanged);
+        wait_parked(1).await;
         prefs.servers.insert(
             "claude-code:playwright".into(),
             zeron_proto::McpServerChoice::Eager,
         );
         core.registry.set_mcp_prefs(prefs.clone());
-        inner.apply_mcp_plan(
-            &mut incoming,
-            "main",
-            "live-run",
-            HarnessId::ClaudeCode,
-            Some("1"),
-        );
+        let replaced = core
+            .sessions
+            .dispatch("main", HarnessId::ClaudeCode, request.clone(), None)
+            .await
+            .unwrap();
+        assert_ne!(first, replaced);
+        wait_parked(2).await;
         assert_eq!(
-            incoming.mcp_plan.as_ref().unwrap().modes.get("playwright"),
+            lock(&launches)[1].as_ref().unwrap().modes.get("playwright"),
             Some(&zeron_proto::McpMode::Eager)
         );
-        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), None);
         prefs.lazy = false;
         core.registry.set_mcp_prefs(prefs);
-        inner.apply_mcp_plan(
-            &mut incoming,
-            "main",
-            "live-run",
-            HarnessId::ClaudeCode,
-            Some("1"),
-        );
-        assert!(incoming.mcp_plan.is_none());
-        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), None);
+        let disabled = core
+            .sessions
+            .dispatch("main", HarnessId::ClaudeCode, request, None)
+            .await
+            .unwrap();
+        assert_ne!(replaced, disabled);
+        wait_parked(3).await;
+        assert!(lock(&launches)[2].is_none());
         core.sessions.shutdown().await;
     }
 

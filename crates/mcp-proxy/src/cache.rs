@@ -449,10 +449,38 @@ mod tests {
     }
 }
 
-/// Channels must keep a live connection even when status snapshots omit caps.
-pub fn declares_channel(initialize: &Value) -> bool {
-    initialize
-        .pointer("/capabilities/experimental")
-        .and_then(Value::as_object)
-        .is_some_and(|m| m.keys().any(|k| k == "channel" || k.ends_with("/channel")))
+/// None means malformed/unknown capabilities, never negative channel evidence.
+pub fn channel_capability(initialize: &Value) -> Option<bool> {
+    let caps = initialize.get("capabilities")?.as_object()?;
+    let Some(experimental) = caps.get("experimental") else {
+        return Some(false);
+    };
+    Some(
+        experimental
+            .as_object()?
+            .keys()
+            .any(|k| k == "channel" || k.ends_with("/channel")),
+    )
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    #[test]
+    fn channel_evidence_requires_valid_initialize_capabilities() {
+        assert_eq!(channel_capability(&json!({})), None);
+        assert_eq!(channel_capability(&json!({"capabilities":null})), None);
+        assert_eq!(
+            channel_capability(&json!({"capabilities":{"experimental":null}})),
+            None
+        );
+        assert_eq!(
+            channel_capability(&json!({"capabilities":{"tools":{}}})),
+            Some(false)
+        );
+        assert_eq!(
+            channel_capability(&json!({"capabilities":{"experimental":{"claude/channel":{}}}})),
+            Some(true)
+        );
+    }
 }

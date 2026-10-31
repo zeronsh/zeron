@@ -409,10 +409,9 @@ impl Proxy {
             };
             self.key = cache::key(&self.config, &message["params"], &command, &bin, npx);
             let disk = cache::read(&self.config.data_dir, &self.key);
-            if disk
-                .as_ref()
-                .is_some_and(|e| e.discovery_failed || cache::declares_channel(&e.initialize))
-            {
+            if disk.as_ref().is_some_and(|e| {
+                e.discovery_failed || cache::channel_capability(&e.initialize) != Some(false)
+            }) {
                 self.passthrough = true;
                 self.event("cache", json!({"status":"discovery-failed-passthrough"}));
             } else if let Some(entry) =
@@ -662,7 +661,11 @@ impl Proxy {
             if !result.is_object() {
                 return self.fail("initialize result is not an object".into()).await;
             }
-            let channel = cache::declares_channel(&result);
+            let Some(channel) = cache::channel_capability(&result) else {
+                return self
+                    .fail("initialize channel capabilities unknown".into())
+                    .await;
+            };
             if channel {
                 self.stop_after_capture = false;
                 let _ =

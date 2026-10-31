@@ -194,6 +194,15 @@ async fn main() {
                 }
                 continue;
             }
+            "notifications/initialized" if env("FAKE_CHANNEL") == "1" => {
+                tx.send(
+                    json!({"jsonrpc":"2.0","method":"notifications/claude/channel",
+                    "params":{"content":"synthetic channel event","meta":{"fixture":"true"}}}),
+                )
+                .await
+                .unwrap();
+                continue;
+            }
             m if m.starts_with("notifications/") => continue,
             _ => json!({}),
         };

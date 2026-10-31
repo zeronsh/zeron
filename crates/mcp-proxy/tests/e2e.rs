@@ -704,10 +704,30 @@ async fn channel_capability_never_idles_and_cached_channel_starts_eagerly() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(pids(&dir.path().join("spawn")).len(), 1);
     assert!(pids(&dir.path().join("spawn")).into_iter().all(alive));
+    assert_eq!(
+        first.call(1, "echo").await["result"]["content"][0]["text"],
+        "echo"
+    );
+    assert!(
+        first
+            .seen
+            .iter()
+            .any(|v| v["method"] == "notifications/claude/channel")
+    );
     first.close().await;
     let mut second = Peer::spawn(dir.path(), "lazy", &[("FAKE_CHANNEL", "1")]);
     second.init().await;
     eventually(|| pids(&dir.path().join("spawn")).len() == 2).await;
     assert!(alive(*pids(&dir.path().join("spawn")).last().unwrap()));
+    assert_eq!(
+        second.call(2, "echo").await["result"]["content"][0]["text"],
+        "echo"
+    );
+    assert!(
+        second
+            .seen
+            .iter()
+            .any(|v| v["method"] == "notifications/claude/channel")
+    );
     second.close().await;
 }

@@ -147,7 +147,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         events = [('message_start', {'type': 'message_start', 'message': message})]
         for index, block in enumerate(content):
-            events += [('content_block_start', {'type': 'content_block_start', 'index': index, 'content_block': block}),
+            start = {**block, 'input': {}} if block['type'] == 'tool_use' else {'type': 'text', 'text': ''}
+            delta = {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])} if block['type'] == 'tool_use' else {
+                'type': 'text_delta', 'text': block['text']}
+            events += [('content_block_start', {'type': 'content_block_start', 'index': index, 'content_block': start}),
+                       ('content_block_delta', {'type': 'content_block_delta', 'index': index, 'delta': delta}),
                        ('content_block_stop', {'type': 'content_block_stop', 'index': index})]
         events += [('message_delta', {'type': 'message_delta', 'delta': {
             'stop_reason': 'tool_use' if results < 2 else 'end_turn', 'stop_sequence': None},
@@ -178,7 +182,7 @@ BASE = {'request': {'prompt': '', 'model': 'haiku', 'reasoning': None, 'cwd': st
 
 
 class Session:
-    def __init__(self, name, lazy):
+    def __init__(self, name, lazy, expected_status="connected"):
         self.name, self.frames, self.errors, self.sent, self.known = name, [], [], [], set()
         spec = {**BASE, 'plan': {'proxyCommand': str(PROXY), 'runDir': str(DATA / 'run/mcp' / name)} if lazy else None}
         write(SPEC, spec)
@@ -193,10 +197,10 @@ class Session:
         for _ in range(80):
             self.status = self.control('mcp_status')
             rows = self.rows()
-            if len(rows) == 2 and all(r['status'] == 'connected' for r in rows):
+            if len(rows) == 2 and all(r['status'] == expected_status for r in rows):
                 break
             time.sleep(.1)
-        assert len(self.rows()) == 2 and all(r['status'] == 'connected' for r in self.rows()), self.status
+        assert len(self.rows()) == 2 and all(r['status'] == expected_status for r in self.rows()), self.status
         self.known |= tree(self.p.pid)
         self.cli_pid = next(p for p in tree(self.p.pid) if Path(f'/proc/{p}/exe').resolve() == CLI)
         self.cli_env = dict(part.split(b'=', 1) for part in Path(f'/proc/{self.cli_pid}/environ').read_bytes().split(b'\0') if b'=' in part)
@@ -354,11 +358,25 @@ try:
         assert len(lines(ROOT / 'channel-spawns')) == before + 1 and alive(channel_pids[0])
         channel_results.append({'case': name, 'proxied': proxied, 'one_live_server': True, 'call_forwarded': True})
         session.close(); sessions.remove(session)
+    # A transient initialization failure after a previously connected capture
+    # must switch this very session to eager forwarding, then exec on later runs.
+    ENV['FAKE_INIT_ERROR'] = '1'
+    failures = []
+    for name, expected_proxies in [('discovery-failed', 2), ('failed-later', 0)]:
+        before = len(lines(SPAWNS)) + len(lines(ROOT / 'channel-spawns'))
+        failed = Session(name, True, expected_status='failed')
+        helpers = [p for p in tree(failed.p.pid) if Path(f'/proc/{p}/exe').resolve() == PROXY]
+        assert len(helpers) == expected_proxies, (name, helpers)
+        spawned = len(lines(SPAWNS)) + len(lines(ROOT / 'channel-spawns')) - before
+        assert spawned == (4 if expected_proxies else 2), (name, spawned)
+        failures.append({'case': name, 'proxy_count': len(helpers), 'real_starts': spawned})
+        failed.close(); sessions.remove(failed)
+    ENV.pop('FAKE_INIT_ERROR')
     result = {'baseline_mcp_pss': baseline_pss, 'lazy_mcp_pss': lazy_pss,
         'saved_kib': baseline_pss['median_kib'] - lazy_pss['median_kib'], 'server_names_and_tools': names,
         'checks': ['catalog names', 'zero servers before call', 'one server on first call', 'plugin/entry env',
                    'allow and deny permission rules', 'Bash node/npx/python argv0/env/exit', 'descendant/watchdog teardown'],
-        'channel_cases': channel_results, 'zero_tokens': True, 'all_children_gone': True}
+        'channel_cases': channel_results, 'failure_cases': failures, 'zero_tokens': True, 'all_children_gone': True}
     write(ROOT / 'result.json', result)
     print(json.dumps(result), flush=True)
 finally:

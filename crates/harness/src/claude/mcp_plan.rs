@@ -108,6 +108,7 @@ fn declares_channel(v: &serde_json::Value) -> bool {
 
 /// No shim on unsupported platforms, a disabled plan, or any freshness/setup error.
 /// Small-helper absence in source/old packages keeps the normal eager launch.
+#[cfg(target_os = "linux")]
 pub(super) fn prepare(
     cmd: &mut Command,
     exe: &Path,
@@ -115,7 +116,6 @@ pub(super) fn prepare(
     title: bool,
 ) -> Option<ShimRun> {
     if title
-        || !cfg!(target_os = "linux")
         || request.env.get("ZERON_MCP_LAZY").map(String::as_str) == Some("0")
         || std::env::var("ZERON_MCP_LAZY").as_deref() == Ok("0")
     {
@@ -156,7 +156,13 @@ pub(super) fn prepare(
     }
     .canonicalize()
     .ok()?;
-    if !helper.is_file() {
+    // Old/source builds may leave an H1 helper beside a new app. Do not
+    // install multi-call entries unless this exact helper supports them.
+    let support = std::process::Command::new(&helper)
+        .arg("--shim-version")
+        .output()
+        .ok()?;
+    if !support.status.success() || support.stdout != b"1\n" {
         return None;
     }
     let dir = run_dir.join(format!("shim-{}", uuid::Uuid::new_v4()));
@@ -217,6 +223,16 @@ pub(super) fn prepare(
     result.ok().map(|_| guard)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(super) fn prepare(
+    _cmd: &mut Command,
+    _exe: &Path,
+    _request: &RunRequest,
+    _title: bool,
+) -> Option<ShimRun> {
+    None
+}
+
 pub(super) fn same_plan(a: &Option<McpPlan>, b: &Option<McpPlan>) -> bool {
     // A new run directory does not change policy; modes and ownership do.
     match (a, b) {
@@ -250,7 +266,8 @@ mod tests {
         let exe = root.path().join("claude");
         let helper = root.path().join("zeron-mcp-proxy");
         std::fs::write(&exe, "fixture").unwrap();
-        std::os::unix::fs::symlink("/bin/true", &helper).unwrap();
+        std::fs::write(&helper, "#!/bin/sh\necho 1\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut request: RunRequest = serde_json::from_value(serde_json::json!({
             "prompt":"", "cwd":project, "sandbox":"workspace-write"
         }))
@@ -325,6 +342,9 @@ mod tests {
         assert!(prepare(&mut command(), &exe, &request, false).is_none());
         plan.proxy_command = helper.to_string_lossy().into_owned();
         request.mcp_plan = Some(plan);
+        std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(prepare(&mut command(), &exe, &request, false).is_none());
+        std::fs::write(&helper, "#!/bin/sh\necho 1\n").unwrap();
         std::fs::write(
             config.join("settings.json"),
             r#"{"enabledPlugins":{"changed":true}}"#,

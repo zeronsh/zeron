@@ -5,5 +5,9 @@ fn main() -> std::io::Result<()> {
     {
         return zeron_mcp_proxy::shim::run(argv);
     }
+    if argv.get(1).is_some_and(|a| a == "--shim-version") && argv.len() == 2 {
+        println!("1");
+        return Ok(());
+    }
     zeron_mcp_proxy::run_cli(std::env::args().skip(1), zeron_mcp_proxy::data_dir())
 }
