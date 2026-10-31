@@ -27,8 +27,9 @@ still needs native validation; only Linux has been executed here.
   freshness check and replacement. Identity env values are hashed, never saved.
 - `mcp-cache/npx.json`: version-2 resolution records keyed by package spec and
   bin, with a 24-hour TTL, plus `npx.lock`. Runtime arguments are never stored.
-  Floating specs re-scan the npm cache so an engine refresh takes effect on the
-  next session even within that TTL.
+  A floating spec (`@latest`, a range, no version) is served from the npm cache
+  for at most 24 hours per version; then the original `npx` runs once, which
+  revalidates it against the registry, and the clock restarts.
 - `run/mcp/<run>/<pgid>` when `--run-dir` is supplied: private ownership markers.
   Linux markers include the leader's start ticks to reject PID reuse.
   `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups.
@@ -79,10 +80,16 @@ cache refresh.
 
 The npx resolver prefers `ZERON_NPM_CACHE`, then `NPM_CONFIG_CACHE` (also the
 npm lowercase spelling), then one bounded `npm config get cache` invocation.
-It chooses exact top-level specs before newer transitive copies, checks exact
-version pins, resolves `.bin` symlinks, and prepends the install's `.bin` to the
-child PATH. JS entries use the first executable `node` on that PATH. Unsupported
-invocations, local/git specs, Windows, and failures keep the original command;
+It runs exactly the install npm itself would: `_npx/<first 16 hex of SHA-512 of the
+spec as typed>`, whose top-level request is that package (any other install that
+merely contains a copy, such as another version or a hoisted dependency, is never
+used), with npm's bin choice (`.bin/<command>` for `-p`, else the single or
+package-named bin). A project-local or global install that npm would prefer
+(`node_modules` in the working directory or an ancestor, a local bin of that
+name, a global `lib/node_modules` next to a PATH `bin`) leaves the decision to
+npx. The install's `.bin` is prepended to the child PATH and JS entries use the
+first executable `node` on it. Several `--package` values, unsupported flags,
+local/git specs, Windows, and failures keep the original command;
 `--no-npx-resolve` explicitly selects that behavior. Unlike pi's optional slow
 population path, the proxy does not run a preliminary npm installation: the
 original invocation handles a cold npm cache. Daily refresh is engine work.

@@ -804,7 +804,18 @@ pub async fn run(config: Config) -> io::Result<()> {
     let resolved = if config.no_npx_resolve || config.selftest {
         None
     } else {
-        crate::npx::resolve(&config.command, &config.args, &config.data_dir).await
+        // The server runs in its configured cwd, else the one this proxy inherited.
+        match config
+            .cwd
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+        {
+            Ok(cwd) => {
+                crate::npx::resolve(&config.command, &config.args, &config.data_dir, &cwd).await
+            }
+            Err(_) => None,
+        }
     };
     let passthrough = config.mode == Mode::KeepAlive;
     let mut proxy = Proxy {

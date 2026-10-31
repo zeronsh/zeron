@@ -520,14 +520,16 @@ async fn npx_resolves_without_wrapper_composes_path_and_has_an_escape_hatch() {
     let dir = temp();
     let d = dir.path();
     let npm = d.join("npm");
-    let install = npm.join("_npx/direct");
+    let install = npm
+        .join("_npx")
+        .join(zeron_mcp_proxy::npx::install_hash("demo@1.2.3"));
     let pkg = install.join("node_modules/demo");
     let bins = install.join("node_modules/.bin");
     fs::create_dir_all(&pkg).unwrap();
     fs::create_dir_all(&bins).unwrap();
     fs::write(
         install.join("package.json"),
-        r#"{"dependencies":{"demo":"1.2.3"}}"#,
+        r#"{"dependencies":{"demo":"^1.2.3"},"_npx":{"packages":["demo@1.2.3"]}}"#,
     )
     .unwrap();
     fs::write(
