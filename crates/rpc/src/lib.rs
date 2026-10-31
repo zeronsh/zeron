@@ -24,7 +24,7 @@ pub mod ipc_auth;
 mod server;
 mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ws};
+pub use client::{RpcClient, RpcRawSubscription, RpcSubscription, connect_ipc, connect_ws};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
@@ -438,15 +438,101 @@ where
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
+/// [`ServerFrame`]'s envelope with `ok` and `item` left as unparsed bytes
+/// borrowed from the frame line: the reader scans the payload once to find
+/// where it ends and decodes it only into the type the consumer wants.
+/// Accepts exactly the frames [`ServerFrame`] does, with the same
+/// null-versus-absent rules (`"ok": null` is present, `"item": null` is not).
+#[derive(Deserialize)]
+pub(crate) struct ServerFrameRef<'a> {
+    pub id: u64,
+    #[serde(default, borrow, deserialize_with = "present_raw")]
+    pub ok: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    pub err: Option<String>,
+    #[serde(default, borrow)]
+    pub item: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    pub done: bool,
+}
+
+fn present_raw<'de, D>(
+    deserializer: D,
+) -> Result<Option<&'de serde_json::value::RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <&serde_json::value::RawValue>::deserialize(deserializer).map(Some)
+}
+
+/// Write the `{id, item}` frame for an already serialized item. Byte-for-byte
+/// The frame envelope has the same field order and skips as `ServerFrame`;
+/// the item's original key order and numeric spelling are preserved.
+pub(crate) fn item_frame(id: u64, raw: &serde_json::value::RawValue) -> String {
+    let raw = raw.get();
+    // RawValue may contain pretty-printed whitespace, including inside nested
+    // raw values. Remove whitespace outside strings without parsing numbers or
+    // objects into Value, which can lose precision, keys, or fail on depth.
+    if raw.contains(['\n', '\r']) {
+        let mut compact = String::with_capacity(raw.len());
+        let mut quoted = false;
+        let mut escaped = false;
+        for ch in raw.chars() {
+            if quoted {
+                compact.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quoted = false;
+                }
+            } else if ch == '"' {
+                quoted = true;
+                compact.push(ch);
+            } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
+                compact.push(ch);
+            }
+        }
+        return item_frame_compact(id, &compact);
+    }
+    item_frame_compact(id, raw)
+}
+
+fn item_frame_compact(id: u64, raw: &str) -> String {
+    use std::fmt::Write;
+    let mut frame = String::with_capacity(raw.len() + 32);
+    let _ = write!(frame, "{{\"id\":{id},\"item\":{raw}}}");
+    frame
+}
+
 /// What a service returns for one invocation.
 pub enum RpcReply {
     /// Unary response — sent as `{id, ok}`.
     Value(serde_json::Value),
     /// Stream — each item sent as `{id, item}`, then `{id, done: true}` when it ends.
     Stream(BoxStream<'static, serde_json::Value>),
+    /// [`Stream`](Self::Stream) whose items are already serialized: the server
+    /// splices each into its frame instead of encoding a `Value` tree. The
+    /// Decoded items match those of the equivalent `Stream` of parsed items;
+    /// object key order and numeric spelling are not canonical wire bytes.
+    RawStream(BoxStream<'static, Box<serde_json::value::RawValue>>),
 }
 
 impl RpcReply {
+    /// The stream of a streaming reply as parsed values, whichever way the
+    /// service produced it. `Err` hands a unary reply back.
+    pub fn into_value_stream(self) -> Result<BoxStream<'static, serde_json::Value>, Self> {
+        use futures::StreamExt;
+        match self {
+            Self::Stream(stream) => Ok(stream),
+            Self::RawStream(stream) => Ok(stream
+                .filter_map(|raw| async move { serde_json::from_str(raw.get()).ok() })
+                .boxed()),
+            reply @ Self::Value(_) => Err(reply),
+        }
+    }
+
     /// Serialize a value into a unary reply.
     pub fn value<T: Serialize>(value: &T) -> Result<Self, RpcError> {
         serde_json::to_value(value)
@@ -477,6 +563,9 @@ pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
     tokio::spawn(serve_connection(service, server_out, server_in));
     RpcClient::new(client_out, client_in)
 }
+
+#[cfg(test)]
+mod raw_tests;
 
 #[cfg(test)]
 mod tests {

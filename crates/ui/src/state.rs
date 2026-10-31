@@ -4698,6 +4698,16 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
     })
 }
 
+fn transcript_history_pending(raw: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Marker {
+        #[serde(default)]
+        history_pending: bool,
+    }
+    serde_json::from_str::<Marker>(raw).is_ok_and(|marker| marker.history_pending)
+}
+
 fn spawn_transcript_watch(
     cx: &mut Context<AppState>,
     handle: EngineHandle,
@@ -4719,7 +4729,7 @@ fn spawn_transcript_watch(
             let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
                 .client()
-                .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_checked_raw(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
@@ -4733,21 +4743,22 @@ fn spawn_transcript_watch(
                 }
             };
             let mut preparation = WatchPreparation::new(cx.background_executor().clone());
-            while let Some(value) = rx.recv().await {
-                let history_pending = value
-                    .get("historyPending")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+            while let Some(raw) = rx.recv().await {
+                // Decoded once, off the main thread, straight from the frame's
+                // bytes into the typed update.
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
                         let update: zeron_doc::TranscriptUpdate =
-                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                            serde_json::from_str(raw.get()).map_err(|e| e.to_string())?;
+                        // JSON keys may use escapes, so a literal substring
+                        // check would miss a valid historyPending marker.
+                        let history_pending = transcript_history_pending(raw.get());
                         let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
-                        Ok::<_, String>((update, prepared, preparation))
+                        Ok::<_, String>((update, history_pending, prepared, preparation))
                     })
                     .await;
-                let (update, prepared, next_preparation) = match decoded {
+                let (update, history_pending, prepared, next_preparation) = match decoded {
                     Ok(frame) => frame,
                     Err(err) => {
                         // Schema skew (a newer peer's entry shape arriving
@@ -4815,7 +4826,7 @@ fn spawn_queue_watch(
             let params = serde_json::json!({ "chatId": chat_id });
             let mut rx = match handle
                 .client()
-                .subscribe_checked(methods::WATCH_QUEUE, params)
+                .subscribe_checked_raw(methods::WATCH_QUEUE, params)
                 .await
             {
                 Ok(rx) => rx,
@@ -4828,8 +4839,8 @@ fn spawn_queue_watch(
                     continue 'resubscribe;
                 }
             };
-            while let Some(value) = rx.recv().await {
-                let frame: QueueFrame = match serde_json::from_value(value) {
+            while let Some(raw) = rx.recv().await {
+                let frame: QueueFrame = match serde_json::from_str(raw.get()) {
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "dropping malformed queue frame");
@@ -4869,7 +4880,7 @@ fn spawn_subagent_watch(
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
                 .client()
-                .subscribe_checked(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_checked_raw(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
@@ -4883,12 +4894,12 @@ fn spawn_subagent_watch(
                 }
             };
             let mut preparation = WatchPreparation::new(cx.background_executor().clone());
-            while let Some(value) = rx.recv().await {
+            while let Some(raw) = rx.recv().await {
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
                         let update: zeron_doc::TranscriptUpdate =
-                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                            serde_json::from_str(raw.get()).map_err(|e| e.to_string())?;
                         let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
                         Ok::<_, String>((update, prepared, preparation))
                     })
@@ -4948,6 +4959,12 @@ fn spawn_subagent_watch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_pending_accepts_escaped_keys() {
+        assert!(super::transcript_history_pending(r#"{"history\u0050ending":true}"#));
+        assert!(!super::transcript_history_pending(r#"{"historyPending":null}"#));
+        assert!(!super::transcript_history_pending(r#"{"reset":[]}"#));
+    }
     use super::*;
     use chrono::TimeDelta;
     use gpui::AppContext;
