@@ -199,11 +199,12 @@ fn codex_proxy_overrides(
             continue;
         };
         // Do not reconstruct incomplete or unrepresentable launch data.
-        if row.get("args").is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
+        if !row.get("args").and_then(Value::as_array).is_some_and(|a| a.iter().all(Value::is_string))
             || row.get("env").is_some_and(|v| !v.is_null() && !v.as_object().is_some_and(|e| e.iter().all(|(k, v)| !k.is_empty() && !k.contains(',') && v.is_string())))
             || row.get("env_vars").is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(|a| a.iter().all(|v| v.as_str().is_some_and(|k| !k.is_empty() && !k.contains(',')))))
-            // Relative cwd cannot be passed to the proxy a second time safely.
-            || row.get("cwd").is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(|cwd| std::path::Path::new(cwd).is_absolute()))
+            // Missing cwd is not represented in the proxy cache key; a
+            // relative cwd cannot safely be applied a second time.
+            || !row.get("cwd").and_then(Value::as_str).is_some_and(|cwd| std::path::Path::new(cwd).is_absolute())
         {
             continue;
         }
@@ -3768,6 +3769,7 @@ mod mcp_injection_tests {
             },
             "playwright": {
                 "capabilities": {},
+                "cwd": "/work/playwright",
                 "command": "npx",
                 "args": ["-y", "@playwright/mcp@0.0.1"],
                 "env_vars": ["PLAYWRIGHT_BROWSERS_PATH"],
@@ -3777,6 +3779,7 @@ mod mcp_injection_tests {
             },
             "spaced": {
                 "capabilities": {},
+                "cwd": "/work/spaced",
                 "command": "/opt/My Servers/node",
                 "args": ["srv.js", "a b", "say \"hi\""],
                 "enabled": true
@@ -3828,7 +3831,7 @@ mod mcp_injection_tests {
         let servers = json!({
             "unknown": {"command": "node"},
             "channel": {"command": "node", "capabilities": {"experimental": {"vendor/channel": {}}}},
-            "ordinary": {"command": "node", "capabilities": {"tools": {}}}
+            "ordinary": {"command": "node", "args": [], "cwd": "/work", "capabilities": {"tools": {}}}
         }).as_object().unwrap().clone();
         let overrides = override_map(&servers, &sample_plan());
         assert_eq!(overrides.len(), 2);
@@ -3840,7 +3843,7 @@ mod mcp_injection_tests {
         let servers = json!({
             "dot.name": {"command": "node", "args": []},
             "quote\"name": {"command": "node", "args": []},
-            "dash-name": {"capabilities": {}, "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
+            "dash-name": {"capabilities": {}, "cwd": "/work", "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
             "bad-args": {"capabilities": {}, "command": "node", "args": [1]},
             "bad-env": {"capabilities": {}, "command": "node", "env_vars": ["A,B"]},
             "relative": {"capabilities": {}, "command": "node", "cwd": "relative"}
@@ -3919,6 +3922,8 @@ mod mcp_injection_tests {
                 "10",
                 "--identity-env",
                 "PLAYWRIGHT_BROWSERS_PATH",
+                "--cwd",
+                "/work/playwright",
                 "--run-dir",
                 "/data/run/mcp/run-1",
                 "--",
@@ -3937,6 +3942,8 @@ mod mcp_injection_tests {
                 "lazy",
                 "--idle-min",
                 "10",
+                "--cwd",
+                "/work/spaced",
                 "--run-dir",
                 "/data/run/mcp/run-1",
                 "--",
