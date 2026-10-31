@@ -51,6 +51,7 @@ pub mod spaces;
 pub mod terminals;
 pub mod titles;
 mod transcript_history;
+pub mod transcript_search;
 pub mod uploads;
 pub mod voice;
 pub mod workspace_files;
@@ -165,6 +166,8 @@ pub struct EngineCore {
     pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
+    /// `None` when the index cannot open; search is then unavailable.
+    pub transcript_search: Option<transcript_search::TranscriptSearch>,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -245,6 +248,7 @@ impl EngineCore {
         registry.load_prefs(data_dir);
         let store = Arc::new(DocsStore::open(profile.store_root())?);
         let store_for_import = store.clone();
+        let store_for_search = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
         let doc_host = DocHost::new(
@@ -268,6 +272,13 @@ impl EngineCore {
                 local_only: matches!(profile.scope(), WorkspaceScope::Local),
             },
         )?;
+        let transcript_search = transcript_search::TranscriptSearch::open(
+            profile.store_root(),
+            store_for_search,
+            workspace.clone(),
+        )
+        .inspect_err(|error| tracing::warn!(%error, "transcript search unavailable"))
+        .ok();
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
@@ -380,6 +391,7 @@ impl EngineCore {
             harness_updates,
             device_id,
             local_import,
+            transcript_search,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -534,6 +546,9 @@ impl EngineCore {
         }
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
+        }
+        if let Some(search) = self.transcript_search.clone() {
+            rpc = rpc.with_transcript_search(search);
         }
         Arc::new(rpc)
     }

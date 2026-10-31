@@ -1505,6 +1505,8 @@ pub(super) fn flat_text_presented_element(
         .map(|original| original.offsets.clone());
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
+    let find = crate::find::washes(&opts.row_key, &flat.text);
+    let find_theme = theme.clone();
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, _| {
@@ -1521,6 +1523,7 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
+            paint_find_washes(window, &layout, &find, &find_theme);
             if let Some(range) = super::selection::wash_range(surface, &sel_key) {
                 let range = offsets
                     .as_ref()
@@ -1717,12 +1720,16 @@ pub(crate) fn selectable_text_element(
     text: SharedString,
     runs: Vec<TextRun>,
     wash: Hsla,
+    find: Option<(Vec<(Range<usize>, bool)>, Theme)>,
 ) -> AnyElement {
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, _| {
+            if let Some((find, theme)) = &find {
+                paint_find_washes(window, &layout, find, theme);
+            }
             paint_text_selection_with_wash(window, hitbox, &key, &text, &layout, wash);
         },
     )
@@ -1732,6 +1739,28 @@ pub(crate) fn selectable_text_element(
         .child(underlay)
         .child(styled)
         .into_any_element()
+}
+
+/// Find-in-thread washes under matched text; the current match is stronger.
+pub(crate) fn paint_find_washes(
+    window: &mut Window,
+    layout: &gpui::TextLayout,
+    washes: &[(Range<usize>, bool)],
+    theme: &Theme,
+) {
+    for (range, current) in washes {
+        let color = theme.accent.opacity(if *current { 0.6 } else { 0.25 });
+        for rect in range_rects(layout, range, 1.0, 0.0) {
+            window.paint_quad(quad(
+                rect,
+                px(3.0),
+                color,
+                px(0.0),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+    }
 }
 
 fn code_line_selection_key(row_key: &str, code_ix: usize, line_ix: usize) -> std::sync::Arc<str> {
@@ -2782,7 +2811,13 @@ fn render_code_block_source_with_actions(
                                 .flex_none()
                         }
                     })
-                    .child(selectable_text_element(key, line.clone(), runs, sel_wash)),
+                    .child(selectable_text_element(
+                        key,
+                        line.clone(),
+                        runs,
+                        sel_wash,
+                        Some((crate::find::washes(&opts.row_key, line), theme.clone())),
+                    )),
             )
         }));
 
