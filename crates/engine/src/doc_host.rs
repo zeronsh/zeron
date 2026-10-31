@@ -670,6 +670,10 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    publication_barrier: Mutex<Option<Arc<zeron_sync::SnapshotBarrier>>>,
+    own_ops_order: Mutex<Option<Arc<Mutex<crate::chat2_host::OwnOpsOrder>>>>,
+    #[cfg(test)]
+    before_outbox_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
@@ -1924,6 +1928,10 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            publication_barrier: Mutex::new(None),
+            own_ops_order: Mutex::new(None),
+            #[cfg(test)]
+            before_outbox_submit: Mutex::new(None),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -1959,11 +1967,36 @@ impl DocHost {
                 let publication_chat = chat_id.to_string();
                 // Concurrent commits can run their hooks out of order; this
                 // device's ops still go out in commit order (OwnOpsOrder).
-                let own_order = Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc()));
+                let own_order = Arc::new(Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc())));
+                *lock(&handle.own_ops_order) = Some(own_order.clone());
+                let snapshot_order = own_order.clone();
+                let snapshot_outbox = outbox.clone();
+                let snapshot_weak = weak_push.clone();
+                let snapshot_chat = publication_chat.clone();
+                let barrier: Arc<zeron_sync::SnapshotBarrier> = Arc::new(move |chat, bytes| {
+                    if chat != snapshot_chat { return Ok(()); }
+                    let Some(handle) = snapshot_weak.upgrade() else { return Ok(()); };
+                    if handle.retired.load(Ordering::Acquire) { return Ok(()); }
+                    {
+                        let mut order = lock(&snapshot_order);
+                        for update in order.snapshot_prefix(bytes).map_err(std::io::Error::other)? {
+                            snapshot_outbox.submit(chat, snapshot_weak.clone(), uuid::Uuid::new_v4().to_string(), update);
+                        }
+                    }
+                    snapshot_outbox.flush_writes();
+                    Ok(())
+                });
+                self.inner.store.add_snapshot_barrier(&barrier);
+                *lock(&handle.publication_barrier) = Some(barrier);
                 let sub = doc
                     .doc()
                     .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
                         if let Some(handle) = weak_push.upgrade() {
+                            #[cfg(test)]
+                            {
+                                let hook = lock(&handle.before_outbox_submit).take();
+                                if let Some(hook) = hook { hook(); }
+                            }
                             // No I/O here: the commit may be a stream task. The
                             // outbox writer inserts the row, then hands the
                             // update to `ChatDocHandle::outbox_written`, which
@@ -1972,7 +2005,7 @@ impl DocHost {
                             // Ordering and submitting share one lock so two
                             // hooks cannot swap their updates on the queue.
                             let mut order = lock(&own_order);
-                            for bytes in order.order(handle.doc.doc(), bytes) {
+                            for bytes in order.order(bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 outbox.submit(&publication_chat, weak_push.clone(), batch_id, bytes);
                             }
@@ -7136,6 +7169,44 @@ mod publication_eviction_tests {
         let restored = loro::LoroDoc::new();
         restored.import(&bytes).unwrap();
         assert_eq!(restored.get_text("body").to_string(), "committed");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_covers_commits_whose_local_hook_has_not_submitted_yet() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("late-hook").unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *lock(&handle.before_outbox_submit) = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let committing = {
+            let handle = handle.clone();
+            std::thread::spawn(move || commit_text(&handle, "already committed"))
+        };
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()).await.unwrap();
+        let snapshot = handle.doc.export_snapshot().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let saving = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.save_snapshot("late-hook", &snapshot).unwrap();
+                done_tx.send(()).unwrap();
+            })
+        };
+        let result = tokio::task::spawn_blocking(move || done_rx.recv_timeout(std::time::Duration::from_secs(5))).await.unwrap();
+        // Always release the hook, including on a regression, so the test cleans up.
+        release_tx.send(()).unwrap();
+        committing.join().unwrap();
+        saving.join().unwrap();
+        result.expect("snapshot barrier deadlocked with the late hook");
+        host.inner.outbox.flush();
+        assert_eq!(replay_in_order(&store, "late-hook").1, "already committed");
         host.shutdown_workers().await;
     }
 
