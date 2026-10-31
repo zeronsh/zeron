@@ -3031,6 +3031,10 @@ impl RunCleanup {
             tracing::warn!(%error, path = %self.path.display(), "MCP run group sweep failed");
         } else {
             self.cleaned = true;
+            // The run is over: its capability evidence, capture binding and
+            // shim leftovers have no reader, and a directory per run would
+            // otherwise pile up and lengthen every boot sweep.
+            let _ = tokio::fs::remove_dir_all(&self.path).await;
         }
     }
 }
@@ -3043,6 +3047,8 @@ impl Drop for RunCleanup {
             runtime.spawn(async move {
                 if let Err(error) = zeron_mcp_proxy::cleanup_run_dir(&path).await {
                     tracing::warn!(%error, "MCP fallback group sweep failed");
+                } else {
+                    let _ = tokio::fs::remove_dir_all(&path).await;
                 }
             });
         }
@@ -6046,6 +6052,7 @@ mod tests {
                 .is_err()
         );
         assert!(!marker.exists());
+        assert!(!run.exists(), "a dead engine's run directory is removed");
         assert!(!child.wait().await.unwrap().success());
         core.sessions.shutdown().await;
     }
@@ -6063,6 +6070,14 @@ mod tests {
         t.wait(zeron_proto::RuntimeState::Hibernated).await;
         assert!(!child.wait().await.unwrap().success());
         assert!(!marker.exists());
+        // Nothing reads the run's evidence once it ends: the directory goes too.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("run directory removed after its sweep");
         t.core.sessions.shutdown().await;
     }
     #[tokio::test]

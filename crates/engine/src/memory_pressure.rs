@@ -179,6 +179,9 @@ pub(crate) async fn cleanup_boot(root: &Path) -> std::io::Result<()> {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             zeron_mcp_proxy::cleanup_run_dir(&entry.path()).await?;
+            // No engine is running (the instance lock), so every run directory
+            // found here is a dead run's leftover.
+            let _ = std::fs::remove_dir_all(entry.path());
         }
     }
     Ok(())
@@ -274,9 +277,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(run_pss_mib(&dir).is_some_and(|pss| pss > 0.0));
         let marker = dir.join(child.id().unwrap().to_string());
+        std::fs::create_dir_all(dir.join("capabilities")).unwrap();
+        std::fs::write(dir.join("channel-live"), "channel").unwrap();
         cleanup_boot(root.path()).await.unwrap();
         assert!(!child.wait().await.unwrap().success());
         assert!(!marker.exists());
+        assert!(!dir.exists(), "markers, evidence and the directory itself");
         assert!(run_pss_mib(&dir).is_none());
     }
     #[test]

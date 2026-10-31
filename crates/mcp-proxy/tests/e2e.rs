@@ -162,6 +162,20 @@ impl Peer {
         );
     }
 }
+/// Process-group markers left in a run directory. Run-local evidence the
+/// engine reads (capabilities, channel-live) is not a marker and outlives the
+/// proxy until the engine removes the directory.
+fn markers(run: &Path) -> usize {
+    fs::read_dir(run)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .count()
+}
 async fn seed(dir: &Path) {
     let mut peer = Peer::spawn(dir, "lazy", &[]);
     assert!(peer.init().await.get("result").is_some());
@@ -205,7 +219,7 @@ async fn miss_captures_all_pages_and_kills_the_whole_tree() {
             .count(),
         1
     );
-    assert_eq!(fs::read_dir(d.join("run")).unwrap().count(), 0);
+    assert_eq!(markers(&d.join("run")), 0);
     peer.close().await;
 }
 #[tokio::test(flavor = "current_thread")]
@@ -485,7 +499,7 @@ async fn eof_signal_and_sigkill_run_dir_cleanup_leave_no_orphans() {
             .all(|p| !alive(p))
     })
     .await;
-    assert_eq!(fs::read_dir(d.join("run")).unwrap().count(), 0);
+    assert_eq!(markers(&d.join("run")), 0);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn failed_discovery_next_session_is_transparent() {
