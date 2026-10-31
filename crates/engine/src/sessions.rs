@@ -2306,7 +2306,7 @@ impl Inner {
         ws.chat(chat_id)
             .ok()
             .flatten()
-            .is_some_and(|chat| chat.parent_chat_id.is_some())
+            .is_none_or(|chat| chat.parent_chat_id.is_some())
     }
 
     /// Stamp the lazy-MCP plan for the process this run is about to start.
@@ -5601,7 +5601,7 @@ mod tests {
         assert!(!inner.chat_is_worker("main"));
         assert!(inner.chat_is_worker("side"));
         assert!(inner.chat_is_worker("early"));
-        assert!(!inner.chat_is_worker("missing"));
+        assert!(inner.chat_is_worker("missing"));
 
         let mut request = request();
         request.mcp_plan = Some(zeron_proto::McpPlan::default());
