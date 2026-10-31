@@ -80,6 +80,24 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE salvage_checked (
         doc_id TEXT PRIMARY KEY
     ) STRICT;",
+    // Invalidate old unversioned receipts and tie future receipts to every
+    // change of the persisted snapshot or its pending updates.
+    "DELETE FROM salvage_checked;
+     CREATE TRIGGER salvage_snapshot_insert AFTER INSERT ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_snapshot_update AFTER UPDATE ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_snapshot_delete AFTER DELETE ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = OLD.doc_id;
+     END;
+     CREATE TRIGGER salvage_outbox_insert AFTER INSERT ON chat_outbox BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_outbox_delete AFTER DELETE ON chat_outbox BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = OLD.doc_id;
+     END;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -612,14 +630,15 @@ impl DocsStore {
         })
     }
 
-    /// Record that `doc_id`'s transcript was seen non-empty, so later boots
-    /// skip it. Does not touch the run journal.
-    pub fn mark_salvage_checked(&self, doc_id: &str) -> Result<(), StoreError> {
+    /// Mark only the exact inspected snapshot, while no pending updates can
+    /// change its decoded transcript. The comparison and insert are atomic.
+    pub fn mark_salvage_checked(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         store_blocking(|| {
             self.conn().execute(
-                "INSERT INTO salvage_checked (doc_id) VALUES (?1)
-                 ON CONFLICT(doc_id) DO NOTHING",
-                params![doc_id],
+                "INSERT OR IGNORE INTO salvage_checked (doc_id)
+                 SELECT doc_id FROM snapshots WHERE doc_id = ?1 AND bytes = ?2
+                 AND NOT EXISTS (SELECT 1 FROM chat_outbox WHERE doc_id = ?1)",
+                params![doc_id, bytes],
             )?;
             Ok(())
         })

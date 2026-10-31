@@ -1230,10 +1230,16 @@ fn scan_salvage(
         // its entries are a recovery SOURCE, not proof the new doc is healthy.
         if *epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || !edge_configured {
             let raw = import_snapshot(bytes, &mut imports)?;
-            for (_, update) in store
+            let snapshot_healthy = !messages_list_empty(&raw)?;
+            let updates = store
                 .pending_chat_updates(chat_id)
-                .map_err(|err| err.to_string())?
-            {
+                .map_err(|err| err.to_string())?;
+            if snapshot_healthy && updates.is_empty() {
+                store
+                    .mark_salvage_checked(chat_id, bytes)
+                    .map_err(|err| err.to_string())?;
+            }
+            for (_, update) in updates {
                 raw.import(&update).map_err(|err| err.to_string())?;
             }
             if !messages_list_empty(&raw)? {
@@ -3180,11 +3186,7 @@ impl DocHost {
         self.note_salvage_imports(scan.imports);
         match scan.kind {
             SalvageScanKind::Skip => Ok(()),
-            SalvageScanKind::Healthy => self
-                .inner
-                .store
-                .mark_salvage_checked(chat_id)
-                .map_err(|err| err.to_string()),
+            SalvageScanKind::Healthy => Ok(()),
             SalvageScanKind::Absent => Ok(()),
             SalvageScanKind::Recover { bytes, entries } => {
                 self.recover_transcript(chat_id, bytes, entries).await
@@ -3215,7 +3217,6 @@ impl DocHost {
             // Transcript present — nothing lost. Mark only after the
             // non-empty doc is durable, so a crash before the snapshot
             // still retries.
-            self.persist_salvage_ok(&handle).await?;
             return Ok(());
         }
         // Fat source: the M3 adopt's rollback copy on disk. (The other
@@ -3244,32 +3245,20 @@ impl DocHost {
         }
         drop(_import);
         drop(_drain);
-        self.persist_salvage_ok(&handle).await?;
+        // Flush, then inspect the actual persisted snapshot before marking it.
+        let host = self.clone();
+        let persisted = Arc::clone(&handle);
+        tokio::task::spawn_blocking(move || host.save_snapshot(&persisted))
+            .await
+            .map_err(|err| err.to_string())?;
+        let store = self.inner.store.clone();
+        let chat = chat_id.to_string();
+        let edge_configured = self.inner.config.edge.is_some();
+        tokio::task::spawn_blocking(move || scan_salvage(&store, &chat, edge_configured))
+            .await
+            .map_err(|err| err.to_string())??;
         tracing::info!(chat = %chat_id, entries = entries.len(),
             "transcript salvaged into chat2 lineage");
-        Ok(())
-    }
-
-    /// Flush the live doc, then mark it salvage-checked only if that flush
-    /// landed. A failed flush leaves the chat unmarked so the next boot retries.
-    async fn persist_salvage_ok(&self, handle: &Arc<ChatDocHandle>) -> Result<(), String> {
-        let host = self.clone();
-        let persisted = Arc::clone(handle);
-        let clean = tokio::task::spawn_blocking(move || {
-            host.save_snapshot(&persisted);
-            match &persisted.persistence {
-                Some(persistence) => persistence.is_clean(),
-                None => true,
-            }
-        })
-        .await
-        .map_err(|err| err.to_string())?;
-        if clean {
-            self.inner
-                .store
-                .mark_salvage_checked(&handle.chat_id)
-                .map_err(|err| err.to_string())?;
-        }
         Ok(())
     }
 
@@ -7827,7 +7816,9 @@ mod salvage_tests {
                 )
                 .unwrap();
             std::fs::write(journals.path().join(format!("{id}.jsonl")), b"{}\n").unwrap();
-            store.mark_salvage_checked(&id).unwrap();
+            store
+                .mark_salvage_checked(&id, &doc.export_snapshot().unwrap())
+                .unwrap();
         }
         wait_for_chats(&workspace, 200).await;
         let loads = store.snapshot_loads();
