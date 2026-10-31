@@ -495,7 +495,7 @@ impl EngineCore {
                 }
             }
         });
-        let mut service: Arc<dyn RpcService> = self.rpc_service();
+        let mut service: Arc<dyn RpcService> = rpc::relay_service(self.rpc_service());
         // Cloud runner: requests served to remote devices are the heartbeat's
         // `clients` activity (idle sleep), counted at the relay boundary.
         if let Some(activity) = self.relay_activity() {

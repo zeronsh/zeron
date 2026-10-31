@@ -2531,6 +2531,21 @@ impl crate::remote_terminals::Relay for EngineRpc {
     }
 }
 
+/// Restrict the runtime-state feed to local IPC at the host relay boundary.
+pub(crate) fn relay_service(inner: std::sync::Arc<dyn RpcService>) -> std::sync::Arc<dyn RpcService> {
+    struct RelayService(std::sync::Arc<dyn RpcService>);
+    #[async_trait]
+    impl RpcService for RelayService {
+        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            if method == methods::WATCH_RUNTIME_STATES {
+                return Err(RpcError::UnknownMethod(method.to_owned()));
+            }
+            self.0.handle(method, params).await
+        }
+    }
+    std::sync::Arc::new(RelayService(inner))
+}
+
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -4871,6 +4886,18 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn runtime_states_are_not_available_through_the_host_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Codex, None,
+        ).unwrap();
+        let client = zeron_rpc::memory_client(relay_service(core.rpc_service()));
+        assert!(client.subscribe_checked(methods::WATCH_RUNTIME_STATES, serde_json::json!({})).await.is_err());
+        assert!(client.call(methods::LOCAL_DEVICE, serde_json::json!({})).await.is_ok());
+    }
 
     #[tokio::test]
     async fn restart_with_all_mcp_answers_over_the_memory_transport() {
