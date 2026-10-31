@@ -64,6 +64,8 @@ struct BuildJson {
     sha: String,
     sha12: String,
     sha256: String,
+    #[serde(default)]
+    mcp_proxy_sha256: Option<String>,
     profile: String,
     features: String,
     rustc: String,
@@ -104,7 +106,19 @@ pub fn build_revision(req: &BuildRequest) -> Result<BuiltBinary> {
     let bin_dir = req.zb_root.join("bins").join(&sha12);
     let bin_path = bin_dir.join("zeron-engine");
     let meta_path = bin_dir.join("build.json");
-    if let Some(sha256) = cache_hit(&bin_path, &meta_path, &sha) {
+    let has_proxy = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&req.repo)
+        .args(["cat-file", "-e"])
+        .arg(format!("{sha}:crates/mcp-proxy/Cargo.toml"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("check whether revision contains MCP proxy")?
+        .success();
+    if let Some(sha256) = cache_hit(&bin_path, &meta_path, &sha, has_proxy) {
         return Ok(BuiltBinary {
             rev: req.rev.clone(),
             sha,
@@ -155,6 +169,34 @@ pub fn build_revision(req: &BuildRequest) -> Result<BuiltBinary> {
             tail_text(&output.stderr, &output.stdout)
         );
     }
+    if has_proxy {
+        let proxy = Command::new(&cargo)
+            .args([
+                "build",
+                "--release",
+                "-p",
+                "zeron-mcp-proxy",
+                "--bin",
+                "zeron-mcp-proxy",
+            ])
+            .current_dir(&worktree)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("CARGO_MAKEFLAGS", &makeflags)
+            .env("MAKEFLAGS", &makeflags)
+            .env("PATH", &path_env)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("CARGO_BUILD_JOBS")
+            .output()
+            .with_context(|| format!("build MCP proxy in {}", worktree.display()))?;
+        if !proxy.status.success() {
+            bail!(
+                "cargo build MCP proxy failed (status {}):\n{}",
+                proxy.status,
+                tail_text(&proxy.stderr, &proxy.stdout)
+            );
+        }
+    }
     let built = target_dir.join("release").join("zeron-engine");
     if !built.is_file() {
         bail!("cargo succeeded but {} is missing", built.display());
@@ -162,12 +204,20 @@ pub fn build_revision(req: &BuildRequest) -> Result<BuiltBinary> {
     fs::create_dir_all(&bin_dir).with_context(|| format!("create {}", bin_dir.display()))?;
     publish_file(&built, &bin_path)?;
     let sha256 = sha256_file(&bin_path)?;
+    let mcp_proxy_sha256 = if has_proxy {
+        let proxy_path = bin_dir.join("zeron-mcp-proxy");
+        publish_file(&target_dir.join("release/zeron-mcp-proxy"), &proxy_path)?;
+        Some(sha256_file(&proxy_path)?)
+    } else {
+        None
+    };
     let rustc = rustc_verbose(&worktree, &path_env).unwrap_or_else(|_| "unknown".into());
     let meta = BuildJson {
         rev: req.rev.clone(),
         sha: sha.clone(),
         sha12: sha12.clone(),
         sha256: sha256.clone(),
+        mcp_proxy_sha256,
         profile: "release".into(),
         features: String::new(),
         rustc,
@@ -208,7 +258,7 @@ pub fn distinct_copies(engine: &Path, dir: &Path) -> Result<(PathBuf, PathBuf, S
     Ok((a, b, sha_a))
 }
 
-fn cache_hit(bin: &Path, meta_path: &Path, sha: &str) -> Option<String> {
+fn cache_hit(bin: &Path, meta_path: &Path, sha: &str, has_proxy: bool) -> Option<String> {
     let text = fs::read_to_string(meta_path).ok()?;
     let meta: BuildJson = serde_json::from_str(&text).ok()?;
     if meta.sha != sha || meta.profile != "release" {
@@ -217,6 +267,12 @@ fn cache_hit(bin: &Path, meta_path: &Path, sha: &str) -> Option<String> {
     let got = sha256_file(bin).ok()?;
     if got != meta.sha256 {
         return None;
+    }
+    if has_proxy {
+        let helper = bin.parent()?.join("zeron-mcp-proxy");
+        if meta.mcp_proxy_sha256.as_deref() != Some(sha256_file(&helper).ok()?.as_str()) {
+            return None;
+        }
     }
     Some(got)
 }
@@ -420,6 +476,41 @@ mod tests {
             "-j12 --jobserver-auth=fifo:/home/user/Documents/dev/tmp/zeron-perf/jobserver/fifo"
         );
         assert!(reject_forbidden(Path::new("/tmp/zb")).is_err());
+    }
+
+    #[test]
+    fn candidate_cache_requires_an_untampered_proxy() {
+        let root =
+            PathBuf::from(std::env::var_os("TMPDIR").expect("scratch TMPDIR")).join(format!(
+                "build-proxy-cache-{}-{}",
+                std::process::id(),
+                crate::mono_now()
+            ));
+        fs::create_dir(&root).unwrap();
+        let engine = root.join("zeron-engine");
+        let helper = root.join("zeron-mcp-proxy");
+        let meta_path = root.join("build.json");
+        fs::write(&engine, b"engine").unwrap();
+        fs::write(&helper, b"proxy").unwrap();
+        let meta = BuildJson {
+            rev: "candidate".into(),
+            sha: "abc".into(),
+            sha12: "abc".into(),
+            sha256: sha256_file(&engine).unwrap(),
+            mcp_proxy_sha256: Some(sha256_file(&helper).unwrap()),
+            profile: "release".into(),
+            features: String::new(),
+            rustc: String::new(),
+            path: String::new(),
+            worktree: String::new(),
+            target_dir: String::new(),
+        };
+        fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        assert!(cache_hit(&engine, &meta_path, "abc", true).is_some());
+        fs::write(&helper, b"tampered").unwrap();
+        assert!(cache_hit(&engine, &meta_path, "abc", true).is_none());
+        assert!(cache_hit(&engine, &meta_path, "abc", false).is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -27,9 +27,9 @@ pub mod ab;
 pub mod probe;
 #[cfg(unix)]
 pub mod replay;
+pub mod rpc;
 #[cfg(unix)]
 pub mod scenario;
-pub mod rpc;
 pub mod transcript;
 #[cfg(unix)]
 pub use sample::{
@@ -39,3 +39,5 @@ pub use sample::{
 
 #[cfg(unix)]
 pub mod fixture;
+#[cfg(unix)]
+pub mod mcp_client;

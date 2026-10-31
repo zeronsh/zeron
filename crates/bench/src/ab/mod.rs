@@ -27,7 +27,7 @@ pub use build::{
     BuildRequest, BuiltBinary, build_revision, default_jobserver_fifo, default_target_parent,
     default_worktree_parent, distinct_copies,
 };
-pub use report::headline_metric_ids;
+pub use report::{headline_metric_ids, headline_metric_ids_for};
 pub use schedule::{PlannedTrial, Side, Tier, abba, exceeds_spread, median};
 pub use stats::{
     Fingerprint, MetricSummary, NoiseStatus, Verdict, lookup_noise, noise_pct_of,
@@ -555,6 +555,8 @@ pub struct RunMeta {
     pub control: bool,
     pub noise: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight: Option<Preflight>,
 }
 
@@ -615,7 +617,7 @@ pub fn execute(req: &ProtocolRequest, scenario: &mut dyn Scenario) -> Result<Exe
         if measured >= req.tier.base_pairs()
             && measured == target
             && target < req.tier.max_pairs()
-            && headline_spread(&records)
+            && headline_spread(scenario.id(), &records)
         {
             target += 1;
         }
@@ -704,8 +706,8 @@ fn run_planned(
     Ok(())
 }
 
-fn headline_spread(records: &[TrialRecord]) -> bool {
-    headline_metric_ids().iter().any(|id| {
+fn headline_spread(scenario: &str, records: &[TrialRecord]) -> bool {
+    headline_metric_ids_for(scenario).iter().any(|id| {
         [Side::A, Side::B].into_iter().any(|side| {
             let values: Vec<f64> = records
                 .iter()
@@ -765,6 +767,7 @@ fn run_meta(
         seed: req.seed,
         control: req.control,
         noise: noise.into(),
+        recovery_note: None,
         preflight: req.preflight.clone(),
     }
 }
@@ -841,7 +844,12 @@ fn load_trials(run_dir: &Path) -> Result<Vec<TrialRecord>> {
     dirs.sort();
     let mut trials = Vec::new();
     for dir in dirs {
-        let mut trial: TrialRecord = read_json(&dir.join("trial.json"))?;
+        let record = dir.join("trial.json");
+        // Live workloads also keep their raw sample directories under trials/.
+        if !record.is_file() {
+            continue;
+        }
+        let mut trial: TrialRecord = read_json(&record)?;
         trial.trial_dir = dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1443,6 +1451,89 @@ mod tests {
             &map,
         )
         .unwrap();
+    }
+
+    fn mcp_record(pair: u32, write_bytes: u64, mcp_pss: f64) -> TrialRecord {
+        let mut metrics = TrialMetrics::default();
+        metrics.write_bytes = write_bytes;
+        metrics
+            .scenario
+            .insert("synthetic_mcp_pss_marginal_mib".into(), mcp_pss);
+        metrics
+            .scenario
+            .insert("synthetic_session_tree_pss_marginal_mib".into(), 200.0);
+        metrics
+            .scenario
+            .insert("synthetic_tool_cold_ms".into(), 10.0);
+        TrialRecord {
+            schema: TRIAL_SCHEMA.into(),
+            scenario: "S-mcp".into(),
+            variant: json!({}),
+            side: Side::A,
+            rev: "rev".into(),
+            engine_sha256: "sha".into(),
+            fixture_id: "fixture".into(),
+            seed: 1,
+            order_index: pair,
+            pair_index: Some(pair),
+            valid: true,
+            invalid_reason: None,
+            noisy: false,
+            containment: "scope".into(),
+            times_ms: TimesMs::default(),
+            window_s: 1.0,
+            metrics,
+            counters_delta: BTreeMap::new(),
+            checks: Vec::new(),
+            trial_dir: String::new(),
+            variant_key: String::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_extra_pairs_follow_mcp_headlines_not_write_bytes() {
+        let mut rows = vec![mcp_record(0, 100, 100.0), mcp_record(1, 1_000, 100.0)];
+        assert!(!headline_spread("S-mcp", &rows));
+        assert!(headline_spread("S-stream", &rows));
+        rows[1]
+            .metrics
+            .scenario
+            .insert("synthetic_mcp_pss_marginal_mib".into(), 150.0);
+        assert!(headline_spread("S-mcp", &rows));
+    }
+
+    #[test]
+    fn recovered_mcp_report_discloses_its_provenance() {
+        let scenario = FakeScenario::new("S-mcp", "fixture", "fixture-id");
+        let mut meta = run_meta(
+            &request(Path::new("/does-not-write"), "mcp", Tier::Quick, false),
+            &scenario,
+            3,
+            "unknown",
+        );
+        meta.recovery_note = Some("recovered after an intentional stop".into());
+        let text = report::render_report(&meta, &summarize_trials(&[], None), &[], "unknown");
+        assert!(text.contains("recovery: recovered after an intentional stop"));
+        assert!(text.contains("Readiness is a polling upper bound"));
+    }
+
+    #[test]
+    fn report_reader_skips_live_sample_directories() {
+        let root = PathBuf::from(std::env::var_os("TMPDIR").expect("scratch TMPDIR")).join(
+            format!("report-live-{}-{}", std::process::id(), crate::mono_now()),
+        );
+        let trials = root.join("trials");
+        fs::create_dir_all(trials.join("20000-A")).unwrap();
+        fs::create_dir_all(trials.join("000-A-S-mcp")).unwrap();
+        fs::write(
+            trials.join("000-A-S-mcp/trial.json"),
+            serde_json::to_vec(&mcp_record(0, 1, 1.0)).unwrap(),
+        )
+        .unwrap();
+        let records = load_trials(&root).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].trial_dir, "000-A-S-mcp");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

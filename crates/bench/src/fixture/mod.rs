@@ -1,3 +1,5 @@
+pub mod claude_home;
+pub mod claude_model;
 pub mod multi;
 pub mod profile;
 pub mod real;

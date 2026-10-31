@@ -18,6 +18,10 @@ mod driver;
 pub mod fixture;
 pub mod hibernate;
 pub mod idle;
+#[cfg(target_os = "linux")]
+pub mod mcp;
+#[cfg(target_os = "linux")]
+pub mod mcp_process;
 pub mod stream;
 pub mod switch;
 
@@ -186,7 +190,7 @@ impl ScenarioArg {
 }
 
 /// Names `ab --scenario` accepts for a live scenario.
-pub const SCENARIOS: &[&str] = &["S-stream", "S-boot", "S-idle", "S-switch", "S-hibernate"];
+pub const SCENARIOS: &[&str] = &["S-stream", "S-boot", "S-idle", "S-switch", "S-hibernate", "S-mcp"];
 
 /// The live scenario `name` (with options), or `None` when it is not one of ours.
 pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
@@ -214,6 +218,8 @@ pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
             hibernate::Hibernate::from_params(tier, &arg.overrides)?,
             env,
         )?),
+        #[cfg(target_os = "linux")]
+        "mcp" => Box::new(mcp::Mcp::new((*env).clone(), &arg.overrides)?),
         _ => return Ok(None),
     };
     Ok(Some(scenario))

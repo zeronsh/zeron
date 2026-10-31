@@ -31,6 +31,20 @@ pub fn headline_metric_ids() -> &'static [&'static str] {
     ]
 }
 
+/// Scenario-specific headline metrics control both report ordering and the
+/// automatic extra-pair rule. Other collected metrics remain secondary.
+pub fn headline_metric_ids_for(scenario: &str) -> &'static [&'static str] {
+    if scenario.eq_ignore_ascii_case("S-mcp") || scenario.eq_ignore_ascii_case("mcp") {
+        &[
+            "scenario.synthetic_mcp_pss_marginal_mib",
+            "scenario.synthetic_session_tree_pss_marginal_mib",
+            "scenario.synthetic_tool_cold_ms",
+        ]
+    } else {
+        headline_metric_ids()
+    }
+}
+
 pub fn render_report(
     meta: &super::RunMeta,
     stats: &ScenarioStats,
@@ -67,8 +81,15 @@ pub fn render_report(
         "- trials: {measured} measured, {warmups} warm-up; invalid: {invalid}; noisy: {noisy}\n",
         measured = measured.len(),
     ));
-    out.push_str(&format!("- noise: {noise_note}\n\n"));
+    out.push_str(&format!("- noise: {noise_note}\n"));
+    if let Some(note) = &meta.recovery_note {
+        out.push_str(&format!("- recovery: {note}\n"));
+    }
+    out.push('\n');
     out.push_str(&format!("## {} / {}\n\n", meta.scenario, meta.variant_key));
+    if meta.scenario.eq_ignore_ascii_case("S-mcp") {
+        out.push_str("The empty fleet excludes synthetic servers but retains Zeron's built-in MCP server. Readiness is a polling upper bound, not a direct CLI mcp_status timestamp. Cold-call measurements use the synthetic server directly on A and the standalone proxy on B.\n\n");
+    }
     push_table(
         &mut out,
         &main_ids(meta.scenario.as_str(), stats),
@@ -144,7 +165,7 @@ fn stats_lookup<'a>(stats: &'a ScenarioStats) -> impl Fn(&str) -> Option<&'a Met
 
 fn main_ids(scenario: &str, stats: &ScenarioStats) -> Vec<String> {
     let mut ids = Vec::new();
-    for id in headline_metric_ids() {
+    for id in headline_metric_ids_for(scenario) {
         if stats.main.contains_key(*id) {
             ids.push((*id).to_string());
         }

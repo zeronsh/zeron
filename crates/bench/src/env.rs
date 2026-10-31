@@ -16,7 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 /// The production engine's default IPC port. A trial must never use it.
 pub const DEFAULT_IPC_PORT: u16 = 27654;
@@ -74,6 +74,8 @@ pub struct Trial {
     pub memory_max: String,
     /// Inserted into `PATH` immediately after [`Self::shims`]. S-mcp only.
     pub node_dir: Option<PathBuf>,
+    /// Loopback-only synthetic Claude Messages endpoint, for native MCP trials.
+    pub claude_model_port: Option<u16>,
     /// `CLAUDE_CODE_EXECUTABLE`. May live outside `zb_root` (the bench build
     /// dir) but must not sit in `/tmp` or the live profile.
     pub replay_bin: PathBuf,
@@ -128,6 +130,7 @@ impl Trial {
             scope_unit: format!("zb-{run}-{index}"),
             memory_max: "8G".into(),
             node_dir: None,
+            claude_model_port: None,
             replay_bin: default_replay_bin(),
             bench_bin: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zeron-bench")),
             ready_timeout: Duration::from_secs(90),
@@ -188,6 +191,7 @@ impl Trial {
             &self.home.join(".local/state"),
             &self.home.join(".cache"),
             &self.home.join(".claude"),
+            &self.home.join("codex"),
         ] {
             create_dir_chain(&zb, &self.zb_root, dir)?;
         }
@@ -326,10 +330,25 @@ where
             trial.replay_bin.as_os_str().to_os_string(),
         ),
         ("CLAUDE_CONFIG_DIR", home.join(".claude").into_os_string()),
+        ("CODEX_HOME", home.join("codex").into_os_string()),
         ("ZB_PROBE_SOCK", trial.probe_sock.as_os_str().to_os_string()),
     ];
     for (key, value) in owned {
         upsert(&mut env, OsStr::new(key), value.as_os_str());
+    }
+    if let Some(port) = trial.claude_model_port {
+        for (key, value) in [
+            (
+                "ANTHROPIC_API_KEY",
+                "invalid-zeron-zero-token-verification".to_string(),
+            ),
+            ("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}")),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".to_string()),
+            ("CLAUDE_CODE_AUTO_CONNECT_IDE", "0".to_string()),
+            ("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL", "1".to_string()),
+        ] {
+            upsert(&mut env, OsStr::new(key), OsStr::new(&value));
+        }
     }
     for (key, value) in extra {
         upsert(&mut env, key.as_ref(), value.as_ref());
@@ -558,7 +577,11 @@ fn check_env(env: &[(OsString, OsString)], trial: &Trial, zb: &Path) -> Result<(
     }
     for (key, value) in env {
         let key_str = key.to_string_lossy();
-        if key_forbidden(&key_str) {
+        if key_forbidden(&key_str)
+            && !(key_str == "ANTHROPIC_API_KEY"
+                && trial.claude_model_port.is_some()
+                && value == "invalid-zeron-zero-token-verification")
+        {
             bail!("engine environment contains forbidden key {key_str}");
         }
         if key.as_bytes().contains(&0) || value.as_bytes().contains(&0) {
@@ -579,6 +602,7 @@ fn check_env(env: &[(OsString, OsString)], trial: &Trial, zb: &Path) -> Result<(
         "XDG_RUNTIME_DIR",
         "GIT_CONFIG_GLOBAL",
         "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
         "ZB_PROBE_SOCK",
     ];
     for key in inside {
@@ -591,6 +615,22 @@ fn check_env(env: &[(OsString, OsString)], trial: &Trial, zb: &Path) -> Result<(
         } else if !lexically_inside(&path, &trial.zb_root) {
             bail!("{key}={} is not under ZB_ROOT", path.display());
         }
+    }
+    if let Some(port) = trial.claude_model_port {
+        ensure!(port != 0, "loopback model port must be nonzero");
+        ensure!(
+            env_key(env, "ANTHROPIC_BASE_URL")
+                == Some(OsStr::new(&format!("http://127.0.0.1:{port}"))),
+            "model endpoint must match the loopback fixture"
+        );
+        ensure!(
+            env_key(env, "ANTHROPIC_API_KEY")
+                == Some(OsStr::new("invalid-zeron-zero-token-verification")),
+            "native fixture requires the fixed invalid key"
+        );
+        assert_loopback_sandbox(zb)?;
+    } else if env_key(env, "ANTHROPIC_BASE_URL").is_some() {
+        bail!("model endpoint requires a loopback fixture");
     }
     let dbus =
         env_key(env, "DBUS_SESSION_BUS_ADDRESS").context("env missing DBUS_SESSION_BUS_ADDRESS")?;
@@ -635,6 +675,57 @@ fn check_env(env: &[(OsString, OsString)], trial: &Trial, zb: &Path) -> Result<(
         bail!("ZERON_NO_LOGIN_SHELL must be 1");
     }
     Ok(())
+}
+
+/// Refuse native Claude runs unless network and hard-coded /tmp writes are isolated.
+fn assert_loopback_sandbox(zb: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for path in [
+            "/etc/claude-code/managed-mcp.json",
+            "/etc/claude-code/managed-settings.json",
+        ] {
+            ensure!(
+                !Path::new(path).exists(),
+                "native Claude refuses managed configuration at {path}"
+            );
+        }
+        match fs::read_dir("/etc/claude-code/managed-settings.d") {
+            Ok(mut entries) => ensure!(
+                entries.next().is_none(),
+                "native Claude refuses managed settings"
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        let interfaces = fs::read_to_string("/proc/net/dev")?;
+        let names: Vec<_> = interfaces
+            .lines()
+            .skip(2)
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+            .collect();
+        ensure!(
+            names == ["lo"],
+            "native Claude requires a loopback-only network namespace"
+        );
+        let scratch =
+            std::env::var_os("TMPDIR").context("native Claude requires scratch TMPDIR")?;
+        let scratch = fs::canonicalize(scratch)?;
+        ensure_inside(zb, &scratch)?;
+        let mapped = fs::metadata("/tmp")?;
+        let target = fs::metadata(&scratch)?;
+        ensure!(
+            (mapped.dev(), mapped.ino()) == (target.dev(), target.ino()),
+            "native Claude requires /tmp mapped to scratch TMPDIR"
+        );
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = zb;
+        bail!("native Claude fixture requires Linux network and mount namespaces")
+    }
 }
 
 fn key_forbidden(key: &str) -> bool {
@@ -1271,6 +1362,53 @@ mod tests {
             let err = assert_isolated(&trial).unwrap_err();
             assert!(err.to_string().contains(key), "{key}: {err}");
         }
+    }
+
+    #[test]
+    fn native_model_overrides_refuse_a_real_key_or_endpoint() {
+        let zb = PathBuf::from(std::env::var_os("TMPDIR").expect("scratch TMPDIR")).join(format!(
+            "model-guard-{}-{}",
+            std::process::id(),
+            mono_now()
+        ));
+        fs::create_dir(&zb).unwrap();
+        let mut trial = Trial::at(&zb, "model-guard", 0, "a").unwrap();
+        trial.allocate_port().unwrap();
+        trial.prepare().unwrap();
+        trial.claude_model_port = Some(12345);
+        trial
+            .extra
+            .push(("ANTHROPIC_API_KEY".into(), "not-the-fixed-dummy".into()));
+        let err = assert_isolated(&trial).unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+        trial.extra.clear();
+        trial.extra.push((
+            "ANTHROPIC_BASE_URL".into(),
+            "https://example.invalid".into(),
+        ));
+        let err = assert_isolated(&trial).unwrap_err();
+        assert!(err.to_string().contains("loopback fixture"), "{err}");
+        fs::remove_dir_all(zb).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a loopback-only network namespace and scratch /tmp mount"]
+    fn native_model_accepts_the_sandboxed_dummy_configuration() {
+        let scratch = PathBuf::from(std::env::var_os("TMPDIR").expect("scratch TMPDIR"));
+        let zb = scratch.parent().unwrap();
+        let mut trial = Trial::at(
+            zb,
+            &format!("model-positive-{}-{}", std::process::id(), mono_now()),
+            0,
+            "a",
+        )
+        .unwrap();
+        trial.allocate_port().unwrap();
+        trial.prepare().unwrap();
+        trial.claude_model_port = Some(12345);
+        assert_isolated(&trial).unwrap();
+        fs::remove_dir_all(&trial.root).unwrap();
     }
 
     #[test]
