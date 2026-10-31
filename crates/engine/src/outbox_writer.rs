@@ -18,7 +18,10 @@
 //! snapshot is saved, retaining the full-replay recovery obligation.
 //!
 //! Streaming commits queue in memory. Storage stalls can extend this crash
-//! window and grow the queue; there is no hard one-millisecond bound.
+//! window and grow the queue; there is no hard one-millisecond bound. Raw
+//! agent events remain in the run journal, but boot's journal-tail recovery
+//! only classifies the interrupted turn; it does not restore lost transcript
+//! content or regenerate its CRDT operations.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};

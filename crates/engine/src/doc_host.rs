@@ -1975,21 +1975,38 @@ impl DocHost {
                 let publication_chat = chat_id.to_string();
                 // Concurrent commits can run their hooks out of order; this
                 // device's ops still go out in commit order (OwnOpsOrder).
-                let own_order = Arc::new(Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc())));
+                let own_order =
+                    Arc::new(Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc())));
                 *lock(&handle.own_ops_order) = Some(own_order.clone());
                 let snapshot_order = own_order.clone();
                 let snapshot_outbox = outbox.clone();
                 let snapshot_weak = weak_push.clone();
                 let snapshot_chat = publication_chat.clone();
                 let barrier: Arc<zeron_sync::SnapshotBarrier> = Arc::new(move |chat, bytes| {
-                    if chat != snapshot_chat { return Ok(()); }
-                    let Some(handle) = snapshot_weak.upgrade() else { return Ok(()); };
-                    if handle.retired.load(Ordering::Acquire) { return Ok(()); }
+                    if chat != snapshot_chat {
+                        return Ok(());
+                    }
+                    let Some(handle) = snapshot_weak.upgrade() else {
+                        return Ok(());
+                    };
+                    if handle.retired.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
                     {
                         let mut order = lock(&snapshot_order);
-                        if handle.purged.load(Ordering::Acquire) { return Ok(()); }
-                        for update in order.snapshot_prefix(bytes).map_err(std::io::Error::other)? {
-                            snapshot_outbox.submit(chat, snapshot_weak.clone(), uuid::Uuid::new_v4().to_string(), update);
+                        if handle.purged.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        for update in order
+                            .snapshot_prefix(bytes)
+                            .map_err(std::io::Error::other)?
+                        {
+                            snapshot_outbox.submit(
+                                chat,
+                                snapshot_weak.clone(),
+                                uuid::Uuid::new_v4().to_string(),
+                                update,
+                            );
                         }
                     }
                     snapshot_outbox.flush_writes();
@@ -2004,7 +2021,9 @@ impl DocHost {
                             #[cfg(test)]
                             {
                                 let hook = lock(&handle.before_outbox_submit).take();
-                                if let Some(hook) = hook { hook(); }
+                                if let Some(hook) = hook {
+                                    hook();
+                                }
                             }
                             // No I/O here: the commit may be a stream task. The
                             // outbox writer inserts the row, then hands the
@@ -2014,7 +2033,9 @@ impl DocHost {
                             // Ordering and submitting share one lock so two
                             // hooks cannot swap their updates on the queue.
                             let mut order = lock(&own_order);
-                            if handle.purged.load(Ordering::Acquire) { return true; }
+                            if handle.purged.load(Ordering::Acquire) {
+                                return true;
+                            }
                             for bytes in order.order(bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 outbox.submit(&publication_chat, weak_push.clone(), batch_id, bytes);
@@ -3413,7 +3434,9 @@ impl DocHost {
     }
 
     fn pinned(&self, handle: &Arc<ChatDocHandle>) -> bool {
-        if self.inner.outbox.has_in_flight(&handle.chat_id) { return true; }
+        if self.inner.outbox.has_in_flight(&handle.chat_id) {
+            return true;
+        }
         if handle.sync_started.load(Ordering::Acquire) {
             return true;
         }
@@ -3750,7 +3773,9 @@ impl DocHost {
         if let Some(handle) = &removed {
             lock(&handle.chat2_local_sub).take();
             lock(&handle.publication_barrier).take();
-            if let Some(persistence) = &handle.persistence { persistence.stop(); }
+            if let Some(persistence) = &handle.persistence {
+                persistence.stop();
+            }
             lock(&handle.chat2).take();
         }
         self.inner.outbox.flush();
@@ -6356,7 +6381,9 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
-        if handle.purged.load(Ordering::Acquire) { return; }
+        if handle.purged.load(Ordering::Acquire) {
+            return;
+        }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -7215,7 +7242,13 @@ mod publication_eviction_tests {
             let handle = handle.clone();
             std::thread::spawn(move || commit_text(&handle, "already committed"))
         };
-        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
         let snapshot = handle.doc.export_snapshot().unwrap();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let saving = {
@@ -7225,7 +7258,11 @@ mod publication_eviction_tests {
                 done_tx.send(()).unwrap();
             })
         };
-        let result = tokio::task::spawn_blocking(move || done_rx.recv_timeout(std::time::Duration::from_secs(5))).await.unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            done_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
         // Always release the hook, including on a regression, so the test cleans up.
         release_tx.send(()).unwrap();
         committing.join().unwrap();
@@ -7314,7 +7351,9 @@ mod publication_eviction_tests {
         };
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         drop(pause);
-        tokio::task::spawn_blocking(move || purging.join().unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || purging.join().unwrap())
+            .await
+            .unwrap();
         commit_text(&handle, "orphaned after delete");
         handle.persistence.as_ref().unwrap().dirty(true);
         handle.persistence.as_ref().unwrap().flush_sync();

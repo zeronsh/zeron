@@ -774,7 +774,7 @@ mod own_ops_order_tests {
 
     #[test]
     fn hooks_in_commit_order_publish_their_own_bytes() {
-        let (doc, mut order, hooks) = three_commits();
+        let (_doc, mut order, hooks) = three_commits();
         let published: Vec<Vec<u8>> = hooks.iter().flat_map(|h| order.order(h)).collect();
         assert_eq!(published, hooks);
     }
