@@ -118,6 +118,20 @@ struct HarnessPrefsFile {
     mcp: McpPrefs,
 }
 
+// Preserve fields written by newer versions while replacing known preferences.
+fn preserve_unknown_prefs(current: &mut serde_json::Value, old: serde_json::Value) {
+    if let (Some(current), serde_json::Value::Object(old)) = (current.as_object_mut(), old) {
+        for (key, value) in old {
+            if let Some(existing) = current.get_mut(&key) {
+                // Server choices are a replaceable map, not a fixed schema.
+                if key != "servers" { preserve_unknown_prefs(existing, value); }
+            } else {
+                current.insert(key, value);
+            }
+        }
+    }
+}
+
 fn default_mcp_idle_minutes() -> u32 {
     10
 }
@@ -661,7 +675,21 @@ impl HarnessRegistry {
         else {
             return;
         };
-        let json = match serde_json::to_string_pretty(&*self.prefs()) {
+        let mut value = match serde_json::to_value(&*self.prefs()) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(error = %err, "harness-prefs serialize failed");
+                return;
+            }
+        };
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(mut old) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            // The legacy allow-list is deliberately consumed during migration.
+            if let Some(object) = old.as_object_mut() { object.remove("enabled"); }
+            preserve_unknown_prefs(&mut value, old);
+        }
+        let json = match serde_json::to_string_pretty(&value) {
             Ok(json) => json,
             Err(err) => {
                 tracing::warn!(error = %err, "harness-prefs serialize failed");
@@ -1815,7 +1843,7 @@ mod title_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("harness-prefs.json"),
-            r#"{"disabled":["codex"],"buildJobs":2,"sharedJobserver":true}"#,
+            r#"{"disabled":["codex"],"buildJobs":2,"sharedJobserver":true,"mcp":{"futureOption":{"x":1}},"titles":{"futureTitle":42}}"#,
         )
         .unwrap();
         let registry = HarnessRegistry::new();
@@ -1827,8 +1855,10 @@ mod title_tests {
         );
         registry.set_mcp_prefs(partial.mcp.clone());
         let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
-        assert!(!text.contains("buildJobs"), "{text}");
-        assert!(!text.contains("sharedJobserver"), "{text}");
+        assert!(text.contains("buildJobs"), "{text}");
+        assert!(text.contains("sharedJobserver"), "{text}");
+        assert!(text.contains("futureOption"), "{text}");
+        assert!(text.contains("futureTitle"), "{text}");
         assert!(!text.contains("jobserverMake"), "{text}");
         assert!(!text.contains("sccache"), "{text}");
         let reloaded = HarnessRegistry::new();
