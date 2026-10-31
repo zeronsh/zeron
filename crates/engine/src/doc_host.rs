@@ -3099,9 +3099,8 @@ impl DocHost {
     /// the normal room flow. Idempotent: a doc with any message entry is
     /// never touched, and the salvage only runs on the hosting device.
     ///
-    /// A chat whose transcript has been seen non-empty is marked
-    /// salvage-checked and skipped on later boots. The run journal is never
-    /// deleted or rewritten.
+    /// An unchanged, inspected non-empty snapshot can be skipped on later
+    /// boots. The run journal is never deleted or rewritten.
     pub fn spawn_transcript_salvage(&self, journals_dir: std::path::PathBuf) {
         let host = self.clone();
         self.spawn_worker(async move {
@@ -3214,9 +3213,8 @@ impl DocHost {
             .map_err(|_| "recovery deferred: remote history has not converged".to_string())?;
         }
         if !messages_list_empty(handle.doc().doc())? {
-            // Transcript present — nothing lost. Mark only after the
-            // non-empty doc is durable, so a crash before the snapshot
-            // still retries.
+            // Transcript present — nothing lost. A later scan can mark it
+            // once its non-empty snapshot is durable.
             return Ok(());
         }
         // Fat source: the M3 adopt's rollback copy on disk. (The other
