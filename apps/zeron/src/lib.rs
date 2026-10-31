@@ -195,22 +195,18 @@ pub fn run_mcp() -> anyhow::Result<()> {
 /// Standalone proxy keeps the GUI/engine image out of every MCP session.
 /// Source builds without a packaged sibling use the same current-thread core.
 pub fn run_mcp_proxy(args: Vec<String>) -> anyhow::Result<()> {
-    let sibling = std::env::current_exe()?.with_file_name(if cfg!(windows) {
-        "zeron-mcp-proxy.exe"
-    } else {
-        "zeron-mcp-proxy"
-    });
-    if cfg!(unix) && sibling.is_file() {
-        let mut command = std::process::Command::new(sibling);
-        command.args(&args);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            return Err(command.exec().into());
-        }
-        #[cfg(not(unix))]
-        {
-            std::process::exit(command.status()?.code().unwrap_or(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let sibling = std::env::current_exe()?.with_file_name("zeron-mcp-proxy");
+        if sibling.is_file() {
+            // exec only returns on failure (noexec mount, damaged file). The server
+            // must still start, so fall through to the in-process core.
+            let error = std::process::Command::new(&sibling).args(&args).exec();
+            eprintln!(
+                "zeron mcp-proxy: cannot run {}: {error}; continuing in-process",
+                sibling.display()
+            );
         }
     }
     zeron_mcp_proxy::run_cli(args, paths::data_dir())?;
