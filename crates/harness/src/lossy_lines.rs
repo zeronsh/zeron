@@ -77,6 +77,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lines_larger_than_buffer_remain_complete() {
+        let long = "a".repeat(64 * 1024 + 17);
+        let input = format!("{long}\r\nnext\n{long}");
+        let mut lines = lossy_lines(input.as_bytes());
+        assert_eq!(lines.next_line().await.unwrap(), Some(long.clone()));
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("next"));
+        assert_eq!(lines.next_line().await.unwrap(), Some(long));
+        assert_eq!(lines.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn a_cancelled_read_resumes_the_same_line() {
         let (mut tx, rx) = tokio::io::duplex(64);
         let mut lines = lossy_lines(rx);
