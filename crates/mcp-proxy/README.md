@@ -45,7 +45,10 @@ persistent catalog and refresh it in the background. Cached metadata remains
 available to this client during startup. Cache entries expire at the declared
 TTL or 30 days, whichever is sooner. Private and zero-TTL results remain only
 in this proxy's memory. Failed discovery marks the key for transparent
-passthrough in the next proxy.
+passthrough for 24 hours, then the next launch retries bounded discovery. The
+shared `class-v1` launch evidence uses the same retry window; old failure
+records without a timestamp retry on the next launch. Positive channel evidence
+remains sticky.
 
 Lazy idle timeout is ten minutes, checked every thirty seconds; a zero timeout
 disables idle stopping. Lazy-keep-alive never idle-stops. Keep-alive starts the

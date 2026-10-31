@@ -10,6 +10,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Retry transient discovery failures after one day, for both evidence stores.
+pub const DISCOVERY_RETRY_MS: u64 = 24 * 60 * 60 * 1000;
+pub(crate) fn discovery_failure_active(cached_at: u64, now: u64) -> bool {
+    now.saturating_sub(cached_at) < DISCOVERY_RETRY_MS
+}
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,8 +211,13 @@ pub fn path(data_dir: &Path, key: &str) -> PathBuf {
     data_dir.join("mcp-cache/v1").join(format!("{key}.json"))
 }
 pub fn read(data_dir: &Path, key: &str) -> Option<Entry> {
+    read_at(data_dir, key, now_ms())
+}
+fn read_at(data_dir: &Path, key: &str, now: u64) -> Option<Entry> {
     let entry: Entry = serde_json::from_slice(&fs::read(path(data_dir, key)).ok()?).ok()?;
-    (entry.key == key).then_some(entry)
+    (entry.key == key
+        && (!entry.discovery_failed || discovery_failure_active(entry.cached_at, now)))
+    .then_some(entry)
 }
 
 /// Per-key advisory lock closes the re-read/rename race between simultaneous proxies.
@@ -490,6 +500,22 @@ mod tests {
         new.ttl_ms = Some(0);
         save(dir.path(), &new).unwrap();
         assert!(read(dir.path(), "key").is_none());
+    }
+    #[test]
+    fn failed_discovery_expires_at_24_hours_with_an_injected_clock() {
+        let dir = dir();
+        let now = DISCOVERY_RETRY_MS * 2;
+        let mut entry = Entry::new("key".into(), "demo".into(), Value::Null);
+        entry.cached_at = now;
+        entry.discovery_failed = true;
+        save(dir.path(), &entry).unwrap();
+        assert!(read_at(dir.path(), "key", now - 1).is_some());
+        assert!(read_at(dir.path(), "key", now + DISCOVERY_RETRY_MS - 1).is_some());
+        assert!(read_at(dir.path(), "key", now + DISCOVERY_RETRY_MS).is_none());
+        assert!(read_at(dir.path(), "key", now + DISCOVERY_RETRY_MS + 1).is_none());
+        entry.discovery_failed = false;
+        save(dir.path(), &entry).unwrap();
+        assert!(read_at(dir.path(), "key", now + DISCOVERY_RETRY_MS).is_some());
     }
     #[test]
     fn validity_ttl_protocol_and_discovery_marker() {

@@ -147,7 +147,9 @@ impl Peer {
         self.response(id).await
     }
     async fn init(&mut self) -> Value {
-        let response = self.request(json!("init"),"initialize",json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1.2.3"},"capabilities":{"sampling":{},"roots":{"listChanged":true}}})).await;
+        let response = self
+            .request(json!("init"), "initialize", initialize_params())
+            .await;
         self.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .await;
         response
@@ -166,6 +168,9 @@ impl Peer {
                 .success()
         );
     }
+}
+fn initialize_params() -> Value {
+    json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1.2.3"},"capabilities":{"sampling":{},"roots":{"listChanged":true}}})
 }
 async fn seed(dir: &Path) {
     let mut peer = Peer::spawn(dir, "lazy", &[]);
@@ -558,6 +563,63 @@ async fn failed_discovery_next_session_is_transparent() {
     let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
     eventually(|| pids(&d.join("spawn")).len() == 3).await;
     assert_eq!(peer.init().await["error"]["message"], "fake init failure");
+    peer.close().await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn expired_failure_retries_discovery_and_returns_to_lazy_cache() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
+    assert_eq!(peer.init().await["error"]["message"], "fake init failure");
+    peer.close().await;
+    // Seed both stores, including the H1 marker used by older proxy writers.
+    let command = fs::canonicalize(env!("CARGO_BIN_EXE_fake-mcp")).unwrap();
+    let config = zeron_mcp_proxy::Config::parse(
+        ["--server", "fake", "--", env!("CARGO_BIN_EXE_fake-mcp")].map(str::to_owned),
+        d.into(),
+    )
+    .unwrap();
+    let key = zeron_mcp_proxy::cache::key(
+        &config,
+        &initialize_params(),
+        &command,
+        &command,
+        Value::Null,
+    );
+    let mut entry = zeron_mcp_proxy::cache::Entry::new(key.clone(), "fake".into(), Value::Null);
+    entry.discovery_failed = true;
+    zeron_mcp_proxy::cache::save(d, &entry).unwrap();
+    let mut expired = 0;
+    for store in ["class-v1", "v1"] {
+        for entry in fs::read_dir(d.join("mcp-cache").join(store)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                record["cached_at"] = json!(0);
+                fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+                expired += 1;
+            }
+        }
+    }
+    assert!(expired >= 2);
+    assert!(zeron_mcp_proxy::cache::read(d, &key).is_none());
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    assert!(peer.init().await.get("result").is_some());
+    eventually(|| pids(&d.join("spawn")).iter().all(|pid| !alive(*pid))).await;
+    assert!(
+        !zeron_mcp_proxy::cache::read(d, &key)
+            .unwrap()
+            .discovery_failed
+    );
+    let starts = pids(&d.join("spawn")).len();
+    peer.close().await;
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    assert!(peer.init().await.get("result").is_some());
+    assert_eq!(
+        pids(&d.join("spawn")).len(),
+        starts,
+        "warm cache must stay lazy after recovery"
+    );
     peer.close().await;
 }
 #[tokio::test(flavor = "current_thread")]

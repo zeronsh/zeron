@@ -237,9 +237,10 @@ never substituted into launcher symlinks.
 The helper is a Rust binary, which sets SIGPIPE to ignore at startup and resets
 it to default before exec. A caller that deliberately ignored SIGPIPE before
 spawning a shimmed tool loses that inherited disposition (the ordinary
-default-disposition case is identical). A failed discovery is remembered for the
-launch identity (`class-v1` and the H1 cache marker) with no expiry, so a
-transient first-run failure keeps that server eager until its identity changes.
+default-disposition case is identical). Failed discovery evidence and H1 cache
+markers expire after 24 hours; the next launch retries discovery under the
+existing startup timeout. Old classification failures without a timestamp retry
+on the next launch. Positive channel evidence remains sticky.
 After an engine SIGKILL the run and shim directories remain until the H9a boot
 sweep.
 
