@@ -944,7 +944,21 @@ impl Harness for ClaudeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false).await
+        self.run_with_mode(request, controls, false, false).await
+    }
+
+    // Claude runs SessionStart hooks on every wake, with source=resume.
+    async fn start_idle(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        if request.resume.as_deref().is_none_or(str::is_empty) {
+            return Err(HarnessError::Protocol(
+                "Claude idle start requires a resume id".into(),
+            ));
+        }
+        self.run_with_mode(request, controls, false, true).await
     }
 
     async fn run_title(
@@ -961,7 +975,7 @@ impl Harness for ClaudeHarness {
         // Its tools are off and denied: the chat's modes do not apply.
         request.access = AccessMode::default();
         request.plan = false;
-        self.run_with_mode(request, controls, true).await
+        self.run_with_mode(request, controls, true, false).await
     }
 }
 
@@ -971,6 +985,7 @@ impl ClaudeHarness {
         mut request: RunRequest,
         controls: RunControls,
         title_only: bool,
+        idle: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
         // A session whose transcript holds no conversation cannot be
@@ -983,6 +998,11 @@ impl ClaudeHarness {
             Some(session_id) => {
                 let (normalizer, transcript) =
                     Normalizer::for_resume(&config_root(&request.env), &session_id).await;
+                if transcript == Transcript::Empty && idle {
+                    return Err(HarnessError::Protocol(
+                        "Claude has no conversation to prewarm".into(),
+                    ));
+                }
                 if transcript == Transcript::Empty {
                     tracing::info!(
                         target: "zeron_harness::claude",
@@ -1015,14 +1035,18 @@ impl ClaudeHarness {
         // ahead of the text (verified against the real CLI); their path refs
         // also ride the prompt text, so a skipped/unreadable file degrades to
         // the old-app behavior (the agent opens the path with its Read tool).
-        let images = load_image_blocks(&request.attachments).await;
-        let first_command = uuid::Uuid::new_v4().to_string();
-        let first = wire::prompt_line(
-            &apply_ultrathink(request.reasoning, &request.prompt),
-            &first_command,
-            &images,
-        );
-        stdin.line(first);
+        let first_command = if idle {
+            None
+        } else {
+            let images = load_image_blocks(&request.attachments).await;
+            let id = uuid::Uuid::new_v4().to_string();
+            stdin.line(wire::prompt_line(
+                &apply_ultrathink(request.reasoning, &request.prompt),
+                &id,
+                &images,
+            ));
+            Some(id)
+        };
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         if let Some(message) = notice {
@@ -1236,7 +1260,7 @@ struct Session {
     child: Child,
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     /// The uuid the opening prompt was written with.
-    first_command: String,
+    first_command: Option<String>,
     stdin: Stdin,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
@@ -1294,10 +1318,11 @@ async fn run_session(session: Session) {
     let mut interrupt_sent = false;
     // A message of ours (or a background wake) began a turn that has not
     // reported its end: the CLI dying now leaves it to us to end it.
-    let mut turn_open = true;
+    let mut idle_initialize = first_command.is_none();
+    let mut turn_open = !idle_initialize;
     // A resumed session the CLI turns out to have no conversation for is
     // relaunched fresh, once (see [`no_conversation`]).
-    let mut restore_fallback = launched.resume.is_some();
+    let mut restore_fallback = launched.resume.is_some() && !idle_initialize;
     let mut relaunch = false;
     // Our configuration requests the CLI has not answered yet (`set_model`,
     // `apply_flag_settings`): what each asked for, and when we stop waiting.
@@ -1339,7 +1364,9 @@ async fn run_session(session: Session) {
     let mut stop_done_at: Option<tokio::time::Instant> = None;
     let mut active_since_stop = false;
     let mut commands = Commands::default();
-    commands.written(first_command);
+    if let Some(id) = first_command {
+        commands.written(id);
+    }
     // A `result` that is a steer boundary rather than the turn's end (see
     // [`Commands`]). It is superseded — dropped — once the waiting message
     // starts its own turn, which ends with its own result; it is released
@@ -1460,6 +1487,20 @@ async fn run_session(session: Session) {
                             stop_settle_at = Some(tokio::time::Instant::now() + STOP_SETTLE);
                         }
                         let error = response.error_message();
+                        if idle_initialize && response.request_id == "zeron_initialize" {
+                            idle_initialize = false;
+                            if let Some(error) = &error {
+                                let _ = event_tx.send(Err(HarnessError::Protocol(error.clone()))).await;
+                                break 'main;
+                            }
+                            // initialize can finish before the CLI emits system:init
+                            // (it waits for a user line). Announce the resumed park
+                            // once; the later init is deduplicated by the normalizer.
+                            if !norm.started() {
+                                let event = norm.idle_started(&config);
+                                if event_tx.send(Ok(event)).await.is_err() { break 'main; }
+                            }
+                        }
                         if let Some((what, asked, _)) = pending_controls.remove(&response.request_id) {
                             if let Some(error) = &error {
                                 config_unsure = true;
@@ -1885,7 +1926,7 @@ async fn run_session(session: Session) {
                     session_id: norm.session_id.clone(),
                 }))
                 .await;
-        } else if !interrupted && turn_open {
+        } else if !interrupted && (turn_open || idle_initialize) {
             // The CLI died mid-turn — the first or any later one. Its
             // tools and MCP servers are traced while it can still be; its
             // exit status and last stderr lines land just after stdout
@@ -2213,6 +2254,108 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prewarm_claude_initializes_without_a_user_line_then_steers() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("claude");
+        let log = root.path().join("stdin.jsonl");
+        std::fs::write(&exe, r#"#!/usr/bin/env python3
+import json,os,sys
+assert '--resume=old-session' in sys.argv
+for line in sys.stdin:
+    with open(os.environ['STDIN_LOG'], 'a') as f: f.write(line)
+    msg=json.loads(line)
+    if msg.get('type') == 'control_request':
+        print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':msg['request_id'],'response':{}}}), flush=True)
+    elif msg.get('type') == 'user':
+        print(json.dumps({'type':'system','subtype':'init','session_id':'old-session','cwd':os.getcwd(),'model':'fake','tools':[]}), flush=True)
+        print(json.dumps({'type':'user','uuid':msg['uuid'],'message':msg['message']}), flush=True)
+        print(json.dumps({'type':'result','subtype':'success','result':'ok','session_id':'old-session'}), flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut request: RunRequest = serde_json::from_value(json!({
+            "prompt":"must not be sent", "cwd":root.path(), "sandbox":"workspace-write",
+            "resume":"old-session"
+        }))
+        .unwrap();
+        request.env.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            root.path().to_string_lossy().into_owned(),
+        );
+        request
+            .env
+            .insert("STDIN_LOG".into(), log.to_string_lossy().into_owned());
+        request.mcp_plan = None;
+        let (tx, rx) = mpsc::channel(8);
+        let interrupt = crate::CancellationToken::new();
+        let controls = RunControls {
+            realtime: None,
+            execution_lease: None,
+            request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+            steering: rx,
+            interrupt: interrupt.clone(),
+            turn: Default::default(),
+        };
+        let mut stream = ClaudeHarness::new()
+            .with_executable(&exe)
+            .start_idle(request, controls)
+            .await
+            .unwrap();
+        let started = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(started, AgentEvent::SessionStarted { session_id, .. } if session_id == "old-session")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
+        let lines = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(lines.trim()).unwrap()["request"]["subtype"],
+            "initialize"
+        );
+        tx.send(crate::SteerMessage {
+            prompt: "next".into(),
+            message_id: None,
+            attachments: vec![],
+            config: None,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut steered = false;
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    AgentEvent::SessionStarted { .. } => panic!("duplicate start"),
+                    AgentEvent::Steered { .. } => steered = true,
+                    AgentEvent::Done { .. } => {
+                        assert!(steered);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let lines = std::fs::read_to_string(log).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(lines.lines().nth(1).unwrap()).unwrap()["type"],
+            "user"
+        );
+        interrupt.cancel();
+        while stream.next().await.is_some() {}
+    }
 
     #[test]
     fn probe_timeout_says_what_the_cli_printed_without_its_secrets() {
