@@ -3226,8 +3226,12 @@ impl SubagentSink {
                 }
             }
         };
-        self.render.dirty.clear();
+        if result.is_ok() {
+            self.render.dirty.clear();
+        }
         if let Err(err) = result {
+            // Retain pending indices for the next event's flush, without
+            // keeping the deadline armed and spinning on a broken doc.
             // Fail soft: a broken subagent doc degrades to chip-only, never
             // errors the chat.
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent sink flush failed");
@@ -5883,6 +5887,81 @@ mod tests {
         // holds the run loop's commit guard open on a past deadline.
         sink.flush("dev-test");
         assert!(!sink.dirty);
+    }
+
+    #[tokio::test]
+    async fn subagent_flush_retains_pending_indices_after_a_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "dev-test".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("chat-sub-retry").unwrap();
+        let mut sink = SubagentSink {
+            doc_id: "chat-sub-retry".into(),
+            doc: handle.writer(),
+            entry_id: "entry-1".into(),
+            started_at: 0,
+            entry_index: None,
+            written: Vec::new(),
+            folded: Vec::new(),
+            render: SegmentRender::default(),
+            dirty: true,
+        };
+        let touched = fold_event_into_parts(&mut sink.folded, &text("A"));
+        sink.render.note(touched, sink.folded.len());
+        sink.flush("dev-test");
+        let part_map = match sink.doc.doc().get_list("messages").get(0).unwrap() {
+            loro::ValueOrContainer::Container(loro::Container::Map(entry)) => {
+                match entry.get("parts").unwrap() {
+                    loro::ValueOrContainer::Container(loro::Container::List(parts)) => {
+                        match parts.get(0).unwrap() {
+                            loro::ValueOrContainer::Container(loro::Container::Map(part)) => part,
+                            _ => panic!("part map"),
+                        }
+                    }
+                    _ => panic!("parts list"),
+                }
+            }
+            _ => panic!("entry map"),
+        };
+        part_map.delete("text").unwrap();
+        let touched = fold_event_into_parts(&mut sink.folded, &text("B"));
+        sink.render.note(touched, sink.folded.len());
+        sink.dirty = true;
+        sink.flush("dev-test");
+        assert!(!sink.dirty, "a write error must not spin the run loop");
+        assert!(
+            sink.render.dirty.contains(&0),
+            "the unwritten tail needs retrying"
+        );
+        let restored = part_map
+            .insert_container("text", loro::LoroText::new())
+            .unwrap();
+        restored.insert(0, "A").unwrap();
+        let touched = fold_event_into_parts(
+            &mut sink.folded,
+            &AgentEvent::ToolCall {
+                id: "write".into(),
+                call: zeron_proto::ToolCall::WriteFile {
+                    path: "private.txt".into(),
+                    content: Some("hidden".into()),
+                },
+            },
+        );
+        sink.render.note(touched, sink.folded.len());
+        sink.dirty = true;
+        sink.flush("dev-test");
+        assert!(sink.render.dirty.is_empty());
+        assert_eq!(
+            sink.doc.read_entries().unwrap()[0].parts,
+            render_parts_full(&sink.folded)
+        );
     }
 
     /// Feed-by-hand harness: the test pushes wire events through a channel
