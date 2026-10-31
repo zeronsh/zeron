@@ -1,6 +1,6 @@
 //! Raw-value framing: the new encoder and decoder against the `Value`-based
-//! ones they sit beside. The wire must not change in either direction, because
-//! engines, viewports and the relay of different versions talk to each other.
+//! ones they sit beside. Decoded values must remain compatible in either
+//! direction; raw item key order need not match Value serialization.
 
 use std::sync::{Arc, Mutex};
 
@@ -39,7 +39,7 @@ fn legacy_item_frame(id: u64, item: &str) -> String {
 }
 
 #[test]
-fn item_frame_is_byte_identical_to_the_server_frame_encoding() {
+fn sorted_compact_items_match_the_server_frame_encoding() {
     for id in [0, 1, 7, 4_294_967_296, u64::MAX] {
         for item in ITEMS {
             assert_eq!(
@@ -49,6 +49,14 @@ fn item_frame_is_byte_identical_to_the_server_frame_encoding() {
             );
         }
     }
+}
+
+#[test]
+fn unsorted_raw_item_has_the_same_decoded_value_as_legacy() {
+    let item = r#"{"z":1,"a":{"y":2,"b":3}}"#;
+    let raw_frame: ServerFrame = serde_json::from_str(&item_frame(7, &raw(item))).unwrap();
+    let old_frame: ServerFrame = serde_json::from_str(&legacy_item_frame(7, item)).unwrap();
+    assert_eq!(raw_frame.item, old_frame.item);
 }
 
 #[test]

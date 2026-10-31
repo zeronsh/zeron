@@ -514,7 +514,8 @@ pub enum RpcReply {
     Stream(BoxStream<'static, serde_json::Value>),
     /// [`Stream`](Self::Stream) whose items are already serialized: the server
     /// splices each into its frame instead of encoding a `Value` tree. The
-    /// decoded items match those of the equivalent `Stream` of parsed items.
+    /// Decoded items match those of the equivalent `Stream` of parsed items;
+    /// object key order and numeric spelling are not canonical wire bytes.
     RawStream(BoxStream<'static, Box<serde_json::value::RawValue>>),
 }
 
