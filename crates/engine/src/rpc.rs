@@ -1601,6 +1601,21 @@ impl EngineRpc {
                 });
                 return Ok(RpcReply::Stream(stream.boxed()));
             }
+            if !matches!(method, methods::WATCH_DOC_MESSAGES | methods::WATCH_QUEUE) {
+                let rx = match client.subscribe_scoped(method, params).await {
+                    Ok(rx) => rx,
+                    Err(err) => {
+                        if should_invalidate_link(&err) {
+                            links.invalidate(target);
+                        }
+                        return Err(err);
+                    }
+                };
+                let stream = futures::stream::unfold((rx, client), |(mut rx, client)| async move {
+                    rx.recv().await.map(|item| (item, (rx, client)))
+                });
+                return Ok(RpcReply::Stream(stream.boxed()));
+            }
             let rx = match client.subscribe_scoped_raw(method, params).await {
                 Ok(rx) => rx,
                 Err(err) => {
