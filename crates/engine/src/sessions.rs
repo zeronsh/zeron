@@ -44,10 +44,11 @@ use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
 
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
+/// The event is shared so a hub with many receivers does not clone the payload per receiver.
 #[derive(Debug, Clone)]
 pub struct JournaledEvent {
     pub seq: u64,
-    pub event: AgentEvent,
+    pub event: Arc<AgentEvent>,
 }
 
 /// Outcome of a steer attempt.
@@ -611,7 +612,10 @@ impl SessionsEngine {
             .journal
             .replay(chat_id, after_seq)?
             .into_iter()
-            .map(|(seq, event)| JournaledEvent { seq, event })
+            .map(|(seq, event)| JournaledEvent {
+                seq,
+                event: Arc::new(event),
+            })
             .collect();
         Ok((replay, rx))
     }
@@ -1891,6 +1895,10 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+        // The writer thread may still hold the last events of the turns just stopped.
+        if let Err(err) = self.inner.journal.flush() {
+            tracing::warn!(error = %err, "journal flush on shutdown failed");
+        }
     }
 
     /// The engine is going down because its account signed out: the turns
@@ -1999,23 +2007,36 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
-        let seq = match self.journal.append(chat_id, event) {
-            Ok(seq) => seq,
+        let (seq, recorded) = match self.journal.enqueue(chat_id, event) {
+            Ok(recorded) => recorded,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
-                0
+                (0, true)
             }
         };
+        // SessionStarted carries the resume id; Done closes the turn. Both have
+        // to be on disk before publish returns (crash recovery reads the tail).
+        if matches!(
+            event,
+            AgentEvent::Done { .. } | AgentEvent::SessionStarted { .. }
+        ) && let Err(err) = self.journal.flush()
+        {
+            tracing::error!(chat = %chat_id, error = %err, "journal flush failed");
+        }
         // The journal now closes the turn a Stop marked (see
         // `SessionsEngine::note_user_stop`).
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
-        if let Some(hub) = lock(&self.hubs).get(chat_id) {
-            let _ = hub.send(JournaledEvent {
-                seq,
-                event: event.clone(),
-            });
+        // An unchanged AvailableCommands list was not appended; subscribers already
+        // have that seq. With no receivers there is nothing to clone for.
+        if recorded && let Some(hub) = lock(&self.hubs).get(chat_id) {
+            if hub.receiver_count() > 0 {
+                let _ = hub.send(JournaledEvent {
+                    seq,
+                    event: Arc::new(event.clone()),
+                });
+            }
         }
         seq
     }

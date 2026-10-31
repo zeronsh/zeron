@@ -254,7 +254,10 @@ async fn send_now_recall(stage: u8) {
                     .ok()
                     .is_some_and(|(events, _)| {
                         events.iter().any(|e| {
-                            matches!(e.event, zeron_proto::AgentEvent::SessionStarted { .. })
+                            matches!(
+                                e.event.as_ref(),
+                                zeron_proto::AgentEvent::SessionStarted { .. }
+                            )
                         })
                     })
             },
@@ -325,7 +328,12 @@ async fn startup_steering_burst_retains_all_interrupted_messages() {
                     .unwrap()
                     .0
                     .iter()
-                    .filter(|e| matches!(e.event, zeron_proto::AgentEvent::SessionStarted { .. }))
+                    .filter(|e| {
+                        matches!(
+                            e.event.as_ref(),
+                            zeron_proto::AgentEvent::SessionStarted { .. }
+                        )
+                    })
                     .count()
                     == i + 1
             },
