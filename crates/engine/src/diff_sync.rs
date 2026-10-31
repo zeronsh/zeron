@@ -203,8 +203,8 @@ impl WatchSignals {
 }
 
 impl CheckoutEntry {
-    /// The live watcher covers the whole checkout and has reported nothing
-    /// since the last capture: a repair re-check could only find the same diff.
+    /// The worktree watcher has reported no change since the last capture.
+    /// Forced repairs still check unobserved inputs and lost watch events.
     fn watch_is_quiet(&self) -> bool {
         let signals = &self.signals;
         if !signals.covers_worktree.load(Ordering::Acquire) {
@@ -676,7 +676,7 @@ struct IdentityStamp {
 
 /// `(mtime, size, inode, ctime, mode)` without following symlinks. A
 /// directory's own mtime and size only track churn among its entries (every
-/// index lock inside `.git` moves them), so for one only the inode counts.
+/// index lock inside `.git` moves them), so only identity and mode count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileStamp {
     modified: Option<Duration>,
@@ -1761,10 +1761,11 @@ enum Gated {
 
 /// [`capture_diff_against`] behind the D16 gate. One `git status` yields the
 /// head oid, the branch and every changed path; its output plus the
-/// `(mtime, size)` of the listed paths is the [`GateState`]. When that equals
-/// `prior` the working tree cannot have moved, so nothing else is spawned. On
-/// a change the tracked metadata (`--raw` + `--numstat`) and the patch run in
-/// parallel: three spawns against the legacy six. Anything the fast path
+/// stat stamps of the listed paths and Git inputs form the [`GateState`]. A
+/// trusted match with `prior` skips the capture. On a change, tracked metadata
+/// (`--raw` + `--numstat`) and the patch run in parallel: three warm spawns
+/// against the legacy six. Config discovery adds two or three cold spawns;
+/// an ambiguous detached-HEAD header needs one extra branch lookup. Anything the fast path
 /// cannot reproduce exactly (truncated output, an unparsable record, a failed
 /// status) falls back to [`capture_diff_legacy`], so the result is always the
 /// one the legacy path would give.
@@ -2200,7 +2201,24 @@ async fn capture_status(root: &Path) -> Option<StatusV2> {
     if capture.truncated {
         return None;
     }
-    parse_status_v2(capture.stdout)
+    let mut status = parse_status_v2(capture.stdout)?;
+    // `(detached)` is also a legal branch name: porcelain alone cannot
+    // distinguish it from detached HEAD. Ask Git only for this rare header.
+    if status.branch == "HEAD" {
+        let branch = capture_git(root, &["branch", "--show-current"], MAX_DIFF_METADATA_BYTES)
+            .await
+            .ok()?;
+        if branch.truncated {
+            return None;
+        }
+        let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+        status.branch = if branch.is_empty() {
+            "HEAD".into()
+        } else {
+            branch
+        };
+    }
+    Some(status)
 }
 
 /// The path after the `spaces`th space of a v2 record (paths may contain spaces).
@@ -3347,6 +3365,10 @@ mod git_gating_tests {
         git(&dir, &["checkout", "-q", "--detach", "HEAD~1"]);
         write(&dir, "b.txt", b"edited while detached\n");
 
+        let dir = fresh("sentinel-branch");
+        git(&dir, &["checkout", "-qb", "(detached)"]);
+        write(&dir, "b.txt", b"edited on the sentinel-named branch\n");
+
         let dir = tmp.join("unborn");
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q", "-b", "trunk"]);
@@ -3482,6 +3504,7 @@ mod git_gating_tests {
         );
         assert!(statuses("renamed").contains(&"renamed".to_string()));
         assert_eq!(shot["detached"].branch, "HEAD");
+        assert_eq!(shot["sentinel-branch"].branch, "(detached)");
         assert_eq!(shot["unborn"].head_sha, None);
         assert_eq!(shot["unborn"].branch, "trunk");
         assert_eq!(shot["linked-worktree"].branch, "feature");
