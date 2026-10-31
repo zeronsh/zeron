@@ -7025,6 +7025,181 @@ mod publication_eviction_tests {
         host.shutdown_workers().await;
     }
 
+    /// An edge host whose room is unreachable: commits reach only the outbox.
+    fn outbox_host(store: &Arc<DocsStore>) -> DocHost {
+        DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
+            },
+        )
+    }
+
+    fn commit_text(handle: &ChatDocHandle, text: &str) {
+        let body = handle.doc.doc().get_text("body");
+        body.insert(body.len_unicode(), text).unwrap();
+        handle.doc.doc().commit();
+    }
+
+    /// Outbox rows replay into a fresh doc in ordinal order with no gaps.
+    fn replay_in_order(store: &DocsStore, chat: &str) -> (usize, String) {
+        let replay = loro::LoroDoc::new();
+        let rows = store.pending_chat_updates(chat).unwrap();
+        for (_, bytes) in &rows {
+            let status = replay.import(bytes).unwrap();
+            assert!(status.pending.is_none(), "row {chat}: depends on a later row");
+        }
+        (rows.len(), replay.get_text("body").to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commits_never_wait_on_sqlite_and_rows_keep_commit_order_exactly_once() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let chats = ["order-a", "order-b", "order-c"];
+        let handles: Vec<_> = chats.iter().map(|c| host.open_local(c).unwrap()).collect();
+        let outbox = host.inner.outbox.clone();
+        // Opening journals one baseline row per chat.
+        let baseline: Vec<usize> = chats
+            .iter()
+            .map(|c| store.pending_chat_updates(c).unwrap().len())
+            .collect();
+        let before = store.outbox_write_transactions();
+        const COMMITS: usize = 100;
+        {
+            // The writer cannot write: every commit must still return at once.
+            let _pause = outbox.pause();
+            let threads: Vec<_> = handles
+                .iter()
+                .cloned()
+                .map(|handle| {
+                    std::thread::spawn(move || {
+                        for i in 0..COMMITS {
+                            commit_text(&handle, &format!("{i:03},"));
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            assert_eq!(store.outbox_write_transactions(), before, "a commit wrote");
+            for (chat, base) in chats.iter().zip(&baseline) {
+                assert!(host.outbox_pending(chat).unwrap());
+                assert_eq!(store.pending_chat_updates(chat).unwrap().len(), *base);
+            }
+        }
+        outbox.flush();
+        for ((chat, handle), base) in chats.iter().zip(&handles).zip(&baseline) {
+            let (rows, text) = replay_in_order(&store, chat);
+            assert_eq!(rows, base + COMMITS, "{chat}: one row per commit, exactly once");
+            assert_eq!(text, handle.doc.doc().get_text("body").to_string());
+        }
+        // 300 rows, never more than one transaction per 64: batching, and no
+        // second INSERT from the client.
+        let txs = store.outbox_write_transactions() - before;
+        assert!(txs >= 5 && txs <= 300 / 2, "{txs} transactions for 300 rows");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_waits_for_the_outbox_rows_of_what_it_contains() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("barrier").unwrap();
+        let outbox = host.inner.outbox.clone();
+        let baseline = store.pending_chat_updates("barrier").unwrap().len();
+        let pause = outbox.pause();
+        commit_text(&handle, "committed");
+        let saved = Arc::new(AtomicBool::new(false));
+        let saver = {
+            let (host, handle, saved) = (host.clone(), handle.clone(), saved.clone());
+            std::thread::spawn(move || {
+                host.save_snapshot(&handle);
+                saved.store(true, Ordering::SeqCst);
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!saved.load(Ordering::SeqCst), "snapshot landed before the outbox row");
+        assert_eq!(store.pending_chat_updates("barrier").unwrap().len(), baseline);
+        drop(pause);
+        tokio::task::spawn_blocking(move || saver.join().unwrap()).await.unwrap();
+        // Crash here: the snapshot and the outbox both hold the commit.
+        assert_eq!(store.pending_chat_updates("barrier").unwrap().len(), baseline + 1);
+        let (bytes, _, _) = store.load_snapshot_with_cursor("barrier").unwrap().unwrap();
+        let restored = loro::LoroDoc::new();
+        restored.import(&bytes).unwrap();
+        assert_eq!(restored.get_text("body").to_string(), "committed");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_command_is_in_the_outbox_before_the_call_returns() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        host.open_local("cmd").unwrap();
+        let baseline = store.pending_chat_updates("cmd").unwrap().len();
+        let outbox = host.inner.outbox.clone();
+        let pause = outbox.pause();
+        let returned = Arc::new(AtomicBool::new(false));
+        let queuer = {
+            let (host, returned) = (host.clone(), returned.clone());
+            std::thread::spawn(move || {
+                let id = host
+                    .queue_command("cmd", SessionCommandPayload::Interrupt {})
+                    .unwrap();
+                returned.store(true, Ordering::SeqCst);
+                id
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!returned.load(Ordering::SeqCst), "accepted before the row was written");
+        drop(pause);
+        tokio::task::spawn_blocking(move || queuer.join().unwrap()).await.unwrap();
+        assert_eq!(store.pending_chat_updates("cmd").unwrap().len(), baseline + 1);
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_flushes_the_outbox_writer() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("shutdown").unwrap();
+        let baseline = store.pending_chat_updates("shutdown").unwrap().len();
+        let outbox = host.inner.outbox.clone();
+        let pause = outbox.pause();
+        for i in 0..20 {
+            commit_text(&handle, &format!("{i},"));
+        }
+        drop(handle);
+        let stopping = {
+            let host = host.clone();
+            tokio::spawn(async move { host.shutdown_workers().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!stopping.is_finished(), "shutdown finished with rows unwritten");
+        drop(pause);
+        stopping.await.unwrap();
+        let (rows, text) = replay_in_order(&store, "shutdown");
+        assert_eq!(rows, baseline + 20);
+        assert_eq!(text, (0..20).map(|i| format!("{i},")).collect::<String>());
+        // A fresh host recovers every commit from the outbox.
+        let reopened = outbox_host(&store);
+        let recovered = reopened.open_local("shutdown").unwrap();
+        assert_eq!(recovered.doc.doc().get_text("body").to_string(), text);
+        reopened.shutdown_workers().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_disk_writes_pin_edits_and_resume_admission_after_recovery() {
         let _budget_guard = SYNC_TEST_LOCK.lock().await;
