@@ -210,7 +210,7 @@ impl Render for PetsPage {
                     action(
                         format!("pet-use-{}", entry.pet.id).into(),
                         "Use pet".into(),
-                        widgets::ActionTone::Outlined,
+                        widgets::ActionTone::Filled,
                     )
                     .on_click(cx.listener(move |_, _, _, cx| {
                         let id = id.clone();
@@ -269,7 +269,7 @@ impl Render for PetsPage {
                 action(
                     "pets-open-folder".into(),
                     "Open pets folder".into(),
-                    widgets::ActionTone::Outlined,
+                    widgets::ActionTone::Filled,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.open_folder(cx))),
             )

@@ -138,24 +138,25 @@ final class SessionFlowTests: XCTestCase {
         jump.tap()
     }
 
-    /// Search → back to Sessions / Settings (recorded for the accessory
-    /// transition).
-    func testSearchTabRoundTrip() {
+    /// The bottom bar's Search filters the list in place; leaving search
+    /// brings the bar (and New session) back.
+    func testBottomBarSearch() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        let accessory = app.buttons["new-session"]
-        XCTAssertTrue(accessory.waitForExistence(timeout: 5))
-        for back in ["Sessions", "Settings"] {
-            app.tabBars.buttons[back].tap()
-            sleep(1)
-            app.tabBars.buttons["Search"].tap()
-            sleep(2)
-            // Close beside the field leaves search for the tab you came from.
-            app.buttons["Close"].firstMatch.tap()
-            sleep(2)
-            XCTAssertTrue(accessory.waitForExistence(timeout: 5), "accessory back after search")
-            XCTAssertTrue(accessory.isHittable, "accessory usable after search")
-        }
+        let compose = app.buttons["new-session"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 5))
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "search in the bottom bar")
+        field.tap()
+        field.typeText("wrangler")
+        let match = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Wrangler deploy hygiene'")).firstMatch
+        XCTAssertTrue(match.waitForExistence(timeout: 5), "match shown")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Agent visuals'")).firstMatch.exists, "non-matches filtered out")
+        snapshot(app, "bottom-bar-search")
+        // The system's close button beside the field.
+        app.buttons["close"].firstMatch.tap()
+        XCTAssertTrue(compose.waitForExistence(timeout: 5), "bar back after search")
+        XCTAssertTrue(compose.isHittable, "New session usable after search")
     }
 
     /// Tapping a link in the transcript opens it (in-app Safari for web).
@@ -181,8 +182,8 @@ final class SessionFlowTests: XCTestCase {
         let ready = "/tmp/zeron-push-ready"
         try? FileManager.default.removeItem(atPath: ready)
         let app = launch()
-        XCTAssertTrue(app.tabBars.buttons["Settings"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["bottom-settings"].waitForExistence(timeout: 10))
+        app.buttons["bottom-settings"].tap()
         let toggle = app.switches["toggle-notify:enabled"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         if (toggle.value as? String) != "1" {
@@ -232,14 +233,69 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "unknown-chat-returned-to-sessions")
     }
 
-    func testTabsAndSearch() {
+    func testSettingsFromBottomBar() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["Settings"].tap()
+        snapshot(app, "bottom-bar")
+        app.buttons["bottom-settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["new-session"].exists, "the bar stays on the front page")
         snapshot(app, "settings")
-        app.tabBars.buttons["Sessions"].tap()
+        app.navigationBars["Settings"].buttons.firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 5))
+        // Regression: popping a screen that hides the bottom bar brought a
+        // (hidden) tab bar back over the bottom bar on device.
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "no tab bar after Settings")
+        app.cells["session-chat-cjk"].firstMatch.tap()
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 5))
+        sleep(1)
+        XCTAssertFalse(app.tabBars.firstMatch.exists, "no tab bar after a session")
+        snapshot(app, "bottom-bar-after-pop")
+    }
+
+    /// Render Math toggles the Math Font row; the font picks from a sheet of
+    /// every face.
+    func testMathSettings() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        app.buttons["bottom-settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        let toggle = app.switches["toggle-math:render"]
+        for _ in 0..<6 where !toggle.exists || !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if (toggle.value as? String) != "1" { toggle.tap() }
+        let font = app.cells["settings-math:font"]
+        XCTAssertTrue(font.waitForExistence(timeout: 5), "font row shown while rendering")
+        font.tap()
+        for label in ["Fira Math", "STIX Two", "Computer Modern", "Libertinus", "Palatino", "Euler"] {
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 5), label)
+        }
+        app.buttons["Computer Modern"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'The classic LaTeX look.'")).firstMatch.waitForExistence(timeout: 5))
+        font.tap()
+        XCTAssertTrue(app.buttons["Fira Math"].waitForExistence(timeout: 5))
+        app.buttons["Fira Math"].tap()
+        let size = app.cells["settings-math:size"]
+        XCTAssertTrue(size.waitForExistence(timeout: 5), "size row shown while rendering")
+        for _ in 0..<3 where !size.isHittable { app.swipeUp() }
+        size.tap()
+        XCTAssertTrue(app.buttons["150%"].waitForExistence(timeout: 5))
+        app.buttons["135%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '135% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        size.tap()
+        XCTAssertTrue(app.buttons["100%"].waitForExistence(timeout: 5))
+        app.buttons["100%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '100% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertFalse(font.waitForExistence(timeout: 1), "font row hidden while off")
+        XCTAssertFalse(size.exists, "size row hidden while off")
+        snapshot(app, "math-settings-off")
+        toggle.tap()
+        XCTAssertTrue(font.waitForExistence(timeout: 5))
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
     }
 
     func testNewSessionFromAccessory() {
@@ -279,7 +335,7 @@ final class SessionFlowTests: XCTestCase {
         let app = launch()
         let cell = app.cells["session-chat-deploy"]
         XCTAssertTrue(cell.waitForExistence(timeout: 10))
-        // Recent sits below the inline sections; bring the row clear of the accessory.
+        // Recent sits below the inline sections; bring the row clear of the bottom bar.
         app.collectionViews.firstMatch.swipeUp()
         cell.swipeLeft()
         app.buttons["Archive"].tap()
@@ -288,6 +344,37 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "archive-undo")
         undo.tap()
         XCTAssertTrue(app.cells["session-chat-deploy"].waitForExistence(timeout: 5), "unarchived session returns")
+    }
+
+    /// The ⋯ menu is headed by the session's title and where it runs, and
+    /// deletes after a confirmation; the list's long-press menu deletes too.
+    func testSessionMenuHeaderAndDelete() {
+        let app = launch()
+        let cell = app.cells["session-chat-cjk"]
+        XCTAssertTrue(cell.waitForExistence(timeout: 10))
+        cell.press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "Delete in the list's menu")
+        snapshot(app, "list-menu-delete")
+        app.buttons["Delete"].tap()
+        XCTAssertTrue(app.alerts["Delete session?"].waitForExistence(timeout: 5))
+        snapshot(app, "delete-confirm")
+        app.alerts.buttons["Cancel"].tap()
+        XCTAssertTrue(cell.waitForExistence(timeout: 5), "cancel keeps the session")
+
+        cell.tap()
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        let menu = app.buttons["session-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        snapshot(app, "session-bar")
+        menu.tap()
+        let header = app.staticTexts.matching(NSPredicate(format: "label CONTAINS '多言語'")).firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 5), "title heads the menu")
+        snapshot(app, "session-menu")
+        app.buttons["Delete"].tap()
+        XCTAssertTrue(app.alerts["Delete session?"].waitForExistence(timeout: 5))
+        app.alerts.buttons["Delete"].tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5), "back on the list")
+        XCTAssertFalse(app.cells["session-chat-cjk"].waitForExistence(timeout: 2), "deleted")
     }
 
     func testNewProjectFolderBrowser() {
@@ -455,7 +542,7 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(app.buttons["Photo Library"].waitForExistence(timeout: 5), "attach menu opens from the card")
     }
 
-    /// Regression: the model chip's menu completed off the main thread.
+    /// The model chip opens the picker sheet; a pick names the model on the chip.
     func testModelPickerInSession() {
         let app = launch(["-route", "chat:chat-deploy"])
         let input = app.textViews["composer-input"]
@@ -464,11 +551,91 @@ final class SessionFlowTests: XCTestCase {
         let chip = app.buttons["composer-chip-model"]
         XCTAssertTrue(chip.waitForExistence(timeout: 5))
         chip.tap()
-        let item = app.collectionViews.buttons.element(boundBy: 0)
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "models load")
-        item.tap()
-        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        let lists = app.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'"))
+        XCTAssertTrue(lists.firstMatch.waitForExistence(timeout: 5), "the picker opens")
+        // The page on screen (the others sit beside it, swipeable).
+        let list = lists.allElementsBoundByIndex.first { $0.isHittable } ?? lists.firstMatch
+        let row = list.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-'")).element(boundBy: 1)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "models load")
+        // A row reads "name, what it's for".
+        let picked = row.label.components(separatedBy: ", ").first ?? row.label
+        row.tap()
+        expectation(for: NSPredicate(format: "label == %@", picked), evaluatedWith: chip)
+        waitForExpectations(timeout: 5)
         XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Between turns, on a host that switches providers, the picker's tabs
+    /// move the chat to another provider; an older host's chat shows only its
+    /// own, and says why.
+    func testModelPickerSwitchesProviderWhereTheHostCan() {
+        let app = launch(["-route", "chat:chat-tabs"])
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        let chip = app.buttons["composer-chip-model"]
+        XCTAssertTrue(chip.waitForExistence(timeout: 5))
+        let before = chip.label
+        chip.tap()
+        // The demo's chat-tabs runs Codex on the Mac.
+        let claude = app.buttons["model-picker-tab-claude-code"]
+        XCTAssertTrue(claude.waitForExistence(timeout: 5), "other providers have tabs")
+        XCTAssertTrue(app.buttons["model-picker-tab-codex"].exists)
+        snapshot(app, "model-picker")
+        // Swiping the list moves to the next provider, and its tab follows.
+        app.collectionViews["model-picker-list-codex"].swipeLeft()
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: claude)
+        waitForExpectations(timeout: 5)
+        app.buttons["model-picker-tab-codex"].tap()
+        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["model-picker-tab-codex"])
+        waitForExpectations(timeout: 5)
+        claude.tap()
+        let row = app.collectionViews["model-picker-list-claude-code"].cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-'")).element(boundBy: 0)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Claude's models load")
+        // A row reads "name, what it's for".
+        let picked = row.label.components(separatedBy: ", ").first ?? row.label
+        row.tap()
+        expectation(for: NSPredicate(format: "label == %@", picked), evaluatedWith: chip)
+        waitForExpectations(timeout: 5)
+        XCTAssertNotEqual(chip.label, before)
+
+        // The studio's engine predates provider switching.
+        let older = launch(["-route", "chat:chat-blog"])
+        let field = older.textViews["composer-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        older.buttons["composer-chip-model"].tap()
+        XCTAssertTrue(older.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(older.buttons["model-picker-tab-codex"].exists, "an older host keeps its provider")
+        XCTAssertTrue(older.staticTexts["This computer needs a newer Zeron to switch provider."].exists)
+        // A chat started without picking a model runs (and shows) the default.
+        XCTAssertTrue(older.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-row-' AND value == 'Current'")).firstMatch.waitForExistence(timeout: 5), "the default model is ticked")
+        older.buttons["model-picker-close"].tap()
+        XCTAssertNotEqual(older.buttons["composer-chip-model"].label, "Claude Code", "the chip names the default model, not the provider")
+    }
+
+    /// A computer offering every agent: the switcher scrolls, and the chosen
+    /// provider stays in view as the pages are swiped.
+    func testModelPickerWithEveryProviderKeepsTheChosenOneInView() {
+        let app = launch(["-route", "chat:chat-tabs", "-all-providers"])
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        app.buttons["composer-chip-model"].tap()
+        let first = app.buttons["model-picker-tab-codex"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        snapshot(app, "picker-every-provider-start")
+        for id in ["claude-code", "opencode", "cursor", "devin", "grok"] {
+            app.collectionViews.matching(NSPredicate(format: "identifier BEGINSWITH 'model-picker-list'"))
+                .allElementsBoundByIndex.first { $0.isHittable }?.swipeLeft()
+            let tab = app.buttons["model-picker-tab-\(id)"]
+            expectation(for: NSPredicate(format: "isSelected == true AND isHittable == true"), evaluatedWith: tab)
+            waitForExpectations(timeout: 5)
+        }
+        snapshot(app, "picker-every-provider-middle")
+        app.buttons["model-picker-tab-hermes"].tap()
+        expectation(for: NSPredicate(format: "isSelected == true AND isHittable == true"), evaluatedWith: app.buttons["model-picker-tab-hermes"])
+        waitForExpectations(timeout: 5)
     }
 
     /// Regression: a drag that starts at the tail re-latched follow at once,
@@ -538,7 +705,7 @@ final class SessionFlowTests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)), withVelocity: .slow, thenHoldForDuration: 0.3)
         sleep(1)
         XCTAssertTrue(input.exists, "still on the session")
-        XCTAssertFalse(app.buttons["new-session"].isHittable, "no New session accessory over the session")
+        XCTAssertFalse(app.buttons["new-session"].isHittable, "no bottom bar over the session")
         // The reply keeps streaming to completion.
         XCTAssertTrue(app.staticTexts.matching(identifier: "row-markdown").element(boundBy: 0).waitForExistence(timeout: 20))
         XCTAssertTrue(app.buttons["Send message"].waitForExistence(timeout: 40), "turn settles (updates still arriving)")

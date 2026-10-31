@@ -165,7 +165,7 @@ fn arg_from_title(title: &str) -> Option<String> {
 /// in how much structure they put in `rawInput`, so every arm has a fallback.
 /// Title is only used when it looks like a real arg — never a placeholder
 /// label or markdown-escaped summary.
-fn typed_call(update: &Value) -> ToolCall {
+pub(super) fn typed_call(update: &Value) -> ToolCall {
     let kind = update
         .get("kind")
         .and_then(Value::as_str)

@@ -5,9 +5,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Shared by both binaries; the UI is referenced only by `zeron`, so the
+# background engine links without it.
+[lib]
+name = "zeron_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zeron"
 path = "src/main.rs"
+
+[[bin]]
+name = "zeron-engine"
+path = "src/bin/zeron-engine.rs"
 
 [dependencies]
 zeron-engine.workspace = true
@@ -15,6 +25,7 @@ zeron-rpc.workspace = true
 zeron-ui.workspace = true
 zeron-update.workspace = true
 zeron-mcp.workspace = true
+zeron-notify.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

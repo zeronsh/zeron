@@ -51,7 +51,7 @@ async fn authenticated_coordinator_pairs_devices_for_large_http_preview() {
             for _ in 0..512 { socket.write_all(&[42;8192]).await.unwrap(); }
             socket.shutdown().await.unwrap();
         });
-        host.replace_local(vec![("/work/project".into(),Listener { pid:std::process::id(),parent:1,cwd:"/work/project".into(),args:vec!["node".into(),"vite".into()],started_at:1,address,zeron_owned:true })]).unwrap();
+        host.replace_local(vec![("/work/project".into(),Listener { pid:std::process::id(),parent:1,cwd:"/work/project".into(),args:vec!["node".into(),"vite".into()],started_at:1,address,zeron_owned:true,origin:Some("chat:chat".into()),chat_id:Some("chat".into()) })]).unwrap();
         let host_backend = Arc::new(Backend(host.clone())); let viewer_backend = Arc::new(Backend(viewer.clone()));
         let (host_peers, host_output) = Peers::new("host".into(),host_backend,stop.child_token());
         let (viewer_peers, viewer_output) = Peers::new("viewer".into(),viewer_backend.clone(),stop.child_token());

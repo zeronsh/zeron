@@ -7,6 +7,8 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,13 +21,17 @@ use zeron_proto::{AuthState, WorkspaceScope};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+pub mod billing;
+pub mod cloud;
 pub mod composer;
 pub mod computer_use;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
+mod mcp;
 pub mod notifications;
 pub mod pets;
+pub mod search;
 pub mod shortcuts;
 pub mod thread_naming;
 pub mod wallpaper;
@@ -110,6 +116,8 @@ pub struct NewThreadBackgroundAdjustment {
     pub focal_y: f32,
     /// Multiplier applied after the image has been scaled to cover the viewport.
     pub zoom: f32,
+    /// Clockwise rotation of the artwork in degrees; a multiple of 90.
+    pub rotation: u16,
 }
 
 impl NewThreadBackgroundAdjustment {
@@ -121,8 +129,15 @@ impl NewThreadBackgroundAdjustment {
         self.focal_x = clamp_or(self.focal_x, 0.0, 1.0, defaults.focal_x);
         self.focal_y = clamp_or(self.focal_y, 0.0, 1.0, defaults.focal_y);
         self.zoom = clamp_or(self.zoom, Self::MIN_ZOOM, Self::MAX_ZOOM, defaults.zoom);
+        self.rotation = normalize_rotation(self.rotation);
         self
     }
+}
+
+/// Snap a hand-edited or legacy value to the nearest clockwise quarter turn.
+pub fn normalize_rotation(rotation: u16) -> u16 {
+    let degrees = rotation % 360;
+    (((degrees + 45) / 90) * 90) % 360
 }
 
 impl Default for NewThreadBackgroundAdjustment {
@@ -131,6 +146,7 @@ impl Default for NewThreadBackgroundAdjustment {
             focal_x: 0.5,
             focal_y: 0.5,
             zoom: 1.0,
+            rotation: 0,
         }
     }
 }
@@ -174,6 +190,125 @@ impl NewThreadBackgroundEffect {
             Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
         }
     }
+}
+
+/// The face Markdown math is set in. Every face is bundled, so the choice
+/// never depends on what the device has installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MathFont {
+    #[default]
+    Fira,
+    StixTwo,
+    ComputerModern,
+    Libertinus,
+    Pagella,
+    Euler,
+}
+
+impl MathFont {
+    pub const ALL: [Self; 6] = [
+        Self::Fira,
+        Self::StixTwo,
+        Self::ComputerModern,
+        Self::Libertinus,
+        Self::Pagella,
+        Self::Euler,
+    ];
+
+    /// The name stored in the settings file.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Fira => "fira",
+            Self::StixTwo => "stixTwo",
+            Self::ComputerModern => "computerModern",
+            Self::Libertinus => "libertinus",
+            Self::Pagella => "pagella",
+            Self::Euler => "euler",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fira => "Fira Math",
+            Self::StixTwo => "STIX Two",
+            Self::ComputerModern => "Computer Modern",
+            Self::Libertinus => "Libertinus",
+            Self::Pagella => "Palatino",
+            Self::Euler => "Euler",
+        }
+    }
+
+    /// The short note beside the label in the menu.
+    pub const fn style(self) -> &'static str {
+        match self {
+            Self::Fira => "Sans",
+            Self::StixTwo | Self::Libertinus | Self::Pagella => "Serif",
+            Self::ComputerModern => "LaTeX",
+            Self::Euler => "Upright",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Fira => "A sans face that sits beside the interface font.",
+            Self::StixTwo => "A Times-like serif face with the TeX look.",
+            Self::ComputerModern => "A serif face with the classic LaTeX look.",
+            Self::Libertinus => "A warm serif book face.",
+            Self::Pagella => "A Palatino serif face, from TeX Gyre Pagella.",
+            Self::Euler => "Zapf's upright, hand-drawn math.",
+        }
+    }
+
+    pub const fn face(self) -> zatex::bundled::Face {
+        match self {
+            Self::Fira => zatex::bundled::Face::Fira,
+            Self::StixTwo => zatex::bundled::Face::StixTwo,
+            Self::ComputerModern => zatex::bundled::Face::ComputerModern,
+            Self::Libertinus => zatex::bundled::Face::Libertinus,
+            Self::Pagella => zatex::bundled::Face::Pagella,
+            Self::Euler => zatex::bundled::Face::Euler,
+        }
+    }
+}
+
+impl Serialize for MathFont {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+/// A face this build doesn't know (written by a newer one) reads as the
+/// default rather than failing the whole settings file.
+impl<'de> Deserialize<'de> for MathFont {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::ALL
+            .into_iter()
+            .find(|font| stored == font.key())
+            .unwrap_or_default())
+    }
+}
+
+/// Markdown math size as a percent of the text around it.
+pub const MATH_SIZE_DEFAULT: u16 = 100;
+pub const MATH_SIZE_MIN: u16 = 75;
+pub const MATH_SIZE_MAX: u16 = 200;
+
+/// A stored math size: any number rounds and clamps into range; anything
+/// else (`"big"`, `null`, an object) reads as the default. Like an unknown
+/// [`MathFont`], a bad value never fails the rest of the settings file.
+fn deserialize_math_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u16, D::Error> {
+    let stored = serde_json::Value::deserialize(deserializer)?;
+    Ok(stored
+        .as_f64()
+        .filter(|size| size.is_finite())
+        .map_or(MATH_SIZE_DEFAULT, |size| {
+            // In range, the cast is exact.
+            size.round()
+                .clamp(f64::from(MATH_SIZE_MIN), f64::from(MATH_SIZE_MAX)) as u16
+        }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,21 +445,75 @@ pub enum SavePolicy {
     Immediate,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PullRequestDestination {
     #[default]
     Native,
+    /// A Browser tab beside the conversation. Without one on screen, the
+    /// pull request opens in the default browser.
+    Browser,
     External,
 }
 
 impl PullRequestDestination {
-    pub const ALL: [Self; 2] = [Self::Native, Self::External];
+    pub const ALL: [Self; 3] = [Self::Native, Self::Browser, Self::External];
+
+    /// The name stored in the settings file.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Browser => "browser",
+            Self::External => "external",
+        }
+    }
+
+    /// The value written to the legacy `pullRequestDestination` key. Builds
+    /// up to v0.2.122 read only that key and reset every UI setting on a
+    /// name they don't know, so it never holds `browser`: an in-app browser
+    /// pick reads there as the view, the closest destination they have.
+    const fn legacy_key(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::Native | Self::Browser => "native",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Native => "Pull request view",
+            Self::Browser => "In-app browser",
             Self::External => "Default browser",
         }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Native => {
+                "Inspect them in Zeron, beside the conversation or the Pull requests board."
+            }
+            Self::Browser => {
+                "Open them in a Browser tab beside the conversation, or in the default browser when none is shown."
+            }
+            Self::External => "Open them in the default browser.",
+        }
+    }
+}
+
+impl Serialize for PullRequestDestination {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+/// A destination this build doesn't know (written by a newer one) reads as
+/// the default rather than failing the whole settings file.
+impl<'de> Deserialize<'de> for PullRequestDestination {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::ALL
+            .into_iter()
+            .find(|destination| stored == destination.key())
+            .unwrap_or_default())
     }
 }
 
@@ -342,6 +531,9 @@ pub struct SettingsStore {
     /// the persisted revision, this advances only when the global Fit choice
     /// changes, including a change back to its previous value.
     code_fences_generation: u64,
+    /// The same token for how Markdown math renders (on or off, face and
+    /// size).
+    math_generation: u64,
     save_task: Option<Task<()>>,
 }
 
@@ -367,6 +559,12 @@ impl SettingsStore {
         if self.current.code_fences_fit_content != before.code_fences_fit_content {
             self.code_fences_generation = self.code_fences_generation.wrapping_add(1);
         }
+        if self.current.render_math != before.render_math
+            || self.current.math_font != before.math_font
+            || self.current.math_size != before.math_size
+        {
+            self.math_generation = self.math_generation.wrapping_add(1);
+        }
         self.revision = self.revision.wrapping_add(1);
         true
     }
@@ -387,6 +585,7 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
         revision: 0,
         saved_revision: 0,
         code_fences_generation: 0,
+        math_generation: 0,
         save_task: None,
     });
 }
@@ -402,6 +601,57 @@ pub fn current(cx: &App) -> UiSettings {
 pub fn compact_model_picker(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.compact_model_picker)
+}
+
+/// Read on every wheel notch, so without cloning the settings. Without a
+/// store (not the app) wheel input is left alone.
+pub fn smooth_scrolling(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.smooth_scrolling)
+}
+
+/// The sidebar decoration theme id, without cloning the settings.
+pub fn sidebar_decor(cx: &App) -> String {
+    cx.try_global::<SettingsStore>()
+        .map_or_else(
+            || crate::sidebar_decor::DEFAULT_THEME.to_owned(),
+            |store| store.current.sidebar_decor.clone(),
+        )
+}
+
+pub fn set_sidebar_decor(id: String, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| settings.sidebar_decor = id) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn sidebar_active_project_highlight(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_none_or(|store| store.current.sidebar_active_project_highlight)
+}
+
+pub fn set_sidebar_active_project_highlight(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.sidebar_active_project_highlight = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn keep_awake(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.keep_awake)
+}
+
+pub fn set_keep_awake(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| settings.keep_awake = enabled);
+    crate::keep_awake::set_enabled(enabled);
+}
+
+pub fn set_smooth_scrolling(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.smooth_scrolling = enabled;
+    });
 }
 
 /// Copy a selected image into Zeron's device-local data directory and make it
@@ -631,6 +881,29 @@ pub fn set_new_thread_background_adjustment(
     }
 }
 
+/// Turn the artwork a quarter turn. The crop stays with the image, so the
+/// rotated source is re-cropped from its new dimensions.
+pub fn rotate_new_thread_background(clockwise: bool, cx: &mut App) {
+    let Some(background) = current(cx).new_thread_composer_background else {
+        return;
+    };
+    let mut adjustment = background.adjustment.normalized();
+    adjustment.rotation = if clockwise {
+        adjustment.rotation.wrapping_add(90)
+    } else {
+        adjustment.rotation.wrapping_add(270)
+    };
+    set_new_thread_background_adjustment(adjustment, cx);
+}
+
+/// Clockwise artwork rotation for the active background, if any.
+pub fn new_thread_background_rotation_value(cx: &App) -> u16 {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.new_thread_composer_background.as_ref())
+        .map(|background| background.adjustment.normalized().rotation)
+        .unwrap_or(0)
+}
+
 fn remove_managed_new_thread_background(
     background: Option<&NewThreadComposerBackground>,
     backgrounds_dir: &Path,
@@ -724,6 +997,50 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+/// How Markdown surfaces set math, read each render without cloning the
+/// settings.
+pub fn math_style(cx: &App) -> crate::markdown::math::MathStyle {
+    cx.try_global::<SettingsStore>()
+        .map(|store| crate::markdown::math::MathStyle {
+            enabled: store.current.render_math,
+            face: store.current.math_font.face(),
+            size: store.current.math_size,
+        })
+        .unwrap_or_default()
+}
+
+/// Monotonic id of [`math_style`]: Markdown surfaces that keep measured row
+/// heights compare it during render and remeasure when it moves.
+pub fn math_generation(cx: &App) -> u64 {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.math_generation)
+        .unwrap_or_default()
+}
+
+pub fn set_render_math(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.render_math = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_math_font(font: MathFont, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.math_font = font;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn set_math_size(size: u16, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.math_size = size;
     }) {
         cx.refresh_windows();
     }
@@ -929,7 +1246,7 @@ impl SkillCompletionSettings {
     }
 }
 
-pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
+pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
     (zeron_proto::HarnessId::Antigravity, "Antigravity"),
     (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
     (zeron_proto::HarnessId::Codex, "Codex"),
@@ -937,6 +1254,7 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
     (zeron_proto::HarnessId::Devin, "Devin"),
     (zeron_proto::HarnessId::Grok, "Grok"),
     (zeron_proto::HarnessId::Hermes, "Hermes"),
+    (zeron_proto::HarnessId::Fx, "fx"),
     (zeron_proto::HarnessId::Pi, "Pi"),
     (zeron_proto::HarnessId::Opencode, "OpenCode"),
 ];
@@ -1062,6 +1380,10 @@ pub struct UiSettings {
     pub settings_section: crate::shell::SettingsSection,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// First-run setup was finished or skipped. A file written before this
+    /// field existed reads as done (existing users never see it); only a
+    /// fresh install, with no settings file yet, starts it.
+    pub onboarding_completed: bool,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
     /// User-adjusted widths for the resizable Git History columns.
@@ -1090,17 +1412,31 @@ pub struct UiSettings {
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
+    /// Typeset LaTeX math in Markdown. Off shows its source as code.
+    pub render_math: bool,
+    /// The bundled face typeset math is set in.
+    pub math_font: MathFont,
+    /// Typeset math size, as a percent of the text around it. Read
+    /// tolerantly ([`deserialize_math_size`]).
+    #[serde(deserialize_with = "deserialize_math_size")]
+    pub math_size: u16,
     /// Maximum message and docked composer surface width in logical pixels.
     /// The centered new-chat composer keeps its own width.
     pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
+    /// Off, pull request links leave Zeron too; on, they open where
+    /// [`Self::pull_request_destination`] says.
     pub open_web_links_in_zeron: bool,
     /// Compact transcript: a turn's working steps (thinking, tool calls, and
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
-    /// Destination shared by PR badges and the pull-request board.
+    /// Destination shared by PR badges, the pull-request board, and pull
+    /// request links in messages while [`Self::open_web_links_in_zeron`] is on.
+    /// Stored as `pullRequestOpenIn`; [`Self::save`] also writes the legacy
+    /// `pullRequestDestination` for older builds sharing this file.
+    #[serde(rename = "pullRequestOpenIn")]
     pub pull_request_destination: PullRequestDestination,
     /// Last explicitly selected PR scope, restored when no project is selected.
     pub last_pull_request_repository: Option<String>,
@@ -1150,6 +1486,20 @@ pub struct UiSettings {
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
+    /// Energy saver: calmer, opaque, lighter wallpapers on battery.
+    pub energy_saver: crate::energy::EnergySaver,
+    /// The sidebar's decoration theme id (`sidebar_decor`): "off", a
+    /// built-in ("aquarium", "night", "sakura") or "custom:<file stem>" for a
+    /// JSON theme in `<data dir>/sidebar-themes/`.
+    pub sidebar_decor: String,
+    /// Tint the open project's group header in the sidebar.
+    pub sidebar_active_project_highlight: bool,
+    /// Keep the Mac awake (even with the lid closed, on power) while
+    /// Zeron runs (`keep_awake`).
+    pub keep_awake: bool,
+    /// Mouse-wheel notches glide instead of jumping (`smooth_scroll`).
+    /// Trackpads already scroll smoothly; reduced motion overrides.
+    pub smooth_scrolling: bool,
     /// Stable native Codex voice id only; devices and microphone state are never persisted.
     #[serde(default)]
     pub codex_voice: Option<String>,
@@ -1180,7 +1530,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_organization: SidebarOrganization::ByProject,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
@@ -1223,6 +1573,7 @@ impl Default for UiSettings {
             appshot_sound_enabled: true,
             appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appearance: crate::appearance::AppearanceMode::default(),
+            onboarding_completed: true,
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
@@ -1237,6 +1588,9 @@ impl Default for UiSettings {
             diff_split: false,
             diff_wrap: false,
             code_fences_fit_content: false,
+            render_math: true,
+            math_font: MathFont::Fira,
+            math_size: MATH_SIZE_DEFAULT,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
@@ -1264,6 +1618,11 @@ impl Default for UiSettings {
             new_thread_video_end: 0.0,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
+            energy_saver: crate::energy::EnergySaver::default(),
+            sidebar_decor: crate::sidebar_decor::DEFAULT_THEME.into(),
+            sidebar_active_project_highlight: true,
+            keep_awake: false,
+            smooth_scrolling: true,
             codex_voice: None,
             codex_voice_device: None,
             pet_enabled: false,
@@ -1455,6 +1814,11 @@ pub struct KeymapConfig {
     /// fixed-length array would let one malformed entry reset every unrelated
     /// setting. [`Self::healed`] restores the length instead.
     pub jump_session: Vec<String>,
+    /// Whether custom combos are stored in US keys, as every map this version
+    /// writes is. Older maps kept them as the recording layout typed them;
+    /// [`Self::adopt_layout_neutral`] converts those once. Absent means older.
+    #[serde(default)]
+    pub layout_neutral: bool,
 }
 
 /// Stable key for device-local preferences that belong to one workspace
@@ -1517,6 +1881,7 @@ impl Default for KeymapConfig {
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
+            layout_neutral: true,
         }
     }
 }
@@ -1587,6 +1952,39 @@ impl KeymapConfig {
         while self.jump_session.len() < JUMP_SLOTS {
             self.jump_session
                 .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+        }
+    }
+
+    /// Convert an older map's custom combos, kept as the recording layout
+    /// typed them (AZERTY "mod-&" for its ⌘1 key), to the US keys stored now
+    /// ("mod-1"), taking the active layout as the one that recorded them.
+    /// Defaults are US keys already. A custom chord keeps its key: a default
+    /// that now lands on it yields and arrives unbound, as a default added
+    /// after the file was written does in [`UiSettings::load`]. Runs once.
+    pub fn adopt_layout_neutral(&mut self, equivalents: &KeyEquivalents) {
+        if std::mem::replace(&mut self.layout_neutral, true) {
+            return;
+        }
+        let mut converted = Vec::new();
+        for id in ShortcutId::ALL {
+            let combo = self.get(id);
+            if combo.is_empty() || combo == id.default_combo() {
+                continue;
+            }
+            if let Some(us) = canonical_combo(combo, equivalents).filter(|us| us != combo) {
+                self.set(id, us.clone());
+                converted.push((id, us));
+            }
+        }
+        for id in ShortcutId::ALL {
+            let combo = self.get(id);
+            if combo == id.default_combo()
+                && converted
+                    .iter()
+                    .any(|(owner, us)| *owner != id && us == combo)
+            {
+                self.set(id, String::new());
+            }
         }
     }
 
@@ -1722,9 +2120,156 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
         .join("-")
 }
 
-/// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S").
+/// Where the active keyboard layout puts shortcut keys: the US key a combo
+/// is written with → the key that layout types in its place. This is
+/// Apple's own relocation — an AZERTY Mac reaches ⌘1 as ⌘&, ⌘/ as ⌘: and
+/// ⌘[ as ⌘^ — which gpui ships as `get_key_equivalents` but applies only to
+/// bindings loaded with it. Empty on US layouts and off macOS.
+pub type KeyEquivalents = HashMap<char, char>;
+
+/// The active layout's [`KeyEquivalents`].
+pub fn key_equivalents(cx: &App) -> KeyEquivalents {
+    gpui::PlatformKeyboardMapper::get_key_equivalents(cx.keyboard_mapper().as_ref())
+        .map(|table| table.iter().map(|(&us, &here)| (us, here)).collect())
+        .unwrap_or_default()
+}
+
+thread_local! {
+    /// The table the keymap was last bound against, so displayed combos
+    /// name the key to press ([`display_combo`], [`badge_combo`]).
+    static BOUND_KEY_EQUIVALENTS: RefCell<KeyEquivalents> = RefCell::default();
+}
+
+/// Called by `shell::apply_keymap` with the table it just bound against.
+pub(crate) fn set_bound_key_equivalents(equivalents: KeyEquivalents) {
+    BOUND_KEY_EQUIVALENTS.set(equivalents);
+}
+
+/// The key `equivalents` puts in place of the US `key` — gpui's
+/// `MacKeyboardMapper::map_key_equivalent`, for Zeron's own strings. Named
+/// keys ("tab", "f5") and characters the layout keeps pass through.
+pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, str> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(us), None) => equivalents
+            .get(&us)
+            .map_or(Cow::Borrowed(key), |here| Cow::Owned(here.to_string())),
+        _ => Cow::Borrowed(key),
+    }
+}
+
+/// The US key a combo stores for a key this layout reported: the inverse of
+/// [`localize_key`], so a recorded chord keeps the spelling its default uses
+/// (AZERTY ⌘& records as "mod-1") and conflict checks on stored combos still
+/// see one chord per key. `None` when the layout relocates `key` itself and
+/// nothing lands on it — AZERTY's @ key — since no stored combo reaches it.
+/// Two US keys sharing one target (Icelandic ] and }) resolve to the lower.
+pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let mut chars = key.chars();
+    let (Some(here), None) = (chars.next(), chars.next()) else {
+        return Some(key.to_string());
+    };
+    if let Some(us) = equivalents
+        .iter()
+        .filter(|&(_, &target)| target == here)
+        .map(|(&us, _)| us)
+        .min()
+    {
+        return Some(us.to_string());
+    }
+    (!equivalents.contains_key(&here)).then(|| key.to_string())
+}
+
+/// Split a combo into its modifier prefix and key: ("mod-shift-", "/").
+fn split_combo(combo: &str) -> (&str, &str) {
+    // "-" is a key too: "mod--" is Mod+Minus.
+    let key_start = if combo.ends_with('-') {
+        combo.len() - 1
+    } else {
+        combo.rfind('-').map_or(0, |ix| ix + 1)
+    };
+    combo.split_at(key_start)
+}
+
+/// `combo` with its key localized ("mod-/" → "mod-:" on AZERTY), in either
+/// the stored ("mod-…") or the bindable ("cmd-…") spelling.
+pub fn localize_combo(combo: &str, equivalents: &KeyEquivalents) -> String {
+    let (modifiers, key) = split_combo(combo);
+    format!("{modifiers}{}", localize_key(key, equivalents))
+}
+
+/// The inverse of [`localize_combo`] (see [`canonical_key`]).
+pub fn canonical_combo(combo: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let (modifiers, key) = split_combo(combo);
+    canonical_key(key, equivalents).map(|key| format!("{modifiers}{key}"))
+}
+
+/// macOS French (AZERTY), as gpui_macos `keyboard.rs` lists it for
+/// `com.apple.keylayout.French` — the test platform has no layout table.
+#[cfg(test)]
+pub(crate) fn azerty_key_equivalents() -> KeyEquivalents {
+    [
+        ('!', '1'),
+        ('"', '%'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('&', '7'),
+        ('(', '9'),
+        (')', '0'),
+        ('*', '8'),
+        ('.', ';'),
+        ('/', ':'),
+        ('0', 'à'),
+        ('1', '&'),
+        ('2', 'é'),
+        ('3', '"'),
+        ('4', '\''),
+        ('5', '('),
+        ('6', '§'),
+        ('7', 'è'),
+        ('8', '!'),
+        ('9', 'ç'),
+        (':', '°'),
+        (';', ')'),
+        ('<', '.'),
+        ('>', '/'),
+        ('@', '2'),
+        ('[', '^'),
+        ('\'', 'ù'),
+        ('\\', '`'),
+        (']', '$'),
+        ('^', '6'),
+        ('`', '<'),
+        ('{', '¨'),
+        ('|', '£'),
+        ('}', '*'),
+        ('~', '>'),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// `combo` as the bound layout types it: what the user has to press.
+fn bound_combo(combo: &str) -> String {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| localize_combo(combo, equivalents))
+}
+
+/// [`bound_combo`] for a bare key, for hints that spell their own modifiers.
+pub fn bound_key(key: &str) -> String {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| localize_key(key, equivalents).into_owned())
+}
+
+/// The stored (US-key) spelling of a chord read outside gpui's keymap, by
+/// the table the keymap is bound to (see [`canonical_combo`]).
+pub fn bound_canonical_combo(combo: &str) -> Option<String> {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| canonical_combo(combo, equivalents))
+}
+
+/// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S"),
+/// naming the key the active layout types for it.
 pub fn display_combo(combo: &str) -> String {
-    display_combo_on(cfg!(target_os = "macos"), combo)
+    display_combo_on(cfg!(target_os = "macos"), &bound_combo(combo))
 }
 
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
@@ -1735,24 +2280,30 @@ pub fn display_combo_on(mac: bool, combo: &str) -> String {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
             "alt" => if mac { "Opt" } else { "Alt" }.to_string(),
             "shift" => "Shift".to_string(),
-            other => {
-                let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            }
+            other => key_label(other),
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+/// A key as its keycap prints it: ASCII capitalized ("a" → "A", "tab" →
+/// "Tab"), a layout's own letters as typed — AZERTY's ⌘2 key is é, and "É"
+/// would read as Shift+é.
+fn key_label(key: &str) -> String {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Compact combo for badge surfaces (the sidebar jump hints): macOS spells
 /// the modifiers as their key glyphs in canonical ⌃⌥⇧⌘ order and drops the
 /// separators ("⌘1", "⇧⌘A") — the form the model picker's ⌘N chips already
 /// use — while other platforms keep the textual [`display_combo`] ("Ctrl+1").
+/// Like [`display_combo`], the key is the one the active layout types.
 pub fn badge_combo(combo: &str) -> String {
-    badge_combo_on(cfg!(target_os = "macos"), combo)
+    badge_combo_on(cfg!(target_os = "macos"), &bound_combo(combo))
 }
 
 /// [`badge_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
@@ -1770,11 +2321,7 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
     {
         out.push(glyph);
     }
-    let mut chars = key.chars();
-    if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
-        out.push_str(chars.as_str());
-    }
+    out.push_str(&key_label(key));
     out
 }
 
@@ -1880,6 +2427,7 @@ impl UiSettings {
             escape_stops_active_agent,
             settings_section,
             appearance,
+            onboarding_completed,
             git_history_columns,
             git_history_column_widths,
             git_history_column_order,
@@ -1894,6 +2442,9 @@ impl UiSettings {
             diff_split,
             diff_wrap,
             code_fences_fit_content,
+            render_math,
+            math_font,
+            math_size,
             transcript_width,
             open_web_links_in_zeron,
             transcript_compact_mode,
@@ -1917,6 +2468,11 @@ impl UiSettings {
             new_thread_video_end,
             reduce_motion,
             pause_animations_in_background,
+            energy_saver,
+            sidebar_decor,
+            sidebar_active_project_highlight,
+            keep_awake,
+            smooth_scrolling,
             codex_voice,
             codex_voice_device,
             pet_enabled,
@@ -1971,6 +2527,7 @@ impl UiSettings {
         self.files_autosave_delay_ms = self
             .files_autosave_delay_ms
             .clamp(FILES_AUTOSAVE_DELAY_MIN_MS, FILES_AUTOSAVE_DELAY_MAX_MS);
+        self.math_size = self.math_size.clamp(MATH_SIZE_MIN, MATH_SIZE_MAX);
         self.terminal_font_size = clamp_or(
             self.terminal_font_size,
             crate::typography::FONT_SIZE_MIN,
@@ -2026,6 +2583,11 @@ impl UiSettings {
                         // size; it now drives every code surface.
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
                             settings.entry("codeFontSize").or_insert(legacy);
+                        }
+                        // A file an older build wrote last holds only the
+                        // legacy destination key (see `save`).
+                        if let Some(legacy) = settings.remove("pullRequestDestination") {
+                            settings.entry("pullRequestOpenIn").or_insert(legacy);
                         }
                     }
                     if let Some(keymap) = value
@@ -2112,6 +2674,13 @@ impl UiSettings {
                     }
                 }
             }
+            // No settings file yet: a fresh install, so first-run setup runs,
+            // on frosted glass whatever the theme recommends.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self {
+                onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
+                ..Self::default()
+            },
             Err(_) => Self::default(),
         }
     }
@@ -2121,8 +2690,20 @@ impl UiSettings {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::path(data_dir);
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // Flattened, not through `serde_json::Value`, which would widen
+        // every `f32` (`1.8` → `1.7999999523162842`).
+        #[derive(Serialize)]
+        struct Saved<'a> {
+            #[serde(flatten)]
+            settings: &'a UiSettings,
+            #[serde(rename = "pullRequestDestination")]
+            legacy_pull_request_destination: &'static str,
+        }
+        let json = serde_json::to_string_pretty(&Saved {
+            settings: self,
+            legacy_pull_request_destination: self.pull_request_destination.legacy_key(),
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)
     }
@@ -2132,6 +2713,12 @@ impl UiSettings {
             && let Some(accent) = self.legacy_accent_color.take()
         {
             self.accent = zeron_theme::AccentSelection::Preset(accent.into());
+        }
+        // The flat one-list layout is gone (user request): older files that
+        // still say "one list" come back grouped by project, the only layout
+        // the sidebar view menu offers.
+        if self.sidebar_organization == SidebarOrganization::InOneList {
+            self.sidebar_organization = SidebarOrganization::ByProject;
         }
         self.legacy_accent_color = None;
         self
@@ -2229,6 +2816,61 @@ mod tests {
         assert!(!loaded.compact_model_picker);
     }
 
+    /// Every build shares `ui-settings.json`, and up to v0.2.122 an unknown
+    /// `pullRequestDestination` reset every UI setting. A saved file keeps
+    /// that key to the names those builds know, and the full pick survives.
+    #[test]
+    fn saved_pull_request_destination_stays_readable_by_older_builds() {
+        // `PullRequestDestination` and the fields read here, as v0.2.122
+        // derives them.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum OldDestination {
+            Native,
+            External,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldBuild {
+            pull_request_destination: OldDestination,
+            sidebar_width: f32,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for (destination, old) in [
+            (PullRequestDestination::Native, OldDestination::Native),
+            (PullRequestDestination::Browser, OldDestination::Native),
+            (PullRequestDestination::External, OldDestination::External),
+        ] {
+            let settings = UiSettings {
+                pull_request_destination: destination,
+                sidebar_width: 300.0,
+                ..UiSettings::default()
+            };
+            settings.save(dir.path()).unwrap();
+            let text = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+            let read: OldBuild = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.pull_request_destination, old, "{destination:?}");
+            assert_eq!(read.sidebar_width, 300.0);
+            assert_eq!(
+                UiSettings::load(dir.path()).pull_request_destination,
+                destination
+            );
+        }
+        // A file an older build wrote last: its legacy key is the pick.
+        let write = |text: &str| std::fs::write(UiSettings::path(dir.path()), text).unwrap();
+        write(r#"{"pullRequestDestination":"external"}"#);
+        assert_eq!(
+            UiSettings::load(dir.path()).pull_request_destination,
+            PullRequestDestination::External
+        );
+        // Both keys: the full pick wins over its legacy stand-in.
+        write(r#"{"pullRequestDestination":"native","pullRequestOpenIn":"browser"}"#);
+        assert_eq!(
+            UiSettings::load(dir.path()).pull_request_destination,
+            PullRequestDestination::Browser
+        );
+    }
+
     #[test]
     fn pull_request_destination_defaults_to_the_native_view_and_round_trips() {
         let existing: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
@@ -2236,15 +2878,44 @@ mod tests {
             existing.pull_request_destination,
             PullRequestDestination::Native
         );
-        for destination in PullRequestDestination::ALL {
+        for (destination, stored) in PullRequestDestination::ALL
+            .into_iter()
+            .zip(["native", "browser", "external"])
+        {
             let settings = UiSettings {
                 pull_request_destination: destination,
                 ..existing.clone()
             };
-            let loaded: UiSettings =
-                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            let text = serde_json::to_string(&settings).unwrap();
+            assert!(
+                text.contains(&format!(r#""pullRequestOpenIn":"{stored}""#)),
+                "{text}"
+            );
+            let loaded: UiSettings = serde_json::from_str(&text).unwrap();
             assert_eq!(loaded.pull_request_destination, destination);
             assert_eq!(loaded.sidebar_width, 300.0);
+        }
+        // Unknown names and malformed values read as the native view without
+        // defaulting the rest of the file.
+        let dir = tempfile::tempdir().unwrap();
+        for raw in [
+            r#""sidePanel""#,
+            "42",
+            "null",
+            r#"{"destination":"external"}"#,
+        ] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(r#"{{"sidebarWidth": 300, "pullRequestDestination": {raw}}}"#),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(
+                loaded.pull_request_destination,
+                PullRequestDestination::Native,
+                "{raw}"
+            );
+            assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
     }
 
@@ -2267,6 +2938,7 @@ mod tests {
         );
         assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
         assert!(!loaded.pause_animations_in_background);
+        assert!(loaded.smooth_scrolling);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -2361,7 +3033,7 @@ mod tests {
         assert_eq!(legacy.sidebar_width, 300.0);
         // Unknown names and malformed values read as General without
         // defaulting the rest of the file.
-        for raw in [r#""billing""#, "42", "null", r#"{"section":"devices"}"#] {
+        for raw in [r#""payments""#, "42", "null", r#"{"section":"devices"}"#] {
             std::fs::write(
                 UiSettings::path(dir.path()),
                 format!(r#"{{"sidebarWidth": 300, "settingsSection": {raw}}}"#),
@@ -2556,6 +3228,9 @@ mod tests {
             loaded.code_font_size,
             crate::typography::CODE_FONT_SIZE_DEFAULT
         );
+        assert!(loaded.render_math);
+        assert_eq!(loaded.math_font, MathFont::Fira);
+        assert_eq!(loaded.math_size, MATH_SIZE_DEFAULT);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2688,6 +3363,7 @@ mod tests {
             focal_x: f32::NAN,
             focal_y: 2.0,
             zoom: f32::INFINITY,
+            rotation: 91,
         }
         .normalized();
         assert_eq!(
@@ -2696,6 +3372,7 @@ mod tests {
                 focal_x: 0.5,
                 focal_y: 1.0,
                 zoom: 1.0,
+                rotation: 90,
             }
         );
 
@@ -2707,6 +3384,7 @@ mod tests {
                     focal_x: -1.0,
                     focal_y: 0.25,
                     zoom: 99.0,
+                    rotation: 359,
                 },
             }),
             ..Default::default()
@@ -2718,8 +3396,71 @@ mod tests {
                 focal_x: 0.0,
                 focal_y: 0.25,
                 zoom: NewThreadBackgroundAdjustment::MAX_ZOOM,
+                rotation: 0,
             }
         );
+    }
+
+    #[test]
+    fn background_rotation_snaps_to_quarter_turns() {
+        for (input, expected) in [
+            (0, 0),
+            (1, 0),
+            (44, 0),
+            (45, 90),
+            (91, 90),
+            (134, 90),
+            (135, 180),
+            (225, 270),
+            (270, 270),
+            (315, 0),
+            (359, 0),
+            (360, 0),
+            (450, 90),
+        ] {
+            assert_eq!(normalize_rotation(input), expected, "input {input}");
+        }
+        assert_eq!(
+            NewThreadBackgroundAdjustment {
+                rotation: 91,
+                ..Default::default()
+            }
+            .normalized()
+            .rotation,
+            90
+        );
+    }
+
+    #[gpui::test]
+    fn rotate_background_turns_and_persists_quarter_turns(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            let settings = UiSettings {
+                new_thread_composer_background: Some(NewThreadComposerBackground {
+                    path: "managed.png".into(),
+                    name: "background.png".into(),
+                    adjustment: NewThreadBackgroundAdjustment::default(),
+                }),
+                ..Default::default()
+            };
+            init(settings, dir.path(), cx);
+
+            rotate_new_thread_background(true, cx);
+            assert_eq!(new_thread_background_rotation_value(cx), 90);
+            assert_eq!(
+                UiSettings::load(dir.path())
+                    .new_thread_composer_background
+                    .unwrap()
+                    .adjustment
+                    .rotation,
+                90
+            );
+
+            rotate_new_thread_background(false, cx);
+            assert_eq!(new_thread_background_rotation_value(cx), 0);
+            rotate_new_thread_background(false, cx);
+            assert_eq!(new_thread_background_rotation_value(cx), 270);
+        });
     }
 
     #[gpui::test]
@@ -2742,6 +3483,7 @@ mod tests {
                     focal_x: -0.5,
                     focal_y: 0.7,
                     zoom: 2.25,
+                    rotation: 270,
                 },
                 cx,
             );
@@ -2750,6 +3492,7 @@ mod tests {
                 focal_x: 0.0,
                 focal_y: 0.7,
                 zoom: 2.25,
+                rotation: 270,
             };
             assert_eq!(
                 current(cx)
@@ -2827,6 +3570,7 @@ mod tests {
                     focal_x: 0.2,
                     focal_y: 0.8,
                     zoom: 2.0,
+                    rotation: 0,
                 },
                 cx,
             );
@@ -2890,6 +3634,22 @@ mod tests {
                 .get("activeTurnSendBehavior")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn only_a_fresh_install_starts_first_run_setup() {
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh = UiSettings::load(fresh.path());
+        assert!(!fresh.onboarding_completed);
+        assert_eq!(fresh.surface, zeron_theme::SurfacePreference::Frosted);
+        // A settings file from before setup existed: that user is past it.
+        let existing = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(existing.path()),
+            r#"{"sidebarWidth": 280}"#,
+        )
+        .unwrap();
+        assert!(UiSettings::load(existing.path()).onboarding_completed);
     }
 
     #[test]
@@ -3005,6 +3765,9 @@ mod tests {
             diff_split: true,
             diff_wrap: true,
             code_fences_fit_content: true,
+            render_math: false,
+            math_font: MathFont::StixTwo,
+            math_size: 135,
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
@@ -3030,6 +3793,7 @@ mod tests {
                     focal_x: 0.25,
                     focal_y: 0.75,
                     zoom: 1.8,
+                    rotation: 0,
                 },
             }),
             wallpaper_folder: Some("/tmp/wallpapers".into()),
@@ -3044,13 +3808,22 @@ mod tests {
             new_thread_video_end: 15.0,
             reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
+            energy_saver: crate::energy::EnergySaver::On,
+            sidebar_decor: "night".into(),
+            sidebar_active_project_highlight: false,
+            keep_awake: true,
+            smooth_scrolling: false,
             legacy_accent_color: None,
+            onboarding_completed: false,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
+        assert!(json.contains(r#""renderMath": false"#));
+        assert!(json.contains(r#""mathFont": "stixTwo""#));
+        assert!(json.contains(r#""mathSize": 135"#));
         assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
         assert!(json.contains(r#""focalX": 0.25"#));
@@ -3058,6 +3831,7 @@ mod tests {
         assert!(json.contains(r#""zoom": 1.8"#));
         assert!(json.contains(r#""reduceMotion": "on""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
+        assert!(json.contains(r#""smoothScrolling": false"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
@@ -3073,6 +3847,7 @@ mod tests {
             revision: 0,
             saved_revision: 0,
             code_fences_generation: 0,
+            math_generation: 0,
             save_task: None,
         };
 
@@ -3131,6 +3906,7 @@ mod tests {
             revision: 0,
             saved_revision: 0,
             code_fences_generation: 0,
+            math_generation: 0,
             save_task: None,
         };
 
@@ -3144,6 +3920,163 @@ mod tests {
 
         assert!(!store.update_current(|settings| settings.code_fences_fit_content = false));
         assert_eq!(store.code_fences_generation, 2);
+    }
+
+    #[test]
+    fn math_generation_tracks_every_math_change_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore {
+            current: UiSettings::default(),
+            data_dir: dir.path().to_path_buf(),
+            revision: 0,
+            saved_revision: 0,
+            code_fences_generation: 0,
+            math_generation: 0,
+            save_task: None,
+        };
+
+        assert!(store.update_current(|settings| settings.code_fences_fit_content = true));
+        assert_eq!(store.math_generation, 0);
+
+        assert!(store.update_current(|settings| settings.render_math = false));
+        assert_eq!(store.math_generation, 1);
+        assert!(store.update_current(|settings| settings.math_font = MathFont::StixTwo));
+        assert_eq!(store.math_generation, 2);
+        assert!(store.update_current(|settings| settings.render_math = true));
+        assert_eq!(store.math_generation, 3);
+
+        assert!(!store.update_current(|settings| settings.math_font = MathFont::StixTwo));
+        assert_eq!(store.math_generation, 3);
+
+        assert!(store.update_current(|settings| settings.math_size = 120));
+        assert_eq!(store.math_generation, 4);
+        assert!(!store.update_current(|settings| settings.math_size = 120));
+        assert_eq!(store.math_generation, 4);
+        // A value the clamp heals back to the current size changes nothing.
+        assert!(store.update_current(|settings| settings.math_size = MATH_SIZE_MAX));
+        assert_eq!(store.math_generation, 5);
+        assert!(!store.update_current(|settings| settings.math_size = 500));
+        assert_eq!(store.math_generation, 5);
+    }
+
+    #[test]
+    fn math_settings_default_to_typeset_fira() {
+        let settings = UiSettings::default();
+        assert!(settings.render_math);
+        assert_eq!(settings.math_font, MathFont::Fira);
+        assert_eq!(settings.math_font.face(), zatex::bundled::Face::Fira);
+        assert_eq!(MathFont::StixTwo.face(), zatex::bundled::Face::StixTwo);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["renderMath"], true);
+        assert_eq!(json["mathFont"], "fira");
+        assert_eq!(settings.math_size, 100);
+        assert_eq!(json["mathSize"], 100);
+    }
+
+    #[test]
+    fn every_math_font_round_trips_through_the_settings_file() {
+        let stored = [
+            "fira",
+            "stixTwo",
+            "computerModern",
+            "libertinus",
+            "pagella",
+            "euler",
+        ];
+        assert_eq!(MathFont::ALL.len(), zatex::bundled::Face::ALL.len());
+        for ((font, key), face) in MathFont::ALL
+            .into_iter()
+            .zip(stored)
+            .zip(zatex::bundled::Face::ALL)
+        {
+            assert_eq!(font.face(), face);
+            let settings = UiSettings {
+                math_font: font,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["mathFont"], key);
+            let decoded: UiSettings = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.math_font, font);
+        }
+    }
+
+    #[test]
+    fn an_unknown_math_font_reads_as_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        for stored in [r#""someFutureFace""#, "3", "null"] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(r#"{{"sidebarWidth":300.0,"mathFont":{stored},"mathSize":150}}"#),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(loaded.math_font, MathFont::Fira, "{stored}");
+            // The rest of the file survives.
+            assert_eq!(loaded.sidebar_width, 300.0);
+            assert_eq!(loaded.math_size, 150);
+        }
+    }
+
+    #[test]
+    fn math_size_heals_out_of_range_values() {
+        for (value, expected) in [
+            (10, MATH_SIZE_MIN),
+            (0, MATH_SIZE_MIN),
+            (500, MATH_SIZE_MAX),
+            (75, 75),
+            (135, 135),
+            (200, 200),
+        ] {
+            let settings = UiSettings {
+                math_size: value,
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(settings.math_size, expected, "{value}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"mathSize":10}"#).unwrap();
+        assert_eq!(UiSettings::load(dir.path()).math_size, MATH_SIZE_MIN);
+    }
+
+    #[test]
+    fn a_malformed_math_size_never_fails_the_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for (stored, expected) in [
+            // Numbers round, then clamp.
+            ("1.5", MATH_SIZE_MIN),
+            ("134.6", 135),
+            ("134.4", 134),
+            ("-1", MATH_SIZE_MIN),
+            ("1e300", MATH_SIZE_MAX),
+            ("99999999999999999999999", MATH_SIZE_MAX),
+            ("150", 150),
+            // Anything else is the default.
+            (r#""big""#, MATH_SIZE_DEFAULT),
+            (r#""150""#, MATH_SIZE_DEFAULT),
+            ("null", MATH_SIZE_DEFAULT),
+            ("true", MATH_SIZE_DEFAULT),
+            ("[150]", MATH_SIZE_DEFAULT),
+            (r#"{"size":150}"#, MATH_SIZE_DEFAULT),
+        ] {
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                format!(
+                    r#"{{"sidebarWidth":300.0,"mathSize":{stored},"mathFont":"stixTwo","renderMath":false}}"#
+                ),
+            )
+            .unwrap();
+            let loaded = UiSettings::load(dir.path());
+            assert_eq!(loaded.math_size, expected, "{stored}");
+            // The rest of the file survives.
+            assert_eq!(loaded.sidebar_width, 300.0, "{stored}");
+            assert_eq!(loaded.math_font, MathFont::StixTwo, "{stored}");
+            assert!(!loaded.render_math, "{stored}");
+        }
+        // Absent, it's the default.
+        let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.math_size, MATH_SIZE_DEFAULT);
     }
 
     #[test]
@@ -3345,7 +4278,16 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+        // Defaults, except that a fresh install still has setup ahead of it,
+        // on frosted glass.
+        assert_eq!(
+            UiSettings::load(dir.path()),
+            UiSettings {
+                onboarding_completed: false,
+                surface: zeron_theme::SurfacePreference::Frosted,
+                ..UiSettings::default()
+            }
+        );
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }
@@ -4008,6 +4950,114 @@ mod tests {
         // Elsewhere the textual form stands.
         assert_eq!(badge_combo_on(false, "mod-2"), "Ctrl+2");
         assert_eq!(badge_combo_on(false, "mod-shift-a"), "Ctrl+Shift+A");
+    }
+
+    #[test]
+    fn azerty_localizes_shortcuts_where_appkit_puts_them() {
+        let azerty = azerty_key_equivalents();
+        // The relocations an AZERTY Mac's own menus apply to these shortcuts.
+        for (us, here) in [
+            ("mod-1", "mod-&"),
+            ("mod-2", "mod-é"),
+            ("mod-/", "mod-:"),
+            ("mod-[", "mod-^"),
+            ("mod-]", "mod-$"),
+        ] {
+            assert_eq!(localize_combo(us, &azerty), here);
+        }
+        // Letters, named keys and keys AZERTY keeps in place stay put.
+        for combo in [
+            "mod-b",
+            "mod-shift-a",
+            "ctrl-tab",
+            "mod-enter",
+            "f5",
+            "mod-,",
+            "mod--",
+        ] {
+            assert_eq!(localize_combo(combo, &azerty), combo);
+        }
+        // So does every key on a US layout, and the bindable spelling
+        // localizes like the stored one.
+        assert_eq!(localize_combo("mod-1", &KeyEquivalents::default()), "mod-1");
+        assert_eq!(localize_combo("cmd-shift-/", &azerty), "cmd-shift-:");
+    }
+
+    #[test]
+    fn canonical_keys_invert_localization_on_every_reachable_key() {
+        let azerty = azerty_key_equivalents();
+        for here in azerty.values().copied().chain("abz,-=+?".chars()) {
+            let here = here.to_string();
+            let us = canonical_key(&here, &azerty).unwrap_or_else(|| panic!("{here} unreachable"));
+            assert_eq!(localize_key(&us, &azerty), here.as_str(), "{here} via {us}");
+        }
+        assert_eq!(canonical_key("tab", &azerty).as_deref(), Some("tab"));
+        assert_eq!(
+            canonical_combo("mod-alt-&", &azerty).as_deref(),
+            Some("mod-alt-1")
+        );
+        // AZERTY relocates @ and nothing lands on that key.
+        assert_eq!(canonical_key("@", &azerty), None);
+        // Two US keys sharing one target (Icelandic ] and }) take the lower.
+        let icelandic: KeyEquivalents = [(']', '´'), ('}', '´')].into_iter().collect();
+        assert_eq!(canonical_key("´", &icelandic).as_deref(), Some("]"));
+    }
+
+    #[test]
+    fn displayed_combos_name_the_key_the_bound_layout_types() {
+        let mac = cfg!(target_os = "macos");
+        set_bound_key_equivalents(azerty_key_equivalents());
+        assert_eq!(display_combo("mod-/"), display_combo_on(mac, "mod-:"));
+        assert_eq!(badge_combo("mod-1"), badge_combo_on(mac, "mod-&"));
+        assert_eq!(badge_combo("mod-b"), badge_combo_on(mac, "mod-b"));
+        set_bound_key_equivalents(KeyEquivalents::default());
+        assert_eq!(badge_combo("mod-1"), badge_combo_on(mac, "mod-1"));
+        // The layout's own letters read as their keycaps print them: ⌘é is
+        // no Shift chord.
+        assert_eq!(badge_combo_on(true, "mod-é"), "⌘é");
+        assert_eq!(display_combo_on(true, "mod-é"), "Cmd+é");
+        assert_eq!(badge_combo_on(true, "mod-shift-a"), "⇧⌘A");
+    }
+
+    #[test]
+    fn older_keymaps_adopt_us_keys_once() {
+        let azerty = azerty_key_equivalents();
+        // Recorded on AZERTY before combos were stored in US keys: ⌘& for
+        // Jump to session 1, and ⌘é — where Jump to session 2 now binds —
+        // for New session.
+        let mut keymap = KeymapConfig {
+            new_session: "mod-é".into(),
+            layout_neutral: false,
+            ..KeymapConfig::default()
+        };
+        keymap.set(ShortcutId::JumpSession(0), "mod-&".into());
+        keymap.adopt_layout_neutral(&azerty);
+        assert!(keymap.layout_neutral);
+        assert_eq!(keymap.get(ShortcutId::JumpSession(0)), "mod-1");
+        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-2");
+        // The custom chord keeps its key; the default landing on it yields.
+        assert_eq!(keymap.get(ShortcutId::JumpSession(1)), "");
+        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
+        // Converted maps already store US keys: later passes change nothing.
+        keymap.set(ShortcutId::NewSession, "mod-&".into());
+        keymap.adopt_layout_neutral(&azerty);
+        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-&");
+    }
+
+    #[test]
+    fn keymaps_written_before_us_keys_load_as_older() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"newSession": "mod-é"}}"#,
+        )
+        .unwrap();
+        assert!(!UiSettings::load(dir.path()).keymap.layout_neutral);
+        // Fresh maps are US keys, and say so once saved.
+        let fresh = UiSettings::default();
+        assert!(fresh.keymap.layout_neutral);
+        fresh.save(dir.path()).unwrap();
+        assert!(UiSettings::load(dir.path()).keymap.layout_neutral);
     }
 
     #[test]

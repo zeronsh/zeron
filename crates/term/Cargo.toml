@@ -1,0 +1,12 @@
+[package]
+name = "zeron-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The terminal emulator core without a renderer — alacritty's Term + vte as a
+# pure state machine, plus local echo prediction. The desktop panel and the
+# mobile core both paint it.
+[dependencies]
+alacritty_terminal.workspace = true

@@ -1,0 +1,16 @@
+{"expect":"initialize","bind":{"$ID:init":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:init","result":{"serverInfo":{"name":"muse","version":"1.4.3"},"schema":{"version":1,"fingerprint":"sha256:fake"},"grantedCapabilities":["sessionMcp"]}}}
+{"expect":"initialized"}
+{"expect":"session/start","bind":{"$SESSION":["params","sessionId"],"$ID:start":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:start","result":{"session":{"sessionId":"$SESSION","modelId":"muse-spark-1.2","status":"idle"}}}}
+{"expect":"turn/start","bind":{"$TURN1":["params","commandId"],"$ID:turn":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:turn","result":{"commandId":"$TURN1","status":"accepted","turnId":"$TURN1","startedNewTurn":true,"disposition":"started"}}}
+{"emit":{"jsonrpc":"2.0","method":"turn/started","params":{"sessionId":"$SESSION","turnId":"$TURN1","commandId":"$TURN1"}}}
+{"emit":{"jsonrpc":"2.0","id":9,"method":"userInput/request","params":{"sessionId":"$SESSION","userInputId":"ask-1","turnId":"$TURN1","itemId":"tool-ask","questions":[{"id":"q1","header":"Scope","question":"Which files?","options":[{"label":"All"},{"label":"Changed"}],"selection":{"mode":"single"}}]}}}
+{"emit":{"jsonrpc":"2.0","method":"userInput/requested","params":{"sessionId":"$SESSION","userInputId":"ask-1","turnId":"$TURN1","itemId":"tool-ask","questions":[{"id":"q1","header":"Scope","question":"Which files?","options":[{"label":"All"},{"label":"Changed"}],"selection":{"mode":"single"}}]}}}
+{"expect":"@reply"}
+{"expect":"userInput/answer","bind":{"$ID:answer":["id"]}}
+{"emit":{"jsonrpc":"2.0","id":"$ID:answer","result":{"status":"accepted"}}}
+{"emit":{"jsonrpc":"2.0","method":"userInput/settled","params":{"sessionId":"$SESSION","userInputId":"ask-1"}}}
+{"emit":{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"$SESSION","item":{"itemId":"msg-1","kind":"agentMessage","turnId":"$TURN1","revision":2,"status":"completed","text":"Checked the changed files."}}}}
+{"emit":{"jsonrpc":"2.0","method":"turn/completed","params":{"sessionId":"$SESSION","turnId":"$TURN1","terminal":"completed"}}}

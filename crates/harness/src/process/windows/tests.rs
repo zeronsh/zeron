@@ -49,6 +49,80 @@ fn parked_child_helper() {
     }
 }
 
+#[test]
+fn stdin_eof_helper() {
+    if let Some(marker) = std::env::var_os("ZERON_TEST_STDIN_EOF_MARKER") {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        std::fs::write(marker, "eof").unwrap();
+    }
+}
+fn eof_command(marker: &std::path::Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "process::windows::tests::stdin_eof_helper"])
+        .env("ZERON_TEST_STDIN_EOF_MARKER", marker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// The teardown's grace is for an agent about to exit on stdin EOF. A child
+/// with no stdin pipe, or whose stdin is still held, is terminated at once
+/// (`opencode serve` reads no stdin and would otherwise cost every stop the
+/// whole grace); one whose handed-off stdin closes gets to exit on its own.
+#[tokio::test]
+async fn teardown_waits_on_stdin_eof_only_when_one_is_coming() {
+    let grace = Duration::from_secs(20);
+    let mut parked = parked_command();
+    parked.env("ZERON_TEST_PARKED_CHILD", "1");
+    let mut child = parked.spawn().unwrap();
+    let started = Instant::now();
+    crate::shutdown_child(&mut child, grace).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "no stdin pipe: no wait"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let held_marker = dir.path().join("held");
+    let mut child = eof_command(&held_marker).spawn().unwrap();
+    let held = child.stdin.take();
+    let started = Instant::now();
+    crate::shutdown_child(&mut child, grace).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "stdin still held: no wait"
+    );
+    assert!(!held_marker.exists());
+    drop(held);
+
+    let closed_marker = dir.path().join("closed");
+    let mut child = eof_command(&closed_marker).spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    // A writer task drops it just after the teardown starts, as drivers do.
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(stdin);
+    });
+    crate::shutdown_child(&mut child, grace).await;
+    writer.await.unwrap();
+    assert!(
+        closed_marker.exists(),
+        "the child exits on its own after EOF"
+    );
+
+    let ignored_marker = dir.path().join("ignored");
+    let mut child = eof_command(&ignored_marker).spawn().unwrap();
+    child.ignore_stdin_eof();
+    let started = Instant::now();
+    crate::shutdown_child(&mut child, grace).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "ignores EOF: no wait"
+    );
+}
+
 #[tokio::test]
 async fn unrelated_inheritable_handles_are_not_passed_to_agents() {
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -348,4 +422,153 @@ async fn bare_batch_program_resolves_from_child_path() {
         .expect("shim deadline")
         .unwrap();
     assert!(status.success(), "shim exit: {status}");
+}
+
+// ---------------------------------------------------------------------------
+// npm cmd-shims launch their target directly
+// ---------------------------------------------------------------------------
+
+/// Records every argument after argv[0] when spawned by the shim tests.
+#[test]
+fn shim_target_helper() {
+    let Some(file) = std::env::var_os("ZERON_TEST_SHIM_ARGS_FILE") else {
+        return;
+    };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::fs::write(file, args.join("\n")).unwrap();
+}
+
+/// This test binary under another name, without copying it when possible.
+fn link_test_binary(to: &std::path::Path) {
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    if std::fs::hard_link(&exe, to).is_err() {
+        std::fs::copy(&exe, to).unwrap();
+    }
+}
+
+const SHIM_HEAD: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
+
+async fn run_recording(mut command: Command, received: &std::path::Path) -> Vec<String> {
+    command
+        .env("ZERON_TEST_SHIM_ARGS_FILE", received)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("shim spawn");
+    let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("shim deadline")
+        .unwrap();
+    assert!(status.success(), "shim exit: {status}");
+    std::fs::read_to_string(received)
+        .expect("arguments were recorded")
+        .split('\n')
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn npm_native_shim_runs_its_exe_without_cmd_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    link_test_binary(&dir.path().join(r"node_modules\@scope\cli\bin\native.exe"));
+    let shim = dir.path().join("native.cmd");
+    std::fs::write(
+        &shim,
+        format!("{SHIM_HEAD}\"%dp0%\\node_modules\\@scope\\cli\\bin\\native.exe\"   %*\r\n"),
+    )
+    .unwrap();
+    // A line break (cmd.exe rejects it) and a command line past cmd.exe's
+    // 8191 characters both reach the binary verbatim.
+    let long = "x".repeat(9000);
+    let mut command = Command::new(&shim);
+    command.args([
+        "--exact",
+        "process::windows::tests::shim_target_helper",
+        "line\nbreak",
+        "100% & more",
+        &long,
+    ]);
+    let received = dir.path().join("received.txt");
+    assert_eq!(
+        run_recording(command, &received).await,
+        [
+            "--exact",
+            "process::windows::tests::shim_target_helper",
+            "line",
+            "break",
+            "100% & more",
+            long.as_str(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn npm_node_shim_runs_its_script_with_the_node_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // The role node.exe plays: this test binary, which records its argv.
+    link_test_binary(&dir.path().join("node.exe"));
+    let script = dir.path().join(r"node_modules\@scope\cli\cli.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "#!/usr/bin/env node\r\n").unwrap();
+    let shim = dir.path().join("claude.cmd");
+    std::fs::write(
+        &shim,
+        format!(
+            "{SHIM_HEAD}\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@scope\\cli\\cli.js\" %*\r\n"
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(&shim);
+    command.args(["--exact", "process::windows::tests::shim_target_helper"]);
+    let received = dir.path().join("received.txt");
+    let args = run_recording(command, &received).await;
+    assert_eq!(
+        std::path::PathBuf::from(&args[0]),
+        std::path::absolute(&script).unwrap()
+    );
+    assert_eq!(
+        &args[1..],
+        ["--exact", "process::windows::tests::shim_target_helper"]
+    );
+}
+
+#[test]
+fn cmd_route_rejects_command_lines_past_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("plain.cmd");
+    std::fs::write(&script, "@exit /b 0\r\n").unwrap();
+    let mut command = Command::new(&script);
+    command.arg("x".repeat(9000));
+    let error = command.spawn().expect_err("over cmd.exe's limit");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("8191"), "{error}");
+}
+
+#[test]
+fn missing_working_directory_is_not_a_missing_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = parked_command();
+    command.current_dir(dir.path().join("gone"));
+    let error = command.spawn().expect_err("cwd does not exist");
+    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    assert!(error.to_string().contains("working directory"), "{error}");
+}
+
+#[tokio::test]
+async fn extensionless_program_in_a_dotted_directory_uses_pathext() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("first.last");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("tool.cmd"), "@exit /b 0\r\n").unwrap();
+    let mut command = Command::new(profile.join("tool"));
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = tokio::time::timeout(Duration::from_secs(10), command.spawn().unwrap().wait())
+        .await
+        .expect("tool deadline")
+        .unwrap();
+    assert!(status.success());
 }

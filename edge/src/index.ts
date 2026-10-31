@@ -35,20 +35,67 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
+ *
+ * Cloud device + credential vault (docs/design/cloud-device.md):
+ *   POST /runner/enroll | /runner/token — pre-bearer runner identity
+ *   POST /runner/heartbeat              — runner bearer
+ *   GET|DELETE /cloud/:orgId, POST /cloud/:orgId/{enable,wake,sleep},
+ *   GET  /cloud/:orgId/usage            — user bearer
+ *   *    /vault/:orgId/…                — VAULT service binding
+ *   GET  /admin/cloud/usage             — ADMIN_TOKEN (operator export)
+ *   POST /admin/cloud/credits           — ADMIN_TOKEN (grant a user credits)
+ *   POST /admin/cloud/machine           — ADMIN_TOKEN (a user's machine size)
+ *   POST /admin/cloud/limits            — ADMIN_TOKEN (a user's awake/chat caps)
+ *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
+ *
+ * User directory (user-directory.ts):
+ *   POST /workos/webhook                — pre-bearer, WorkOS-signed user, org and membership events
+ *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
+ *   GET  /admin/organizations[?format=csv] — ADMIN_TOKEN (every org with its members)
+ *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
+ *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
+ *   POST /admin/usernames/{set|clear|face} — ADMIN_TOKEN (give or take a username; pick a card's scene and foil)
+ *
+ * Member cards (card-routes.ts):
+ *   GET  /cards/:username               — pre-bearer, a card as JSON
+ *   GET  /c/:username, /@:username      — pre-bearer, a card's page (also routed from zeron.sh)
+ *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
+ *   GET|POST /username, GET /username/check — user bearer (claim, availability)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
+import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
+import { publicCardGate } from "./card-gate";
+import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
+import { releaseRoute } from "./releases";
 import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
+import { CloudAccount } from "./cloud/cloud-account";
+import { CloudIndex } from "./cloud/cloud-index";
+import { DeleteWorkflow, ProvisionWorkflow, SleepWorkflow, WakeWorkflow } from "./cloud/workflows";
+import {
+  autoWakeCloudDevice,
+  handleBillingPublicRoute,
+  handleCloudRoute,
+  handleRunnerPublicRoute
+} from "./cloud/routes";
+import { handleAdminRoute, runCloudCron } from "./cloud/billing";
+import { sandboxProvider } from "./cloud/providers";
+import { FakeProvider } from "./cloud/providers/fake";
+import { runnerChatGate, runnerDeviceGate } from "./runner-access";
+import { runnerRefusal } from "./runner-policy";
+import { handleVaultRoute } from "./vault-routes";
+import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
+export { ProvisionWorkflow, WakeWorkflow, SleepWorkflow, DeleteWorkflow };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -71,48 +118,8 @@ const json = (value: unknown, status = 200): Response =>
     headers: { "content-type": "application/json" }
   });
 
-/** Forward into a DO with the verified user stamped on the request. */
-const forward = (
-  ns: DurableObjectNamespace,
-  name: string,
-  request: Request,
-  userId: string,
-  path: string,
-  search?: string,
-  roomKind?: "workspace"
-): Promise<Response> => {
-  const stub = ns.get(ns.idFromName(name));
-  const url = new URL(request.url);
-  url.pathname = path;
-  if (search !== undefined) url.search = search;
-  const headers = new Headers(request.headers);
-  // room-kind is a Worker-controlled signal (the DO relaxes owner gating for
-  // workspace rooms): clear any inbound value so only the explicit set below —
-  // reached solely on workspace forwards, after the org-membership check —
-  // can assert it. Do not drop this line; passthrough would let a caller
-  // choose their own room kind.
-  headers.delete(ROOM_KIND_HEADER);
-  headers.set(AUTH_USER_HEADER, userId);
-  if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
-  return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
-};
-
-const requestInit = (request: Request): RequestInit => ({
-  method: request.method,
-  body: request.body
-});
-
-/** Carry the dialing engine's `&device=` through to the DO (socket
- * attribution in logs — the 2026-08-04 deaf socket was only identifiable by
- * reverse-engineering rotating IPv6 privacy addresses). Validated so a
- * hand-crafted value can't inject into log lines or the DO's query. */
-const deviceParam = (url: URL): string => {
-  const device = url.searchParams.get("device") ?? "";
-  return ID_RE.test(device) ? `&device=${device}` : "";
-};
-
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
 
@@ -130,37 +137,54 @@ export default {
         }
       });
     }
-    if (
-      parts[0] === "releases" &&
-      parts.length >= 2 &&
-      (request.method === "GET" || request.method === "HEAD")
-    ) {
-      const key = decodeURIComponent(url.pathname.slice("/releases/".length));
-      if (key.length === 0 || key.includes("..")) return json({ error: "bad request" }, 400);
-      const object = await env.RELEASES.get(key);
-      if (!object) return json({ error: "not_found" }, 404);
-      // latest.txt / manifest.json flip on release; artifacts are immutable by name.
-      const mutable = key.endsWith(".txt") || key.endsWith(".json");
-      const headers = new Headers({
-        "content-type": key.endsWith(".txt")
-          ? "text/plain; charset=utf-8"
-          : key.endsWith(".json")
-            ? "application/json"
-            : "application/octet-stream",
-        "content-length": String(object.size),
-        "cache-control": mutable ? "public, max-age=60" : "public, max-age=86400, immutable",
-        etag: object.httpEtag
-      });
-      return new Response(request.method === "HEAD" ? null : object.body, { headers });
-    }
+    const release = await releaseRoute(request, env, url);
+    if (release) return release;
 
     // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
     if (authRouted) return authRouted;
 
+    // ── operator usage export (ADMIN_TOKEN, not a JWT) and the Cloud
+    //    engine's identity routes (pre-bearer: it is proving possession of
+    //    its enrollment code / key in order to GET a bearer) ─────────────────
+    const adminRouted = await handleAdminRoute(request, env, url);
+    if (adminRouted) return adminRouted;
+    const billingRouted = await handleBillingPublicRoute(request, env, url);
+    if (billingRouted) return billingRouted;
+    const runnerRouted = await handleRunnerPublicRoute(request, env, url);
+    if (runnerRouted) return runnerRouted;
+    const usersRouted = await handleUserDirectoryRoute(request, env, url);
+    if (usersRouted) return usersRouted;
+    const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (cardRouted) return cardRouted;
+
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
+
+    // Runner bearers (the Cloud device) act as their DEVICE, not the user:
+    // no account management, no vault beyond their own grants, no other
+    // device's room but its liveness, no legacy rooms (runner-policy.ts);
+    // chat2/blobs only for chats they host (runner-access.ts); registry rows
+    // filtered and ownership-checked in RegistryRoom (registry-runner.ts).
+    const refused = runnerRefusal(auth, request.method, url);
+    if (refused) return json({ error: "forbidden", message: refused }, 403);
+
+    // Local e2e seam: the fake provider's machines (with the enrollment env a
+    // real sandbox would get), so scripts/cloud-e2e.sh can start a real
+    // runner engine. Dev auth + fake provider only; 404 everywhere else.
+    if (url.pathname === "/dev/cloud/fake-sandboxes" && request.method === "GET") {
+      const fake = env.AUTH_MODE === "dev" ? sandboxProvider(env, "fake") : undefined;
+      return fake instanceof FakeProvider ? json({ sandboxes: fake.snapshot() }) : json({ error: "not_found" }, 404);
+    }
+
+    const usernameRouted = await handleUsernameRoute(request, env, auth, url);
+    if (usernameRouted) return usernameRouted;
+
+    const cloudRouted = await handleCloudRoute(request, env, auth, url);
+    if (cloudRouted) return cloudRouted;
+    const vaultRouted = await handleVaultRoute(request, env, auth, url);
+    if (vaultRouted) return vaultRouted;
 
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
@@ -179,25 +203,25 @@ export default {
         env.SESSION_ROOMS,
         `s2/${parts[1]}`,
         request,
-        auth.userId,
+        auth,
         "/ws",
         `?chatId=${parts[1]}${deviceParam(url)}`
       );
     }
     if (parts[0] === "tail" && parts[1] && ID_RE.test(parts[1]) && request.method === "GET") {
-      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth.userId, "/tail", "");
+      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth, "/tail", "");
     }
     if (parts[0] === "stats" && parts[1] && ID_RE.test(parts[1]) && request.method === "GET") {
-      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth.userId, "/stats", "");
+      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth, "/stats", "");
     }
     if (parts[0] === "diff" && parts[1] && ID_RE.test(parts[1])) {
-      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth.userId, "/diff", "");
+      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth, "/diff", "");
     }
     if (parts[0] === "snapshot" && parts[1] && ID_RE.test(parts[1]) && request.method === "GET") {
-      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth.userId, "/snapshot", "");
+      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth, "/snapshot", "");
     }
     if (parts[0] === "append" && parts[1] && ID_RE.test(parts[1]) && request.method === "POST") {
-      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth.userId, "/append", "");
+      return forward(env.SESSION_ROOMS, `s2/${parts[1]}`, request, auth, "/append", "");
     }
 
     // ── chat2 rooms (docs/chat2-sync.md B): dumb log relays, one per chat.
@@ -205,6 +229,11 @@ export default {
     //    client-minted). The DO handles /ws, /checkpoint (GET Range-resumable
     //    + POST floor-guarded), host-published /tail + /diff sidecars,
     //    /stats, /reset. ──────────────────────────────────────────────────────
+    if (parts[0] === "chat2" && parts[1] && ID_RE.test(parts[1])) {
+      // A Cloud runner reaches only the chats its device hosts.
+      const notHost = await runnerChatGate(env, auth, parts[1]);
+      if (notHost) return notHost;
+    }
     const chatResponse = chatRoute(request, env, auth.userId);
     if (chatResponse) return chatResponse;
 
@@ -232,33 +261,33 @@ export default {
           env.SESSION_ROOMS,
           room,
           request,
-          auth.userId,
+          auth,
           "/ws",
           `?chatId=${encodeURIComponent(room)}${deviceParam(url)}`,
           "workspace"
         );
       }
       if (parts[2] === "tail" && request.method === "GET") {
-        return forward(env.SESSION_ROOMS, room, request, auth.userId, "/tail", "", "workspace");
+        return forward(env.SESSION_ROOMS, room, request, auth, "/tail", "", "workspace");
       }
       // Observability: log/snapshot sizes for the per-user workspace room, so a
       // human can see whether the compaction budget is holding (org-membership
       // was already checked above; the DO bypasses the owner gate for
       // workspace kind).
       if (parts[2] === "stats" && request.method === "GET") {
-        return forward(env.SESSION_ROOMS, room, request, auth.userId, "/stats", "", "workspace");
+        return forward(env.SESSION_ROOMS, room, request, auth, "/stats", "", "workspace");
       }
       // Raw doc snapshot: the repair/reseed read (2026-08-04: a device stranded
       // behind the shallow-locked rebuild converges by replacing its local
       // workspace doc with this — see the incident repair recipe).
       if (parts[2] === "snapshot" && request.method === "GET") {
-        return forward(env.SESSION_ROOMS, room, request, auth.userId, "/snapshot", "", "workspace");
+        return forward(env.SESSION_ROOMS, room, request, auth, "/snapshot", "", "workspace");
       }
       // Operator wedge-break: clear a workspace room whose update log grew big
       // enough to CPU-reset the DO on every cold start (org-membership already
       // checked; state re-uploads from each device's local doc on rejoin).
       if (parts[2] === "reset-log" && request.method === "POST") {
-        return forward(env.SESSION_ROOMS, room, request, auth.userId, "/reset-log", "", "workspace");
+        return forward(env.SESSION_ROOMS, room, request, auth, "/reset-log", "", "workspace");
       }
       // Merge-safe repair write (the chat rooms' /append, for the workspace
       // doc): lets an operator seed a reset room with ONE compact
@@ -266,7 +295,7 @@ export default {
       // re-upload its whole doc — the N-way redundant re-seed is what kept
       // ballooning the update log after the 2026-08-05 wedge breaks.
       if (parts[2] === "append" && request.method === "POST") {
-        return forward(env.SESSION_ROOMS, room, request, auth.userId, "/append", "", "workspace");
+        return forward(env.SESSION_ROOMS, room, request, auth, "/append", "", "workspace");
       }
     }
 
@@ -286,69 +315,81 @@ export default {
           env.REGISTRY_ROOMS,
           room,
           request,
-          auth.userId,
+          auth,
           "/ws",
           `?${deviceParam(url).replace(/^&/, "")}`
         );
       }
       if (parts[2] === "stats" && request.method === "GET") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/stats", "");
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/stats", "");
       }
       // Pull over plain HTTPS: `?since=` returns the same delta the WS
       // hello would (full table without it — the original repair read).
       // One round trip on any network that passes HTTPS at all, where the
       // WS upgrade needs 4 and a cooperative middlebox.
       if (parts[2] === "rows" && request.method === "GET") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/rows", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/rows", url.search);
       }
       // Push over plain HTTPS — the WS push's fallback twin (LWW clocks
       // make replays no-ops, so at-least-once delivery is safe).
       if (parts[2] === "push" && request.method === "POST") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/push", url.search);
       }
       // A phone's APNs token + notification choices (POST), or removal on
       // sign-out / turning notifications off (DELETE). `?device=` required.
       if (parts[2] === "push-target" && (request.method === "POST" || request.method === "DELETE")) {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push-target", url.search);
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/push-target", url.search);
       }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table
       // from local rows with original clocks, automatically.
       if (parts[2] === "reset" && request.method === "POST") {
-        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/reset", "");
+        return forward(env.REGISTRY_ROOMS, room, request, auth, "/reset", "");
       }
     }
 
     // ── device rooms ────────────────────────────────────────────────────────
     if (parts[0] === "device" && parts[1] && ID_RE.test(parts[1])) {
       const deviceId = parts[1];
+      // Another device's link or nudge: only a delegate's machine (the
+      // policy already admitted nothing else but liveness).
+      if (parts[2] === "ws" || parts[2] === "nudge") {
+        const refusedDevice = await runnerDeviceGate(env, auth, deviceId);
+        if (refusedDevice) return refusedDevice;
+      }
       if (parts[2] === "ws") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
         }
         const role = url.searchParams.get("role") === "host" ? "host" : "client";
         const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
+        // Dials never wake a sleeping Cloud session (viewing a chat must not
+        // start a billed machine): the dial sees host_offline. Sends do —
+        // through the nudge below.
         // `d2/` — same staging→prod identity break as `s2/` above.
         return forward(
           env.DEVICE_ROOMS,
           `d2/${deviceId}`,
           request,
-          auth.userId,
+          auth,
           "/ws",
           `?role=${role}&connId=${encodeURIComponent(connId)}`
         );
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
-        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth.userId, `/sidecar/${parts[3]}`, "");
+        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, `/sidecar/${parts[3]}`, "");
       }
       if (parts[2] === "status") {
-        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth.userId, "/status", "");
+        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, "/status", "");
       }
       // Durable command nudge (§7): "chat X has pending commands — open its
       // doc". Delivered live if the host is connected, else queued in the DO
       // and replayed on the host's next join.
       if (parts[2] === "nudge" && request.method === "POST") {
-        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth.userId, "/nudge", "");
+        // A send to a sleeping Cloud session wakes its machine; the nudge
+        // queues in the DeviceRoom and replays once its engine reconnects.
+        autoWakeCloudDevice(env, ctx, auth, deviceId);
+        return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, "/nudge", "");
       }
     }
 
@@ -366,6 +407,8 @@ export default {
       if (partId === undefined || !PART_RE.test(partId)) {
         return json({ error: "bad part id" }, 400);
       }
+      const notHost = await runnerChatGate(env, auth, parts[1]);
+      if (notHost) return notHost;
       const key = `blob/${auth.userId}/${parts[1]}/${partId}`;
       if (request.method === "PUT") {
         const body = await request.arrayBuffer();
@@ -401,5 +444,11 @@ export default {
     }
 
     return json({ error: "not_found" }, 404);
+  },
+
+  /** Hourly (`17 * * * *`): Cloud usage reconcile backstop, daily orphan
+   * scan, closed-month exports (cloud/billing.ts). */
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(runCloudCron(env, controller.scheduledTime));
   }
 } satisfies ExportedHandler<Env>;

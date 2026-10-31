@@ -44,14 +44,30 @@
 //!   (`form.created`, reply `POST /api/session/{id}/form/{formID}/reply`
 //!   with `{answer:{q0:..}}`; verified live against 2.0.24), folded into
 //!   the same question flow.
+//! - permission requests (`permission.asked`; `permission` + `patterns` on
+//!   1.x, `action` + `resources` on 2.x) are answered `once` in full access.
+//!   Auto-accept edits and supervised add `ask` rules to the server's
+//!   inline config ([`access_config`]), since opencode's defaults allow
+//!   everything, and put each request they do not cover to the person:
+//!   yes is `once`, anything else `reject` (verified live, 1.19.4).
+//! - plan mode is opencode's read-only `plan` agent: 1.x names it on each
+//!   prompt (`agent`; a prompt without one runs the default agent, verified
+//!   live, 1.19.4), 2.x sets it on the session (`/api/session/{id}/agent`).
 //!
 //! Failure surfacing (the #169 class): a dying provider is VISIBLE here —
 //! `session.status{type:"retry", attempt, message}` streams per attempt.
 //! Attempt ≥ [`RETRY_REPORT_ATTEMPT`] surfaces an error chip; attempt ≥
 //! [`RETRY_ABORT_ATTEMPT`] aborts the turn instead of retrying forever.
 //! A prompt that produces NO session-scoped event within
-//! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) errors
-//! out instead of spinning "Working" forever.
+//! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) of the
+//! server accepting it errors out instead of spinning "Working" forever.
+//! Both wires report busy within milliseconds of accepting a prompt, before
+//! any provider bootstrap, so a slow first turn never trips it (verified
+//! live, 1.18.31 and 2.1.2). A server process that dies is noticed within
+//! [`SERVER_POLL`], and a bus silent past [`BUS_SILENCE`] is reconnected —
+//! unless the server, still alive, fails a health check there
+//! ([`BUS_PROBE_TIMEOUT`]) or the bus stays frameless past
+//! [`BUS_WEDGE_BUDGET`]: then the run errors and the server is shut down.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -62,13 +78,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer,
-    UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SlashCommand, SteeringMode, TodoItem, TodoStatus, ToolCall,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -95,6 +110,63 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// run as dead (transcript integrity is gone once frames are missed).
 const BUS_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const BUS_RECONNECT_ATTEMPTS: u32 = 40;
+
+/// Longest the bus may stay silent before the stream is presumed wedged and
+/// reconnected (the reconnect re-syncs status and pending requests). Both
+/// generations keep an idle stream talking: 1.x sends a `server.heartbeat`
+/// event every 10s (1.14.17 through 1.18.31), 2.x a `: heartbeat` comment
+/// every 15s (2.1.2); both verified live.
+const BUS_SILENCE: Duration = Duration::from_secs(45);
+
+/// A bus silent past [`BUS_SILENCE`] gets the server checked before it is
+/// reconnected: a process that is stopped or hung still accepts loopback
+/// connections (the kernel completes the handshake), so each reconnect
+/// would otherwise wait out another silence, and the reconnect budget only
+/// runs out after half an hour of "Working" (observed live, 1.18.21 and
+/// 2.1.2, against a SIGSTOPped server: the connect succeeds, the request is
+/// never answered). Any HTTP answer to its info route proves it alive;
+/// none within this bound ends the run.
+const BUS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Longest the bus may go without one frame (heartbeats included) before
+/// the server is presumed wedged even though it still answers health
+/// checks: a few silences' worth of reconnects.
+const BUS_WEDGE_BUDGET: Duration = Duration::from_secs(150);
+
+/// Bus liveness bounds; tests shrink them.
+#[derive(Clone, Copy, Debug)]
+struct BusTimeouts {
+    silence: Duration,
+    probe: Duration,
+    wedged: Duration,
+}
+
+impl Default for BusTimeouts {
+    fn default() -> Self {
+        Self {
+            silence: BUS_SILENCE,
+            probe: BUS_PROBE_TIMEOUT,
+            wedged: BUS_WEDGE_BUDGET,
+        }
+    }
+}
+
+/// How often the run checks that its own server process is still alive. A
+/// crash otherwise surfaces only once the bus exhausts its reconnects, and
+/// each refused loopback connect costs about 2s on Windows.
+const SERVER_POLL: Duration = Duration::from_millis(500);
+
+/// Prompt deliveries: one retry, posted only once the session is checked
+/// for the message (see [`deliver_prompt`]).
+const PROMPT_ATTEMPTS: u32 = 2;
+const PROMPT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Permission and question replies: the agent blocks until one lands.
+const REPLY_ATTEMPTS: u32 = 3;
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Budget for aborting a stopped turn's subagent sessions.
+const CHILD_ABORT_BUDGET: Duration = Duration::from_secs(15);
 
 /// Provider-retry surfacing: report at 3 (a chip; the turn keeps trying),
 /// abort at 8 (opencode itself would retry forever — #169's silent loop).
@@ -212,6 +284,70 @@ fn variant_to_level(id: &str) -> Option<ReasoningLevel> {
     }
 }
 
+/// Startup retries for a server that exited on a transient fault (a locked
+/// database, a lost migration race, a port claimed between our release and
+/// its bind), backing off
+/// linearly from [`SPAWN_RETRY_DELAY`].
+const SPAWN_RETRIES: u32 = 4;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// Oldest release the 1.x wire is verified against; older servers may never
+/// answer a health probe this driver knows.
+const TESTED_SINCE: &str = "1.14";
+
+enum SpawnFailure {
+    /// Launching again can succeed.
+    Retryable(HarnessError),
+    Fatal(HarnessError),
+}
+
+/// opencode's report of its shared SQLite database held by another process.
+fn is_database_locked(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    line.contains("database is locked") || line.contains("sqlite_busy")
+}
+
+/// A schema migration that lost a race with another process's: concurrent
+/// first starts on a fresh database each run the migration DDL, and the
+/// losers exit with "Unexpected error" / "Failed query:", the statement on
+/// the lines after it (observed live, 1.18.21: 3-5 of 6 at once). A relaunch
+/// finds the schema in place. Fed line by line.
+#[derive(Default)]
+struct MigrationRace {
+    /// The last non-blank line was a bare "Failed query:".
+    after_failed_query: bool,
+}
+
+impl MigrationRace {
+    fn feed(&mut self, line: &str) -> bool {
+        let line = line.trim().to_ascii_lowercase();
+        let is_ddl = |sql: &str| {
+            ["create ", "alter ", "drop "]
+                .iter()
+                .any(|verb| sql.starts_with(verb))
+        };
+        if let Some((_, sql)) = line.split_once("failed query:") {
+            let sql = sql.trim();
+            self.after_failed_query = sql.is_empty();
+            return is_ddl(sql);
+        }
+        if line.is_empty() {
+            return false;
+        }
+        std::mem::take(&mut self.after_failed_query) && is_ddl(&line)
+    }
+}
+
+/// The port we picked was claimed before the server bound it.
+fn is_address_in_use(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("eaddrinuse")
+        || text.contains("address already in use")
+        || text.contains("failed to start server. is port")
+        // WSAEADDRINUSE's message.
+        || text.contains("only one usage of each socket address")
+}
+
 /// A kernel-assigned free localhost port, released for the child to claim.
 fn free_localhost_port() -> Option<u16> {
     std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -230,6 +366,7 @@ pub struct OpencodeHarness {
     base_url: Option<String>,
     interrupt_grace: Duration,
     kill_grace: Duration,
+    bus_timeouts: BusTimeouts,
     startup_timeout: Duration,
     models_cache: crate::catalog::Catalog,
     commands_cache: tokio::sync::OnceCell<Vec<SlashCommand>>,
@@ -245,6 +382,7 @@ impl Default for OpencodeHarness {
             base_url: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            bus_timeouts: BusTimeouts::default(),
             startup_timeout: startup_timeout(),
             models_cache: crate::catalog::Catalog::default(),
             commands_cache: tokio::sync::OnceCell::new(),
@@ -276,6 +414,23 @@ impl OpencodeHarness {
         self
     }
 
+    /// Shrink the event-bus liveness bounds (tests): the silence that gets
+    /// the server health-checked, that check's answer bound, and the
+    /// longest the bus may go without a frame.
+    pub fn with_bus_timeouts(
+        mut self,
+        silence: Duration,
+        probe: Duration,
+        wedged: Duration,
+    ) -> Self {
+        self.bus_timeouts = BusTimeouts {
+            silence,
+            probe,
+            wedged,
+        };
+        self
+    }
+
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(exe) = &self.executable {
             return Ok(exe.clone());
@@ -290,11 +445,25 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Server, HarnessError> {
+        self.server_with_env(cwd, mcp, &Default::default(), AccessMode::FullAccess)
+            .await
+    }
+
+    /// [`Self::server`] for a run: the host-resolved run environment
+    /// ([`RunRequest::env`]) rides the spawned `opencode serve`, with the
+    /// permission rules of its access mode.
+    async fn server_with_env(
+        &self,
+        cwd: Option<&str>,
+        mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
+    ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn_with_env(&exe, cwd, self.startup_timeout, mcp, run_env, access).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -386,10 +555,24 @@ impl Harness for OpencodeHarness {
     /// The model and effort ride each prompt (1.x) or are set on the
     /// session (2.x), so a change applies from the next prompt without a new
     /// server. Clearing one back to the default cannot be expressed that way.
+    /// Plan mode is opencode's `plan` agent, named on the prompt (1.x) or
+    /// set on the session (2.x), so it too changes in place. The access mode
+    /// does not: its permission rules are read when the server starts.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
+            && access(live) == access(next)
+    }
+    /// Full access approves every permission request, as every run did
+    /// before modes; the others add `ask` rules to the server's config so
+    /// opencode raises what they ask about (its defaults allow everything),
+    /// and put each of those to the person.
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    fn supports_plan(&self) -> bool {
+        true
     }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
@@ -467,7 +650,14 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        let server = self
+            .server_with_env(
+                cwd.as_deref(),
+                request.mcp.as_ref(),
+                &request.env,
+                access(&request),
+            )
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -476,6 +666,7 @@ impl Harness for OpencodeHarness {
             request,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
+            bus_timeouts: self.bus_timeouts,
             known_commands: None, // Resolve the live session directory, never a global probe cache.
             initial_native_command_selected,
         }));
@@ -500,6 +691,8 @@ struct Server {
     /// Wire generation, resolved once via the health endpoints.
     protocol: tokio::sync::OnceCell<Protocol>,
     version: tokio::sync::OnceCell<ServerVersion>,
+    /// Keeps preview discovery off our own server's port while it lives.
+    _port: Option<crate::agent_ports::Reservation>,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -543,12 +736,27 @@ impl Protocol {
     /// Probe newest to oldest. A version-bearing JSON response distinguishes
     /// the API from web UI catch-alls; `None` means the server is still booting.
     async fn detect(server: &Server) -> Result<Option<Self>, HarnessError> {
-        for (path, protocol) in [
+        Self::detect_preferring(server, None).await
+    }
+
+    /// [`Self::detect`], probing `preferred`'s endpoints first. Every probe of
+    /// the other generation hits the web UI catch-all (which 1.x proxies
+    /// upstream), and while the port is still closed each costs a refused
+    /// loopback connect — about 2s on Windows, which retries the SYN.
+    async fn detect_preferring(
+        server: &Server,
+        preferred: Option<Protocol>,
+    ) -> Result<Option<Self>, HarnessError> {
+        let mut probes = [
             ("/api/info", Protocol::V2),
             ("/api/status", Protocol::V2),
             ("/api/health", Protocol::V2),
             ("/global/health", Protocol::V1),
-        ] {
+        ];
+        if preferred == Some(Protocol::V1) {
+            probes.rotate_right(1);
+        }
+        for (path, protocol) in probes {
             let Ok(resp) = server.get_raw(path).await else {
                 continue;
             };
@@ -588,6 +796,7 @@ impl Server {
             stderr_tail: crate::StderrTail::default(),
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
+            _port: None,
         }
     }
 
@@ -606,48 +815,133 @@ impl Server {
             .await
     }
 
-    /// Spawn `opencode serve` on a free loopback port with a per-run Basic
-    /// password, and wait for a generation-bearing health answer (which
-    /// also resolves [`Protocol`]).
+    #[cfg(test)]
     async fn spawn(
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Self, HarnessError> {
+        Self::spawn_with_env(
+            exe,
+            cwd,
+            startup,
+            mcp,
+            &Default::default(),
+            AccessMode::FullAccess,
+        )
+        .await
+    }
+
+    /// Spawn `opencode serve` on a free loopback port with a per-run Basic
+    /// password, and wait for a generation-bearing health answer (which
+    /// also resolves [`Protocol`]). `run_env` is the host-resolved run
+    /// environment ([`RunRequest::env`]); `access` adds its permission
+    /// rules ([`access_config`]).
+    ///
+    /// Every opencode process shares one SQLite database; a server booting
+    /// while another migrates or checkpoints it can exit with "database is
+    /// locked" (more often on Windows, whose file locks are mandatory and
+    /// whose malware scan holds new WAL files), and concurrent first starts
+    /// race each other's schema migration ([`MigrationRace`]). Those exits
+    /// alone are retried, and on a fresh port, which also covers the port
+    /// race inherent in handing a released port to the child.
+    async fn spawn_with_env(
+        exe: &std::path::Path,
+        cwd: Option<&str>,
+        startup: Duration,
+        mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
+    ) -> Result<Self, HarnessError> {
+        // Known up front (cached per binary): it picks the MCP and
+        // permission config shapes and which health endpoints to probe first.
+        let version = opencode_version(exe).await;
+        let mut attempt = 0;
+        loop {
+            match Self::spawn_once(exe, cwd, startup, mcp, run_env, access, version.as_ref()).await
+            {
+                Err(SpawnFailure::Retryable(error)) if attempt < SPAWN_RETRIES => {
+                    attempt += 1;
+                    tracing::warn!(
+                        target: "zeron_harness::opencode",
+                        attempt,
+                        %error,
+                        "opencode serve exited at startup on a transient fault; retrying"
+                    );
+                    tokio::time::sleep(SPAWN_RETRY_DELAY * attempt).await;
+                }
+                Err(SpawnFailure::Retryable(error) | SpawnFailure::Fatal(error)) => {
+                    return Err(error);
+                }
+                Ok(server) => return Ok(server),
+            }
+        }
+    }
+
+    async fn spawn_once(
+        exe: &std::path::Path,
+        cwd: Option<&str>,
+        startup: Duration,
+        mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
+        access: AccessMode,
+        version: Option<&semver::Version>,
+    ) -> Result<Self, SpawnFailure> {
+        let fatal = SpawnFailure::Fatal;
         let port = free_localhost_port().ok_or_else(|| {
-            HarnessError::Protocol("no free localhost port for opencode serve".into())
+            fatal(HarnessError::Protocol(
+                "no free localhost port for opencode serve".into(),
+            ))
         })?;
         let password = uuid::Uuid::new_v4().to_string();
+        let preferred = version.map(|v| {
+            if v.major >= 2 {
+                Protocol::V2
+            } else {
+                Protocol::V1
+            }
+        });
         let mut cmd = Command::new(exe);
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
             .arg("--hostname")
-            .arg("127.0.0.1")
-            // 2.x prefers OPENCODE_PASSWORD over the legacy name; a user's
-            // own value would otherwise lock us out of our server (401).
-            .env("OPENCODE_PASSWORD", &password)
-            .env("OPENCODE_SERVER_PASSWORD", &password)
-            .env("OPENCODE_CLIENT", "zeron");
-        if let Some(mcp) = mcp {
+            .arg("127.0.0.1");
+        crate::compose_child_path(&mut cmd, exe);
+        crate::apply_run_env(&mut cmd, run_env);
+        let restricted = !access.is_full_access();
+        if mcp.is_some() || restricted {
             // The config shape differs by generation. If even the cold probe
-            // can't tell, run without the Zeron MCP server rather than fail.
-            match opencode_version(exe).await {
-                Some(version) => {
-                    let protocol = if version.major >= 2 {
-                        Protocol::V2
-                    } else {
-                        Protocol::V1
-                    };
-                    cmd.env(
-                        "OPENCODE_CONFIG_CONTENT",
-                        mcp_config(
-                            std::env::var("OPENCODE_CONFIG_CONTENT").ok().as_deref(),
-                            mcp,
-                            protocol,
-                        )?,
-                    );
+            // can't tell, run without the Zeron MCP server rather than fail,
+            // but never without the rules a restricted mode relies on: the
+            // run would do unasked what the person chose to approve.
+            match preferred {
+                Some(protocol) => {
+                    // Set after the run env, merging into its inline config
+                    // (the user's layer for this run) rather than replacing it.
+                    let mut inline = run_env
+                        .get("OPENCODE_CONFIG_CONTENT")
+                        .cloned()
+                        .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+                    if let Some(mcp) = mcp {
+                        inline = Some(mcp_config(inline.as_deref(), mcp, protocol).map_err(fatal)?);
+                    }
+                    if restricted {
+                        inline = Some(
+                            access_config(inline.as_deref(), access, protocol).map_err(fatal)?,
+                        );
+                    }
+                    if let Some(inline) = inline {
+                        cmd.env("OPENCODE_CONFIG_CONTENT", inline);
+                    }
+                }
+                None if restricted => {
+                    return Err(fatal(HarnessError::Protocol(format!(
+                        "Could not tell which opencode version is installed, so {} cannot \
+                         be applied; choose Full access or check the opencode install",
+                        access.label()
+                    ))));
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
@@ -655,29 +949,71 @@ impl Server {
                 ),
             }
         }
-        crate::compose_child_path(&mut cmd, exe);
-        if let Some(cwd) = cwd {
-            cmd.current_dir(cwd);
+        // Ours win over anything inherited: 2.x prefers OPENCODE_PASSWORD
+        // over the legacy name, and a user's own value (or username) would
+        // otherwise lock us out of our own server (401).
+        cmd.env("OPENCODE_PASSWORD", &password)
+            .env("OPENCODE_SERVER_PASSWORD", &password)
+            .env("OPENCODE_SERVER_USERNAME", "opencode")
+            .env("OPENCODE_CLIENT", "zeron");
+        // Probes have no project: run them from home, where the global
+        // config lives, never the engine's own working directory (which for
+        // a GUI or service launch can be System32 or the install folder).
+        match cwd {
+            Some(cwd) => {
+                cmd.current_dir(cwd);
+            }
+            None => {
+                if let Some(home) = crate::executable::home_dir().filter(|h| h.is_dir()) {
+                    cmd.current_dir(home);
+                }
+            }
         }
         cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(crate::executable::binary_hint(exe))
-            } else {
-                HarnessError::Io(e)
-            }
+            let cwd = cwd.map(std::path::Path::new);
+            fatal(crate::executable::spawn_error(e, cwd, || {
+                crate::executable::binary_hint(exe)
+            }))
         })?;
         let stderr_tail = crate::StderrTail::default();
+        // Matched per line: the tail keeps only the last few, and Node prints
+        // the EADDRINUSE message above a stack trace that scrolls it out.
+        let transient = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
+            let transient = transient.clone();
             tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
+                let mut migration = MigrationRace::default();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::opencode", "stderr: {line}");
+                    if migration.feed(&line)
+                        || is_database_locked(&line)
+                        || is_address_in_use(&line)
+                    {
+                        transient.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     tail.push(&line);
+                }
+                tail.close();
+            });
+        }
+        // stdout announces the bound port; it is drained for the process's
+        // whole life, since a full pipe would block the server's next write.
+        let listening = Arc::new(tokio::sync::Notify::new());
+        if let Some(stdout) = child.stdout.take() {
+            let listening = listening.clone();
+            tokio::spawn(async move {
+                let mut lines = crate::lossy_lines::lossy_lines(stdout);
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "zeron_harness::opencode", "stdout: {line}");
+                    if line.to_ascii_lowercase().contains("server listening on") {
+                        listening.notify_one();
+                    }
                 }
             });
         }
@@ -695,6 +1031,7 @@ impl Server {
             stderr_tail,
             protocol: tokio::sync::OnceCell::new(),
             version: tokio::sync::OnceCell::new(),
+            _port: Some(crate::agent_ports::reserve(port)),
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -705,17 +1042,23 @@ impl Server {
             if let Some(child) = server.child.as_mut()
                 && let Ok(Some(status)) = child.try_wait()
             {
-                return Err(HarnessError::Protocol(crate::crash_message(
+                server.stderr_tail.wait_closed().await;
+                let error = HarnessError::Protocol(crate::crash_message(
                     "opencode serve",
                     Some(status),
                     &server.stderr_tail,
-                )));
+                ));
+                return Err(if transient.load(std::sync::atomic::Ordering::Acquire) {
+                    SpawnFailure::Retryable(error)
+                } else {
+                    fatal(error)
+                });
             }
-            let detected = match Protocol::detect(&server).await {
+            let detected = match Protocol::detect_preferring(&server, preferred).await {
                 Ok(detected) => detected,
                 Err(error) => {
                     server.shutdown(Duration::from_secs(1)).await;
-                    return Err(error);
+                    return Err(fatal(error));
                 }
             };
             if let Some(protocol) = detected {
@@ -728,14 +1071,21 @@ impl Server {
             }
             if tokio::time::Instant::now() >= deadline {
                 server.shutdown(Duration::from_secs(1)).await;
-                return Err(HarnessError::Protocol(format!(
-                    "opencode serve did not become healthy within {}s (raise {} if this \
-                     machine's plugin load is genuinely slow)",
+                let version = version.map_or_else(|| "unknown".to_owned(), |v| v.to_string());
+                return Err(fatal(HarnessError::Protocol(format!(
+                    "opencode serve (version {version}) did not become healthy within {}s. \
+                     If this opencode is older than {TESTED_SINCE}, update it; otherwise \
+                     raise {} if this machine's plugin load is genuinely slow",
                     startup.as_secs(),
                     STARTUP_TIMEOUT_ENV,
-                )));
+                ))));
             }
-            tokio::time::sleep(HEALTH_POLL).await;
+            // The listening line means the port is bound: probe right away
+            // rather than finishing the poll interval.
+            tokio::select! {
+                _ = tokio::time::sleep(HEALTH_POLL) => {}
+                _ = listening.notified() => {}
+            }
         }
         Ok(server)
     }
@@ -970,6 +1320,135 @@ impl Server {
             .await
             .map(|_| ())
     }
+
+    /// The same server for a detached task (no process ownership).
+    fn handle(&self) -> Server {
+        Server {
+            child: None,
+            base: self.base.clone(),
+            auth: self.auth.clone(),
+            client: self.client.clone(),
+            stderr_tail: crate::StderrTail::default(),
+            protocol: self.protocol.clone(),
+            version: self.version.clone(),
+            _port: None,
+        }
+    }
+
+    /// The process exit, once our own server has died.
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.as_mut()?.try_wait().ok().flatten()
+    }
+
+    /// Did a prompt whose POST went unanswered reach the session anyway?
+    /// Running means it did; so does its message existing under the id we
+    /// minted (both wires store the prompt under it).
+    async fn prompt_landed(&self, session_id: &str, message_id: &str, dir: Option<&str>) -> bool {
+        let bound = Duration::from_secs(5);
+        if let Ok(Ok(true)) =
+            tokio::time::timeout(bound, self.session_running(session_id, dir)).await
+        {
+            return true;
+        }
+        let path = match self.protocol().await {
+            Protocol::V1 => format!("/session/{session_id}/message/{message_id}"),
+            Protocol::V2 => format!("/api/session/{session_id}/message/{message_id}"),
+        };
+        match tokio::time::timeout(bound, self.get_json(&path, dir)).await {
+            Ok(Ok(message)) => [
+                message.pointer("/info/id"),
+                message.pointer("/data/id"),
+                message.get("id"),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|id| id.as_str() == Some(message_id)),
+            _ => false,
+        }
+    }
+
+    /// Requests still waiting on an answer, as bus payloads. The bus never
+    /// replays, so a `permission.asked` or question emitted while it was
+    /// reconnecting exists only here; unanswered, it blocks the turn for
+    /// good. 1.x lists every pending request of the directory; 2.x lists
+    /// them per session (forms from 2.0.11). Ownership is checked where the
+    /// payloads are handled, like live ones. Best effort: a failed list adds
+    /// nothing.
+    async fn pending_requests(&self, sessions: &[String], dir: Option<&str>) -> Vec<Value> {
+        let mut payloads = Vec::new();
+        let listed = |path: String| async move {
+            match self.get_json(&path, dir).await {
+                Ok(list) => unwrap_data(list).as_array().cloned().unwrap_or_default(),
+                Err(e) => {
+                    tracing::debug!(
+                        target: "zeron_harness::opencode",
+                        "pending request sweep: {e}"
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let asked = |kind: &str, properties: Value| json!({"type": kind, "properties": properties});
+        match self.protocol().await {
+            Protocol::V1 => {
+                for request in listed("/permission".into()).await {
+                    payloads.push(asked("permission.asked", request));
+                }
+                for request in listed("/question".into()).await {
+                    payloads.push(asked("question.asked", request));
+                }
+            }
+            Protocol::V2 => {
+                for session in sessions {
+                    for request in listed(format!("/api/session/{session}/permission")).await {
+                        payloads.push(asked("permission.asked", request));
+                    }
+                    for form in listed(format!("/api/session/{session}/form")).await {
+                        payloads.extend(v2_question_form_payload(&form));
+                    }
+                }
+            }
+        }
+        payloads
+    }
+
+    /// Abort `known` subagent sessions after their root was stopped. Only
+    /// foreground subagents end with their parent; a background one keeps
+    /// running (and spending) on a server a stopped turn leaves up. 1.x also
+    /// lists the root's children, covering any whose creation the bus
+    /// missed. Bounded; failures (an already-idle or vanished child) are
+    /// ignored.
+    async fn abort_children(&self, root: &str, mut known: Vec<String>, dir: Option<&str>) {
+        let work = async {
+            if self.protocol().await == Protocol::V1
+                && let Ok(listed) = self
+                    .get_json(&format!("/session/{root}/children"), dir)
+                    .await
+            {
+                known.extend(
+                    listed
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|child| child.get("id").and_then(Value::as_str))
+                        .map(str::to_owned),
+                );
+            }
+            known.sort();
+            known.dedup();
+            futures::future::join_all(known.iter().map(|child| self.abort_session(child, dir)))
+                .await;
+        };
+        if tokio::time::timeout(CHILD_ABORT_BUDGET, work)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "zeron_harness::opencode",
+                "aborting subagent sessions timed out"
+            );
+        }
+    }
 }
 
 fn http_client() -> reqwest::Client {
@@ -985,8 +1464,16 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// The official SDK sends `x-opencode-directory` percent-encoded.
+/// The official SDK sends `x-opencode-directory` percent-encoded. Both
+/// generations decode it with `decodeURIComponent`, so a Windows path
+/// (`C%3A%5CUsers%5C…`) arrives byte-identical to what the SDK's
+/// `encodeURIComponent` produces; `/` is left as is, which decodes the same.
 fn encode_directory(dir: &str) -> String {
+    percent_encode_path(dir)
+}
+
+/// Percent-encode every byte outside the unreserved set, keeping `/`.
+fn percent_encode_path(dir: &str) -> String {
     let mut out = String::with_capacity(dir.len());
     for b in dir.bytes() {
         match b {
@@ -1329,6 +1816,7 @@ struct Session {
     request: RunRequest,
     interrupt_grace: Duration,
     kill_grace: Duration,
+    bus_timeouts: BusTimeouts,
     known_commands: Option<Vec<SlashCommand>>,
     /// True only when the composer supplied a canonical leading command or
     /// provider-backed skill. Raw slash text deliberately stays false.
@@ -1360,10 +1848,13 @@ enum BusMsg {
     /// re-syncs from `GET /session/status`.
     Connected,
     Event(Value),
-    CommandFailed(String),
     /// The stream is gone past the reconnect budget (or the reader saw the
     /// consumer close).
     Disconnected,
+    /// The server is up but no longer serving: the bus went silent and the
+    /// server failed its health check, or no frame came within the wedge
+    /// budget. Carries the run's error.
+    Unresponsive(String),
 }
 
 /// Per-part streaming state (dedup between full-part snapshots and deltas).
@@ -1424,6 +1915,11 @@ struct TurnState {
     aborted_for_retry: bool,
     /// Deadline for the first session-scoped event after the prompt.
     stall_deadline: Option<tokio::time::Instant>,
+    /// The prompt POST has not been answered yet. The stall clock waits for
+    /// it: a server slow to admit a prompt (a contended database on Windows)
+    /// has not yet had the chance to make progress, and the POST is bounded
+    /// on its own.
+    prompt_in_flight: bool,
     /// Main-session tool calls started and not yet finished.
     open_tools: std::collections::HashSet<String>,
     /// Aborted to deliver a steer immediately: its idle/interrupted frame is
@@ -1431,13 +1927,25 @@ struct TurnState {
     preempted: bool,
 }
 
-/// A detached native-command HTTP request failed. `generation` binds the
-/// response to the turn that launched it: the synchronous command endpoint
-/// can return after the event bus has already settled that turn and started a
-/// queued successor.
-struct NativeCommandFailure {
+/// What a detached turn request reports back. `generation` binds it to the
+/// turn that launched it: the synchronous command endpoint (or a slow
+/// prompt, or a reply the user took minutes to give) can answer after the
+/// event bus has already settled that turn and started a queued successor.
+struct TurnUpdate {
     generation: u64,
-    message: String,
+    signal: TurnSignal,
+}
+
+enum TurnSignal {
+    /// The server took the prompt: the stall clock starts now.
+    PromptAccepted,
+    /// The prompt never reached the server's queue.
+    PromptFailed(String),
+    /// The native command endpoint answered with an error.
+    CommandFailed(String),
+    /// A permission or question answer could not be delivered: the agent is
+    /// blocked on a reply it will never get.
+    ReplyFailed(String),
 }
 
 /// A canonical leading command or provider-backed skill was selected in the
@@ -1467,8 +1975,11 @@ fn selected_native_command(prompt: &str, harness: HarnessId) -> bool {
 }
 
 impl TurnState {
-    fn begin(stall: Option<Duration>) -> Self {
+    /// `prompt_in_flight`: [`post_prompt`] posted a prompt whose acceptance
+    /// will be reported (a native command reports only failure).
+    fn begin(stall: Option<Duration>, prompt_in_flight: bool) -> Self {
         Self {
+            prompt_in_flight,
             active: true,
             idle_ready: false,
             idle_confirmations: 0,
@@ -1499,6 +2010,7 @@ async fn run_session(session: Session) {
         request,
         interrupt_grace,
         kill_grace,
+        bus_timeouts,
         known_commands,
         initial_native_command_selected,
     } = session;
@@ -1514,11 +2026,15 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
-    let agent = request
-        .model_options
-        .get("agent")
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty());
+    let access = access(&request);
+    // Plan mode as of the live prompt: 1.x names the plan agent on each
+    // prompt, 2.x holds it on the session (and keeps it there across runs).
+    let mut plan = request.plan;
+    let agent = if plan {
+        Some(PLAN_AGENT)
+    } else {
+        chosen_agent(&request)
+    };
 
     // ---- session create/resume -------------------------------------------
     let setup = async {
@@ -1532,6 +2048,12 @@ async fn run_session(session: Session) {
                             .and_then(Value::as_str)
                             .unwrap_or(resume)
                             .to_owned();
+                        // A session a plan-mode run left on the plan agent
+                        // goes back to the default one.
+                        let agent = agent.or_else(|| {
+                            (info.get("agent").and_then(Value::as_str) == Some(PLAN_AGENT))
+                                .then_some(DEFAULT_AGENT)
+                        });
                         if server.protocol().await == Protocol::V2
                             && let Some(agent) = agent
                         {
@@ -1670,6 +2192,7 @@ async fn run_session(session: Session) {
         server.auth.clone(),
         server.protocol().await,
         bus_tx.clone(),
+        bus_timeouts,
     ));
 
     // ---- first prompt -----------------------------------------------------
@@ -1694,48 +2217,60 @@ async fn run_session(session: Session) {
         );
     }
     let stall = stall_bound();
-    let (command_failure_tx, mut command_failure_rx) = mpsc::unbounded_channel();
+    let (updates_tx, mut updates_rx) = mpsc::unbounded_channel::<TurnUpdate>();
     let mut turn_generation = 0_u64;
-    if let Err(e) = post_prompt(
+    // The live prompt's delivery: a stop or interrupt cancels it, so a
+    // retry can never post the stopped prompt again.
+    let mut delivery = tokio_util::sync::CancellationToken::new();
+    let first_post = post_prompt(
         &server,
-        &bus_tx,
         &session_id,
         dir,
         &commands,
         &request.prompt,
         initial_native_command_selected,
         turn_generation,
-        &command_failure_tx,
+        &updates_tx,
+        &delivery,
         TurnSpec {
             model: model.as_ref(),
             variant: variant.as_deref(),
+            plan,
             attachments: &request.attachments,
         },
     )
-    .await
-    {
-        let _ = send(
-            &event_tx,
-            AgentEvent::Error {
-                message: e.to_string(),
-            },
-        )
-        .await;
-        let _ = send(
-            &event_tx,
-            AgentEvent::Done {
-                status: DoneStatus::Errored,
-                result: None,
-                error: Some(e.to_string()),
-                session_id: Some(session_id.clone()),
-            },
-        )
-        .await;
-        bus_handle.abort();
-        server.shutdown(kill_grace).await;
-        return;
-    }
-    let mut turn = TurnState::begin(stall);
+    .await;
+    let awaiting_ack = match first_post {
+        Ok(awaiting_ack) => awaiting_ack,
+        Err(e) => {
+            let _ = send(
+                &event_tx,
+                AgentEvent::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await;
+            let _ = send(
+                &event_tx,
+                AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some(e.to_string()),
+                    session_id: Some(session_id.clone()),
+                },
+            )
+            .await;
+            bus_handle.abort();
+            server.shutdown(kill_grace).await;
+            return;
+        }
+    };
+    let mut turn = TurnState::begin(stall, awaiting_ack);
+    let mut server_poll = tokio::time::interval(SERVER_POLL);
+    server_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Permission and question ids already handled: a reconnect's sweep
+    // re-lists requests the live bus may also have delivered.
+    let mut seen_requests: std::collections::HashSet<String> = Default::default();
 
     // ---- main loop --------------------------------------------------------
     let mut main_feed = SessionFeed::default();
@@ -1829,25 +2364,27 @@ async fn run_session(session: Session) {
                 }
                 let steer = texts.join("\n\n");
                 let adopted = match config {
-                    Some(next) => adopt_config(&server, &session_id, dir, &next)
+                    Some(next) => adopt_config(&server, &session_id, dir, &next, &mut plan)
                         .await
                         .map(|selection| (model, variant) = selection),
                     None => Ok(()),
                 };
+                delivery = tokio_util::sync::CancellationToken::new();
                 let sent = match adopted {
                     Ok(()) => post_prompt(
                         &server,
-                        &bus_tx,
                         &session_id,
                         dir,
                         &commands,
                         &steer,
                         native_command_selected,
                         turn_generation,
-                        &command_failure_tx,
+                        &updates_tx,
+                        &delivery,
                         TurnSpec {
                             model: model.as_ref(),
                             variant: variant.as_deref(),
+                            plan,
                             attachments: &attachments,
                         },
                     )
@@ -1855,8 +2392,8 @@ async fn run_session(session: Session) {
                     Err(e) => Err(e),
                 };
                 match sent {
-                    Ok(()) => {
-                        turn = TurnState::begin(stall);
+                    Ok(awaiting_ack) => {
+                        turn = TurnState::begin(stall, awaiting_ack);
                         continue $label;
                     }
                     Err(e) => {
@@ -1928,13 +2465,116 @@ async fn run_session(session: Session) {
         }};
     }
 
+    // The server is gone: it exited (`Some` status), or its bus could not be
+    // revived. Settle everything still open — the turn as errored unless it
+    // was being interrupted or stopped — and end the run, so the next
+    // message starts a fresh server rather than failing against a dead
+    // port. Between turns the Done still carries the crash message, never a
+    // later transport error.
+    macro_rules! settle_lost_server {
+        ($label:lifetime, message: $message:expr) => {{
+            let message: String = $message;
+            if turn.active {
+                let _ = send(
+                    &event_tx,
+                    AgentEvent::Error {
+                        message: message.clone(),
+                    },
+                )
+                .await;
+            }
+            settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
+            let halted = interrupt_requested || stopping;
+            let _ = send(
+                &event_tx,
+                AgentEvent::Done {
+                    status: if halted {
+                        DoneStatus::Interrupted
+                    } else {
+                        DoneStatus::Errored
+                    },
+                    result: None,
+                    error: (!halted).then_some(message),
+                    session_id: Some(session_id.clone()),
+                },
+            )
+            .await;
+            done_sent = true;
+            break $label;
+        }};
+        ($label:lifetime, $status:expr) => {{
+            let message = crate::crash_message("opencode serve", $status, &server.stderr_tail);
+            settle_lost_server!($label, message: message)
+        }};
+    }
+
+    // Route one bus payload through the turn engine and act on the outcome.
+    macro_rules! dispatch_bus_event {
+        ($label:lifetime, $event:expr) => {{
+            let event: Value = $event;
+            let outcome = handle_bus_event(BusCtx {
+                event: &event,
+                session_id: &session_id,
+                server: &server,
+                dir,
+                event_tx: &event_tx,
+                request_input: &request_input,
+                main_feed: &mut main_feed,
+                children: &mut children,
+                pending_spawns: &mut pending_spawns,
+                unbound_children: &mut unbound_children,
+                turn: &mut turn,
+                pending_usage: &mut pending_usage,
+                context_windows: &context_windows,
+                seen_requests: &mut seen_requests,
+                generation: turn_generation,
+                updates_tx: &updates_tx,
+                access,
+            })
+            .await;
+            match outcome {
+                BusOutcome::Continue => maybe_preempt!(),
+                BusOutcome::ConsumerGone => break $label,
+                BusOutcome::TurnIdle => settle_idle!($label),
+                // Our own steer preempt: a steer boundary.
+                BusOutcome::TurnInterrupted
+                    if turn.preempted && !interrupt_requested && !stopping =>
+                {
+                    settle_idle!($label)
+                }
+                BusOutcome::TurnInterrupted => {
+                    interrupt_requested = true;
+                    settle_idle!($label);
+                }
+            }
+        }};
+    }
+
+    // After the root is aborted (stop or interrupt), its subagent sessions
+    // go too; detached, so the turn settles on the root's own idle.
+    macro_rules! abort_children {
+        () => {{
+            let known: Vec<String> = children
+                .keys()
+                .chain(unbound_children.keys())
+                .cloned()
+                .collect();
+            let handle = server.handle();
+            let root = session_id.clone();
+            let dir = directory.clone();
+            tokio::spawn(async move {
+                handle.abort_children(&root, known, dir.as_deref()).await;
+            });
+        }};
+    }
+
     'main: loop {
         // The stall watchdog only arms while a turn awaits its first sign of
         // life; a running tool's silence never trips it (events already
         // proved the turn alive and disarmed it). Computed by value each
         // iteration so the future doesn't hold a borrow of `turn`.
         let deadline = abort_deadline.or_else(|| {
-            (turn.active && !turn.saw_activity)
+            (turn.active && !turn.saw_activity && !turn.prompt_in_flight)
                 .then_some(turn.stall_deadline)
                 .flatten()
         });
@@ -1957,6 +2597,7 @@ async fn run_session(session: Session) {
                 queued_steers.clear();
                 if turn.active && !stopping {
                     stopping = true;
+                    delivery.cancel();
                     turn.idle_ready = true;
                     let abort = tokio::time::timeout(
                         Duration::from_secs(5),
@@ -1965,6 +2606,7 @@ async fn run_session(session: Session) {
                     .await;
                     if matches!(abort, Ok(Ok(_))) {
                         abort_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
+                        abort_children!();
                     } else {
                         // The turn may still be running: this session must
                         // never take a prompt on top of it.
@@ -1990,6 +2632,7 @@ async fn run_session(session: Session) {
 
             _ = interrupt.cancelled(), if !interrupt_requested => {
                 interrupt_requested = true;
+                delivery.cancel();
                 if turn.active {
                     turn.idle_ready = true;
                     let abort = tokio::time::timeout(
@@ -2014,6 +2657,7 @@ async fn run_session(session: Session) {
                     // live runner) — the settle path below finishes up. The
                     // grace guards a server that never delivers it.
                     abort_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
+                    abort_children!();
                 } else {
                     let _ = send(&event_tx, AgentEvent::Done {
                         status: DoneStatus::Interrupted,
@@ -2026,21 +2670,57 @@ async fn run_session(session: Session) {
                 }
             }
 
-            failure = command_failure_rx.recv() => {
-                let Some(failure) = failure else { continue 'main; };
-                if failure.generation != turn_generation || !turn.active || interrupt_requested || stopping {
+            update = updates_rx.recv() => {
+                let Some(update) = update else { continue 'main; };
+                if update.generation != turn_generation || !turn.active || interrupt_requested || stopping {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
-                        failed_generation = failure.generation,
+                        update_generation = update.generation,
                         active_generation = turn_generation,
-                        "ignoring native-command HTTP failure from a retired turn"
+                        "ignoring a request outcome from a retired turn"
                     );
                     continue 'main;
                 }
+                let message = match update.signal {
+                    TurnSignal::PromptAccepted => {
+                        turn.prompt_in_flight = false;
+                        if !turn.saw_activity {
+                            turn.stall_deadline = stall.map(|d| tokio::time::Instant::now() + d);
+                        }
+                        continue 'main;
+                    }
+                    // Its POST failed, but the bus already shows the turn
+                    // running: the server took the prompt after all.
+                    TurnSignal::PromptFailed(message) if turn.idle_ready => {
+                        tracing::warn!(
+                            target: "zeron_harness::opencode",
+                            "prompt POST failed but the turn is running: {message}"
+                        );
+                        turn.prompt_in_flight = false;
+                        continue 'main;
+                    }
+                    TurnSignal::PromptFailed(message) | TurnSignal::CommandFailed(message) => message,
+                    TurnSignal::ReplyFailed(message) => {
+                        // Whatever waits on the reply would never resume.
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            server.abort_session(&session_id, dir),
+                        )
+                        .await;
+                        message
+                    }
+                };
+                // A request that failed because the server died reports the
+                // crash, not the transport error it caused.
+                if let Some(status) = server.exited() {
+                    server.stderr_tail.wait_closed().await;
+                    settle_lost_server!('main, Some(status));
+                }
+                settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(
                     &event_tx,
                     AgentEvent::Error {
-                        message: failure.message.clone(),
+                        message: message.clone(),
                     },
                 )
                 .await;
@@ -2049,7 +2729,7 @@ async fn run_session(session: Session) {
                     AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(failure.message),
+                        error: Some(message),
                         session_id: Some(session_id.clone()),
                     },
                 )
@@ -2076,6 +2756,12 @@ async fn run_session(session: Session) {
                             });
                             maybe_preempt!();
                         } else {
+                            // A server that died since the last turn reports
+                            // its crash, not this prompt's refused connect.
+                            if let Some(status) = server.exited() {
+                                server.stderr_tail.wait_closed().await;
+                                settle_lost_server!('main, Some(status));
+                            }
                             turn_generation = turn_generation.wrapping_add(1);
                             // Between turns: the engine routes the next message
                             // of a parked session here — images included.
@@ -2085,25 +2771,29 @@ async fn run_session(session: Session) {
                                 next_assistant_message_id: Some(next),
                             }).await;
                             let adopted = match &steer.config {
-                                Some(next) => adopt_config(&server, &session_id, dir, next)
-                                    .await
-                                    .map(|selection| (model, variant) = selection),
+                                Some(next) => {
+                                    adopt_config(&server, &session_id, dir, next, &mut plan)
+                                        .await
+                                        .map(|selection| (model, variant) = selection)
+                                }
                                 None => Ok(()),
                             };
+                            delivery = tokio_util::sync::CancellationToken::new();
                             let sent = match adopted {
                                 Ok(()) => post_prompt(
                                     &server,
-                                    &bus_tx,
                                     &session_id,
                                     dir,
                                     &commands,
                                     &prompt,
                                     native_command_selected,
                                     turn_generation,
-                                    &command_failure_tx,
+                                    &updates_tx,
+                                    &delivery,
                                     TurnSpec {
                                         model: model.as_ref(),
                                         variant: variant.as_deref(),
+                                        plan,
                                         attachments: &steer.attachments,
                                     },
                                 )
@@ -2111,7 +2801,7 @@ async fn run_session(session: Session) {
                                 Err(e) => Err(e),
                             };
                             match sent {
-                                Ok(()) => turn = TurnState::begin(stall),
+                                Ok(awaiting_ack) => turn = TurnState::begin(stall, awaiting_ack),
                                 Err(error) => {
                                     let message = error.to_string();
                                     let _ = send(
@@ -2172,7 +2862,11 @@ async fn run_session(session: Session) {
                     stall.unwrap_or(DEFAULT_STALL_BOUND).as_secs()
                 );
                 let _ = send(&event_tx, AgentEvent::Error { message: message.clone() }).await;
-                let _ = server.abort_session(&session_id, dir).await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    server.abort_session(&session_id, dir),
+                )
+                .await;
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
                     status: DoneStatus::Errored,
@@ -2198,22 +2892,32 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
-                    BusMsg::CommandFailed(_) if interrupt_requested || stopping => {}
-                    BusMsg::CommandFailed(message) => {
-                        let _ = send(&event_tx, AgentEvent::Done {
-                            status: DoneStatus::Errored, result: None,
-                            error: Some(message), session_id: Some(session_id.clone()),
-                        }).await;
-                        done_sent = true;
-                        break 'main;
-                    }
                     BusMsg::Connected => {
-                        // A RECONNECT mid-turn may have swallowed our idle
-                        // (no replay): re-sync from the server's own status
-                        // surface — not running means idle. Can't tell:
-                        // leave the turn running; the next disconnect or
-                        // event decides.
+                        // A RECONNECT may have swallowed frames (no replay).
+                        // Requests asked in the gap are re-listed and handled
+                        // like live ones (the agent waits on them), then the
+                        // turn re-syncs from the server's own status surface
+                        // — not running means idle. Can't tell: leave the
+                        // turn running; the next disconnect or event decides.
+                        if !interrupt_requested && !stopping {
+                            let sessions: Vec<String> = std::iter::once(session_id.clone())
+                                .chain(children.keys().cloned())
+                                .chain(unbound_children.keys().cloned())
+                                .collect();
+                            let pending = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                server.pending_requests(&sessions, dir),
+                            )
+                            .await
+                            .unwrap_or_default();
+                            for event in pending {
+                                dispatch_bus_event!('main, event);
+                            }
+                        }
+                        // A prompt the server has not answered yet may simply
+                        // not be queued yet: not running proves nothing.
                         if turn.active
+                            && !turn.prompt_in_flight
                             && !server
                                 .session_running(&session_id, dir)
                                 .await
@@ -2223,31 +2927,21 @@ async fn run_session(session: Session) {
                         }
                     }
                     BusMsg::Disconnected => {
-                        let crashed = match server.child.as_mut() {
-                            Some(child) => child.try_wait().ok().flatten(),
-                            None => None,
-                        };
-                        let message = crate::crash_message(
-                            "opencode serve",
-                            crashed,
-                            &server.stderr_tail,
-                        );
-                        if turn.active {
-                            let _ = send(&event_tx, AgentEvent::Error { message: message.clone() }).await;
+                        let crashed = server.exited();
+                        if crashed.is_some() {
+                            server.stderr_tail.wait_closed().await;
                         }
-                        settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
-                        let _ = send(&event_tx, AgentEvent::Done {
-                            status: if interrupt_requested {
-                                DoneStatus::Interrupted
-                            } else {
-                                DoneStatus::Errored
-                            },
-                            result: None,
-                            error: (!interrupt_requested).then_some(message),
-                            session_id: Some(session_id.clone()),
-                        }).await;
-                        done_sent = true;
-                        break 'main;
+                        settle_lost_server!('main, crashed);
+                    }
+                    BusMsg::Unresponsive(message) => {
+                        // A server that died meanwhile reports its crash.
+                        if let Some(status) = server.exited() {
+                            server.stderr_tail.wait_closed().await;
+                            settle_lost_server!('main, Some(status));
+                        }
+                        tracing::warn!(target: "zeron_harness::opencode", "{message}");
+                        // Ending the run tears the server down.
+                        settle_lost_server!('main, message: message);
                     }
                     BusMsg::Event(event) => {
                         if interrupt_requested || stopping {
@@ -2265,42 +2959,24 @@ async fn run_session(session: Session) {
                             if ours && idle { settle_idle!('main); }
                             continue;
                         }
-                        let outcome = handle_bus_event(BusCtx {
-                            event: &event,
-                            session_id: &session_id,
-                            server: &server,
-                            dir,
-                            event_tx: &event_tx,
-                            request_input: &request_input,
-                            main_feed: &mut main_feed,
-                            children: &mut children,
-                            pending_spawns: &mut pending_spawns,
-                            unbound_children: &mut unbound_children,
-                            turn: &mut turn,
-                            pending_usage: &mut pending_usage,
-                            context_windows: &context_windows,
-                        }).await;
-                        match outcome {
-                            BusOutcome::Continue => maybe_preempt!(),
-                            BusOutcome::ConsumerGone => break 'main,
-                            BusOutcome::TurnIdle => settle_idle!('main),
-                            // Our own steer preempt: a steer boundary.
-                            BusOutcome::TurnInterrupted
-                                if turn.preempted && !interrupt_requested && !stopping =>
-                            {
-                                settle_idle!('main)
-                            }
-                            BusOutcome::TurnInterrupted => {
-                                interrupt_requested = true;
-                                settle_idle!('main);
-                            }
-                        }
+                        dispatch_bus_event!('main, event);
                     }
+                }
+            }
+
+            // Last, so frames the server wrote before dying are handled
+            // before its crash ends the run.
+            _ = server_poll.tick(), if server.child.is_some() => {
+                if let Some(status) = server.exited() {
+                    server.stderr_tail.wait_closed().await;
+                    settle_lost_server!('main, Some(status));
                 }
             }
         }
     }
 
+    // A run that ended mid-delivery never posts its prompt again.
+    delivery.cancel();
     if stop_teardown {
         // Close the mailbox before the stop reads settled: the next prompt
         // must start a fresh runtime, never land in this one.
@@ -2448,25 +3124,54 @@ fn model_selection(
     (model, variant)
 }
 
-/// Adopt `next`'s model and effort for the prompts that follow: 1.x carries
-/// them on each prompt, 2.x sets them on the session first. The catalog is
-/// fetched again here rather than held for the session's life.
+/// Adopt `next`'s model, effort and plan mode for the prompts that follow:
+/// 1.x carries them on each prompt, 2.x sets them on the session first —
+/// leaving plan mode for the agent `next` chose, else the default one. The
+/// catalog is fetched again here rather than held for the session's life.
 async fn adopt_config(
     server: &Server,
     session_id: &str,
     dir: Option<&str>,
     next: &RunRequest,
+    plan: &mut bool,
 ) -> Result<(Option<(String, String)>, Option<String>), HarnessError> {
     let providers = server.provider_catalog(dir).await.unwrap_or_default();
     let (model, variant) = model_selection(&providers, next);
-    if server.protocol().await == Protocol::V2
-        && let Some((provider, model_id)) = &model
-    {
+    let v2 = server.protocol().await == Protocol::V2;
+    if v2 && let Some((provider, model_id)) = &model {
         server
             .set_model(session_id, provider, model_id, variant.as_deref(), dir)
             .await?;
     }
+    if v2 && next.plan != *plan {
+        let agent = if next.plan {
+            PLAN_AGENT
+        } else {
+            chosen_agent(next).unwrap_or(DEFAULT_AGENT)
+        };
+        server
+            .post_json(
+                &format!("/api/session/{session_id}/agent"),
+                dir,
+                &json!({ "agent": agent }),
+            )
+            .await?;
+    }
+    *plan = next.plan;
     Ok((model, variant))
+}
+
+/// opencode's read-only planning agent, and the agent it hands back to.
+const PLAN_AGENT: &str = "plan";
+const DEFAULT_AGENT: &str = "build";
+
+/// The agent picked in the model's Agent option (2.x), if any.
+fn chosen_agent(request: &RunRequest) -> Option<&str> {
+    request
+        .model_options
+        .get("agent")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
 }
 
 fn pick_variant(
@@ -2501,20 +3206,21 @@ fn prompt_body(
     model: Option<(&str, &str)>,
     variant: Option<&str>,
     attachments: &[String],
+    message_id: Option<&str>,
 ) -> Value {
     let mut parts = vec![json!({ "type": "text", "text": prompt })];
     for path in attachments {
         parts.push(json!({
             "type": "file",
             "mime": mime_for(path),
-            "filename": std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            "url": format!("file://{path}"),
+            "filename": attachment_name(path),
+            "url": file_url(path),
         }));
     }
     let mut body = serde_json::Map::new();
+    if let Some(id) = message_id {
+        body.insert("messageID".into(), json!(id));
+    }
     body.insert("parts".into(), Value::Array(parts));
     if let Some((provider, model)) = model {
         body.insert(
@@ -2531,20 +3237,52 @@ fn prompt_body(
 /// 2.x prompt body: plain text plus `{uri, name}` file attachments. Model
 /// and variant do NOT ride here — they were set on the session at run
 /// start (`POST /api/session/{id}/model`).
-fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
+fn prompt_body_v2(prompt: &str, attachments: &[String], message_id: Option<&str>) -> Value {
     let files: Vec<Value> = attachments
         .iter()
-        .map(|path| {
-            json!({
-                "uri": format!("file://{path}"),
-                "name": std::path::Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            })
-        })
+        .map(|path| json!({ "uri": file_url(path), "name": attachment_name(path) }))
         .collect();
-    json!({ "text": prompt, "files": files })
+    let mut body = json!({ "text": prompt, "files": files });
+    if let Some(id) = message_id {
+        body["id"] = json!(id);
+    }
+    body
+}
+
+fn attachment_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `path` as the `file:` URL Node's `fileURLToPath` (how both wires read an
+/// attachment) maps back to the same path. Every byte outside the unreserved
+/// set is percent-encoded, so `#`, `?`, `%` and spaces survive; a Windows
+/// drive path becomes `file:///C:/…`, a UNC path `file://server/share/…`
+/// (its server is the URL's host), and verbatim `\\?\` prefixes are dropped.
+fn file_url(path: &str) -> String {
+    let unc = path.strip_prefix(r"\\?\UNC\").or_else(|| {
+        path.strip_prefix(r"\\")
+            .filter(|rest| !rest.starts_with(r"?\"))
+    });
+    if let Some(unc) = unc {
+        let unc = unc.replace('\\', "/");
+        let (host, share) = unc.split_once('/').unwrap_or((&unc, ""));
+        return format!("file://{host}/{}", percent_encode_path(share));
+    }
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes.get(2), None | Some(b'\\' | b'/'))
+    {
+        let rest = path[2..].replace('\\', "/");
+        return format!("file:///{}:{}", &path[..1], percent_encode_path(&rest));
+    }
+    let root = if path.starts_with('/') { "" } else { "/" };
+    format!("file://{root}{}", percent_encode_path(path))
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -2568,6 +3306,9 @@ fn mime_for(path: &str) -> &'static str {
 struct TurnSpec<'a> {
     model: Option<&'a (String, String)>,
     variant: Option<&'a str>,
+    /// Plan mode: 1.x names the plan agent on the prompt or command (2.x
+    /// set it on the session).
+    plan: bool,
     attachments: &'a [String],
 }
 
@@ -2583,7 +3324,7 @@ fn command_body_v2(
     {
         let mut body = json!({"name": name, "text": text});
         if !attachments.is_empty() {
-            body["files"] = prompt_body_v2(text, attachments)["files"].clone();
+            body["files"] = prompt_body_v2(text, attachments, None)["files"].clone();
         }
         body
     } else {
@@ -2597,24 +3338,33 @@ fn command_body_v2(
 /// Both are fire-and-forget for the loop: the command endpoint is
 /// synchronous on the wire, so it rides a detached task and the bus
 /// delivers the actual turn.
+///
+/// `Ok(true)`: a prompt whose acceptance (or failure) `updates` will carry;
+/// `Ok(false)`: a native command, which reports only failure. Cancelling
+/// `delivery` (the turn was stopped) ends a prompt's delivery: it is never
+/// posted again, and nothing is reported.
+#[allow(clippy::too_many_arguments)]
 async fn post_prompt(
     server: &Server,
-    bus_tx: &mpsc::Sender<BusMsg>,
     session_id: &str,
     dir: Option<&str>,
     commands: &[SlashCommand],
     prompt: &str,
     native_command_selected: bool,
     turn_generation: u64,
-    command_failure_tx: &mpsc::UnboundedSender<NativeCommandFailure>,
+    updates: &mpsc::UnboundedSender<TurnUpdate>,
+    delivery: &tokio_util::sync::CancellationToken,
     spec: TurnSpec<'_>,
-) -> Result<(), HarnessError> {
+) -> Result<bool, HarnessError> {
     let TurnSpec {
         model,
         variant,
+        plan,
         attachments,
     } = spec;
     let protocol = server.protocol().await;
+    // A prompt or command naming no agent runs the default one.
+    let agent = (plan && protocol == Protocol::V1).then_some(PLAN_AGENT);
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {
@@ -2625,7 +3375,7 @@ async fn post_prompt(
             ));
         }
         // 1.x names the args `arguments`; 2.x `text`.
-        let (path, cmd_body) = match protocol {
+        let (path, mut cmd_body) = match protocol {
             Protocol::V1 => (
                 format!("/session/{session_id}/command"),
                 json!({ "command": name, "arguments": arguments }),
@@ -2635,22 +3385,15 @@ async fn post_prompt(
                 command_body_v2(server.version.get(), name, &arguments, attachments),
             ),
         };
-        let server_base = server.base.clone();
-        let auth = server.auth.clone();
+        // A command's own configured agent still wins over this one.
+        if let Some(agent) = agent {
+            cmd_body["agent"] = json!(agent);
+        }
+        let server = server.handle();
         let dir_owned = dir.map(str::to_owned);
         let path_owned = path.clone();
-        let protocol = server.protocol.clone();
-        let command_failure_tx = command_failure_tx.clone();
+        let updates = updates.clone();
         tokio::spawn(async move {
-            let server = Server {
-                child: None,
-                base: server_base,
-                auth,
-                client: http_client(),
-                stderr_tail: crate::StderrTail::default(),
-                protocol,
-                version: tokio::sync::OnceCell::new(),
-            };
             // The command endpoint blocks for the whole turn; the bus
             // carries the real events, so this response is ignored —
             // but it must not be cut off mid-turn by CALL_TIMEOUT.
@@ -2668,15 +3411,16 @@ async fn post_prompt(
                 Err(error) => Some(format!("opencode POST {path_owned}: {error}")),
             };
             if let Some(message) = failure {
-                let _ = command_failure_tx.send(NativeCommandFailure {
+                let _ = updates.send(TurnUpdate {
                     generation: turn_generation,
-                    message,
+                    signal: TurnSignal::CommandFailed(message),
                 });
             }
         });
-        return Ok(());
+        return Ok(false);
     }
-    let (path, body) = match protocol {
+    let message_id = prompt_message_id();
+    let (path, mut body) = match protocol {
         Protocol::V1 => (
             format!("/session/{session_id}/prompt_async"),
             prompt_body(
@@ -2684,32 +3428,131 @@ async fn post_prompt(
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
+                Some(&message_id),
             ),
         ),
         Protocol::V2 => (
             format!("/api/session/{session_id}/prompt"),
-            prompt_body_v2(prompt, attachments),
+            prompt_body_v2(prompt, attachments, Some(&message_id)),
         ),
     };
-    let server = Server {
-        child: None,
-        base: server.base.clone(),
-        auth: server.auth.clone(),
-        client: server.client.clone(),
-        stderr_tail: crate::StderrTail::default(),
-        protocol: server.protocol.clone(),
-        version: tokio::sync::OnceCell::new(),
-    };
-    let bus_tx = bus_tx.clone();
+    if let Some(agent) = agent {
+        body["agent"] = json!(agent);
+    }
+    let server = server.handle();
+    let session_id = session_id.to_owned();
+    let updates = updates.clone();
     let dir = dir.map(str::to_owned);
+    let delivery = delivery.clone();
     // The bus owns turn completion. A stalled HTTP acknowledgement must not
-    // prevent cancellation or event consumption; post_json bounds the request.
+    // prevent cancellation or event consumption; each POST is bounded.
     tokio::spawn(async move {
-        if let Err(error) = server.post_json(&path, dir.as_deref(), &body).await {
-            let _ = bus_tx.send(BusMsg::CommandFailed(error.to_string())).await;
+        let delivered = deliver_prompt(
+            &server,
+            &path,
+            &body,
+            &session_id,
+            &message_id,
+            dir.as_deref(),
+            &delivery,
+        )
+        .await;
+        if delivery.is_cancelled() {
+            return;
         }
+        let signal = match delivered {
+            Ok(()) => TurnSignal::PromptAccepted,
+            Err(message) => TurnSignal::PromptFailed(message),
+        };
+        let _ = updates.send(TurnUpdate {
+            generation: turn_generation,
+            signal,
+        });
     });
-    Ok(())
+    Ok(true)
+}
+
+/// POST a prompt until the server has it. A 4xx is a definitive rejection.
+/// A timeout, a dropped connection or a 5xx is ambiguous — the server may
+/// have queued the prompt and only the answer was lost — so before posting
+/// again (and before giving up) the session is checked for it: running, or
+/// holding the message under the id we minted, and only a prompt it does
+/// not have is posted again. That check, not the server, is what keeps a
+/// repeat from being a duplicate turn: 2.x does not reject a known id, it
+/// answers 200 and updates the stored message in place (verified live,
+/// 2.1.2). A stopped turn's prompt (`cancel`) is never posted again.
+async fn deliver_prompt(
+    server: &Server,
+    path: &str,
+    body: &Value,
+    session_id: &str,
+    message_id: &str,
+    dir: Option<&str>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..PROMPT_ATTEMPTS {
+        if attempt > 0 {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err("prompt delivery cancelled".into()),
+                _ = tokio::time::sleep(PROMPT_RETRY_DELAY * attempt) => {}
+            }
+            if server.prompt_landed(session_id, message_id, dir).await {
+                return Ok(());
+            }
+            if cancel.is_cancelled() {
+                return Err("prompt delivery cancelled".into());
+            }
+        }
+        match server.post_json_raw(path, dir, body).await {
+            Ok((status, _)) if status.is_success() => return Ok(()),
+            Ok((status, text)) if status.is_client_error() => {
+                return Err(post_error_message(path, status, &text));
+            }
+            Ok((status, text)) => last_error = post_error_message(path, status, &text),
+            Err(error) => last_error = error.to_string(),
+        }
+        tracing::warn!(
+            target: "zeron_harness::opencode",
+            attempt,
+            "prompt POST failed: {last_error}"
+        );
+    }
+    if server.prompt_landed(session_id, message_id, dir).await {
+        return Ok(());
+    }
+    Err(last_error)
+}
+
+/// A message id in opencode's own ascending form: `msg_`, 12 hex digits of
+/// the millisecond clock ×4096 plus a per-millisecond counter, then 14
+/// base62 characters. Sessions order their messages by id, so ours must
+/// sort like one the server would mint at the same moment. Both wires take
+/// it on the prompt (1.x `messageID`, 2.x `id`), which makes a lost answer
+/// checkable and a retry safe ([`deliver_prompt`]).
+fn prompt_message_id() -> String {
+    static CLOCK: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
+    let counter = {
+        let mut clock = CLOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if clock.0 != now {
+            *clock = (now, 0);
+        }
+        clock.1 += 1;
+        clock.1
+    };
+    let stamp = now.wrapping_mul(0x1000).wrapping_add(counter) & 0xFFFF_FFFF_FFFF;
+    const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let random: String = uuid::Uuid::new_v4().as_bytes()[..14]
+        .iter()
+        .map(|b| BASE62[usize::from(*b) % BASE62.len()] as char)
+        .collect();
+    format!("msg_{stamp:012x}{random}")
 }
 
 /// Resolve a delivered leading slash command against the run's live,
@@ -2774,6 +3617,61 @@ struct BusCtx<'a> {
     turn: &'a mut TurnState,
     pending_usage: &'a mut Option<AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
+    /// Permission/question ids already handled (a reconnect re-lists them).
+    seen_requests: &'a mut std::collections::HashSet<String>,
+    /// The live turn, for reply failures.
+    generation: u64,
+    updates_tx: &'a mpsc::UnboundedSender<TurnUpdate>,
+    /// Which permission requests are approved without asking the person.
+    access: AccessMode,
+}
+
+/// Deliver an answer the agent is blocked on. Each round tries `routes` in
+/// order (1.x keeps a session-scoped fallback); a timeout, a transport fault
+/// or a 5xx retries with backoff. A request every route reports missing
+/// (404) is no longer pending — answered elsewhere, or gone with its turn —
+/// so that counts as delivered rather than failing the turn.
+async fn deliver_reply(
+    server: &Server,
+    routes: &[(String, Value)],
+    dir: Option<&str>,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..REPLY_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(1) * attempt).await;
+        }
+        let mut missing = 0;
+        let mut retryable = false;
+        for (path, body) in routes {
+            match tokio::time::timeout(REPLY_TIMEOUT, server.post_json_raw(path, dir, body)).await {
+                Ok(Ok((status, _))) if status.is_success() => return Ok(()),
+                Ok(Ok((status, text))) => {
+                    missing += usize::from(status == reqwest::StatusCode::NOT_FOUND);
+                    retryable |= !status.is_client_error();
+                    last_error = post_error_message(path, status, &text);
+                }
+                Ok(Err(error)) => {
+                    retryable = true;
+                    last_error = error.to_string();
+                }
+                Err(_) => {
+                    retryable = true;
+                    last_error = format!(
+                        "opencode POST {path}: no answer within {}s",
+                        REPLY_TIMEOUT.as_secs()
+                    );
+                }
+            }
+        }
+        if missing == routes.len() {
+            return Ok(());
+        }
+        if !retryable {
+            break;
+        }
+    }
+    Err(last_error)
 }
 
 /// Wrap an event as subagent-attributed traffic.
@@ -2825,6 +3723,10 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         turn,
         pending_usage,
         context_windows,
+        seen_requests,
+        generation,
+        updates_tx,
+        access,
     } = ctx;
     // Envelope styles: /global/event wraps ({payload: {...}}); a bare
     // /event feed (tests) delivers the payload directly.
@@ -2902,7 +3804,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         if !send(event_tx, AgentEvent::Error { message: msg }).await {
                             return BusOutcome::ConsumerGone;
                         }
-                        let _ = server.abort_session(session_id, dir).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            server.abort_session(session_id, dir),
+                        )
+                        .await;
                     } else if attempt >= RETRY_REPORT_ATTEMPT && !turn.retry_reported {
                         turn.retry_reported = true;
                         let msg = format!(
@@ -3140,6 +4046,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
+            if !seen_requests.insert(id.to_owned()) {
+                return BusOutcome::Continue;
+            }
             let session = session.to_owned();
             let protocol = server.protocol().await;
             // 1.x: global permission endpoint + a session-scoped fallback;
@@ -3155,10 +4064,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     None,
                 ),
             };
-            let base = server.base.clone();
-            let auth = server.auth.clone();
+            let server = server.handle();
             let dir_owned = dir.map(str::to_owned);
-            let protocol_cell = server.protocol.clone();
+            let updates_tx = updates_tx.clone();
             let reply_key = if protocol == Protocol::V2
                 && server
                     .version
@@ -3170,38 +4078,50 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             } else {
                 "reply"
             };
+            // Full access approves each owned request, as every run did
+            // before modes; what a restricted mode does not cover is put to
+            // the person, and only a yes approves. Never "always": that
+            // would write a durable permission rule. Genuine agent questions
+            // use the separate question.asked path.
+            let permission = props
+                .get("permission")
+                .or_else(|| props.get("action"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let action = if is_edit_permission(permission) {
+                crate::approval::Action::Edit
+            } else {
+                crate::approval::Action::Other
+            };
+            let ask = (!crate::approval::allowed_without_asking(access, action)).then(|| {
+                let question = permission_question(props, dir);
+                (question.clone(), (request_input)(vec![question]))
+            });
             tokio::spawn(async move {
-                let server = Server {
-                    child: None,
-                    base,
-                    auth,
-                    client: http_client(),
-                    stderr_tail: crate::StderrTail::default(),
-                    protocol: protocol_cell,
-                    version: tokio::sync::OnceCell::new(),
+                let reply = match ask {
+                    None => "once",
+                    Some((question, answers)) => {
+                        let answers = answers.await.unwrap_or_default();
+                        if crate::approval::approved(&question, &answers) {
+                            "once"
+                        } else {
+                            "reject"
+                        }
+                    }
                 };
-                // Like Claude and Codex, normal Zeron sessions run unattended,
-                // regardless of RunRequest.auto_approve. Approve each owned
-                // request without writing durable permission rules via "always".
-                // Genuine agent questions use the separate question.asked path.
-                let reply = "once";
-                if server
-                    .post_json(
-                        &reply_path,
-                        dir_owned.as_deref(),
-                        &json!({ reply_key: reply }),
-                    )
-                    .await
-                    .is_err()
-                    && let Some(fallback_path) = fallback_path
-                {
-                    let _ = server
-                        .post_json(
-                            &fallback_path,
-                            dir_owned.as_deref(),
-                            &json!({ "response": reply }),
-                        )
-                        .await;
+                let mut routes = vec![(reply_path, json!({ reply_key: reply }))];
+                if let Some(fallback_path) = fallback_path {
+                    routes.push((fallback_path, json!({ "response": reply })));
+                }
+                if let Err(error) = deliver_reply(&server, &routes, dir_owned.as_deref()).await {
+                    let _ = updates_tx.send(TurnUpdate {
+                        generation,
+                        signal: TurnSignal::ReplyFailed(format!(
+                            "Could not {} an opencode permission request, so the \
+                             agent cannot continue: {error}",
+                            if reply == "once" { "approve" } else { "refuse" }
+                        )),
+                    });
                 }
             });
             BusOutcome::Continue
@@ -3223,7 +4143,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             // Panel ids are minted per question, like Claude and Codex; the
             // paired key is what a 2.x form reply addresses.
             let pairs = map_questions(props);
-            if pairs.is_empty() {
+            if pairs.is_empty() || !seen_requests.insert(id.to_owned()) {
                 return BusOutcome::Continue;
             }
             // 2.x (2.0.24+) ships the `question` tool as a session form; its
@@ -3237,32 +4157,17 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             // no resolver knew — the QuestionPanel answered that twin and the
             // run never resumed (the same fix Claude and Codex got).
             let rx = (request_input)(pairs.iter().map(|(_, question)| question.clone()).collect());
-            let base = server.base.clone();
-            let auth = server.auth.clone();
+            let server = server.handle();
             let dir_owned = dir.map(str::to_owned);
             let request_id = id.to_owned();
-            let protocol_cell = server.protocol.clone();
+            let updates_tx = updates_tx.clone();
             tokio::spawn(async move {
-                let server = Server {
-                    child: None,
-                    base,
-                    auth,
-                    client: http_client(),
-                    stderr_tail: crate::StderrTail::default(),
-                    protocol: protocol_cell,
-                    version: tokio::sync::OnceCell::new(),
-                };
-                let reply = match rx.await {
-                    Ok(answers) if is_form => {
-                        server
-                            .post_json(
-                                &format!("/api/session/{session}/form/{request_id}/reply"),
-                                dir_owned.as_deref(),
-                                &form_answer_body(&pairs, &answers),
-                            )
-                            .await
-                    }
-                    Ok(answers) => {
+                let answer = match rx.await {
+                    Ok(answers) if is_form => Some((
+                        format!("/api/session/{session}/form/{request_id}/reply"),
+                        form_answer_body(&pairs, &answers),
+                    )),
+                    Ok(answers) if !answers.is_empty() => {
                         let ordered: Vec<Vec<String>> = pairs
                             .iter()
                             .map(|(_, q)| {
@@ -3273,35 +4178,46 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                                     .unwrap_or_default()
                             })
                             .collect();
-                        server
-                            .post_json(
-                                &format!("/question/{request_id}/reply"),
-                                dir_owned.as_deref(),
-                                &json!({ "answers": ordered }),
-                            )
-                            .await
+                        Some((
+                            format!("/question/{request_id}/reply"),
+                            json!({ "answers": ordered }),
+                        ))
                     }
                     // A dropped resolver means the run — and with it this
                     // OpenCode child — is already going away. Pending forms
                     // are instance state and die with it, so there is nothing
                     // left to cancel; only the 1.x route gets an explicit
                     // reject.
-                    Err(_) if is_form => Ok(Value::Null),
-                    Err(_) => {
-                        server
+                    Err(_) if is_form => None,
+                    // No answers (the questions were closed unanswered), or
+                    // the run went away: the 1.x route's own decline.
+                    Ok(_) | Err(_) => {
+                        if let Err(e) = server
                             .post_json(
                                 &format!("/question/{request_id}/reject"),
                                 dir_owned.as_deref(),
                                 &Value::Null,
                             )
                             .await
+                        {
+                            tracing::debug!(
+                                target: "zeron_harness::opencode",
+                                "question reject failed: {e}"
+                            );
+                        }
+                        None
                     }
                 };
-                if let Err(e) = reply {
-                    tracing::debug!(
-                        target: "zeron_harness::opencode",
-                        "question reply failed: {e}"
-                    );
+                if let Some(route) = answer
+                    && let Err(error) = deliver_reply(&server, &[route], dir_owned.as_deref()).await
+                {
+                    let _ = updates_tx.send(TurnUpdate {
+                        generation,
+                        signal: TurnSignal::ReplyFailed(format!(
+                            "Could not deliver the answer to opencode, so the agent \
+                             cannot continue: {error}"
+                        )),
+                    });
                 }
             });
             BusOutcome::Continue
@@ -3707,6 +4623,57 @@ fn part_delta_events(
             text: delta.to_owned(),
         }
     }]
+}
+
+/// The approval question for a `permission.asked` request: the command for
+/// `bash` (`metadata.command`), the file for an edit (`metadata.filepath`,
+/// shown relative to the run's directory), else the permission and its
+/// patterns (`resources` on 2.x).
+fn permission_question(props: &Value, dir: Option<&str>) -> UserInputQuestion {
+    const AGENT: &str = "OpenCode";
+    let permission = props
+        .get("permission")
+        .or_else(|| props.get("action"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let patterns: Vec<&str> = props
+        .get("patterns")
+        .or_else(|| props.get("resources"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let metadata = |key: &str| {
+        props
+            .pointer(&format!("/metadata/{key}"))
+            .and_then(Value::as_str)
+    };
+    match permission {
+        "bash" => crate::approval::command(
+            AGENT,
+            &metadata("command").map_or_else(|| patterns.join(" && "), str::to_owned),
+        ),
+        edit if is_edit_permission(edit) => match metadata("filepath") {
+            Some(path) => {
+                let relative = dir
+                    .and_then(|dir| std::path::Path::new(path).strip_prefix(dir).ok())
+                    .and_then(|relative| relative.to_str())
+                    .filter(|relative| !relative.is_empty());
+                crate::approval::edit(AGENT, &[relative.unwrap_or(path)])
+            }
+            None => crate::approval::edit(AGENT, &patterns),
+        },
+        "external_directory" => crate::approval::question(
+            "Approve access",
+            format!(
+                "{AGENT} wants to access {} outside the project. Allow it?",
+                metadata("parentDir").map_or_else(|| patterns.join(", "), str::to_owned)
+            ),
+        ),
+        "" => crate::approval::tool(AGENT, "a tool", Some(&patterns.join(", "))),
+        other => crate::approval::tool(AGENT, other, Some(&patterns.join(", "))),
+    }
 }
 
 /// `question.asked` → the input panel's questions, each paired with the key a
@@ -4350,18 +5317,35 @@ fn v2_tool_part(data: &Value, id: &str, name: &str, state: &Value) -> Value {
 /// text/event-stream` is sent — observed live, 2.0.3). Reconnects on
 /// transient drops (the server is our own child on loopback); past the
 /// budget the loop learns via [`BusMsg::Disconnected`] and errors the run —
-/// missed frames mean the transcript can no longer be trusted.
+/// missed frames mean the transcript can no longer be trusted. A server
+/// that stops serving without exiting ends it via [`BusMsg::Unresponsive`]
+/// ([`BUS_PROBE_TIMEOUT`], [`BUS_WEDGE_BUDGET`]).
 async fn bus_task(
     base: String,
     auth: Option<String>,
     protocol: Protocol,
     tx: mpsc::Sender<BusMsg>,
+    timeouts: BusTimeouts,
 ) {
+    let BusTimeouts {
+        silence,
+        probe,
+        wedged,
+    } = timeouts;
     let client = http_client();
     let url = match protocol {
         Protocol::V1 => format!("{base}/global/event"),
         Protocol::V2 => format!("{base}/api/event"),
     };
+    // 2.1.2 answers 404 on `/api/health`; `/api/info` is its live route.
+    let health = match protocol {
+        Protocol::V1 => format!("{base}/global/health"),
+        Protocol::V2 => format!("{base}/api/info"),
+    };
+    // The server just answered its startup and session calls.
+    let mut last_frame = tokio::time::Instant::now();
+    // Attempts in a row that ended in silence.
+    let mut silences: u32 = 0;
     let mut failures: u32 = 0;
     let mut v2_tool_names: HashMap<V2ToolKey, String> = HashMap::new();
     let mut v2_session_models: HashMap<String, V2ModelIdentity> = HashMap::new();
@@ -4375,13 +5359,17 @@ async fn bus_task(
         if let Some(auth) = &auth {
             req = req.header(reqwest::header::AUTHORIZATION, auth.clone());
         }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                failures = 0;
-                stream_bus(
+        // A server that accepts the connection but never answers it must
+        // not park the bus forever either.
+        let attempt = tokio::time::Instant::now();
+        match tokio::time::timeout(silence, req.send()).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {
+                let framed = stream_bus(
                     &tx,
                     resp,
                     protocol,
+                    silence,
+                    &mut last_frame,
                     &mut v2_tool_names,
                     &mut v2_session_models,
                 )
@@ -4389,11 +5377,57 @@ async fn bus_task(
                 if tx.is_closed() {
                     return;
                 }
+                // Only a stream that delivered a frame proves the server
+                // healthy: one accepted and closed (or wedged) before its
+                // first frame keeps counting toward the budget, or an
+                // accept-then-close server would be retried forever.
+                if framed {
+                    failures = 0;
+                }
             }
             _ => {}
         }
         // (stream_bus sends Connected itself once the first frame lands —
         // an accepted-but-parked boot-window connection must not count.)
+        let quiet = last_frame.elapsed();
+        if quiet < silence {
+            silences = 0;
+        } else {
+            // A stream that framed, then fell silent, is the first silence.
+            silences = if last_frame >= attempt {
+                1
+            } else {
+                silences + 1
+            };
+            // Any answer at all proves the process is serving.
+            let mut check = client.get(&health).timeout(probe);
+            if let Some(auth) = &auth {
+                check = check.header(reqwest::header::AUTHORIZATION, auth.clone());
+            }
+            let unresponsive = if check.send().await.is_err() {
+                Some(format!(
+                    "opencode server stopped responding: no event for {}s, and no answer \
+                     to a health check within {}s",
+                    quiet.as_secs(),
+                    probe.as_secs_f32()
+                ))
+            } else {
+                // Two silences waited out, so a clock that jumped across a
+                // machine sleep (one timer firing late) never trips it.
+                (silences >= 2 && quiet >= wedged).then(|| {
+                    format!(
+                        "opencode server stopped responding: no event for {}s",
+                        quiet.as_secs()
+                    )
+                })
+            };
+            if let Some(message) = unresponsive {
+                let message =
+                    format!("{message}. It was shut down; the next message starts a fresh one");
+                let _ = tx.send(BusMsg::Unresponsive(message)).await;
+                return;
+            }
+        }
         failures += 1;
         if failures > BUS_RECONNECT_ATTEMPTS {
             let _ = tx.send(BusMsg::Disconnected).await;
@@ -4403,70 +5437,151 @@ async fn bus_task(
     }
 }
 
+/// Forward one stream's events; returns whether it delivered a frame, and
+/// stamps `last_frame` with each. A stream silent for `silence` (heartbeats
+/// included) is abandoned so the caller reconnects.
 async fn stream_bus(
     tx: &mpsc::Sender<BusMsg>,
     resp: reqwest::Response,
     protocol: Protocol,
+    silence: Duration,
+    last_frame: &mut tokio::time::Instant,
     v2_tool_names: &mut HashMap<V2ToolKey, String>,
     v2_session_models: &mut HashMap<String, V2ModelIdentity>,
-) {
+) -> bool {
     let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut decoder = SseDecoder::default();
     let mut announced = false;
-    while let Some(chunk) = stream.next().await {
-        let Ok(bytes) = chunk else {
-            return;
+    loop {
+        let bytes = match tokio::time::timeout(silence, stream.next()).await {
+            Ok(Some(Ok(bytes))) => bytes,
+            Ok(Some(Err(_)) | None) => return announced,
+            Err(_) => {
+                tracing::warn!(
+                    target: "zeron_harness::opencode",
+                    "event bus silent for {}s; reconnecting",
+                    silence.as_secs()
+                );
+                return announced;
+            }
         };
-        if !announced {
+        let frames = decoder.frames;
+        let events = decoder.feed(&bytes);
+        if decoder.frames > frames {
+            *last_frame = tokio::time::Instant::now();
+        }
+        if !announced && decoder.frames > 0 {
             announced = true;
             if tx.send(BusMsg::Connected).await.is_err() {
-                return;
+                return announced;
             }
         }
-        buf.extend_from_slice(&bytes);
-        // SSE frames are blank-line separated; each data line is one event.
-        while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-            let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-            let Ok(frame) = std::str::from_utf8(&frame) else {
+        for data in events {
+            let Ok(event) = serde_json::from_str::<Value>(&data) else {
                 continue;
             };
-            for line in frame.lines() {
-                let Some(data) = line
-                    .strip_prefix("data: ")
-                    .or_else(|| line.strip_prefix("data:"))
-                else {
-                    continue;
-                };
-                let Ok(event) = serde_json::from_str::<Value>(data) else {
-                    continue;
-                };
-                if protocol == Protocol::V2 {
-                    let payloads = normalize_v2_frame_with_session_models(
-                        event,
-                        v2_tool_names,
-                        v2_session_models,
-                    );
-                    if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
-                        let _ = tx.send(BusMsg::Disconnected).await;
-                        return;
+            if protocol == Protocol::V2 {
+                let payloads =
+                    normalize_v2_frame_with_session_models(event, v2_tool_names, v2_session_models);
+                if v2_tool_names.len() > MAX_PENDING_V2_TOOLS {
+                    let _ = tx.send(BusMsg::Disconnected).await;
+                    return announced;
+                }
+                // Model identity only feeds usage frames. Dropping the
+                // cache degrades to "window preserved" and refills on the
+                // next step.started, so — unlike leaked pending tools — it
+                // must not fail the run, especially now that the cache
+                // survives reconnects.
+                if v2_session_models.len() > MAX_V2_SESSION_MODELS {
+                    v2_session_models.clear();
+                }
+                for payload in payloads {
+                    if tx.send(BusMsg::Event(payload)).await.is_err() {
+                        return announced;
                     }
-                    // Model identity only feeds usage frames. Dropping the
-                    // cache degrades to "window preserved" and refills on the
-                    // next step.started, so — unlike leaked pending tools — it
-                    // must not fail the run, especially now that the cache
-                    // survives reconnects.
-                    if v2_session_models.len() > MAX_V2_SESSION_MODELS {
-                        v2_session_models.clear();
-                    }
-                    for payload in payloads {
-                        if tx.send(BusMsg::Event(payload)).await.is_err() {
-                            return;
-                        }
-                    }
-                } else if tx.send(BusMsg::Event(event)).await.is_err() {
-                    return;
+                }
+            } else if tx.send(BusMsg::Event(event)).await.is_err() {
+                return announced;
+            }
+        }
+    }
+}
+
+/// Incremental `text/event-stream` decoder (the WHATWG framing). Lines end
+/// in LF, CR or CRLF — a CR closing one chunk may pair with the LF opening
+/// the next — `:` lines are comments, an event's `data` lines join with LF,
+/// and a blank line dispatches it. Each line decodes lossily on its own, so
+/// an invalid byte costs a character rather than the event, and every byte
+/// is scanned once however large a frame grows.
+#[derive(Default)]
+struct SseDecoder {
+    line: Vec<u8>,
+    data: String,
+    has_data: bool,
+    /// The current block has seen a line (a comment or any field).
+    in_frame: bool,
+    /// The last chunk ended in CR: an LF opening the next one belongs to it.
+    after_cr: bool,
+    /// The first line has been read (a leading byte-order mark is dropped).
+    started: bool,
+    /// Complete blocks seen, comment-only ones (heartbeats) included.
+    frames: u64,
+}
+
+impl SseDecoder {
+    /// Feed one chunk; returns the data of every event it completed.
+    fn feed(&mut self, mut bytes: &[u8]) -> Vec<String> {
+        let mut events = Vec::new();
+        if bytes.is_empty() {
+            return events;
+        }
+        if std::mem::take(&mut self.after_cr) && bytes[0] == b'\n' {
+            bytes = &bytes[1..];
+        }
+        while let Some(end) = bytes.iter().position(|b| matches!(b, b'\n' | b'\r')) {
+            self.line.extend_from_slice(&bytes[..end]);
+            let cr = bytes[end] == b'\r';
+            bytes = &bytes[end + 1..];
+            if cr {
+                match bytes.first() {
+                    Some(b'\n') => bytes = &bytes[1..],
+                    Some(_) => {}
+                    None => self.after_cr = true,
                 }
             }
+            self.end_line(&mut events);
+        }
+        self.line.extend_from_slice(bytes);
+        events
+    }
+
+    fn end_line(&mut self, events: &mut Vec<String>) {
+        let raw = std::mem::take(&mut self.line);
+        let decoded = String::from_utf8_lossy(&raw);
+        let mut line: &str = &decoded;
+        if !std::mem::replace(&mut self.started, true) {
+            line = line.strip_prefix('\u{feff}').unwrap_or(line);
+        }
+        if line.is_empty() {
+            if std::mem::take(&mut self.in_frame) {
+                self.frames += 1;
+            }
+            if std::mem::take(&mut self.has_data) {
+                events.push(std::mem::take(&mut self.data));
+            }
+            return;
+        }
+        self.in_frame = true;
+        if line.starts_with(':') {
+            return;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        if field == "data" {
+            if self.has_data {
+                self.data.push('\n');
+            }
+            self.data.push_str(value.strip_prefix(' ').unwrap_or(value));
+            self.has_data = true;
         }
     }
 }
@@ -4589,6 +5704,22 @@ async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
     Some(version)
 }
 
+/// The inherited inline config (none is an empty one), to add ours to.
+fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
+    let config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
+        Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
+            HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
+        })?,
+        None => json!({}),
+    };
+    if !config.is_object() {
+        return Err(HarnessError::Protocol(
+            "OPENCODE_CONFIG_CONTENT must be an object".into(),
+        ));
+    }
+    Ok(config)
+}
+
 /// Inline config is the final user config layer. Preserve inherited overrides
 /// and other MCP servers; never write chat identity into a shared config file.
 fn mcp_config(
@@ -4596,15 +5727,8 @@ fn mcp_config(
     mcp: &zeron_proto::McpServer,
     protocol: Protocol,
 ) -> Result<String, HarnessError> {
-    let mut config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
-        Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
-            HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be a valid config object".into())
-        })?,
-        None => json!({}),
-    };
-    let object = config.as_object_mut().ok_or_else(|| {
-        HarnessError::Protocol("OPENCODE_CONFIG_CONTENT must be an object".into())
-    })?;
+    let mut config = inline_config(inherited)?;
+    let object = config.as_object_mut().expect("inline config is an object");
     let servers = object.entry("mcp").or_insert_with(|| json!({}));
     let servers = if protocol == Protocol::V2 {
         servers
@@ -4630,6 +5754,170 @@ fn mcp_config(
     }
     servers.insert(mcp.name.clone(), server);
     Ok(config.to_string())
+}
+
+/// The access mode `request` runs with; `auto_approve` still means full
+/// access.
+fn access(request: &RunRequest) -> AccessMode {
+    if request.auto_approve {
+        AccessMode::FullAccess
+    } else {
+        request.access
+    }
+}
+
+/// opencode's permission for changing files: 1.x folds its write and patch
+/// tools into `edit` (verified live, 1.19.4); older names are kept.
+fn is_edit_permission(permission: &str) -> bool {
+    matches!(
+        permission,
+        "edit" | "write" | "patch" | "multiedit" | "apply_patch"
+    )
+}
+
+/// What a restricted mode has opencode ask before, besides file changes in
+/// supervised: commands and the network. Reaching outside the project
+/// (`external_directory`) and a repeated identical call (`doom_loop`) are
+/// opencode's own asks already.
+const ASKED_PERMISSIONS: [&str; 3] = ["bash", "webfetch", "websearch"];
+
+/// What a restricted mode still lets through unasked on 1.x, where every
+/// other tool — MCP tools, custom tools — is asked (`"*": "ask"`, verified
+/// live on 1.19.4): looking around, the agent's own todo list and
+/// questions, and subagents, whose tools answer to the same rules.
+const UNASKED_PERMISSIONS: [&str; 10] = [
+    "read", "glob", "grep", "list", "lsp", "todoread", "todowrite", "question", "task", "skill",
+];
+
+/// Where the `plan` agent writes its plan: `.opencode/plans/` in a
+/// repository, opencode's data directory otherwise (a path relative to the
+/// worktree); `*` spans directories.
+const PLAN_FILES: &str = "*opencode/plans/*.md";
+
+/// The `ask` rules a restricted `access` mode adds to the inline config.
+/// opencode allows every tool by default and raises a request only for an
+/// `ask` rule; rules match last-first and this layer is read last, so ours
+/// win over the user's — a `deny` set in this same layer is kept. The
+/// general `edit: ask` of supervised would also relax the `plan` agent's own
+/// edit denial (verified live, 1.19.4), so the plan agent gets it back,
+/// asking before its plan file instead of allowing it.
+fn access_config(
+    inherited: Option<&str>,
+    access: AccessMode,
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config = inline_config(inherited)?;
+    let supervised = access == AccessMode::Supervised;
+    let mut asked: Vec<&str> = ASKED_PERMISSIONS.to_vec();
+    if supervised {
+        asked.push("edit");
+    }
+    let object = config.as_object_mut().expect("inline config is an object");
+    match protocol {
+        Protocol::V1 => {
+            let rules = permission_object(object, "permission", "OPENCODE_CONFIG_CONTENT")?;
+            // The catch-all leads so every named rule after it wins.
+            let inherited = std::mem::take(rules);
+            let deny = json!("deny");
+            let all = match inherited.get("*") {
+                Some(rule) if *rule == deny => deny.clone(),
+                _ => json!("ask"),
+            };
+            rules.insert("*".into(), all);
+            rules.extend(inherited.into_iter().filter(|(name, _)| name != "*"));
+            let mut set = |permission: &str, rule: &str| {
+                if rules.get(permission) != Some(&deny) {
+                    rules.insert(permission.into(), json!(rule));
+                }
+            };
+            for permission in UNASKED_PERMISSIONS {
+                set(permission, "allow");
+            }
+            if !supervised {
+                set("edit", "allow");
+            }
+            for permission in asked {
+                set(permission, "ask");
+            }
+            if supervised {
+                let plan = object
+                    .entry("agent")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .and_then(|agents| {
+                        agents
+                            .entry("plan")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                    })
+                    .ok_or_else(|| {
+                        HarnessError::Protocol(
+                            "OPENCODE_CONFIG_CONTENT.agent.plan must be an object".into(),
+                        )
+                    })?;
+                let rules =
+                    permission_object(plan, "permission", "OPENCODE_CONFIG_CONTENT.agent.plan")?;
+                rules.insert("edit".into(), json!({"*": "deny", PLAN_FILES: "ask"}));
+            }
+        }
+        // 2.x: ordered `{action, resource, effect}` rules, every config
+        // layer's appended in turn, then each agent's own.
+        Protocol::V2 => {
+            let rule = |action: &str, resource: &str, effect: &str| -> Value {
+                json!({"action": action, "resource": resource, "effect": effect})
+            };
+            permission_list(object, "OPENCODE_CONFIG_CONTENT")?
+                .extend(asked.into_iter().map(|action| rule(action, "*", "ask")));
+            if supervised {
+                let plan = object
+                    .entry("agents")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .and_then(|agents| {
+                        agents
+                            .entry("plan")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                    })
+                    .ok_or_else(|| {
+                        HarnessError::Protocol(
+                            "OPENCODE_CONFIG_CONTENT.agents.plan must be an object".into(),
+                        )
+                    })?;
+                permission_list(plan, "OPENCODE_CONFIG_CONTENT.agents.plan")?
+                    .extend([rule("edit", "*", "deny"), rule("edit", PLAN_FILES, "ask")]);
+            }
+        }
+    }
+    Ok(config.to_string())
+}
+
+/// `owner[key]` as a 1.x permission object; the one-word form (`"allow"`)
+/// is the same as `{"*": "allow"}`.
+fn permission_object<'a>(
+    owner: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>, HarnessError> {
+    let rules = owner.entry(key).or_insert_with(|| json!({}));
+    if let Some(action) = rules.as_str() {
+        *rules = json!({ "*": action });
+    }
+    rules
+        .as_object_mut()
+        .ok_or_else(|| HarnessError::Protocol(format!("{path}.{key} must be an object")))
+}
+
+/// `owner.permissions` as a 2.x rule list.
+fn permission_list<'a>(
+    owner: &'a mut serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<&'a mut Vec<Value>, HarnessError> {
+    owner
+        .entry("permissions")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| HarnessError::Protocol(format!("{path}.permissions must be a list")))
 }
 
 #[cfg(test)]
@@ -4703,6 +5991,40 @@ http.createServer((req, res) => {{
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn startup_retries_a_port_taken_before_bind() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let exe = fixture.path().join("opencode");
+        // The first launch loses the port race the way Node reports it: the
+        // EADDRINUSE line, then more stack than the stderr tail keeps.
+        let script = r#"#!/usr/bin/env node
+const fs = require('node:fs');
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.14.0'); process.exit(0); }
+const raced = require('node:path').join(__dirname, 'raced');
+if (!fs.existsSync(raced)) {
+  fs.writeFileSync(raced, '');
+  console.error('Error: listen EADDRINUSE: address already in use 127.0.0.1:1');
+  for (let i = 0; i < 12; i++) console.error(`    at frame${i} (node:net:${i})`);
+  process.exit(1);
+}
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({version: '1.14.0'}));
+}).listen(port, '127.0.0.1', () => console.log(`opencode server listening on http://127.0.0.1:${port}`));
+"#;
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut server = Server::spawn(&exe, fixture.path().to_str(), Duration::from_secs(5), None)
+            .await
+            .unwrap();
+        server.shutdown(Duration::from_millis(100)).await;
+        assert!(fixture.path().join("raced").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn unknown_version_starts_without_mcp_instead_of_failing() {
         use std::os::unix::fs::PermissionsExt;
         let fixture = tempfile::tempdir().unwrap();
@@ -4739,6 +6061,75 @@ http.createServer((req, res) => {
         let probe = server.get_json("/config-probe", None).await.unwrap();
         server.shutdown(Duration::from_millis(100)).await;
         assert_eq!(probe["config"], Value::Null);
+        // A restricted mode cannot run without its rules: it would do
+        // unasked what the person chose to approve.
+        let error = Server::spawn_with_env(
+            &exe,
+            fixture.path().to_str(),
+            Duration::from_secs(5),
+            Some(&mcp),
+            &Default::default(),
+            AccessMode::Supervised,
+        )
+        .await
+        .err()
+        .expect("supervised must not start without its permission rules");
+        assert!(error.to_string().contains("Supervised"), "{error}");
+    }
+
+    /// A restricted mode's rules reach the server with no MCP server to
+    /// inject, merged into the run environment's inline config.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restricted_access_injects_permission_rules() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let exe = fixture.path().join("opencode");
+        let script = r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.19.4'); process.exit(0); }
+const config = process.env.OPENCODE_CONFIG_CONTENT ?? null;
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  if (req.url === '/config-probe') { res.end(JSON.stringify({config})); return; }
+  if (req.url === '/global/health') { res.end(JSON.stringify({version: '1.19.4'})); return; }
+  res.statusCode = 404; res.end('{}');
+}).listen(port, '127.0.0.1');
+"#;
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run_env = [(
+            "OPENCODE_CONFIG_CONTENT".to_owned(),
+            r#"{"model": "keep"}"#.to_owned(),
+        )]
+        .into();
+        for access in AccessMode::ALL {
+            let mut server = Server::spawn_with_env(
+                &exe,
+                fixture.path().to_str(),
+                Duration::from_secs(5),
+                None,
+                &run_env,
+                access,
+            )
+            .await
+            .unwrap();
+            let probe = server.get_json("/config-probe", None).await.unwrap();
+            server.shutdown(Duration::from_millis(100)).await;
+            let config: Value = serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+            assert_eq!(config["model"], "keep");
+            let edit = &config["permission"]["edit"];
+            let bash = &config["permission"]["bash"];
+            match access {
+                // Full access passes the run's config through untouched.
+                AccessMode::FullAccess => assert_eq!(config, json!({"model": "keep"})),
+                AccessMode::AutoAcceptEdits => {
+                    assert_eq!((edit, bash), (&json!("allow"), &json!("ask")))
+                }
+                AccessMode::Supervised => assert_eq!((edit, bash), (&json!("ask"), &json!("ask"))),
+            }
+        }
     }
 
     /// A freshly installed binary's first `--version` outlasts the shared

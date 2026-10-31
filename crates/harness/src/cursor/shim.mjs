@@ -11,12 +11,21 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?,"images"?,
+//      "imageBudget"?,"silenceTimeoutMs"?}
+//                                                       start / first turn;
+//                                                       `imageBudget` = bytes of
+//                                                       images one send inlines,
+//                                                       `silenceTimeoutMs` = how
+//                                                       long a send may go without
+//                                                       any SDK update
 //     {"op":"user","prompt"}                            explicit next turn
-//     {"op":"steer","prompt","model"?,"modelOptions"?,"reconfigure"?}
+//     {"op":"steer","prompt","model"?,"modelOptions"?,"reconfigure"?,"images"?}
 //                                                       native mid-turn input;
 //                                                       `reconfigure` = runs as
 //                                                       its own turn on `model`
+//                                                       `images` = [{data, mimeType}]
+//                                                       inlined with the text
 //     {"op":"interrupt"}                                cancel the live run
 //     {"op":"stop"}                                     cancel this turn only; the agent stays up
 //   stdout (shim → engine):
@@ -73,10 +82,33 @@ const fatal = async (message) => {
 // a multi-megabyte minified source line and obscure the exception.
 for (const event of ["uncaughtException", "unhandledRejection"]) {
   process.on(event, (error) => {
+    if (event === "unhandledRejection" && harmlessSdkRejection(error)) return;
     const deadline = setTimeout(() => process.exit(1), 2000);
     deadline.unref();
     void fatal(error).catch(() => process.exit(1));
   });
+}
+
+// Two rejections the SDK leaves unawaited are not failures of the chat: the
+// tool call they belong to already reports its own error, and treating them
+// as fatal killed the whole conversation over one failed shell command.
+function harmlessSdkRejection(error) {
+  // A shell tool's spawn failed (its interpreter is missing, the cwd is gone):
+  // the SDK's state-capture wrapper rejects a promise nobody awaits.
+  const spawnargs = error?.spawnargs;
+  if (typeof error?.syscall === "string" && error.syscall.startsWith("spawn") &&
+      Array.isArray(spawnargs) && spawnargs.some((arg) => typeof arg === "string" &&
+        ["dump_bash_state", "dump_zsh_state", "__CURSOR_SANDBOX_ENV_RESTORE"].some((m) => arg.includes(m)))) {
+    process.stderr.write(`cursor shell spawn failed (ignored): ${formatError(error)}\n`);
+    return true;
+  }
+  // After a failed exec the SDK writes a last frame to its already-closed
+  // stream. Its class is minified; only the name identifies it.
+  if (error instanceof Error && error.name === "WriteIterableClosedError") {
+    process.stderr.write("cursor SDK wrote to a closed exec stream (ignored)\n");
+    return true;
+  }
+  return false;
 }
 
 // Only copy explicit diagnostic fields, never cause/config/headers or the
@@ -334,6 +366,8 @@ if (process.argv[2] === "login") {
 let agent = null;
 let run = null;
 let interrupted = false;
+// Cuts short the wait between startup retries when a stop or interrupt lands.
+let wakeStartup = null;
 // A turn stop: this turn is cancelled, the agent takes the next prompt.
 let stopping = false;
 let closing = false;
@@ -366,6 +400,36 @@ setInterval(() => {
   catch (error) { if (error.code === "ESRCH") void exitAfterFlush(0); }
 }, 1000).unref();
 
+// A run can "finish" when its whole reply is a transport dump the agent
+// loop printed instead of answering (a ConnectError, the backend's generic
+// failure line). Each top-level assistant message is classified on its own,
+// and only one consisting entirely of such lines (plus a stack trace) counts:
+// prose or code that quotes the same diagnostic is a real answer.
+const TRANSPORT_ERROR =
+  /^Error: (?:RetriableError: (?!\[internal\]).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/;
+const SERVER_ERROR = "Something went wrong communicating with the server. Please try again.";
+class ReplyFailure {
+  constructor() { this.text = ""; }
+  push(text) { if (this.text.length < 65536) this.text += text; }
+  get failure() {
+    let failure;
+    for (const raw of this.text.split("\n")) {
+      const line = raw.trimEnd();
+      if (TRANSPORT_ERROR.test(line) || line === SERVER_ERROR) failure = line;
+      else if (line.trim() && !(failure && /^\s+at\s/.test(line))) return undefined;
+    }
+    return failure;
+  }
+}
+const MESSAGE_BOUNDARIES = new Set([
+  "tool-call-started", "tool-call-completed", "thinking-delta", "thinking-completed",
+  "step-started", "step-completed", "user-message-appended",
+]);
+// The current top-level assistant message, and whether this run streamed any.
+let reply = new ReplyFailure();
+let replyOpen = false;
+let streamedText = false;
+
 // One InteractionUpdate → zero or one frame. `parent` attributes nested
 // subagent traffic (tool-call-delta carries the child's updates tagged by
 // the spawning task's callId — the full subagent transcript, live).
@@ -373,8 +437,17 @@ const activeTools = new Set();
 function mapUpdate(u, parent) {
   if (!u || typeof u !== "object") return;
   const tag = parent ? { parent } : {};
+  // Tools, reasoning and step boundaries close the message being written;
+  // token counts and the like stream alongside it.
+  if (!parent && MESSAGE_BOUNDARIES.has(u.type)) replyOpen = false;
   switch (u.type) {
     case "text-delta":
+      if (!parent && u.text) {
+        if (!replyOpen) reply = new ReplyFailure();
+        replyOpen = true;
+        streamedText = true;
+        reply.push(u.text);
+      }
       if (u.text) out({ ev: "text", text: u.text, ...tag });
       break;
     case "thinking-delta":
@@ -455,10 +528,11 @@ const pendingSteers = [];
 // message. Once replaced, every send names it (a send's model is per-run).
 let currentModel = null;
 let modelChanged = false;
-// Messages up to (not including) the first that changes the model: only
-// those may ride the running turn, natively or batched.
+// Messages up to (not including) the first that changes the model or
+// carries images (native steering takes text only): only those may ride the
+// running turn, natively or batched.
 function steerableNow() {
-  const at = pendingSteers.findIndex(message => message.selection);
+  const at = pendingSteers.findIndex(message => message.selection || message.images.length);
   return at < 0 ? pendingSteers : pendingSteers.slice(0, at);
 }
 const steerDeliveries = new Set();
@@ -554,10 +628,52 @@ async function followupSteers() {
       JSON.stringify(undelivered.map(message => message.prompt));
     await runTurn(prompt, undefined, () => {
       for (const message of batch) out({ev: "steered"});
-    });
+    }, undelivered.flatMap(message => message.images));
   }
 }
+// Bytes of images one send may inline, and how long a send may go without
+// a single SDK update: set by the engine's run frame.
+let imageBudget = Infinity;
+let silenceTimeoutMs = 10 * 60 * 1000;
+// Several messages' images can ride one send (a batched follow-up). Past the
+// budget the rest ride as the path refs already in their text.
+function withinBudget(images) {
+  let left = imageBudget;
+  return images.filter(({ data }) => {
+    const bytes = Math.floor(data.length * 3 / 4);
+    if (bytes > left) return false;
+    left -= bytes;
+    return true;
+  });
+}
+// The SDK can go silent for good after a send (a large inlined image did,
+// live: no update for 400s+, never settling). A run streams updates from its
+// first model step, and a running tool has announced itself by then, so a
+// send with no update at all past the bound is wedged, not slow.
+const SILENT = Symbol("silent");
+function silenceWatch() {
+  let timer;
+  let fire;
+  let abandoned = false;
+  const silent = new Promise((resolve) => { fire = resolve; });
+  return {
+    silent,
+    arm() { timer = setTimeout(fire, silenceTimeoutMs, SILENT); },
+    heard() { clearTimeout(timer); },
+    // Once its turn is abandoned, nothing the send reports reaches the
+    // engine: the turn already ended.
+    abandon() { abandoned = true; },
+    get abandoned() { return abandoned; },
+  };
+}
+// `{type, data, mimeType}` blocks from the engine → the SDK's image shape.
+function sdkImages(images) {
+  return (Array.isArray(images) ? images : [])
+    .filter((image) => typeof image?.data === "string" && typeof image?.mimeType === "string")
+    .map(({ data, mimeType }) => ({ data, mimeType }));
+}
 function acceptSteer(message) {
+  message.images = sdkImages(message.images);
   if (message.reconfigure) message.selection = modelSelection(message);
   pendingSteers.push(message);
   if (turnActive) {
@@ -567,7 +683,40 @@ function acceptSteer(message) {
   }
 }
 
-async function runTurn(prompt, ready, accepted) {
+async function runTurn(prompt, ready, accepted, images = []) {
+  const watch = silenceWatch();
+  try {
+    await sendTurn(prompt, ready, accepted, withinBudget(images), watch);
+  } finally {
+    watch.heard();
+  }
+}
+
+// The send outlived the silence bound: abandon the turn with a clear error.
+// The process lives on: whatever the stuck send reports later is dropped
+// (see `silenceWatch`), and the next message starts a run of its own (a run
+// the SDK still holds active is expired then, see `sendTurn`).
+function abandonSilentTurn(watch, pending) {
+  watch.abandon();
+  void pending?.then((late) => late?.cancel().catch(() => {}), () => {});
+  if (run) run.cancel().catch(() => {});
+  activeTools.clear();
+  run = null;
+  turnActive = false;
+  const seconds = Math.max(1, Math.round(silenceTimeoutMs / 1000));
+  const span = seconds >= 120 ? `${Math.round(seconds / 60)} minutes` : `${seconds} seconds`;
+  out({
+    ev: "turn",
+    status: interrupted || stopping ? "cancelled" : "error",
+    ...(interrupted || stopping ? {} : {
+      error: `Cursor sent nothing back for ${span} after the message went out, ` +
+        "so the turn was abandoned. Send it again to retry.",
+    }),
+  });
+  stopping = false;
+}
+
+async function sendTurn(prompt, ready, accepted, images, watch) {
   turnActive = true;
   if (closing) return;
   try {
@@ -580,10 +729,17 @@ async function runTurn(prompt, ready, accepted) {
       return;
     }
     accepted?.();
+    reply = new ReplyFailure();
+    replyOpen = false;
+    streamedText = false;
     let thisRun = null;
-    run = thisRun = await agent.send(prompt, {
+    const message = images.length ? { text: prompt, images } : prompt;
+    const send = (local) => agent.send(message, {
       ...(modelChanged ? { model: currentModel } : {}),
+      ...(local ? { local } : {}),
       onDelta: ({ update }) => {
+        watch.heard();
+        if (watch.abandoned) return;
         if (thisRun && thisRun === preemptedRun) return;
         try {
           mapUpdate(update);
@@ -592,7 +748,26 @@ async function runTurn(prompt, ready, accepted) {
         }
       },
     });
+    watch.arm();
+    const sent = async (local) => {
+      const pending = send(local);
+      const outcome = await Promise.race([pending, watch.silent]);
+      if (outcome === SILENT) throw Object.assign(new Error("silent"), { silent: pending });
+      return outcome;
+    };
+    try {
+      run = thisRun = await sent();
+    } catch (e) {
+      if (e?.silent) throw e;
+      // The agent's persisted run never reached a terminal state (a process
+      // that died mid-run, a cancel that wedged). This send is the only run
+      // this process starts on the agent, so expiring that stale run — the
+      // SDK's own recovery option — is safe. Once.
+      if (!/already has (?:an )?active run/i.test(String(e?.message ?? e))) throw e;
+      run = thisRun = await sent({ force: true });
+    }
   } catch (e) {
+    if (e?.silent) return abandonSilentTurn(watch, e.silent);
     out({ ev: "turn", status: "error", error: withAuthHint(formatError(e, run?.requestId)) });
     run = null;
     turnActive = false;
@@ -604,7 +779,8 @@ async function runTurn(prompt, ready, accepted) {
   if (interrupted || stopping || closing) await run.cancel().catch(() => {});
   let result;
   try {
-    result = await run.wait();
+    result = await Promise.race([run.wait(), watch.silent]);
+    if (result === SILENT) return abandonSilentTurn(watch);
   } catch (e) {
     if (preempting && !interrupted && !stopping && !closing) return continueAfterPreempt();
     const stopped = stopping;
@@ -630,10 +806,18 @@ async function runTurn(prompt, ready, accepted) {
   turnActive = false;
   const stopped = stopping;
   stopping = false;
+  // A reply the SDK settled without streaming it still belongs in the chat.
+  if (!stopped && !streamedText && typeof result?.result === "string" && result.result) {
+    reply = new ReplyFailure();
+    reply.push(result.result);
+    out({ ev: "text", text: result.result });
+  }
+  const transportFailure = !stopped && (result?.status ?? "finished") === "finished" ? reply.failure : undefined;
   out({
     ev: "turn",
-    status: stopped ? "cancelled" : result?.status ?? "finished",
-    ...(!stopped && result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
+    status: stopped ? "cancelled" : transportFailure ? "error" : result?.status ?? "finished",
+    ...(transportFailure ? { error: transportFailure } : {}),
+    ...(!stopped && !transportFailure && result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
   });
   if (pendingSteers.length) chain = chain.then(followupSteers).catch(fatal);
 }
@@ -657,6 +841,11 @@ function modelSelection(msg) {
 }
 
 async function start(msg) {
+  if (Number.isFinite(msg.imageBudget) && msg.imageBudget >= 0) imageBudget = msg.imageBudget;
+  // setTimeout fires at once past 2^31-1 ms; clamp to it (about 24 days).
+  if (Number.isFinite(msg.silenceTimeoutMs) && msg.silenceTimeoutMs > 0) {
+    silenceTimeoutMs = Math.min(msg.silenceTimeoutMs, 2 ** 31 - 1);
+  }
   const model = modelSelection(msg);
   currentModel = model;
   // The SDK loads NO ambient settings unless asked: without settingSources the
@@ -712,7 +901,18 @@ async function start(msg) {
       } catch (error) {
         if (attempt >= 6 || interrupted || closing ||
             !/rate limit.*get_models|get_models.*rate limit/i.test(String(error?.message ?? error))) throw error;
-        await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+        await new Promise(resolve => {
+          wakeStartup = resolve;
+          setTimeout(resolve, 1000 * 2 ** attempt);
+        });
+        wakeStartup = null;
+        if (interrupted || closing) throw error;
+        // Stopped while waiting out the limit: the turn ends before it began.
+        // No agent exists to take a next prompt, so the process ends with it.
+        if (stopping) {
+          out({ ev: "turn", status: "cancelled" });
+          await exitAfterFlush(0);
+        }
       }
     }
   } catch (e) {
@@ -734,7 +934,7 @@ async function start(msg) {
   }
   await runTurn(msg.prompt ?? "", () => {
     out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
-  });
+  }, undefined, sdkImages(msg.images));
 }
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -762,12 +962,20 @@ rl.on("line", (line) => {
       break;
     case "interrupt":
       interrupted = true;
+      wakeStartup?.();
       if (run) run.cancel().catch(() => {});
       break;
     case "stop":
       // Undelivered steers go with the stopped turn.
       pendingSteers.splice(0);
-      if (!turnActive) {
+      if (!agent && !closing) {
+        // Still starting (creating or resuming the agent, possibly waiting
+        // out a rate limit): the first turn sees the flag and settles
+        // cancelled exactly once, instead of a cancel now and the prompt
+        // running anyway.
+        stopping = true;
+        wakeStartup?.();
+      } else if (!turnActive) {
         out({ev: "turn", status: "cancelled"});
       } else {
         stopping = true;

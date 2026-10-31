@@ -355,8 +355,8 @@ impl Shell {
         // Subagents run on the session's own harness.
         let harness = chat.config.as_ref().map(|config| config.harness);
         // ── The two ways to start a side chat: rows while the lane is empty,
-        // then icon buttons on the heading so the branches lead.
-        let busy = self.side_chat_creating;
+        // then icon buttons on the heading so the branches lead. A fork in
+        // flight shows in its own tab and never blocks another.
         let compact = !side_chats.is_empty();
         let mut heading = div()
             .flex()
@@ -393,7 +393,6 @@ impl Shell {
                         .justify_center()
                         .rounded(px(5.0))
                         .cursor_pointer()
-                        .when(busy, |button| button.opacity(0.5))
                         .hover(|style| style.bg(crate::theme::ink(0.08)))
                         .tooltip(crate::settings::widgets::text_tooltip(label))
                         .on_click(start)
@@ -404,7 +403,6 @@ impl Shell {
                     popover::picker_row(theme, false, false, id)
                         .id(id)
                         .debug_selector(move || id.into())
-                        .when(busy, |row| row.opacity(0.5))
                         .on_click(start)
                         .child(popover::picker_icon_slot(glyph(path, theme)))
                         .child(div().flex_1().child(label))

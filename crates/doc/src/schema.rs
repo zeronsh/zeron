@@ -17,6 +17,7 @@
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
@@ -90,6 +91,10 @@ struct DocPartJson {
     questions: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved: Option<bool>,
+    /// What an input part's questions were answered (additive): presence is
+    /// the record — `[]` when they closed unanswered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answers: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     /// Fork seam (`kind: "fork"`, additive): the chat the history above was
@@ -98,6 +103,17 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Provider switch seam (`kind: "switch"`, additive): display names of
+    /// the provider before and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_provider: Option<String>,
+    /// Harness slugs of the same two providers, for their logos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_harness: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,11 +224,13 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             request_id,
             questions,
             resolved,
+            answers,
         } => DocPartJson {
             id: request_id.clone(),
             kind: "input".into(),
             questions: Some(serde_json::to_value(questions)?),
             resolved: Some(*resolved),
+            answers: answers.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Error { id, message } => DocPartJson {
@@ -230,6 +248,21 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             kind: "fork".into(),
             source_chat_id: Some(source_chat_id.clone()),
             source_title: Some(source_title.clone()),
+            ..Default::default()
+        },
+        MessagePart::Switch {
+            id,
+            from,
+            to,
+            from_harness,
+            to_harness,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "switch".into(),
+            from_provider: Some(from.clone()),
+            to_provider: Some(to.clone()),
+            from_harness: from_harness.clone(),
+            to_harness: to_harness.clone(),
             ..Default::default()
         },
     })
@@ -284,6 +317,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 .and_then(|q| serde_json::from_value(q).ok())
                 .unwrap_or_default(),
             resolved: p.resolved.unwrap_or(false),
+            answers: p.answers.and_then(|a| serde_json::from_value(a).ok()),
         },
         "error" => MessagePart::Error {
             id: p.id,
@@ -297,6 +331,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+        },
+        "switch" => MessagePart::Switch {
+            id: p.id,
+            from: p.from_provider.unwrap_or_default(),
+            to: p.to_provider.unwrap_or_default(),
+            from_harness: p.from_harness,
+            to_harness: p.to_harness,
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -332,6 +373,21 @@ fn image_part(
             message: "Generated image unavailable".into(),
         },
     }
+}
+
+/// One provider's own session in a chat that changed provider (see
+/// [`SessionDoc::provider_sessions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSessionMark {
+    pub session_id: String,
+    /// Where the provider created the session; resume is cwd-gated.
+    #[serde(default)]
+    pub cwd: String,
+    /// The last transcript entry this session has seen. Everything after it
+    /// ran elsewhere and is owed to the session when the chat comes back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<String>,
 }
 
 /// A session doc handle: typed access over a LoroDoc with the schema above.
@@ -413,6 +469,60 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Whether this chat has ever changed provider. Its transcript then holds
+    /// turns the current provider session never saw, so a fresh session is
+    /// owed the history. A cheap meta read: the warm-send path checks it on
+    /// every message, and must not decode the transcript to do so.
+    pub fn provider_switched(&self) -> bool {
+        matches!(
+            self.doc.get_map("meta").get("providerSwitched"),
+            Some(loro::ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+
+    pub fn mark_provider_switched(&self) -> Result<(), DocError> {
+        if !self.provider_switched() {
+            self.doc.get_map("meta").insert("providerSwitched", true)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// Each provider's own session in a chat that changed provider, keyed by
+    /// harness slug. Switching back resumes that session and hands it only
+    /// the turns after its `seen` entry, so its native history (and the
+    /// provider's prompt cache over it) stays intact. One atomic value so a
+    /// synced reader never sees half a record.
+    pub fn provider_sessions(&self) -> BTreeMap<String, ProviderSessionMark> {
+        let Some(loro::ValueOrContainer::Value(LoroValue::String(value))) =
+            self.doc.get_map("meta").get("providerSessions")
+        else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&value).unwrap_or_default()
+    }
+
+    pub fn provider_session(&self, harness: &str) -> Option<ProviderSessionMark> {
+        self.provider_sessions().remove(harness)
+    }
+
+    pub fn set_provider_session(
+        &self,
+        harness: &str,
+        mark: &ProviderSessionMark,
+    ) -> Result<(), DocError> {
+        let mut marks = self.provider_sessions();
+        if marks.get(harness) == Some(mark) {
+            return Ok(());
+        }
+        marks.insert(harness.to_owned(), mark.clone());
+        self.doc
+            .get_map("meta")
+            .insert("providerSessions", serde_json::to_string(&marks)?)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn chat_id(&self) -> Option<String> {
         match self.doc.get_map("meta").get("chatId") {
             Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
@@ -425,6 +535,21 @@ impl SessionDoc {
     pub fn push_message(&self, entry: &SessionMessageEntry) -> Result<(), DocError> {
         let messages = self.doc.get_list("messages");
         let map = messages.push_container(LoroMap::new())?;
+        write_entry_scalar_fields(&map, entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// [`push_message`](Self::push_message), but inserted before the last
+    /// `from_end` entries of the messages list (clamped to its start).
+    pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+        let messages = self.doc.get_list("messages");
+        let at = messages.len().saturating_sub(from_end);
+        let map = messages.insert_container(at, LoroMap::new())?;
         write_entry_scalar_fields(&map, entry)?;
         let parts = map.insert_container("parts", LoroList::new())?;
         for part in &entry.parts {
@@ -690,12 +815,17 @@ impl SessionDoc {
         Ok(false)
     }
 
-    /// Mark the input part carrying `request_id` resolved, wherever it lives
-    /// (input parts store the request id as their part id). The live-run path
-    /// resolves through the entry fold; this direct write is for answers to a
-    /// question whose run already died — no fold owns the entry anymore.
-    /// Returns `false` when no such part exists.
-    pub fn resolve_input(&self, request_id: &str) -> Result<bool, DocError> {
+    /// Mark the input part carrying `request_id` resolved with `answers`,
+    /// wherever it lives (input parts store the request id as their part
+    /// id). The live-run path resolves through the entry fold; this direct
+    /// write is for answers to a question whose run already died — no fold
+    /// owns the entry anymore. Empty `answers` record the questions closed
+    /// unanswered. Returns `false` when no such part exists.
+    pub fn resolve_input(
+        &self,
+        request_id: &str,
+        answers: &[zeron_proto::UserInputAnswer],
+    ) -> Result<bool, DocError> {
         let messages = self.doc.get_list("messages");
         for i in 0..messages.len() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -724,6 +854,10 @@ impl SessionDoc {
                 );
                 if is_input && id_matches {
                     part.insert("resolved", true)?;
+                    part.insert(
+                        "answers",
+                        loro_value_from_json(&serde_json::to_value(answers)?),
+                    )?;
                     self.doc.commit();
                     return Ok(true);
                 }
@@ -744,6 +878,36 @@ impl SessionDoc {
         status: Option<&str>,
         tail: Option<&str>,
     ) -> Result<bool, DocError> {
+        // Genus gate: subagent lifecycle only ever lands on a SPAWN call.
+        // Mis-keyed tagged traffic (a driver bug — claude's background shells
+        // settled through the subagent subtype, 2026-08-20) must not decorate
+        // an ordinary chip with a ref to a doc it never had.
+        let Some(part) = self.newest_tool_part(part_id).filter(is_spawn_part) else {
+            return Ok(false);
+        };
+        if let Some(r) = subagent_ref {
+            part.insert("subagentRef", r)?;
+        }
+        if let Some(s) = status {
+            part.insert("subagentStatus", s)?;
+        }
+        if let Some(t) = tail {
+            part.insert("subagentTail", t)?;
+        }
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// Whether `part_id` is one of this doc's subagent SPAWN chips, the only
+    /// part a subagent doc may hang off (same lookup and gate as
+    /// [`Self::update_subagent_chip`]).
+    pub fn has_subagent_spawn(&self, part_id: &str) -> bool {
+        self.newest_tool_part(part_id)
+            .is_some_and(|part| is_spawn_part(&part))
+    }
+
+    /// The tool part with this id, searched from the NEWEST entry back.
+    fn newest_tool_part(&self, part_id: &str) -> Option<LoroMap> {
         let messages = self.doc.get_list("messages");
         for i in (0..messages.len()).rev() {
             let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
@@ -771,37 +935,11 @@ impl SessionDoc {
                     Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
                 );
                 if is_tool && id_matches {
-                    // Genus gate: subagent lifecycle only ever lands on a
-                    // SPAWN call. Mis-keyed tagged traffic (a driver bug —
-                    // claude's background shells settled through the
-                    // subagent subtype, 2026-08-20) must not decorate an
-                    // ordinary chip with a ref to a doc it never had.
-                    let is_spawn = part
-                        .get("call")
-                        .and_then(|v| match v {
-                            loro::ValueOrContainer::Value(v) => serde_json::to_value(v).ok(),
-                            _ => None,
-                        })
-                        .and_then(|j| serde_json::from_value::<zeron_proto::ToolCall>(j).ok())
-                        .is_some_and(|c| c.is_subagent_spawn());
-                    if !is_spawn {
-                        return Ok(false);
-                    }
-                    if let Some(r) = subagent_ref {
-                        part.insert("subagentRef", r)?;
-                    }
-                    if let Some(s) = status {
-                        part.insert("subagentStatus", s)?;
-                    }
-                    if let Some(t) = tail {
-                        part.insert("subagentTail", t)?;
-                    }
-                    self.doc.commit();
-                    return Ok(true);
+                    return Some(part);
                 }
             }
         }
-        Ok(false)
+        None
     }
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
@@ -810,6 +948,17 @@ impl SessionDoc {
             .export(ExportMode::Snapshot)
             .map_err(|e| DocError::Schema(e.to_string()))
     }
+}
+
+/// A tool part whose call is a subagent spawn ([`zeron_proto::ToolCall::is_subagent_spawn`]).
+fn is_spawn_part(part: &LoroMap) -> bool {
+    part.get("call")
+        .and_then(|v| match v {
+            loro::ValueOrContainer::Value(v) => serde_json::to_value(v).ok(),
+            _ => None,
+        })
+        .and_then(|j| serde_json::from_value::<zeron_proto::ToolCall>(j).ok())
+        .is_some_and(|c| c.is_subagent_spawn())
 }
 
 fn write_entry_scalar_fields(map: &LoroMap, entry: &SessionMessageEntry) -> Result<(), DocError> {
@@ -881,12 +1030,19 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
     }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
+    }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("fromProvider", &doc_part.from_provider),
+        ("toProvider", &doc_part.to_provider),
+        ("fromHarness", &doc_part.from_harness),
+        ("toHarness", &doc_part.to_harness),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1142,6 +1298,9 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     created_at: i64,
+    /// What `durationMs` counts from: `created_at`, or an earlier moment the
+    /// turn really began ([`Self::count_duration_from`]).
+    duration_from: i64,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1175,7 +1334,18 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             created_at,
+            duration_from: created_at,
         })
+    }
+
+    /// Count this entry's `durationMs` from `started_at` (ms) rather than its
+    /// `createdAt` — never from a later moment. A Cloud machine's setup entry
+    /// opens the turn of the message that brought the machine up, and that
+    /// turn began at the send: starting the machine is part of the work.
+    pub fn count_duration_from(&mut self, started_at: i64) {
+        if started_at > 0 && started_at < self.duration_from {
+            self.duration_from = started_at;
+        }
     }
 
     /// Reattach to a streaming entry a prior [`Self::begin`] pushed on the
@@ -1197,6 +1367,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written,
             created_at,
+            duration_from: created_at,
         }
     }
 
@@ -1300,8 +1471,8 @@ impl<'a> SegmentWriter<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(self.created_at);
-        if self.created_at > 0 {
-            map.insert("durationMs", (now - self.created_at).max(0))?;
+        if self.duration_from > 0 {
+            map.insert("durationMs", (now - self.duration_from).max(0))?;
         }
         self.doc.doc.commit();
         Ok(())
@@ -1338,6 +1509,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(resolved) = doc_part.resolved {
         map.insert("resolved", resolved)?;
+    }
+    if let Some(answers) = &doc_part.answers {
+        map.insert("answers", loro_value_from_json(answers))?;
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
@@ -1453,6 +1627,33 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
+    }
+
+    #[test]
+    fn provider_switch_seam_round_trips_and_flags_the_doc() {
+        let doc = SessionDoc::init("switch").unwrap();
+        assert!(!doc.provider_switched());
+        let seam = MessagePart::Switch {
+            id: "switch:1".into(),
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            from_harness: Some("claude-code".into()),
+            to_harness: Some("codex".into()),
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "switch:1".into(),
+            role: MessageRole::System,
+            parts: vec![seam.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        doc.mark_provider_switched().unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
+        assert!(doc.provider_switched());
     }
     use zeron_proto::{AgentEvent, ToolCall};
 
@@ -1606,6 +1807,25 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_counts_its_duration_from_when_it_really_began() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let doc = SessionDoc::init("c1").unwrap();
+        // The entry opens 5s ago; its turn began a minute ago (the send that
+        // had to wait for a Cloud machine). A later moment never shortens it.
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", now - 5_000).unwrap();
+        w.count_duration_from(now - 60_000);
+        w.count_duration_from(now - 1_000);
+        w.finish(&[], MessageStatus::Complete).unwrap();
+        let entry = &doc.read_entries().unwrap()[0];
+        assert_eq!(entry.created_at, now - 5_000, "the entry's own time is kept");
+        let duration = entry.duration_ms.unwrap();
+        assert!((60_000..65_000).contains(&duration), "{duration}");
+    }
+
+    #[test]
     fn todo_status_survives_the_doc_and_refreshes_in_place() {
         use zeron_proto::{TodoItem, TodoStatus};
         let todo = |items: Vec<TodoItem>| MessagePart::Tool {
@@ -1756,6 +1976,10 @@ mod tests {
             ),
         ];
         w.sync(&parts).unwrap();
+        // The engine asks the same question before it opens a subagent doc.
+        assert!(doc.has_subagent_spawn("toolu_spawn"));
+        assert!(!doc.has_subagent_spawn("toolu_bash"));
+        assert!(!doc.has_subagent_spawn("toolu_elsewhere"));
         assert!(
             doc.update_subagent_chip(
                 "toolu_spawn",
@@ -1796,16 +2020,18 @@ mod tests {
 
     #[test]
     fn resolve_input_stamps_the_part_in_place() {
+        let input = |id: &str| MessagePart::Input {
+            id: id.into(),
+            request_id: id.into(),
+            questions: vec![],
+            resolved: false,
+            answers: None,
+        };
         let doc = SessionDoc::init("chat-1").unwrap();
         doc.push_message(&SessionMessageEntry {
             id: "m1".into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Input {
-                id: "r1".into(),
-                request_id: "r1".into(),
-                questions: vec![],
-                resolved: false,
-            }],
+            parts: vec![input("r1"), input("r2")],
             created_at: 1,
             device_id: "dev-a".into(),
             // The orphan case: the run died and recovery stamped the entry.
@@ -1814,13 +2040,60 @@ mod tests {
             duration_ms: None,
         })
         .unwrap();
-        assert!(!doc.resolve_input("nope").unwrap());
-        assert!(doc.resolve_input("r1").unwrap());
+        let picked = vec![zeron_proto::UserInputAnswer {
+            question_id: "q".into(),
+            labels: vec!["B".into()],
+        }];
+        assert!(!doc.resolve_input("nope", &picked).unwrap());
+        assert!(doc.resolve_input("r1", &picked).unwrap());
+        // Closed without an answer records an empty list, not nothing.
+        assert!(doc.resolve_input("r2", &[]).unwrap());
         let entries = doc.read_entries().unwrap();
         assert!(matches!(
             &entries[0].parts[0],
-            MessagePart::Input { resolved: true, .. }
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if *a == picked
         ));
+        assert!(matches!(
+            &entries[0].parts[1],
+            MessagePart::Input { resolved: true, answers: Some(a), .. } if a.is_empty()
+        ));
+    }
+
+    #[test]
+    fn input_answers_round_trip_and_old_parts_read_as_unrecorded() {
+        let answered = MessagePart::Input {
+            id: "r1".into(),
+            request_id: "r1".into(),
+            questions: vec![],
+            resolved: true,
+            answers: Some(vec![zeron_proto::UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec!["Deep dive".into()],
+            }]),
+        };
+        let doc = SessionDoc::init("chat-1").unwrap();
+        doc.push_message(&SessionMessageEntry {
+            id: "m1".into(),
+            role: MessageRole::Assistant,
+            parts: vec![answered.clone()],
+            created_at: 1,
+            device_id: "dev-a".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts[0], answered);
+        // A part map written before answers were recorded has no `answers`
+        // key at all.
+        let legacy = from_doc_part(DocPartJson {
+            id: "r0".into(),
+            kind: "input".into(),
+            questions: Some(serde_json::json!([])),
+            resolved: Some(true),
+            ..Default::default()
+        });
+        assert!(matches!(legacy, MessagePart::Input { answers: None, .. }));
     }
 
     #[test]

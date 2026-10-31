@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::{ClientFrame, RpcError, ServerFrame};
 
@@ -42,6 +40,10 @@ pub struct RpcClient {
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
+    /// Flips to true once the server side of the duplex is gone.
+    closed: tokio::sync::watch::Receiver<bool>,
+    /// Why the transport failed, when it did; set before `closed` flips.
+    close_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 /// Owned stream receiver whose drop immediately cancels the server task.
@@ -93,6 +95,7 @@ impl RpcClient {
         });
         let reader_shared = shared.clone();
         let reader_out = out.clone();
+        let (closed_tx, closed) = tokio::sync::watch::channel(false);
         let reader = tokio::spawn(async move {
             while let Some(payload) = inbound.recv().await {
                 for line in payload.lines() {
@@ -129,13 +132,29 @@ impl RpcClient {
                 }
                 // Stream item receivers end by sender drop.
             }
+            let _ = closed_tx.send(true);
         });
         Self {
             out,
             shared,
             next_id: AtomicU64::new(1),
             reader,
+            closed,
+            close_reason: Arc::default(),
         }
+    }
+
+    /// Why the connection failed (an oversized frame, a reset socket), once
+    /// [`Self::closed`] resolved; `None` for a clean close.
+    pub fn close_reason(&self) -> Option<String> {
+        self.close_reason.get().cloned()
+    }
+
+    /// Resolves once the connection has closed (the server went away). An
+    /// in-memory client's never does while its service lives.
+    pub async fn closed(&self) {
+        let mut closed = self.closed.clone();
+        let _ = closed.wait_for(|closed| *closed).await;
     }
 
     /// Unary request.
@@ -366,40 +385,97 @@ fn wire_error(error: String) -> RpcError {
 /// stranger on port 27654 would hang the app at boot rather than degrade it.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`).
-pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
-    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
-        .await
-        .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
-        .map_err(|e| RpcError::Transport(e.to_string()))?;
-    let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+/// Dial the engine's localhost IPC on `port`, presenting the bearer the
+/// engine published ([`crate::ipc_auth`]). Tokens are resolved at dial time
+/// — `$ZERON_IPC_TOKEN`, `$ZERON_IPC_TOKEN_FILE`, then
+/// `{data_dir}/ipc-token` — and tried in that order, so a stale explicit token
+/// falls back to the file the restarted engine just rewrote. With no token at
+/// all the dial goes out bare (an engine that predates IPC auth accepts it).
+pub async fn connect_ipc(
+    port: u16,
+    data_dir: Option<&std::path::Path>,
+) -> Result<RpcClient, RpcError> {
+    let url = format!("ws://127.0.0.1:{port}");
+    let tokens = crate::ipc_auth::client_tokens(data_dir);
+    if tokens.is_empty() {
+        return connect_ws(&url, None).await;
+    }
+    for token in &tokens {
+        match dial(&url, Some(token)).await {
+            // A stale or garbled candidate: try the next one.
+            Err(DialError::Unauthorized | DialError::Malformed) => continue,
+            Err(DialError::Other(error)) => return Err(error),
+            Ok(client) => return Ok(client),
+        }
+    }
+    let file = data_dir
+        .map(|dir| crate::ipc_auth::token_path(dir).display().to_string())
+        .unwrap_or_else(|| "the engine's ipc-token file".into());
+    Err(RpcError::Transport(format!(
+        "the engine on 127.0.0.1:{port} rejected this client's IPC token (401) — \
+         it must match {file} of the running engine"
+    )))
+}
+
+/// Dial a WebSocket RPC server (`ws://127.0.0.1:{ipc_port}`), presenting
+/// `token` as `Authorization: Bearer` when given. Prefer [`connect_ipc`] for
+/// the engine's own port: it reads the current token for you.
+pub async fn connect_ws(url: &str, token: Option<&str>) -> Result<RpcClient, RpcError> {
+    dial(url, token).await.map_err(|error| match error {
+        DialError::Unauthorized => {
+            RpcError::Transport(format!("{url} rejected the IPC token (401 Unauthorized)"))
+        }
+        DialError::Malformed => RpcError::Transport("malformed IPC token".into()),
+        DialError::Other(error) => error,
+    })
+}
+
+enum DialError {
+    /// The server answered the handshake with 401: wrong or missing bearer.
+    Unauthorized,
+    /// The token can't be sent as a header value (a garbled token file).
+    Malformed,
+    Other(RpcError),
+}
+
+async fn dial(url: &str, token: Option<&str>) -> Result<RpcClient, DialError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode, header};
+
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| DialError::Other(RpcError::Transport(e.to_string())))?;
+    if let Some(token) = token {
+        let value =
+            HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| DialError::Malformed)?;
+        request.headers_mut().insert(header::AUTHORIZATION, value);
+    }
+    let (ws, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        // Nagle off: terminal keystrokes are tiny frames that must not wait
+        // for the previous one's ACK.
+        tokio_tungstenite::connect_async_with_config(request, Some(crate::ws::config()), true),
+    )
+    .await
+    .map_err(|_| DialError::Other(RpcError::Transport(format!("timed out dialing {url}"))))?
+    .map_err(|e| match e {
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if response.status() == StatusCode::UNAUTHORIZED =>
+        {
+            DialError::Unauthorized
+        }
+        other => DialError::Other(RpcError::Transport(other.to_string())),
+    })?;
+    let (out_tx, out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let client = RpcClient::new(out_tx, in_rx);
+    let close_reason = client.close_reason.clone();
+    let url = url.to_owned();
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                frame = out_rx.recv() => match frame {
-                    Some(text) => {
-                        if sink.send(WsMessage::Text(text)).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => {
-                        let _ = sink.send(WsMessage::Close(None)).await;
-                        break;
-                    }
-                },
-                message = stream.next() => match message {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {}
-                },
-            }
+        if let Some(reason) = crate::ws::pump(ws, out_rx, in_tx).await {
+            tracing::warn!(%reason, %url, "rpc: lost the connection");
+            let _ = close_reason.set(reason);
         }
     });
-    Ok(RpcClient::new(out_tx, in_rx))
+    Ok(client)
 }

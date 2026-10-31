@@ -14,8 +14,8 @@ use zeron_harness::{
     AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
-    TodoItem, TodoStatus, ToolCall, UserInputAnswer,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel,
+    SteeringMode, TodoItem, TodoStatus, ToolCall, UserInputAnswer,
 };
 
 fn fixture_path() -> PathBuf {
@@ -46,9 +46,12 @@ fn request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
     }
 }
 
@@ -407,13 +410,21 @@ async fn resumed_first_class_model_is_switched_before_prompt() {
 
 #[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
-    let (controls, _steer, _token) = controls();
-    let events = run_to_end(&harness(), request("scenario:permission"), controls).await;
-    // The fixture answers refusal unless the harness selected "always".
-    assert!(events.contains(&AgentEvent::TextDelta {
-        text: "approved".into()
-    }));
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    // Whatever the run's auto_approve: a Grok edit never waits on the user.
+    for auto_approve in [true, false] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:permission");
+        req.auto_approve = auto_approve;
+        let events = run_to_end(&harness(), req, controls).await;
+        // The fixture answers refusal unless the harness selected "always".
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: "approved".into()
+            }),
+            "auto_approve {auto_approve}: {events:?}"
+        );
+        assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    }
 }
 
 #[tokio::test]
@@ -653,6 +664,84 @@ async fn resume_loads_the_session_and_drops_replayed_history() {
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "back again".into()
     }));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+/// A load that outlasts its budget, is refused for a reason other than a
+/// missing session, or loses the agent errors the run and keeps the session:
+/// no session/new, and the Done still names the session being restored.
+#[tokio::test]
+async fn an_unfinished_restore_errors_and_keeps_the_session() {
+    for (resume, says) in [
+        ("load-hang", Some("did not finish within")),
+        ("load-busy", Some("session store is locked")),
+        ("load-exit", None),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let mut req = request("scenario:echo-prompt");
+        req.resume = Some(resume.into());
+        let harness = harness().with_session_load_timeout(Duration::from_millis(300));
+        let events = run_to_end(&harness, req, controls).await;
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::SessionStarted { .. } | AgentEvent::Error { .. }
+            )),
+            "{resume}: {events:?}"
+        );
+        let done: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Done {
+                    status,
+                    error,
+                    session_id,
+                    ..
+                } => Some((
+                    *status,
+                    error.clone().unwrap_or_default(),
+                    session_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), 1, "{resume}: {events:?}");
+        assert_eq!(done[0].0, DoneStatus::Errored, "{resume}: {done:?}");
+        assert_eq!(done[0].2.as_deref(), Some(resume), "{resume}: {done:?}");
+        if let Some(says) = says {
+            let error = &done[0].1;
+            assert!(
+                error.contains(&format!("could not restore session {resume}"))
+                    && error.contains(says),
+                "{resume}: {error}"
+            );
+        }
+    }
+}
+
+/// An agent that no longer has the session gets a fresh one, announced.
+#[tokio::test]
+async fn an_unknown_session_starts_fresh_with_a_notice() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:echo-prompt");
+    req.resume = Some("load-fail".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Error { message }
+                if message.contains("could not restore session load-fail")
+                    && message.contains("without the previous context")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SessionStarted { session_id, .. } if session_id == "s-fresh"
+        )),
+        "{events:?}"
+    );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 #[test]
@@ -1188,6 +1277,217 @@ async fn antigravity_models_group_effort_variants_into_one_row() {
         ]
     );
     assert!(models.iter().all(|m| m.description.is_none()), "{models:?}");
+}
+
+#[test]
+fn only_antigravity_offers_access_modes_beyond_full_access() {
+    assert_eq!(AcpHarness::antigravity().access_modes(), AccessMode::ALL);
+    for harness in [
+        AcpHarness::grok(),
+        AcpHarness::devin(),
+        AcpHarness::hermes(),
+    ] {
+        assert_eq!(
+            harness.access_modes(),
+            [AccessMode::FullAccess],
+            "{}",
+            harness.display_name()
+        );
+    }
+    for harness in [
+        AcpHarness::antigravity(),
+        AcpHarness::grok(),
+        AcpHarness::devin(),
+        AcpHarness::hermes(),
+    ] {
+        assert!(!harness.supports_plan(), "{}", harness.display_name());
+    }
+}
+
+#[test]
+fn a_new_access_mode_needs_a_new_agent_where_it_is_honored() {
+    let full = RunRequest {
+        auto_approve: false,
+        ..request("hi")
+    };
+    let supervised = RunRequest {
+        access: AccessMode::Supervised,
+        ..full.clone()
+    };
+    assert!(!AcpHarness::antigravity().reconfigures_in_place(&full, &supervised));
+    // Auto-approve is full access whatever the mode says.
+    let auto_approved = RunRequest {
+        auto_approve: true,
+        ..supervised.clone()
+    };
+    assert!(AcpHarness::antigravity().reconfigures_in_place(&full, &auto_approved));
+    // Grok runs every mode with full access, so nothing changes.
+    assert!(AcpHarness::grok().reconfigures_in_place(&full, &supervised));
+}
+
+/// Controls whose input bridge answers every question `answer` (`None`
+/// drops it unanswered), and the questions it was asked.
+fn answering_controls(
+    answer: Option<&'static str>,
+) -> (RunControls, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let (controls, _steer, _token) = controls();
+    let asked: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let record = asked.clone();
+    let controls = RunControls {
+        request_input: Box::new(move |questions| {
+            let (tx, rx) = oneshot::channel();
+            record
+                .lock()
+                .unwrap()
+                .extend(questions.iter().map(|q| q.question.clone()));
+            if let Some(answer) = answer {
+                let _ = tx.send(
+                    questions
+                        .iter()
+                        .map(|q| UserInputAnswer {
+                            question_id: q.id.clone(),
+                            labels: vec![answer.into()],
+                        })
+                        .collect(),
+                );
+            }
+            rx
+        }),
+        ..controls
+    };
+    (controls, asked)
+}
+
+/// A run of the fake server's "permissions" prompt (read, edit, then run
+/// `cargo test`) in `access`: its reply text, the questions asked, and how
+/// the run ended.
+async fn antigravity_permissions(
+    access: AccessMode,
+    auto_approve: bool,
+    workspace: &str,
+    answer: Option<&'static str>,
+) -> (Vec<String>, Vec<String>, Vec<(DoneStatus, Option<String>)>) {
+    let workspace = tempfile::Builder::new()
+        .prefix(workspace)
+        .tempdir()
+        .unwrap();
+    let mut req = request("permissions");
+    req.model = Some("gemini-3.7-flash".into());
+    req.reasoning = Some(ReasoningLevel::Medium);
+    req.cwd = workspace.path().display().to_string();
+    req.access = access;
+    req.auto_approve = auto_approve;
+    let (controls, asked) = answering_controls(answer);
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    let texts = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let asked = asked.lock().unwrap().clone();
+    (texts, asked, dones(&events))
+}
+
+#[tokio::test]
+async fn antigravity_full_access_runs_in_yolo_and_allows_every_permission_unasked() {
+    // Full access, and auto-approve whatever the mode says: as before modes.
+    for (access, auto_approve) in [
+        (AccessMode::FullAccess, false),
+        (AccessMode::FullAccess, true),
+        (AccessMode::Supervised, true),
+    ] {
+        let (texts, asked, done) =
+            antigravity_permissions(access, auto_approve, "full", Some("No")).await;
+        assert_eq!(
+            texts,
+            [
+                "sets:model=gemini-3.7-flash-medium;mode=yolo; perms:read=always;edit=always;execute=always;"
+            ],
+            "{access:?} auto_approve {auto_approve}"
+        );
+        assert!(asked.is_empty(), "{asked:?}");
+        assert_eq!(done, vec![(DoneStatus::Completed, None)]);
+    }
+}
+
+#[tokio::test]
+async fn antigravity_supervised_stays_in_default_and_asks_before_edits_and_commands() {
+    let (texts, asked, done) =
+        antigravity_permissions(AccessMode::Supervised, false, "supervised", Some("No")).await;
+    // No mode set: the session opens in `default`. Reading is never asked.
+    assert_eq!(
+        texts,
+        ["sets:model=gemini-3.7-flash-medium; perms:read=once;edit=no;execute=no;"]
+    );
+    assert_eq!(
+        asked,
+        [
+            "Antigravity wants to modify /w/src/lib.rs. Allow it?",
+            "Antigravity wants to run `cargo test`. Allow it?",
+        ]
+    );
+    assert_eq!(done, vec![(DoneStatus::Completed, None)]);
+
+    let (texts, asked, _) =
+        antigravity_permissions(AccessMode::Supervised, false, "supervised", Some("Yes")).await;
+    assert_eq!(
+        texts,
+        ["sets:model=gemini-3.7-flash-medium; perms:read=once;edit=once;execute=once;"]
+    );
+    assert_eq!(asked.len(), 2, "{asked:?}");
+
+    // A question closed unanswered is a refusal.
+    let (texts, _, _) =
+        antigravity_permissions(AccessMode::Supervised, false, "supervised", None).await;
+    assert_eq!(
+        texts,
+        ["sets:model=gemini-3.7-flash-medium; perms:read=once;edit=no;execute=no;"]
+    );
+}
+
+#[tokio::test]
+async fn antigravity_auto_accept_edits_allows_edits_and_asks_before_commands() {
+    let (texts, asked, done) =
+        antigravity_permissions(AccessMode::AutoAcceptEdits, false, "edits", Some("No")).await;
+    assert_eq!(
+        texts,
+        ["sets:model=gemini-3.7-flash-medium; perms:read=once;edit=once;execute=no;"]
+    );
+    assert_eq!(asked, ["Antigravity wants to run `cargo test`. Allow it?"]);
+    assert_eq!(done, vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_supervised_leaves_yolo_or_does_not_start() {
+    let (texts, _, done) =
+        antigravity_permissions(AccessMode::Supervised, false, "yolo-current", Some("No")).await;
+    assert_eq!(
+        texts,
+        ["sets:model=gemini-3.7-flash-medium;mode=default; perms:read=once;edit=no;execute=no;"]
+    );
+    assert_eq!(done, vec![(DoneStatus::Completed, None)]);
+
+    // Stuck in yolo, the run would never be asked anything.
+    let (texts, asked, done) = antigravity_permissions(
+        AccessMode::Supervised,
+        false,
+        "yolo-current-reject-mode-",
+        Some("Yes"),
+    )
+    .await;
+    assert!(texts.is_empty(), "{texts:?}");
+    assert!(asked.is_empty(), "{asked:?}");
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("rejected session mode")),
+        "{done:?}"
+    );
 }
 
 #[tokio::test]
@@ -2504,4 +2804,85 @@ async fn a_stopped_turn_keeps_the_agent_for_the_next_prompt() {
     ));
     drop(steer);
     assert!(next_event(&mut stream).await.is_none());
+}
+
+#[tokio::test]
+async fn fx_selects_models_and_enforces_policy_on_new_and_loaded_sessions() {
+    let harness = AcpHarness::fx().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+    );
+    let models = harness.models().await.unwrap();
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["model-a", "model-b"]
+    );
+    for resume in [None, Some("fx-session".to_string())] {
+        let mut req = request("hello");
+        req.model = Some("model-b".into());
+        req.resume = resume;
+        req.auto_approve = false;
+        req.access = AccessMode::Supervised;
+        let (control, sender, _) = controls();
+        drop(sender);
+        let events = run_to_end(&harness, req, control).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )));
+    }
+}
+
+#[tokio::test]
+async fn fx_rejected_model_never_falls_back_to_another_model() {
+    let harness = AcpHarness::fx().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+    );
+    let mut req = request("hello");
+    req.model = Some("rejected-model".into());
+    let (control, sender, _) = controls();
+    drop(sender);
+    let stream = harness.run(req, control).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            ..
+        })
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Ok(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    )));
+}
+
+#[tokio::test]
+async fn fx_permissions_follow_zeron_access_mode() {
+    for (access, answer, expected, question_count) in [
+        (AccessMode::Supervised, Some("No"), "deny", 1),
+        (AccessMode::Supervised, Some("Yes"), "allow", 1),
+        (AccessMode::FullAccess, Some("No"), "allow", 0),
+    ] {
+        let harness = AcpHarness::fx().with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-fx.py"),
+        );
+        let mut req = request("permission");
+        req.model = Some("model-b".into());
+        req.auto_approve = false;
+        req.access = access;
+        let (control, asked) = answering_controls(answer);
+        let events = run_to_end(&harness, req, control).await;
+        assert_eq!(asked.lock().unwrap().len(), question_count);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TextDelta { text } if text == expected))
+        );
+    }
 }

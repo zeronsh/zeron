@@ -21,6 +21,10 @@ const BACKUP: &str = "zeron.exe.old";
 /// Deterministic name for the copy that becomes the next installation; a
 /// crash between the two renames leaves at most this file behind.
 const INCOMING: &str = ".zeron-update-incoming.exe";
+/// The installed version, written by each update: the app's background
+/// engine (`zeron.exe engine`) compares it with its own to restart into the
+/// new image once idle.
+const VERSION_FILE: &str = "zeron-version";
 /// The installer's uninstall entry (`AppId` in `dist/windows/zeron.iss`, plus
 /// Inno Setup's `_is1` suffix). Settings → Apps reads `DisplayVersion` here.
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}_is1";
@@ -146,6 +150,7 @@ pub fn apply(staged: &Path, directory: &Path, relaunch: bool) -> anyhow::Result<
     swap_into_place(staged, &installed)?;
     if let Ok(version) = std::fs::read_to_string(staged.with_file_name("version")) {
         refresh_installer_version(version.trim());
+        let _ = std::fs::write(directory.join(VERSION_FILE), version.trim());
     }
     if relaunch {
         std::process::Command::new(&installed)
@@ -220,6 +225,14 @@ fn swap_into_place(staged: &Path, installed: &Path) -> anyhow::Result<()> {
         return Err(err).context("installing the updated executable");
     }
     Ok(())
+}
+
+/// The version the last update installed in `directory`, if one recorded it.
+pub(super) fn installed_version(directory: &Path) -> Option<String> {
+    std::fs::read_to_string(directory.join(VERSION_FILE))
+        .ok()
+        .map(|version| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
 }
 
 /// Called by the newly installed desktop before it opens the engine profile.

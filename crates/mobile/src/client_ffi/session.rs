@@ -98,6 +98,8 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The host moves the chat to another provider between turns.
+    pub provider_switch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -273,6 +275,7 @@ impl From<&zc::ComposerState> for ComposerState {
                     queue_edit_lease: caps.queue_edit_lease,
                     queued_attachments: caps.queued_attachments,
                     mid_turn_steering: caps.mid_turn_steering,
+                    provider_switch: caps.provider_switch,
                 },
             },
             live: LiveStatus {

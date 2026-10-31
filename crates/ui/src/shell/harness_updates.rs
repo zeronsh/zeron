@@ -3,7 +3,9 @@
 //! tweens; content keeps its final width while the outer surface clips it.
 
 use super::*;
-use zeron_proto::{HarnessId, HarnessUpdatePhase as Phase, HarnessUpdateStatus};
+use zeron_proto::{
+    HarnessId, HarnessUpdateFailureKind, HarnessUpdatePhase as Phase, HarnessUpdateStatus,
+};
 
 pub(super) fn versionless_notification_key(device: &str, harness: HarnessId) -> String {
     format!("{device}:{harness:?}:versionless")
@@ -98,9 +100,11 @@ fn agent_name(harness: HarnessId) -> &'static str {
         HarnessId::Devin => "Devin",
         HarnessId::Grok => "Grok",
         HarnessId::Hermes => "Hermes",
+        HarnessId::Fx => "fx",
         HarnessId::Pi => "Pi",
         HarnessId::Opencode => "OpenCode",
         HarnessId::Antigravity => "Antigravity",
+        HarnessId::Muse => "Muse Code",
         HarnessId::Mock => "Mock",
     }
 }
@@ -125,9 +129,20 @@ fn action(status: &HarnessUpdateStatus) -> Option<(&'static str, Option<&'static
         Phase::WaitingForIdle | Phase::Preparing | Phase::Downloading => {
             Some(("Cancel", Some(methods::CANCEL_HARNESS_UPDATE)))
         }
+        Phase::Failed if status.can_apply && install_failed(status) => {
+            Some(("Retry update", Some(methods::APPLY_HARNESS_UPDATE)))
+        }
         Phase::Failed => Some(("Check again", Some(methods::CHECK_HARNESS_UPDATES))),
         _ => None,
     }
+}
+
+/// The update itself failed (not a check): its release is still known.
+fn install_failed(status: &HarnessUpdateStatus) -> bool {
+    status
+        .error
+        .as_ref()
+        .is_some_and(|error| error.kind == HarnessUpdateFailureKind::Install)
 }
 
 fn right_inset(has_button: bool) -> f32 {
@@ -159,7 +174,13 @@ fn detail(status: &HarnessUpdateStatus) -> String {
             .error
             .as_ref()
             .map(|e| e.message.clone())
-            .unwrap_or_else(|| "Couldn’t check for updates".into()),
+            .unwrap_or_else(|| {
+                if install_failed(status) {
+                    "Update failed".into()
+                } else {
+                    "Couldn’t check for updates".into()
+                }
+            }),
         _ => "Checking for updates…".into(),
     }
 }
@@ -408,6 +429,7 @@ impl Shell {
                 Phase::Installing => format!("Updating {name}…"),
                 Phase::Verifying => format!("Verifying {name}…"),
                 Phase::Updated => format!("{name} updated"),
+                Phase::Failed if install_failed(status) => format!("{name} update failed"),
                 Phase::Failed => format!("{name} update check failed"),
                 _ => return None,
             }
@@ -430,14 +452,8 @@ impl Shell {
             .any(|row| row.connected && active(&row.status))
         {
             Some(
-                loaders::mini_glyph_spinner(
-                    "home-agent-update-activity",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                crate::loaders::ring_spinner("home-agent-update-activity", 14.0, theme.text_muted)
+                    .into_any_element(),
             )
         } else if all_updated {
             Some(
@@ -907,7 +923,11 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.show_notice(crate::toast::ToastKind::Error, format!("Agent update ({device}): {error}"), cx);
+                    shell.show_notice(
+                        crate::toast::ToastKind::Error,
+                        format!("Agent update ({device}): {error}"),
+                        cx,
+                    );
                 }
                 cx.notify();
             })
@@ -936,6 +956,8 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: None,
+            compatibility: None,
+            held_back: None,
         }
     }
 

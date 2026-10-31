@@ -84,7 +84,7 @@ pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
         exe,
         extra,
         &|key| std::env::var_os(key),
-        crate::shell_env::login_shell_path().map(OsString::from),
+        crate::shell_env::user_path(),
         Platform::current(),
         |path| {
             if runnable(path) {
@@ -104,6 +104,31 @@ pub(crate) fn binary_hint(path: &Path) -> String {
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unknown".into())
     )
+}
+
+/// What a failed agent launch reports. A working directory that is gone
+/// fails the spawn with `NotFound` on Unix too, which must not read as a
+/// missing binary; `binary` names the binary when it really is missing.
+/// Everything else stays [`HarnessError::Io`], kind intact (the engine
+/// retries the transient kinds).
+pub(crate) fn spawn_error(
+    error: std::io::Error,
+    cwd: Option<&Path>,
+    binary: impl FnOnce() -> String,
+) -> crate::HarnessError {
+    if let Some(cwd) = cwd
+        && matches!(cwd.try_exists(), Ok(false))
+    {
+        return crate::HarnessError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("working directory {} does not exist", cwd.display()),
+        ));
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        crate::HarnessError::NotInstalled(binary())
+    } else {
+        crate::HarnessError::Io(error)
+    }
 }
 
 fn runnable(path: &Path) -> bool {
@@ -144,44 +169,183 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
 }
 
 type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
-type VersionEntry = (Option<semver::Version>, std::collections::HashSet<String>);
-static VERSION_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<VersionKey, VersionEntry>>,
-> = std::sync::OnceLock::new();
+
+struct VersionEntry {
+    version: Option<semver::Version>,
+    aliases: std::collections::HashSet<String>,
+    /// Set for anything but a version: a probe that could not finish
+    /// (timeout, transient spawn failure) is retried soon, a definite
+    /// failure a little later; only an answer is kept for the binary's life.
+    expires: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
+struct VersionCache {
+    entries: std::collections::HashMap<VersionKey, VersionEntry>,
+    /// One lock per executable being probed, so concurrent callers for the
+    /// same binary share one `--version` while other binaries probe freely.
+    probing: std::collections::HashMap<VersionKey, std::sync::Arc<std::sync::Mutex<()>>>,
+    /// Per name, how often [`invalidate_versions`] cleared it: a probe whose
+    /// names were cleared while it ran may have run the replaced wrapper, so
+    /// its answer is not cached.
+    invalidated: std::collections::HashMap<String, u64>,
+}
+
+impl VersionCache {
+    /// A stamp over `names` that changes whenever any of them is invalidated.
+    fn invalidation_stamp<'a>(&self, names: impl IntoIterator<Item = &'a String>) -> u64 {
+        names
+            .into_iter()
+            .map(|name| self.invalidated.get(name).copied().unwrap_or(0))
+            .sum()
+    }
+}
+
+static VERSION_CACHE: std::sync::OnceLock<std::sync::Mutex<VersionCache>> =
+    std::sync::OnceLock::new();
+
+/// A freshly installed or updated CLI's first exec waits on the OS malware
+/// scan, and an npm `.cmd` shim starts node before the CLI itself does.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = if cfg!(windows) {
+    std::time::Duration::from_secs(10)
+} else {
+    std::time::Duration::from_secs(5)
+};
+
+/// How long an inconclusive probe is trusted before the binary is asked again.
+const INCONCLUSIVE_VERSION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a definite failure (non-zero exit, no version in the output) is
+/// trusted: a busy machine or a half-finished update heals.
+const VERSION_FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+enum Probe {
+    /// The binary answered: a version, or a definite failure (non-zero exit,
+    /// unparseable output). Cached for the executable's identity.
+    Answered(Option<semver::Version>),
+    /// The probe could not finish; cached only briefly.
+    Inconclusive,
+}
+
+fn version_cache() -> std::sync::MutexGuard<'static, VersionCache> {
+    VERSION_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 /// An explicit install may replace wrappers without changing their metadata.
 /// Clear all candidates, including canonical paths behind vendor symlinks.
 pub(crate) fn invalidate_versions(names: &[&str]) {
-    if let Some(cache) = VERSION_CACHE.get() {
+    if VERSION_CACHE.get().is_some() {
+        let mut cache = version_cache();
+        for name in names {
+            *cache.invalidated.entry((*name).to_owned()).or_default() += 1;
+        }
         cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, aliases)| !names.iter().any(|name| aliases.contains(*name)));
+            .entries
+            .retain(|_, entry| !names.iter().any(|name| entry.aliases.contains(*name)));
     }
 }
 
-/// Probe once per executable identity. Failures are cached too, including timeout.
-/// Keep the lock during the short probe so concurrent descriptor requests coalesce.
+/// Probe once per executable identity. A version is cached until the file
+/// changes; a failure is retried after [`VERSION_FAILURE_TTL`], and a probe
+/// that timed out after [`INCONCLUSIVE_VERSION_TTL`], so one cold first exec
+/// cannot pin an older install for the life of the process.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
-    use std::time::Duration;
+    binary_version_with(path, VERSION_PROBE_TIMEOUT)
+}
+
+fn binary_version_with(path: &Path, timeout: std::time::Duration) -> Option<semver::Version> {
     let canonical = path.canonicalize().ok()?;
     let metadata = canonical.metadata().ok()?;
     let key = (canonical, metadata.modified().ok(), metadata.len());
-    let mut cache = VERSION_CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let alias = path
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some((version, aliases)) = cache.get_mut(&key) {
-        aliases.insert(alias);
-        return version.clone();
+    let cached = |cache: &mut VersionCache| {
+        let entry = cache.entries.get_mut(&key)?;
+        if entry
+            .expires
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            return None;
+        }
+        entry.aliases.insert(alias.clone());
+        Some(entry.version.clone())
+    };
+    let slot = {
+        let mut cache = version_cache();
+        if let Some(version) = cached(&mut cache) {
+            return version;
+        }
+        cache.probing.entry(key.clone()).or_default().clone()
+    };
+    // The global lock is released while probing: a slow binary must not
+    // stall every other harness's resolution behind it.
+    let _probing = slot.lock().unwrap_or_else(|e| e.into_inner());
+    // The names this binary is known by: what an invalidation would match.
+    let (names, stamp) = {
+        let mut cache = version_cache();
+        if let Some(version) = cached(&mut cache) {
+            return version;
+        }
+        let mut names: Vec<String> = vec![alias.clone()];
+        if let Some(entry) = cache.entries.get(&key) {
+            names.extend(entry.aliases.iter().cloned());
+        }
+        let stamp = cache.invalidation_stamp(&names);
+        (names, stamp)
+    };
+    let (version, expires) = match probe_version(path, timeout) {
+        Probe::Answered(Some(version)) => (Some(version), None),
+        Probe::Answered(None) => (None, Some(std::time::Instant::now() + VERSION_FAILURE_TTL)),
+        Probe::Inconclusive => (
+            None,
+            Some(std::time::Instant::now() + INCONCLUSIVE_VERSION_TTL),
+        ),
+    };
+    let mut cache = version_cache();
+    if cache.invalidation_stamp(&names) != stamp {
+        // An install replaced wrappers while this probe ran: its answer may
+        // be the old one's, so the next caller asks again.
+        if cache
+            .probing
+            .get(&key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &slot))
+        {
+            cache.probing.remove(&key);
+        }
+        return version;
     }
+    let mut aliases: std::collections::HashSet<String> = [alias].into_iter().collect();
+    // An inconclusive retry keeps the aliases earlier callers registered.
+    if let Some(previous) = cache.entries.get(&key) {
+        aliases.extend(previous.aliases.iter().cloned());
+    }
+    cache.entries.retain(|(p, _, _), _| p != &key.0);
+    cache.entries.insert(
+        key.clone(),
+        VersionEntry {
+            version: version.clone(),
+            aliases,
+            expires,
+        },
+    );
+    if cache
+        .probing
+        .get(&key)
+        .is_some_and(|current| std::sync::Arc::ptr_eq(current, &slot))
+    {
+        cache.probing.remove(&key);
+    }
+    version
+}
+
+fn probe_version(path: &Path, timeout: std::time::Duration) -> Probe {
     #[cfg(not(windows))]
-    let probe = || -> Option<semver::Version> {
+    let probe = || -> Probe {
         use std::io::Read;
         use std::process::{Command, Stdio};
         let mut command = Command::new(path);
@@ -195,7 +359,10 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().ok()?;
+        let Ok(mut child) = command.spawn() else {
+            // ETXTBSY while an updater is still writing the file, EAGAIN, …
+            return Probe::Inconclusive;
+        };
         fn reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
@@ -203,18 +370,23 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                 bytes
             })
         }
-        let readers = [reader(child.stdout.take()?), reader(child.stderr.take()?)];
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Probe::Inconclusive;
+        };
+        let readers = [reader(stdout), reader(stderr)];
         let start = std::time::Instant::now();
-        let success = loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.success(),
-                Ok(None) if start.elapsed() < Duration::from_secs(2) => {
-                    std::thread::sleep(Duration::from_millis(10))
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if start.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
                 }
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break false;
+                    break None;
                 }
             }
         };
@@ -222,58 +394,65 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         unsafe {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
         }
-        if !success {
-            return None;
+        let Some(status) = status else {
+            return Probe::Inconclusive;
+        };
+        if !status.success() {
+            return Probe::Answered(None);
         }
         let mut bytes = Vec::new();
         for reader in readers {
-            while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
-                std::thread::sleep(Duration::from_millis(5));
+            while !reader.is_finished() && start.elapsed() < timeout {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
             if !reader.is_finished() {
-                return None;
+                return Probe::Inconclusive;
             }
-            bytes.extend(reader.join().ok()?);
+            bytes.extend(reader.join().unwrap_or_default());
             bytes.push(b' ');
         }
-        parse_version(&bytes)
+        Probe::Answered(parse_version(&bytes))
     };
     #[cfg(windows)]
-    let probe = || -> Option<semver::Version> {
+    let probe = || -> Probe {
         let path = path.to_path_buf();
         // Use the native launcher for npm .cmd/.bat shims and job-tree cleanup.
         // A separate runtime is safe even when descriptors run inside Tokio.
         std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .ok()?
-                .block_on(async {
-                    let mut command = crate::process::Command::new(&path);
-                    command
-                        .arg("--version")
-                        .stdin(crate::process::Stdio::null())
-                        .stdout(crate::process::Stdio::piped())
-                        .stderr(crate::process::Stdio::piped())
-                        .kill_on_drop(true);
-                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
-                        .await
-                        .ok()?
-                        .ok()?;
-                    if !output.status.success() {
-                        return None;
+            else {
+                return Probe::Inconclusive;
+            };
+            runtime.block_on(async {
+                let mut command = crate::process::Command::new(&path);
+                command
+                    .arg("--version")
+                    .stdin(crate::process::Stdio::null())
+                    .stdout(crate::process::Stdio::piped())
+                    .stderr(crate::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let output = match tokio::time::timeout(timeout, command.output()).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Probe::Answered(None);
                     }
-                    parse_version(&output.stdout).or_else(|| parse_version(&output.stderr))
-                })
+                    // Timed out, or a spawn the AV scanner held up.
+                    _ => return Probe::Inconclusive,
+                };
+                if !output.status.success() {
+                    return Probe::Answered(None);
+                }
+                Probe::Answered(
+                    parse_version(&output.stdout).or_else(|| parse_version(&output.stderr)),
+                )
+            })
         })
         .join()
-        .ok()
-        .flatten()
+        .unwrap_or(Probe::Inconclusive)
     };
-    let version = probe();
-    cache.retain(|(p, _, _), _| p != &key.0);
-    cache.insert(key, (version.clone(), [alias].into_iter().collect()));
-    version
+    probe()
 }
 
 pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
@@ -288,15 +467,29 @@ pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
         })
 }
 
+/// The user's home as the agent CLIs see it. On Windows that is USERPROFILE
+/// (Node's `os.homedir()`), not HOME: Git for Windows and MSYS shells export
+/// HOME, sometimes as a POSIX path like `/home/ada`, and trusting it would put
+/// transcripts, config and installs somewhere the CLIs never look. HOME is
+/// only a fallback there, and only when it is an existing absolute path.
 fn home_dir_with(env: &impl Fn(&str) -> Option<OsString>, platform: Platform) -> Option<PathBuf> {
-    env("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            (platform == Platform::Windows)
-                .then(|| env("USERPROFILE").filter(|value| !value.is_empty()))
-                .flatten()
-        })
-        .map(PathBuf::from)
+    if platform == Platform::Windows {
+        return env_path(env, "USERPROFILE").or_else(|| {
+            env_path(env, "HOME").filter(|home| is_windows_absolute(home) && home.is_dir())
+        });
+    }
+    env_path(env, "HOME")
+}
+
+/// `C:\…` or `\\server\share\…`, judged lexically so it holds on any host.
+fn is_windows_absolute(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    drive || text.starts_with(r"\\")
 }
 
 fn node_version_manager_bins_with(
@@ -396,6 +589,50 @@ fn node_version_manager_bins_with(
     dirs
 }
 
+/// The node-manager and global-install directories discovery searches that
+/// exist on this machine, for agent children's PATH: a CLI found through
+/// them shells out to `node`/`npx` (MCP servers) from the same place.
+#[cfg(windows)]
+pub(crate) fn node_manager_dirs() -> Vec<PathBuf> {
+    node_version_manager_bins_with(&|key| std::env::var_os(key), Platform::current())
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+/// Expand `%NAME%` references the way Windows expands REG_EXPAND_SZ values:
+/// names resolve through `lookup`, an unknown reference stays literal, and a
+/// lone `%` is kept.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn expand_windows_vars(value: &str, lookup: &impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) if end > 0 => {
+                let name = &after[..end];
+                match lookup(name) {
+                    Some(expanded) => out.push_str(&expanded),
+                    None => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn env_path(env: &impl Fn(&str) -> Option<OsString>, key: &str) -> Option<PathBuf> {
     env(key)
         .filter(|value| !value.is_empty())
@@ -483,6 +720,39 @@ fn is_runnable_candidate(path: &Path, platform: Platform) -> bool {
     path.is_file()
 }
 
+/// Directories of a bare system PATH: launchd's for a Dock/Finder launch,
+/// systemd's default for a service, and macOS's path_helper additions.
+const SYSTEM_PATH_DIRS: &[&str] = &[
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+    "/snap/bin",
+    "/usr/games",
+    "/usr/local/games",
+    "/System/Cryptexes/App/usr/bin",
+    "/Library/Apple/usr/bin",
+];
+
+/// Whether a Unix process PATH is only the system's: what a GUI launch or a
+/// service without its own PATH inherits. Only then does the login shell's
+/// PATH (the user's Homebrew, nvm, …) go first; a PATH the user or a unit
+/// set up — a venv, nix, direnv, nvm in the launching terminal — keeps
+/// precedence, for the child's PATH and for resolving the agent binary alike.
+pub(crate) fn is_bare_system_path(path: Option<&OsStr>) -> bool {
+    path.is_none_or(|path| {
+        std::env::split_paths(path).all(|dir| {
+            dir.as_os_str().is_empty()
+                || SYSTEM_PATH_DIRS
+                    .iter()
+                    .any(|system| dir == Path::new(system))
+                || dir.starts_with("/var/run/com.apple.security.cryptexd")
+        })
+    })
+}
+
 pub(crate) fn find_on_paths_with(
     exe: &str,
     extra: Vec<PathBuf>,
@@ -510,10 +780,16 @@ pub(crate) fn find_on_paths_matching_with(
             .flat_map(variants)
             .collect::<Vec<_>>()
     };
-    let mut candidates = env("PATH").map(from_path).unwrap_or_default();
-    if let Some(shell_path) = login_shell_path {
-        candidates.extend(from_path(shell_path));
-    }
+    let own_path = env("PATH");
+    let login_first = platform == Platform::Unix && is_bare_system_path(own_path.as_deref());
+    let own = own_path.map(from_path).unwrap_or_default();
+    let shell = login_shell_path.map(from_path).unwrap_or_default();
+    // The same precedence as the child's PATH (see `child_path_entries`).
+    let mut candidates = if login_first {
+        [shell, own].concat()
+    } else {
+        [own, shell].concat()
+    };
     candidates.extend(
         extra
             .into_iter()
@@ -537,6 +813,68 @@ pub(crate) fn find_on_paths_matching_with(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Resolution walks the PATHs in the child PATH's order: the login shell
+    /// first only behind a bare system PATH.
+    #[cfg(unix)]
+    #[test]
+    fn resolution_prefers_a_deliberate_process_path_like_the_child_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (venv, brew) = (dir.path().join("venv"), dir.path().join("brew"));
+        for bin in [&venv, &brew] {
+            std::fs::create_dir_all(bin).unwrap();
+            let exe = bin.join("agent");
+            std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let shell = Some(brew.clone().into_os_string());
+        let process = std::env::join_paths([venv.as_path(), Path::new("/usr/bin")]).unwrap();
+        let lookup = env(&[("PATH", process)]);
+        assert_eq!(
+            find_on_paths_with("agent", Vec::new(), &lookup, shell.clone(), Platform::Unix),
+            Some(venv.join("agent"))
+        );
+        let bare = env(&[("PATH", OsString::from("/usr/bin:/bin:/usr/sbin:/sbin"))]);
+        assert_eq!(
+            find_on_paths_with("agent", Vec::new(), &bare, shell, Platform::Unix),
+            Some(brew.join("agent"))
+        );
+        assert!(is_bare_system_path(None));
+        assert!(!is_bare_system_path(Some(OsStr::new(
+            "/nix/store/x/bin:/usr/bin"
+        ))));
+    }
+
+    #[test]
+    fn a_missing_working_directory_is_not_a_missing_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("deleted-project");
+        let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        match spawn_error(not_found(), Some(&gone), || "claude".into()) {
+            crate::HarnessError::Io(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+                assert_eq!(
+                    error.to_string(),
+                    format!("working directory {} does not exist", gone.display())
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            spawn_error(not_found(), Some(tmp.path()), || "claude".into()),
+            crate::HarnessError::NotInstalled(hint) if hint == "claude"
+        ));
+        assert!(matches!(
+            spawn_error(not_found(), None, || "claude".into()),
+            crate::HarnessError::NotInstalled(_)
+        ));
+        let busy = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            spawn_error(busy, Some(tmp.path()), || unreachable!()),
+            crate::HarnessError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+    }
 
     #[test]
     fn semantic_versions_support_cli_labels_and_prereleases() {
@@ -650,10 +988,232 @@ mod tests {
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             let started = std::time::Instant::now();
-            assert_eq!(binary_version(&path), None);
+            assert_eq!(
+                binary_version_with(&path, std::time::Duration::from_secs(1)),
+                None
+            );
             assert!(started.elapsed() < std::time::Duration::from_secs(3));
             assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
         }
+    }
+
+    /// A first exec slower than the probe budget (an AV scan of a fresh
+    /// install) must not pin "unknown version" for the process lifetime.
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_probe_is_retried_after_its_ttl_but_answers_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slow-until-warm");
+        let warm = dir.path().join("warm");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ -e '{}' ] || sleep 30\necho cli 3.1.0\n",
+                warm.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let short = std::time::Duration::from_millis(500);
+        assert_eq!(binary_version_with(&path, short), None);
+        std::fs::write(&warm, "").unwrap();
+        // Still inside the TTL: the inconclusive result is reused, not re-run.
+        assert_eq!(binary_version_with(&path, short), None);
+        // Age the entry past its TTL.
+        let canonical = path.canonicalize().unwrap();
+        for entry in version_cache()
+            .entries
+            .iter_mut()
+            .filter(|((p, _, _), _)| p == &canonical)
+            .map(|(_, entry)| entry)
+        {
+            assert!(entry.expires.is_some(), "a timeout is cached only briefly");
+            entry.expires = Some(std::time::Instant::now());
+        }
+        assert_eq!(
+            binary_version_with(&path, std::time::Duration::from_secs(10)),
+            Some(semver::Version::new(3, 1, 0))
+        );
+        let entries = version_cache();
+        let entry = entries
+            .entries
+            .iter()
+            .find(|((p, _, _), _)| p == &canonical)
+            .unwrap()
+            .1;
+        assert!(entry.expires.is_none(), "an answer is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_probe_is_retried_once_its_failure_ages_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let answer = dir.path().join("answer");
+        let path = dir.path().join("flaky-cli");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ncat '{}' || exit 1\n", answer.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(binary_version(&path), None);
+        // The binary itself is unchanged, so its identity (and cache key) is too.
+        std::fs::write(&answer, "flaky-cli 1.2.3\n").unwrap();
+        assert_eq!(binary_version(&path), None, "a fresh failure is cached");
+        let canonical = path.canonicalize().unwrap();
+        for entry in version_cache()
+            .entries
+            .iter_mut()
+            .filter(|((p, _, _), _)| p == &canonical)
+            .map(|(_, entry)| entry)
+        {
+            assert!(entry.expires.is_some(), "a failure is cached only briefly");
+            entry.expires = Some(std::time::Instant::now());
+        }
+        assert_eq!(binary_version(&path), Some(semver::Version::new(1, 2, 3)));
+    }
+
+    /// An install that replaces a wrapper in place (same metadata) while it
+    /// is being probed: the probe's answer, from the old wrapper, is not
+    /// cached over the invalidation.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_racing_an_invalidation_does_not_cache_its_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("racing-wrapper");
+        let (calls, go) = (dir.path().join("calls"), dir.path().join("go"));
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho x >> '{}'\nwhile [ ! -e '{}' ]; do sleep 0.02; done\necho cli 1.0.0\n",
+                calls.display(),
+                go.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let budget = std::time::Duration::from_secs(30);
+        let probe = {
+            let path = path.clone();
+            std::thread::spawn(move || binary_version_with(&path, budget))
+        };
+        while !calls.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        invalidate_versions(&["racing-wrapper"]);
+        std::fs::write(&go, "").unwrap();
+        assert_eq!(probe.join().unwrap(), Some(semver::Version::new(1, 0, 0)));
+        let canonical = path.canonicalize().unwrap();
+        assert!(
+            !version_cache()
+                .entries
+                .keys()
+                .any(|(p, _, _)| p == &canonical),
+            "the stale answer was cached"
+        );
+        // The next caller probes again.
+        assert_eq!(
+            binary_version_with(&path, budget),
+            Some(semver::Version::new(1, 0, 0))
+        );
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "x\nx\n");
+    }
+
+    /// Concurrent callers for one binary share a probe, and a slow binary
+    /// does not hold up probes of another.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_probes_coalesce_per_binary_without_a_global_wait() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let slow = dir.path().join("slow");
+        let fast = dir.path().join("fast");
+        std::fs::write(
+            &slow,
+            format!(
+                "#!/bin/sh\necho x >> '{}'\nsleep 3\necho cli 1.0.0\n",
+                dir.path().join("slow.calls").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(&fast, "#!/bin/sh\necho cli 2.0.0\n").unwrap();
+        for path in [&slow, &fast] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // A budget far past the slow binary's 3s: on a loaded machine the
+        // default one could time it out, which is not what this tests.
+        let budget = std::time::Duration::from_secs(30);
+        let slow_callers: Vec<_> = (0..4)
+            .map(|_| {
+                let slow = slow.clone();
+                std::thread::spawn(move || binary_version_with(&slow, budget))
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            binary_version_with(&fast, budget),
+            Some(semver::Version::new(2, 0, 0))
+        );
+        assert!(
+            slow_callers.iter().all(|caller| !caller.is_finished()),
+            "the fast probe waited on the slow one"
+        );
+        for caller in slow_callers {
+            assert_eq!(caller.join().unwrap(), Some(semver::Version::new(1, 0, 0)));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("slow.calls")).unwrap(),
+            "x\n"
+        );
+    }
+
+    #[test]
+    fn windows_home_is_userprofile_not_an_msys_home() {
+        let lookup = env(&[
+            ("HOME", OsString::from("/home/ada")),
+            ("USERPROFILE", OsString::from(r"C:\Users\Ada")),
+        ]);
+        assert_eq!(
+            home_dir_with(&lookup, Platform::Windows),
+            Some(PathBuf::from(r"C:\Users\Ada"))
+        );
+        assert_eq!(
+            home_dir_with(&lookup, Platform::Unix),
+            Some(PathBuf::from("/home/ada"))
+        );
+        // Without USERPROFILE, a POSIX-style HOME is not a Windows home.
+        let msys_only = env(&[("HOME", OsString::from("/home/ada"))]);
+        assert_eq!(home_dir_with(&msys_only, Platform::Windows), None);
+        assert!(is_windows_absolute(Path::new(r"D:\Users\ada")));
+        assert!(is_windows_absolute(Path::new(r"\\server\share\ada")));
+        assert!(!is_windows_absolute(Path::new("/home/ada")));
+        assert!(!is_windows_absolute(Path::new(r"Users\ada")));
+    }
+
+    #[test]
+    fn windows_registry_values_expand_known_variables_only() {
+        let lookup = |name: &str| match name {
+            "SystemRoot" => Some(r"C:\Windows".to_owned()),
+            "NVM_SYMLINK" => Some(r"C:\nvm4w\nodejs".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_windows_vars(r"%SystemRoot%\system32", &lookup),
+            r"C:\Windows\system32"
+        );
+        assert_eq!(
+            expand_windows_vars("%NVM_SYMLINK%", &lookup),
+            r"C:\nvm4w\nodejs"
+        );
+        assert_eq!(
+            expand_windows_vars(r"%MISSING%\bin", &lookup),
+            r"%MISSING%\bin"
+        );
+        assert_eq!(expand_windows_vars("100%", &lookup), "100%");
+        assert_eq!(expand_windows_vars("a%%b", &lookup), "a%%b");
     }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {

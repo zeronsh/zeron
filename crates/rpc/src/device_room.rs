@@ -83,6 +83,21 @@ const ECHO_DEADLINE: Duration = Duration::from_secs(20);
 static CLIENT_PING_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CLIENT_ECHO_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Marks the link-dial readiness probe (`ListHarnesses {readinessProbe: true}`)
+/// so a host can tell it from a user's request — a Cloud device must not count
+/// link (re)dials as activity that keeps it awake. Every host ignores
+/// `ListHarnesses` params, so the tag is wire-compatible both ways.
+pub const READINESS_PROBE_PARAM: &str = "readinessProbe";
+
+/// Whether a served request is the relay's own liveness traffic rather than
+/// something a user did: the dial readiness probe, and `EngineReady`.
+/// (Echo keepalives are relay-control frames and never reach the service.)
+pub fn is_liveness_probe(method: &str, params: &serde_json::Value) -> bool {
+    method == crate::methods::ENGINE_READY
+        || (method == crate::methods::LIST_HARNESSES
+            && params.get(READINESS_PROBE_PARAM) == Some(&serde_json::Value::Bool(true)))
+}
+
 #[doc(hidden)]
 pub fn set_client_liveness_for_tests(ping: Duration, echo_deadline: Duration) {
     CLIENT_PING_MS.store(ping.as_millis() as u64, Ordering::Relaxed);
@@ -1063,7 +1078,10 @@ impl LinkCache {
         // Readiness probe: prove the host answers before caching (an offline host bounces
         // host_offline, which closes the link and fails this call fast).
         let client = link.client();
-        let probe = client.call(crate::methods::LIST_HARNESSES, serde_json::json!({}));
+        let probe = client.call(
+            crate::methods::LIST_HARNESSES,
+            serde_json::json!({ READINESS_PROBE_PARAM: true }),
+        );
         tokio::time::timeout(self.config.probe_timeout, probe)
             .await
             .map_err(|_| {

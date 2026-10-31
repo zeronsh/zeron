@@ -775,6 +775,45 @@ async fn target_device_id_routes_over_the_relay() {
             .is_err()
     );
 
+    // A reply's Markdown image reads on the chat's host, within its folder.
+    let pictures = dirs.path().join("b-chat-folder");
+    std::fs::create_dir_all(&pictures).unwrap();
+    std::fs::write(pictures.join("shot.png"), payload).unwrap();
+    core_b
+        .workspace
+        .create_chat(
+            "chat-pictures",
+            None,
+            Some("device-b"),
+            None,
+            Some(pictures.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+    let params = serde_json::json!({
+        "chatId": "chat-pictures",
+        "path": pictures.join("shot.png"),
+        "offset": 0,
+    });
+    let local_picture = local_b
+        .call(methods::READ_CHAT_IMAGE_CHUNK, params.clone())
+        .await
+        .unwrap();
+    let mut targeted = params.clone();
+    targeted["targetDeviceId"] = "device-b".into();
+    let remote_picture = client
+        .call(methods::READ_CHAT_IMAGE_CHUNK, targeted)
+        .await
+        .unwrap();
+    assert_eq!(remote_picture, local_picture);
+    assert_eq!(remote_picture["mimeType"], "image/png");
+    // A doesn't host that chat, so it never serves it itself.
+    assert!(
+        client
+            .call(methods::READ_CHAT_IMAGE_CHUNK, params)
+            .await
+            .is_err()
+    );
+
     // The add-space picker's exact call: browse a folder ON B from A's IPC
     // surface (ListFolders + targetDeviceId, relay-forwarded).
     let browse_dir = dirs.path().join("b-folders");
@@ -880,9 +919,12 @@ async fn target_device_id_routes_over_the_relay() {
             cwd: "/tmp".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
             auto_approve: true,
+            access: Default::default(),
+            plan: false,
             attachments: Vec::new(),
             worktree: None,
             resume: None,
+            env: Default::default(),
         },
         message_id: "m-a-1".into(),
     })
@@ -2012,6 +2054,7 @@ async fn mcp_standalone_session_executes_on_the_selected_device() {
         Origin {
             chat_id: Some("coordinator".into()),
             device_id: Some("device-a".into()),
+            ..Default::default()
         },
     )));
     a.workspace

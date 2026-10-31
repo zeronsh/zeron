@@ -30,15 +30,38 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   no current client dials it) + DeviceRoom DO (per device) + R2 attachments + WorkOS JWKS auth.
   Absorbs the old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
+- **Cloud** (`docs/design/cloud-device.md`): a checkout option — a session in any project
+  whose GitHub repository the Zeron GitHub App reaches can run on its own hosted sandbox,
+  with Cloud's own providers — an ordinary headless engine
+  provisioned per session by the edge's CloudAccount DO + Workflows behind a provider-neutral
+  sandbox interface, sleeping when idle, authenticated with its own device key (runner tokens
+  scoped to that one session's device), and fed provider credentials by the separate
+  service-binding-only `zeron-vault` Worker (one Durable Object per account serializes
+  refreshes, so parallel sessions never race a refresh token).
 
 ### Headed / headless
-Single binary `zeron`:
-- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
-  otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
-  serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
-  port**. The embedded engine is not private: any other viewport can attach to the running app
-  without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
-  window still opens, having lost only the ability to host peers.
+Binaries `zeron` (app + CLI) and `zeron-engine` (the app's background engine, no UI linked):
+- `zeron` — headed. If an engine is already listening on the IPC port, connect to it. Otherwise
+  start the **background engine** (`crates/engine/src/managed.rs`) — `zeron-engine` beside the app
+  ("Zeron Engine" inside the macOS bundle), or `zeron engine` where no separate executable ships
+  (Windows, which updates as a single `zeron.exe`) — and attach to it. It is spawned detached from
+  the app (own session/process group, no inherited pipes), not through a service manager, so on
+  macOS privacy permissions stay attributed to the app and no background-item approval is needed.
+  Closing or quitting the app leaves it running with every session; it shows up as its own process.
+  The app reconnects when the connection drops (starting it again if it is gone) without resetting
+  what's on screen, and stops it itself only to replace the runtime (sign-out, the local→synced
+  switch). After an app update it restarts into the new version once no run or terminal is live.
+  If it can't start — or the port is 0, or something else holds the port — the app embeds the
+  engine **in-process** as before (RPC over an in-memory duplex — same protocol — and serving that
+  engine on the IPC port); `ZERON_EMBED_ENGINE=1` forces it. An engine that went away unasked is
+  started again after 1, 2, 5 and 15 s; a fifth loss within five minutes stops and shows the failure
+  (with Retry) rather than embedding — an engine bug would crash an in-process engine too.
+  The engine stops by itself once idle if its app is moved to the Trash or uninstalled, and its log
+  (like every long-running mode's) moves to `.old` past 64 MB rather than growing for weeks.
+- Desktop banners are the engine's (`desktop_notify.rs`, advertised as `desktop-notifications-v1`):
+  finished runs, questions, failures, connection loss and agent updates keep arriving with the app
+  closed. Preferences come from the app's `ui-settings.json`; "only in the background" uses window
+  focus the app reports (`SetViewportFocus`). The app keeps the chimes, decided by the same baselines.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles
@@ -195,12 +218,21 @@ feature spec `docs/research/feature-inventory.md` §1.
 - **Composer**: hand-rolled gpui text input (start from Zed's `examples/input.rs`: IME, selection,
   clipboard, key actions), compact↔expanded auto-flip by measured text width, auto-grow 76–260px,
   Enter/Shift+Enter, Send→Steer→Stop morph, drafts + attachments per chat, drag-drop/paste
-  images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance) replacing the composer while input
-  is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
+  images, QuestionPanel (paged, 1-9 keys, 220ms auto-advance, a corner close / Escape that
+  answers nothing) replacing the composer while input is requested. Pickers (harness/model, traits, repo w/ folder browser, branch w/ worktree
   toggle) as gpui popovers with `menu-in` scale/fade.
 - **Terminal**: `alacritty_terminal` (vte state machine, MIT/Apache) + `portable-pty` on the
   engine side; custom gpui grid element; tabs w/ drag-reorder (150ms sliding transforms), height
-  drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
+  drag 160px–55vh, 80ms resize debounce, 1MB replay, detach ≠ close. No artificial latency: keys
+  are written the moment they land (one write in flight per tab keeps them ordered) and output
+  after a quiet spell is sent the moment it is read (only floods are paced, 4ms). Typed text goes
+  through the platform text input (IME, dead keys, layout symbols); mouse/focus reporting,
+  DECSCUSR cursors with a typing-aware blink, synchronized output, a contrast floor for program
+  colors. A terminal on another device streams over a direct WebRTC link
+  (`engine/src/terminals/link.rs`, `remote_terminals.rs`), falling back to the device-room relay
+  only when the devices can't reach each other and moving back mid-session without a gap (input
+  is numbered and acknowledged, so a path change neither drops nor repeats a keystroke); on
+  slow links the viewer predicts the echo of typed text (`ui/src/terminal/predict.rs`).
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
 - **Animation kit** (`zeron-ui::motion`): small helpers over gpui `Animation` reproducing the

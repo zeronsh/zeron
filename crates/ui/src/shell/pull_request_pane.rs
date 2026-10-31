@@ -733,12 +733,10 @@ impl Shell {
             }
             .into();
             let leading = if loading {
-                loaders::mini_glyph_spinner(
+                crate::loaders::ring_spinner(
                     format!("pull-request-tab-{ix}"),
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
+                    14.0,
+                    theme.text_muted,
                 )
                 .into_any_element()
             } else {

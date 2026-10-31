@@ -242,6 +242,9 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The host moves the chat to another provider between turns; older
+    /// hosts would resume one provider's session under another.
+    pub provider_switch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

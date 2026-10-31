@@ -20,7 +20,10 @@ pub(crate) struct ChatPersistence {
     urgent: AtomicBool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
-    pub(crate) initial_cursor_verified: bool,
+    /// Seeded from the store, then set by the first verified write: cursor
+    /// repair is once per legacy snapshot, never once per rejoin. The thin
+    /// client reads the same flag from the store (client/src/live/room.rs).
+    cursor_verified: AtomicBool,
     #[cfg(test)]
     writes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -50,7 +53,7 @@ impl ChatPersistence {
             urgent: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
-            initial_cursor_verified: verified,
+            cursor_verified: AtomicBool::new(verified),
             #[cfg(test)]
             writes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -64,6 +67,10 @@ impl ChatPersistence {
 
     pub(crate) fn cursor(&self) -> u64 {
         self.cursor.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cursor_verified(&self) -> bool {
+        self.cursor_verified.load(Ordering::Acquire)
     }
 
     pub(crate) fn is_clean(&self) -> bool {
@@ -174,6 +181,7 @@ impl ChatPersistence {
                 Ok(()) => {
                     #[cfg(test)]
                     self.writes.fetch_add(1, Ordering::Relaxed);
+                    self.cursor_verified.store(true, Ordering::Release);
                     self.saved.store(generation, Ordering::Release);
                 }
                 Err(error) => {
@@ -278,6 +286,17 @@ mod tests {
         (dir, doc, store, persistence)
     }
 
+    #[test]
+    fn an_unverified_cursor_opens_at_zero() {
+        let (_dir, doc, store, _) = fixture();
+        let bytes = doc.export_snapshot().unwrap();
+        store
+            .save_snapshot_with_cursor("legacy", &bytes, 500, 2)
+            .unwrap();
+        let persistence = ChatPersistence::new(&doc, store, "legacy".into(), 500);
+        assert_eq!(persistence.cursor(), 0);
+    }
+
     #[tokio::test]
     async fn replay_burst_coalesces_and_flush_bypasses_debounce() {
         let (_dir, doc, store, persistence) = fixture();
@@ -332,6 +351,60 @@ mod tests {
             0,
             "server-reset cursor must be allowed to decrease"
         );
+    }
+
+    #[test]
+    fn first_verified_write_ends_legacy_cursor_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("born").unwrap());
+        // A cold reader's first open stamps an unverified lineage.
+        store
+            .save_snapshot_with_cursor(
+                "born",
+                &doc.export_snapshot().unwrap(),
+                0,
+                crate::chat2_host::CHAT2_DOC_EPOCH,
+            )
+            .unwrap();
+        let persistence = ChatPersistence::new(&doc, store.clone(), "born".into(), 0);
+        assert!(!persistence.cursor_verified());
+        persistence.applied(7, true); // no runtime: flushes inline
+        assert!(persistence.cursor_verified(), "the next join would rewind");
+        assert!(ChatPersistence::new(&doc, store, "born".into(), 7).cursor_verified());
+    }
+
+    /// Only a write that landed certifies the cursor: a failed one leaves
+    /// the legacy repair in place until a retry succeeds.
+    #[test]
+    fn failed_write_keeps_legacy_cursor_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("born").unwrap());
+        store
+            .save_snapshot_with_cursor(
+                "born",
+                &doc.export_snapshot().unwrap(),
+                0,
+                crate::chat2_host::CHAT2_DOC_EPOCH,
+            )
+            .unwrap();
+        let persistence = ChatPersistence::new(&doc, store.clone(), "born".into(), 0);
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_update BEFORE UPDATE ON snapshots BEGIN SELECT RAISE(FAIL, 'injected disk failure'); END;
+             CREATE TRIGGER fail_insert BEFORE INSERT ON snapshots BEGIN SELECT RAISE(FAIL, 'injected disk failure'); END;",
+        )
+        .unwrap();
+        persistence.applied(7, true); // no runtime: flushes inline, and fails
+        assert!(!persistence.is_clean(), "the write failed");
+        assert!(!persistence.cursor_verified());
+        assert!(!store.snapshot_cursor_verified("born").unwrap());
+        db.execute_batch("DROP TRIGGER fail_update; DROP TRIGGER fail_insert;")
+            .unwrap();
+        persistence.flush_sync();
+        assert!(persistence.is_clean());
+        assert!(persistence.cursor_verified());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

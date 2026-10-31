@@ -1,0 +1,24 @@
+[package]
+name = "zeron-term-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Terminals on other devices, for every viewer (the desktop engine and the
+# phone alike): the direct peer-to-peer link's protocol, and the hub that
+# carries a terminal's I/O over the direct link when the devices can reach
+# each other and the relay when they can't — switching mid-session with no
+# gap, no repeat and no lost keystroke.
+[dependencies]
+zeron-proto.workspace = true
+zeron-rpc.workspace = true
+zeron-preview.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+base64 = "0.22"

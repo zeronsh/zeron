@@ -925,7 +925,13 @@ async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
 
     // Latest-only sidecar to every syncing chat's session DO slot.
     let chats = lock(&entry.chats).clone();
-    if let Some(edge) = &inner.edge {
+    // The legacy s2 sidecar route is closed to Cloud runner tokens (and no
+    // current client reads it), so a Cloud machine doesn't post it.
+    if let Some(edge) = inner
+        .edge
+        .as_ref()
+        .filter(|_| !crate::runner::is_cloud_platform())
+    {
         for chat in &chats {
             let sidecar = DiffSidecar {
                 chat_id: chat.id.clone(),

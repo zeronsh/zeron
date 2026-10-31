@@ -70,7 +70,10 @@ fn front_page_mirrors_the_desktop_sidebar() {
         ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
-    assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
+    assert_eq!(
+        ids(ws.children("chat-veil")),
+        ["chat-side-easing", "chat-side"]
+    );
 
     let veil = ws.session("chat-veil").unwrap();
     assert_eq!(veil.indicator, ChatIndicator::Working);
@@ -598,4 +601,38 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     let row = client.workspace().session("chat-blog").unwrap().clone();
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
+}
+
+/// A provider change goes through only where the chat's host switches
+/// providers; a model change goes through anywhere.
+#[test]
+fn provider_switch_needs_a_host_that_switches() {
+    let (client, _dir) = demo(fast());
+    let switched = |chat: &str| {
+        let mut config = client
+            .session_config(chat)
+            .expect("demo chats have a config");
+        use zeron_proto::HarnessId;
+        config.harness = if config.harness == HarnessId::Codex {
+            HarnessId::ClaudeCode
+        } else {
+            HarnessId::Codex
+        };
+        config.model = None;
+        (client.set_session_config(chat, &config), config.harness)
+    };
+    // The Mac advertises provider switching.
+    let (result, harness) = switched("chat-veil");
+    result.expect("a host that switches takes the change");
+    assert_eq!(client.session_config("chat-veil").unwrap().harness, harness);
+    // The studio's engine predates it: the chat keeps its provider.
+    let before = client.session_config("chat-blog").unwrap();
+    let (result, _) = switched("chat-blog");
+    let error = result.expect_err("an older host refuses").to_string();
+    assert!(error.contains("newer Zeron"), "{error}");
+    assert_eq!(client.session_config("chat-blog").unwrap(), before);
+    // A model change on the same provider is not a switch.
+    let mut model = before.clone();
+    model.model = Some("another-model".into());
+    client.set_session_config("chat-blog", &model).unwrap();
 }

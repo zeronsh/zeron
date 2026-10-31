@@ -36,7 +36,7 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 
-probe() { cargo run -q -p zeron-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
+probe() { ZERON_DATA_DIR="$DAEMON_DIR" cargo run -q -p zeron-rpc --example rpc_probe -- "ws://127.0.0.1:$IPC" "$@"; }
 
 if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   echo "▸ seeding demo chats"
@@ -93,4 +93,5 @@ probe QueueCommand "{\"chatId\":\"$(cat "$FANOUT_ID_FILE")\",\"command\":{\"kind
 
 echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
 echo "  'Fan Out Forty Scouts' settles a subagent every 2.5s; send '/fanout 40' to replay"
-ZERON_DATA_DIR="$UI_DIR" ZERON_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/zeron
+# The UI attaches to the daemon, whose IPC bearer lives in the daemon's data dir.
+ZERON_DATA_DIR="$UI_DIR" ZERON_IPC_PORT=$IPC ZERON_IPC_TOKEN_FILE="$DAEMON_DIR/ipc-token" RUST_LOG=warn ./target/debug/zeron

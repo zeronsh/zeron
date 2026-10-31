@@ -50,6 +50,27 @@ Codex CLI 0.153.4 was checked on 2026-09-10. The local model catalog advertises
 `gpt-5.6-terra`. Feature flags alone do not force a v2 model onto the v1 protocol.
 Setting `agents.enabled=false` disables agent tools, so it cannot select v1.
 
+Title runs pass `features.multi_agent`, `features.multi_agent_v2` and
+`agents.enabled` as false in the `thread/start` `config` map, and so does the
+driver for a run whose Zeron server is side-chats-only. The app-server
+merges that map into its `-c` overrides (`load_with_cli_overrides` in
+`codex-rs/app-server/src/config_manager.rs`), and an enabled
+`features.multi_agent_v2` takes precedence over `agents.enabled`
+(`codex-rs/core/config.schema.json`).
+
+Zeron doesn't offer the native subagents switch (Settings → Providers) for
+Codex, though: a thread keeps the multi-agent mode it ran with. A thread
+started with agents off records `disabled` in its session meta
+(`codex-rs/core/src/session/session.rs`), each turn records its mode
+(`codex-rs/core/src/session/turn_context.rs`), and a resume takes the
+recorded mode unless the config forces one (`resolve_multi_agent_version` in
+`codex-rs/core/src/session/mod.rs`, `codex-rs/history/src/lib.rs`). The config
+can only force V2 or disabled (`multi_agent_version_override` in
+`codex-rs/core/src/config/mod.rs`), so turning the switch back on would leave
+a chat that ran while it was off without agent tools until it started a
+fresh thread. Both paragraphs are read from source at rust-v0.153.4, not
+live-checked.
+
 The ignored test `live_subagent_spawn_and_followup_keep_one_transcript` asks one
 child for three short replies: initial assignment, follow-up, and another
 follow-up after restarting the app-server and resuming the parent. It asserts

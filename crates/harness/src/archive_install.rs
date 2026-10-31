@@ -196,10 +196,13 @@ where
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
+    if crate::adapter_install::rename_into_place(&tmp_dir, &final_dir)
+        .await
+        .is_err()
+    {
         if installed().is_none() {
             let _ = std::fs::remove_dir_all(&final_dir);
-            std::fs::rename(&tmp_dir, &final_dir)?;
+            crate::adapter_install::rename_into_place(&tmp_dir, &final_dir).await?;
         } else {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }

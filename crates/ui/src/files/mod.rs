@@ -640,6 +640,7 @@ impl FilesSurface {
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::OpenAttachment(_)
+            | ComposerInputEvent::AnnotationHovered(_)
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged => {}
         });
@@ -921,6 +922,14 @@ impl FilesSurface {
         }
     }
 
+    /// The host didn't answer: if it's a Cloud machine, find out at once
+    /// whether it went to sleep, so the panel can say so.
+    pub(super) fn recheck_host(&mut self, cx: &mut Context<Self>) {
+        let chat_id = self.chat_id.clone();
+        self.state
+            .update(cx, |state, cx| state.recheck_cloud_machine(&chat_id, cx));
+    }
+
     pub fn retry_root(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.started = true;
@@ -1092,6 +1101,7 @@ impl FilesSurface {
                         if directory.is_empty() {
                             surface.error = Some(message.clone().into());
                         }
+                        surface.recheck_host(cx);
                         surface
                             .tree
                             .fail_load(&directory, cursor, message, generation);

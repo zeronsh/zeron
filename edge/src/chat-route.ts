@@ -1,4 +1,4 @@
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { AUTH_USER_HEADER, ROOM_KIND_HEADER, RUNNER_ACCOUNT_HEADER, RUNNER_DEVICE_HEADER, type Env } from "./env";
 
 /** Canonical chat identity comes from the authenticated route, never a
  * sender-supplied query. Also used by the workerd routing fixture. */
@@ -30,6 +30,9 @@ export function chatRoute(request: Request, env: Pick<Env, "CHAT_ROOMS">, userId
   url.pathname = `/${route}`;
   const headers = new Headers(request.headers);
   headers.delete(ROOM_KIND_HEADER);
+  // Worker-controlled runner identity: never passed through from a caller.
+  headers.delete(RUNNER_DEVICE_HEADER);
+  headers.delete(RUNNER_ACCOUNT_HEADER);
   headers.set(AUTH_USER_HEADER, userId);
   const room = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName(`chat2/${chat}`));
   return room.fetch(new Request(url, { method: request.method, body: request.body, headers }));

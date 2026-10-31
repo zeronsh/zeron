@@ -92,6 +92,9 @@ enum Palette {
         case .diffAddBar: dynamic(0x15803D, 0x34D399, alpha: 0.55)
         case .diffDelBar: dynamic(0xDC2626, 0xF87171, alpha: 0.55)
         case .diffHunk: dual(UIColor(hex: 0x5B43E8, alpha: 0.07), UIColor(hex: 0x8B7CF6, alpha: 0.08))
+        // Error cards: a red wash, and a lighter red that reads on it.
+        case .dangerWash: dual(UIColor(hex: 0xDC2626, alpha: 0.08), UIColor(hex: 0xF87171, alpha: 0.12))
+        case .dangerSoft: dynamic(0xB91C1C, 0xFCA5A5)
         }
     }
 }

@@ -74,7 +74,7 @@ impl EngineRpc {
         let thread = self
             .workspace
             .chat_harness_session(&chat.id)
-            .filter(|(id, _)| !id.is_empty());
+            .filter(|stored| !stored.session_id.is_empty());
         // The old segment stays until the new one holds a message: a failed
         // start may remove the empty successor, and then the next call
         // rotates again from here instead of losing the thread.
@@ -109,7 +109,7 @@ impl EngineRpc {
     fn new_voice_chat(
         &self,
         config: ChatConfig,
-        thread: Option<(String, Option<String>)>,
+        thread: Option<crate::workspace_host::StoredHarnessSession>,
     ) -> Result<String, VoiceRejection> {
         let chat = format!("{ORCHESTRATOR_CHAT_PREFIX}{}", uuid::Uuid::new_v4());
         // No space: a projectless chat whose cwd is the host's `~`.
@@ -127,9 +127,13 @@ impl EngineRpc {
         self.workspace
             .rename_chat(&chat, ORCHESTRATOR_CHAT_TITLE)
             .map_err(|_| VoiceRejection::Protocol)?;
-        if let Some((id, cwd)) = thread {
-            self.workspace
-                .set_chat_harness_session(&chat, &id, cwd.as_deref().unwrap_or(""));
+        if let Some(thread) = thread {
+            self.workspace.set_chat_harness_session(
+                &chat,
+                &thread.session_id,
+                thread.cwd.as_deref().unwrap_or(""),
+                thread.harness,
+            );
         }
         Ok(chat)
     }
@@ -175,13 +179,17 @@ mod tests {
         assert_eq!(row.config, Some(config("b")));
 
         core.workspace
-            .set_chat_harness_session(&first, "codex-thread", "/home/me");
+            .set_chat_harness_session(&first, "codex-thread", "/home/me", Some(HarnessId::Codex));
         let doc = core.doc_host.open(&first).unwrap();
         for i in 0..ROTATE_AFTER {
             doc.write_user_message(&format!("m{i}"), "hi", i as i64)
                 .unwrap();
         }
-        let inherited = Some(("codex-thread".into(), Some("/home/me".into())));
+        let inherited = Some(crate::workspace_host::StoredHarnessSession {
+            session_id: "codex-thread".into(),
+            cwd: Some("/home/me".into()),
+            harness: Some(HarnessId::Codex),
+        });
         let next = rpc.voice_chat(config("b")).await.unwrap();
         assert_ne!(next, first);
         assert_eq!(core.workspace.chat_harness_session(&next), inherited);

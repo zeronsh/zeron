@@ -266,12 +266,15 @@ fn chat(id: &str, device_id: &str) -> Chat {
             reasoning: None,
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            access: Default::default(),
+            plan: false,
         }),
         last_message_preview: None,
         last_message_at: None,
         created_at: ts(2_000),
         harness_session_id: None,
         harness_session_cwd: None,
+        harness_session_harness: None,
         parent_chat_id: Some("parent-chat".into()),
         space_id: None,
         last_seen_at: None,
@@ -289,6 +292,7 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
         git_checked_at: None,
         checkout_id: None,
         repository_id: None,
+        github_repo: None,
         created_at: ts(1_500),
     }
 }
@@ -296,13 +300,84 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
+        last_turn_outcome: None,
+        terminal_activity: None,
         running_subagents: 0,
+        background_tasks: Vec::new(),
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
     }
+}
+
+#[test]
+fn background_processes_replicate_and_clear() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.background_tasks = vec![zeron_proto::BackgroundTask {
+        id: "bgsh".into(),
+        command: "npm run dev".into(),
+        description: Some("Start the dev server".into()),
+        started_at: ts(3_100),
+    }];
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+
+    // Every process ended: an empty list replaces the old one.
+    row.background_tasks.clear();
+    row.updated_at = ts(3_600);
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn program_activity_and_native_outcome_survive_replication_and_restart() {
+    use zeron_proto::{
+        DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity,
+    };
+    let now = ts(3_500);
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Interrupted,
+        finished_at: now,
+    });
+    row.terminal_activity = Some(TerminalActivity {
+        terminal_id: "pty".into(),
+        updated_at: ts(3_400),
+        report: ProgramStatus {
+            id: "worker".into(),
+            state: ProgramState::Blocked,
+            kind: Some(ProgramInputKind::Auth),
+            app: Some("demo".into()),
+            title: None,
+            message: Some("Sign in".into()),
+            progress: None,
+        },
+    });
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    let restored = RegistryDoc::from_bytes(&viewer.to_bytes().unwrap(), "viewer").unwrap();
+    assert_eq!(restored.read_sessions().unwrap(), vec![row.clone()]);
+    row.terminal_activity = None;
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Completed,
+        finished_at: now,
+    });
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
 }
 
 /// Stand-in for the server: applies every pushable batch from `docs` to a row
@@ -573,6 +648,7 @@ fn spaces_round_trip_and_mutate() {
             true,
             Some("checkout-abc"),
             Some("github.com/owner/project"),
+            Some("acme/app"),
             ts(4_000),
         )
         .unwrap()
@@ -587,7 +663,10 @@ fn spaces_round_trip_and_mutate() {
     assert_eq!(row.git_checked_at, Some(ts(4_000)));
 
     assert!(!ws.rename_space("nope", Some("x")).unwrap());
-    assert!(!ws.set_space_git("nope", true, None, None, ts(1)).unwrap());
+    assert!(
+        !ws.set_space_git("nope", true, None, None, None, ts(1))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -2299,4 +2378,28 @@ fn attaching_an_edge_after_local_only_writes_reseeds_them() {
     let mut doc = RegistryDoc::from_bytes(&doc.to_bytes().unwrap(), "dev-a").unwrap();
     doc.set_local_only(false);
     assert_eq!(doc.pending_len(), 0);
+}
+
+#[test]
+fn a_deleted_device_row_reads_as_deleted_not_unknown() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_device(&device("laptop", "Laptop")).unwrap();
+    assert!(!ws.device_deleted("laptop"));
+    assert!(!ws.device_deleted("never-heard-of"));
+    // The edge tombstones a deleted Cloud session's device.
+    let _ = ws.apply_rows(
+        1,
+        vec![RegistryRow::tombstone(
+            KIND_DEVICES,
+            "cloud-1",
+            hlc_by(5_000, "cloud-edge"),
+        )],
+    );
+    assert!(ws.device_deleted("cloud-1"));
+    assert!(ws.read_devices().unwrap().iter().all(|d| d.id != "cloud-1"));
+    // A device that comes back revives its row.
+    let mut back = device("cloud-1", "Cloud session");
+    back.last_seen_at = Some(ts(9_000));
+    ws.upsert_device(&back).unwrap();
+    assert!(!ws.device_deleted("cloud-1"));
 }

@@ -318,104 +318,22 @@ fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> 
 }
 
 // ---------------------------------------------------------------------------
-// Notification decision (shared by sound and desktop banners)
+// Notification decision (shared with the engine's desktop banners)
 // ---------------------------------------------------------------------------
 
-use zeron_proto::{
-    Session,
-    view::{Indicator, effective_indicator},
+/// The engine decides banners with the same baselines (`desktop_notify`),
+/// so a chime and a banner always agree on what happened.
+pub(crate) use zeron_engine::desktop_notify::{
+    ConnectivityNotificationState, Ping, SessionNotificationState,
 };
 
-/// Notification baseline is separate from the visual activity indicator:
-/// going idle can mean cancellation, expiry, or an internal handoff.
-#[derive(Debug, Clone)]
-pub(crate) struct SessionNotificationState {
-    indicator: Indicator,
-    last_completed_turn: Option<String>,
-    fresh: bool,
-}
-
-impl SessionNotificationState {
-    pub(crate) fn new(session: &Session, now: chrono::DateTime<chrono::Utc>) -> Self {
-        Self {
-            indicator: effective_indicator(Some(session), now),
-            last_completed_turn: session.last_completed_turn.clone(),
-            fresh: now
-                .signed_duration_since(session.updated_at)
-                .num_milliseconds()
-                <= zeron_proto::view::SESSION_STALE_MS,
+impl From<Ping> for Sound {
+    fn from(ping: Ping) -> Self {
+        match ping {
+            Ping::Done => Sound::Done,
+            Ping::Request => Sound::Request,
+            Ping::Attention => Sound::Attention,
         }
-    }
-
-    /// Call after saving the new baseline, including when delivery is pending
-    /// or outputs are disabled. Suppressed pings must never be replayed later.
-    pub(crate) fn sound_since(&self, prev: &Self, send_pending: bool) -> Option<Sound> {
-        if self.indicator == Indicator::Errored && prev.indicator != Indicator::Errored {
-            return Some(Sound::Attention);
-        }
-        if self.indicator == Indicator::AwaitingInput && prev.indicator != Indicator::AwaitingInput
-        {
-            return Some(Sound::Request);
-        }
-        if !send_pending
-            && self.fresh
-            && self.last_completed_turn.is_some()
-            && self.last_completed_turn != prev.last_completed_turn
-        {
-            return Some(Sound::Done);
-        }
-        None
-    }
-}
-
-/// The engine already holds raw transport degradation for four seconds before
-/// exposing `Offline` or `Reconnecting`. Notify once when that durable state is
-/// first crossed; booting into an outage is seeded silently by the shell.
-pub(crate) fn connectivity_sound_since(
-    current: zeron_proto::ConnectivityState,
-    previous: zeron_proto::ConnectivityState,
-) -> Option<Sound> {
-    use zeron_proto::ConnectivityState as State;
-    let degraded = matches!(current, State::Offline | State::Reconnecting);
-    let was_degraded = matches!(previous, State::Offline | State::Reconnecting);
-    (degraded && !was_degraded).then_some(Sound::Attention)
-}
-
-/// A newly attached engine can report `Connected` while its four-second
-/// degradation grace is still measuring an outage that predates the UI. Arm
-/// alerts only after a longer healthy observation, or after recovery from a
-/// boot-time outage. Runtime replacement resets the observation flag.
-#[derive(Debug, Default)]
-pub(crate) struct ConnectivityNotificationState {
-    previous: Option<zeron_proto::ConnectivityState>,
-    first_observed_at: Option<Instant>,
-    armed: bool,
-}
-
-impl ConnectivityNotificationState {
-    const STARTUP_QUIET: Duration = Duration::from_secs(5);
-
-    pub(crate) fn update(
-        &mut self,
-        current: zeron_proto::ConnectivityState,
-        observed: bool,
-        now: Instant,
-    ) -> Option<Sound> {
-        if !observed {
-            *self = Self::default();
-            return None;
-        }
-
-        let first = *self.first_observed_at.get_or_insert(now);
-        let previous = self.previous.replace(current);
-        if !self.armed {
-            if now.duration_since(first) >= Self::STARTUP_QUIET {
-                self.armed = true;
-                return previous.and_then(|previous| connectivity_sound_since(current, previous));
-            }
-            return None;
-        }
-        previous.and_then(|previous| connectivity_sound_since(current, previous))
     }
 }
 
@@ -444,92 +362,6 @@ impl AttentionSoundGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn baseline(indicator: Indicator, turn: Option<&str>) -> SessionNotificationState {
-        SessionNotificationState {
-            indicator,
-            last_completed_turn: turn.map(str::to_owned),
-            fresh: true,
-        }
-    }
-
-    #[test]
-    fn interrupted_and_expired_activity_never_chime() {
-        let working = baseline(Indicator::Working, Some("old"));
-        let idle = baseline(Indicator::None, Some("old"));
-        assert_eq!(idle.sound_since(&working, false), None);
-        // An older host without explicit completion metadata is silent too.
-        assert_eq!(
-            baseline(Indicator::None, None).sound_since(&baseline(Indicator::Working, None), false),
-            None
-        );
-    }
-
-    #[test]
-    fn a_run_error_chimes_once_and_never_masquerades_as_completion() {
-        let working = baseline(Indicator::Working, Some("old"));
-        let errored = baseline(Indicator::Errored, Some("failed"));
-        assert_eq!(errored.sound_since(&working, false), Some(Sound::Attention));
-        assert_eq!(errored.sound_since(&errored, false), None);
-    }
-
-    #[test]
-    fn durable_connectivity_degradation_chimes_once_per_outage() {
-        use zeron_proto::ConnectivityState as State;
-
-        assert_eq!(
-            connectivity_sound_since(State::Connected, State::Disabled),
-            None
-        );
-        assert_eq!(
-            connectivity_sound_since(State::Reconnecting, State::Connected),
-            Some(Sound::Attention)
-        );
-        assert_eq!(
-            connectivity_sound_since(State::Offline, State::Reconnecting),
-            None
-        );
-        assert_eq!(
-            connectivity_sound_since(State::Connected, State::Offline),
-            None
-        );
-        assert_eq!(
-            connectivity_sound_since(State::Offline, State::Connected),
-            Some(Sound::Attention)
-        );
-    }
-
-    #[test]
-    fn ordinary_queue_completions_survive_coalesced_working_states() {
-        let first = baseline(Indicator::Working, None);
-        let second = baseline(Indicator::Working, Some("first"));
-        assert_eq!(second.sound_since(&first, false), Some(Sound::Done));
-        assert_eq!(second.sound_since(&second, false), None);
-        let last = baseline(Indicator::None, Some("second"));
-        assert_eq!(last.sound_since(&second, false), Some(Sound::Done));
-        assert_eq!(last.sound_since(&last, false), None);
-    }
-
-    #[test]
-    fn pending_send_consumes_completion_but_preserves_input_requests() {
-        let before = baseline(Indicator::Working, None);
-        let settled = baseline(Indicator::None, Some("first"));
-        assert_eq!(settled.sound_since(&before, true), None);
-        assert_eq!(settled.sound_since(&settled, false), None);
-        let question = baseline(Indicator::AwaitingInput, Some("first"));
-        assert_eq!(question.sound_since(&settled, true), Some(Sound::Request));
-        assert_eq!(question.sound_since(&question, false), None);
-    }
-
-    #[test]
-    fn stale_completion_is_consumed_without_replaying_on_a_heartbeat() {
-        let before = baseline(Indicator::Working, None);
-        let mut stale = baseline(Indicator::None, Some("old"));
-        stale.fresh = false;
-        assert_eq!(stale.sound_since(&before, false), None);
-        let refreshed = baseline(Indicator::Working, Some("old"));
-        assert_eq!(refreshed.sound_since(&stale, false), None);
-    }
 
     #[test]
     fn temp_files_are_exclusive_and_cleaned_up() {
@@ -561,61 +393,6 @@ mod tests {
             assert_eq!(&data[..4], b"RIFF");
             assert_eq!(&data[8..12], b"WAVE");
         }
-    }
-
-    #[test]
-    fn connectivity_boot_outages_seed_silently_then_later_outages_alert() {
-        use zeron_proto::ConnectivityState as State;
-        let t0 = Instant::now();
-
-        // Warm daemon: the first authoritative snapshot is already degraded.
-        let mut warm = ConnectivityNotificationState::default();
-        assert_eq!(warm.update(State::Disabled, false, t0), None);
-        assert_eq!(warm.update(State::Offline, true, t0), None);
-        assert_eq!(
-            warm.update(State::Connected, true, t0 + Duration::from_secs(6)),
-            None
-        );
-        assert_eq!(
-            warm.update(State::Offline, true, t0 + Duration::from_secs(7)),
-            Some(Sound::Attention)
-        );
-
-        // Cold daemon: the engine's grace initially masks the existing outage.
-        let mut cold = ConnectivityNotificationState::default();
-        assert_eq!(cold.update(State::Connected, true, t0), None);
-        assert_eq!(
-            cold.update(State::Offline, true, t0 + Duration::from_secs(4)),
-            None
-        );
-        assert_eq!(
-            cold.update(State::Connected, true, t0 + Duration::from_secs(5)),
-            None
-        );
-        assert_eq!(
-            cold.update(State::Reconnecting, true, t0 + Duration::from_secs(6)),
-            Some(Sound::Attention)
-        );
-
-        // A quiet healthy boot may not publish another frame until the first
-        // genuine outage; elapsed time arms that transition itself.
-        let mut healthy = ConnectivityNotificationState::default();
-        assert_eq!(healthy.update(State::Connected, true, t0), None);
-        assert_eq!(
-            healthy.update(State::Offline, true, t0 + Duration::from_secs(6)),
-            Some(Sound::Attention)
-        );
-
-        // Replacing the runtime returns to bootstrap semantics even if the
-        // prior runtime had already armed alerts.
-        assert_eq!(
-            healthy.update(State::Disabled, false, t0 + Duration::from_secs(7)),
-            None
-        );
-        assert_eq!(
-            healthy.update(State::Offline, true, t0 + Duration::from_secs(7)),
-            None
-        );
     }
 
     #[test]

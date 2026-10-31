@@ -76,6 +76,26 @@ Users pick a theme in Settings → Computer use. The saved setting is a theme id
 `run_steps` and `run_script` dispatch real input, so they are in `ACTION_TOOLS`:
 Escape and Stop interrupt them like any other action.
 
+## The agent cursor, never the user's mouse
+
+Zeron's computer use is background-only. The pointer tools (`click`,
+`double_click`, `right_click`, `drag`, `scroll`, `move_cursor`) stay available,
+but `pointer_refusal()` in `crates/mcp/src/computer.rs` rejects any call that
+would reach the user's physical pointer before it is dispatched:
+
+- `scope: "desktop"` — acts in true screen pixels instead of window pixels;
+- `delivery_mode: "foreground"` — drives the physical cursor through the
+  gesture.
+
+The same check runs over every `run_steps` entry, in both the `{tool, args}` and
+`{<tool>: args}` forms, and `foreground_fallback` is refused because the driver
+retries a refused step in the foreground with it. A script's own calls happen
+inside the driver, so `run_script` is guarded coarsely by name: a script whose
+text contains `desktop` or `foreground` is refused before it runs. A refused
+call returns `computer_pointer_forbidden` (layer `zeron-host`) and the driver
+never sees it, so what the agent does on screen is always the agent cursor
+showing a background accessibility action.
+
 ## Interrupting the agent (Escape, Stop, turn end)
 
 Upstream 0.36 has **no interrupt method** and does not watch for a physical

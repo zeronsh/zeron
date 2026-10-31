@@ -41,6 +41,191 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
     }
 }
 
+/// A subagent spawn as hosts stamp it: `Agent: <description>`, bound to the
+/// child's doc (`{chat}--sub--{tool id}`), with its own lifecycle.
+fn agent(
+    chat: &str,
+    id: &str,
+    description: &str,
+    input: serde_json::Value,
+    status: zeron_doc::parts::SubagentStatus,
+    tail: Option<&str>,
+) -> MessagePart {
+    let mut part = tool(
+        id,
+        ToolCall::Unknown {
+            name: format!("Agent: {description}"),
+            input: Some(input),
+        },
+        status == zeron_doc::parts::SubagentStatus::Failed,
+        None,
+    );
+    if let MessagePart::Tool {
+        subagent_ref,
+        subagent_status,
+        subagent_tail,
+        ..
+    } = &mut part
+    {
+        *subagent_ref = Some(subagent_doc_id(chat, id));
+        *subagent_status = Some(status);
+        *subagent_tail = tail.map(str::to_owned);
+    }
+    part
+}
+
+pub(crate) fn subagent_doc_id(chat: &str, tool_id: &str) -> String {
+    format!("{chat}--sub--{tool_id}")
+}
+
+/// The veil chat's subagents, as (tool id, running).
+pub(crate) const VEIL_AGENTS: &[(&str, bool)] = &[
+    ("toolu_veil_graphemes", false),
+    ("toolu_veil_bench", true),
+    ("toolu_veil_review", false),
+];
+
+/// A demo subagent's transcript. A running one returns a prefix of its
+/// script, `step` parts long, so it grows as the demo streams it.
+pub(crate) fn subagent_transcript(
+    doc_id: &str,
+    host: &str,
+    now: i64,
+    step: Option<usize>,
+) -> Option<Vec<SessionMessageEntry>> {
+    let (_, tool_id) = doc_id.split_once("--sub--")?;
+    let (prompt, mut parts): (&str, Vec<MessagePart>) = match tool_id {
+        "toolu_veil_graphemes" => (
+            "Audit every place veil.rs splits a streamed chunk and confirm each split lands on an extended grapheme cluster boundary. Report any byte-offset splits.",
+            vec![
+                tool(
+                    "k1",
+                    ToolCall::Search {
+                        pattern: "split_at|char_indices|chunk_spans".into(),
+                        path: Some("crates/ui/src/markdown".into()),
+                    },
+                    false,
+                    Some(
+                        "veil.rs:88: let (head, tail) = text.split_at(cut);\nveil.rs:141: for (i, c) in text.char_indices() {",
+                    ),
+                ),
+                tool("k2", read("crates/ui/src/markdown/veil.rs"), false, None),
+                tool(
+                    "k3",
+                    read("crates/ui/src/markdown/veil/graphemes.rs"),
+                    false,
+                    None,
+                ),
+                tool(
+                    "k4",
+                    exec("cargo test -p zeron-ui veil::graphemes"),
+                    false,
+                    Some(
+                        "running 6 tests\ntest veil::graphemes::zwj_family ... ok\ntest veil::graphemes::flags ... ok\ntest veil::graphemes::combining_acute ... ok\n\ntest result: ok. 6 passed; 0 failed",
+                    ),
+                ),
+                text(
+                    "t0",
+                    "Both split sites go through `grapheme_cut()`:\n\n- **`veil.rs:88`** — `split_at(cut)` where `cut` comes from `grapheme_cut(text, budget)`, never a raw byte budget.\n- **`veil.rs:141`** — iterates `char_indices` only to *find* candidate cuts, then snaps each one with `next_boundary()`.\n\nNo byte-offset splits remain. The six grapheme tests (ZWJ families, flags, combining marks) all pass.",
+                ),
+            ],
+        ),
+        "toolu_veil_bench" => (
+            "Measure the veil's per-frame cost on the 600-turn synthetic transcript, streaming at 140ms cadence. Compare against the veil disabled.",
+            vec![
+                tool("k1", read("crates/mobile/src/layout/rows.rs"), false, None),
+                tool(
+                    "k2",
+                    exec("cargo bench -p zeron-mobile --bench layout -- veil"),
+                    false,
+                    Some(
+                        "veil/on   time: [212.4 µs 214.9 µs 217.6 µs]\nveil/off  time: [208.1 µs 209.7 µs 211.5 µs]\nchange: +2.48% (p = 0.00 < 0.05)",
+                    ),
+                ),
+                reasoning(
+                    "r0",
+                    "A 2.5% delta on the layout pass is noise-level, but the paint side matters more on device: each veiled run multiplies alpha per glyph run, not per glyph. Check the RowCanvas draw path next.",
+                ),
+                tool(
+                    "k3",
+                    read("apps/ios/Zeron/Transcript/RowView.swift"),
+                    false,
+                    None,
+                ),
+                tool(
+                    "k4",
+                    exec(
+                        "xcodebuild test -scheme Zeron -only-testing:ZeronUITests/ScrollPerformanceTests",
+                    ),
+                    false,
+                    Some(
+                        "Test Case 'testStreamingHitches' passed (31.2 seconds).\n  hitch ratio: 0.8 ms/s (veil on) vs 0.7 ms/s (veil off)",
+                    ),
+                ),
+                text(
+                    "t0",
+                    "So far the veil is effectively free:\n\n| Path | Veil on | Veil off |\n| --- | ---: | ---: |\n| Layout pass | 214.9 µs | 209.7 µs |\n| Hitch ratio | 0.8 ms/s | 0.7 ms/s |\n\nProfiling the 600-turn case on an iPhone 17 Pro next.",
+                ),
+                tool(
+                    "k5",
+                    exec(
+                        "xcrun xctrace record --template 'Time Profiler' --launch Zeron.app -- -demo -huge -stream",
+                    ),
+                    false,
+                    None,
+                ),
+            ],
+        ),
+        "toolu_veil_review" => (
+            "Review the veil fade-curve tests for gaps: boundary values, cadence clamping, and the live→complete lifecycle.",
+            vec![
+                tool("k1", read("crates/ui/src/markdown/veil.rs"), false, None),
+                tool(
+                    "k2",
+                    exec("cargo test -p zeron-ui veil -- --list"),
+                    false,
+                    Some(
+                        "veil::alpha_bounds: test\nveil::cadence_clamp: test\nveil::lifecycle_drop: test\n…14 tests",
+                    ),
+                ),
+                text(
+                    "t0",
+                    "The suite covers the curve's endpoints and the 120/400 ms clamp. **One gap:** nothing asserts that a re-attached row seeds its baseline (invariant 3) — a warm reopen could re-fade history and no test would notice. Suggested test:\n\n```rust\n#[test]\nfn reattach_keeps_history_opaque() {\n    let mut veil = RowVeil::seeded(\"hello\".len());\n    assert_eq!(veil.alpha_at(0, 0.0), 1.0);\n}\n```",
+                ),
+            ],
+        ),
+        _ => return None,
+    };
+    let running = step.is_some();
+    if let Some(step) = step {
+        parts.truncate(step.clamp(1, parts.len()));
+    }
+    let started = now - 240_000;
+    let mut reply = entry("a1", MessageRole::Assistant, host, started + 2_000, parts);
+    if running {
+        reply.status = Some(MessageStatus::Streaming);
+        reply.duration_ms = None;
+        if let Some(MessagePart::Tool { resolved, .. }) = reply.parts.last_mut() {
+            *resolved = false;
+        }
+    }
+    Some(vec![
+        entry(
+            "u1",
+            MessageRole::User,
+            host,
+            started,
+            vec![text("t0", prompt)],
+        ),
+        reply,
+    ])
+}
+
+/// Script length of a demo subagent (its parts).
+pub(crate) fn subagent_steps(doc_id: &str) -> usize {
+    subagent_transcript(doc_id, "", 0, None).map_or(0, |e| e.last().map_or(0, |r| r.parts.len()))
+}
+
 fn edit(id: &str, path: &str, additions: u64, deletions: u64) -> MessagePart {
     let mut part = tool(
         id,
@@ -235,6 +420,14 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                 false,
                 Some("test result: ok. 14 passed; 0 failed; 0 ignored"),
             ),
+            agent(
+                "chat-veil",
+                VEIL_AGENTS[1].0,
+                "Benchmark the veil on 600 turns",
+                serde_json::json!({ "subagent_type": "general-purpose" }),
+                zeron_doc::parts::SubagentStatus::Running,
+                Some("Profiling the 600-turn case on an iPhone 17 Pro next."),
+            ),
             text("t1", VEIL_LIVE_PREFIX),
         ],
     );
@@ -321,6 +514,22 @@ fn veil(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     None,
                 ),
                 edit("k4", "crates/ui/src/markdown/veil.rs", 31, 4),
+                agent(
+                    "chat-veil",
+                    VEIL_AGENTS[0].0,
+                    "Audit grapheme splits in veil.rs",
+                    serde_json::json!({ "subagent_type": "Explore", "model": "claude-haiku-5" }),
+                    zeron_doc::parts::SubagentStatus::Done,
+                    None,
+                ),
+                agent(
+                    "chat-veil",
+                    VEIL_AGENTS[2].0,
+                    "Review the fade-curve tests",
+                    serde_json::json!({ "subagent_type": "reviewer", "model": "claude-opus-5" }),
+                    zeron_doc::parts::SubagentStatus::Done,
+                    None,
+                ),
                 text("t0", CJK_REPLY),
             ],
         ),
@@ -390,6 +599,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                         },
                     ],
                     resolved: false,
+                    answers: None,
                 },
             ],
         ),
@@ -408,6 +618,14 @@ fn tabs(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             host,
             now - 950_000,
             vec![
+                // The chat moved from Claude Code to Codex before this turn.
+                MessagePart::Switch {
+                    id: "s0".into(),
+                    from: "Claude Code".into(),
+                    to: "Codex".into(),
+                    from_harness: Some("claude-code".into()),
+                    to_harness: Some("codex".into()),
+                },
                 tool(
                     "k1",
                     ToolCall::Search {
@@ -457,12 +675,39 @@ fn errored(host: &str, now: i64) -> Vec<SessionMessageEntry> {
             ),
             MessagePart::Error {
                 id: "e0".into(),
-                message: "Harness exited with status 1: rate limited — retry in 2m".into(),
+                message: "Harness exited with status 1: wrangler crashed before the first request"
+                    .into(),
             },
         ],
     );
     failed.status = Some(MessageStatus::Aborted);
+    // The error states, oldest first: signed out, a usage limit, then a plain
+    // failure (the first two offer "Log in").
+    let mut signed_out = assistant(
+        "m2a",
+        host,
+        now - 2_500_000,
+        vec![MessagePart::Error {
+            id: "e0".into(),
+            message: "Not logged in · Please run /login".into(),
+        }],
+    );
+    signed_out.status = Some(MessageStatus::Aborted);
+    let mut limited = assistant(
+        "m2b",
+        host,
+        now - 2_250_000,
+        vec![MessagePart::Error {
+            id: "e0".into(),
+            message: "Claude usage limit reached — try again after the limit resets.".into(),
+        }],
+    );
+    limited.status = Some(MessageStatus::Aborted);
     vec![
+        user("m1a", now - 2_600_000, "Look into the flush timer wakes."),
+        signed_out,
+        user("m1b", now - 2_300_000, "Signed in — try again."),
+        limited,
         user(
             "m1",
             now - 2_100_000,
@@ -651,6 +896,55 @@ fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageE
     ]
 }
 
+/// The Codex side chat that messages `chat-side` (see [`side`]): its
+/// `send_message` call reads as the message it sent.
+fn easing(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let send = ToolCall::Mcp {
+        server: "zeron".into(),
+        tool: "send_message".into(),
+        input: Some(serde_json::json!({
+            "chat": "chat-side",
+            "text": "Keeping the power curve for the veil. Which EMA window should the fade track so the cadence stays steady?",
+            "wait": true,
+        })),
+    };
+    vec![
+        user("m1", now - 360_000, "Would a spring read calmer than the power curve for the veil?"),
+        assistant(
+            "m2",
+            host,
+            now - 340_000,
+            vec![
+                text("t0", "A critically damped spring settles in ~2.4τ, but it overshoots nothing and can't be retimed mid-fade — the `1 − (1−p)^1.6` curve keeps the cadence-tracking duration. Keep the curve; use the spring only for the follow scroll."),
+                text("t1", "The fade still needs its EMA window, so I'll ask the timing chat."),
+                tool("k1", send, false, None),
+                text("t2", "Track α = 0.2: it settles within five appends and ignores a single slow chunk."),
+            ],
+        ),
+    ]
+}
+
+/// A side chat another chat messaged through Zeron's `send_message`: its
+/// header names the Codex side chat that sent it.
+fn side(host: &str, now: i64) -> Vec<SessionMessageEntry> {
+    let sent = zeron_proto::agent_messages::agent_message(
+        "Spring vs. power curve for the veil (chat-sid)",
+        "chat-side-easing",
+        "Keeping the power curve for the veil. Which EMA window should the fade track so the cadence stays steady?",
+    );
+    vec![
+        user("m1", now - 300_000, "What EMA window does the veil use?"),
+        assistant("m2", host, now - 280_000, vec![text("t0", "α = 0.2 over inter-append gaps, seeded from the first two chunks.")]),
+        user("m3", now - 120_000, &sent),
+        assistant(
+            "m4",
+            host,
+            now - 100_000,
+            vec![text("t0", "Track α = 0.2: it settles within five appends and ignores a single slow chunk. I've replied to your chat with the numbers.")],
+        ),
+    ]
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -681,12 +975,8 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Draft the launch post outline.",
             "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
         ),
-        "chat-side" => short(
-            host,
-            now,
-            "What EMA window does the veil use?",
-            "α = 0.2 over inter-append gaps, seeded from the first two chunks.",
-        ),
+        "chat-side" => side(host, now),
+        "chat-side-easing" => easing(host, now),
         "chat-oklch" => short(
             host,
             now,

@@ -75,6 +75,8 @@ const SYNC_QUANTUM_MS: i64 = 30_000;
 const ACTIVE_SYNC_CAP: usize = 28;
 const SYNC_ADMISSION_BATCH: usize = 4;
 const SYNC_CATCH_UP_QUANTUM_MS: i64 = 300_000;
+/// A quiesce for a Cloud sleep the stop never followed lifts after this.
+const QUIESCE_LEASE: std::time::Duration = std::time::Duration::from_secs(180);
 
 // All live-transport scenarios share the process budget, including tests in
 // sibling modules. Hold through shutdown so one fixture cannot rotate another.
@@ -251,6 +253,14 @@ struct DocHostInner {
     /// doc-host reference each other through Arcs, so a retired runtime's
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
+    /// Quiesced for a Cloud sleep ([`DocHost::quiesce_for_sleep`]): drains
+    /// leave new work pending in the room, for the machine once it wakes.
+    quiesced: AtomicBool,
+    /// Bumped per quiesce: only the newest one's lease lifts it.
+    quiesce_generation: AtomicU64,
+    /// Drains between their quiesce check and the end of their dispatch (a
+    /// run they start is registered — and Working — by then).
+    dispatching: Arc<AtomicUsize>,
     workspace: OnceLock<WorkspaceHost>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
@@ -653,6 +663,14 @@ impl Drop for ResetFlag {
     }
 }
 
+/// One drain counted in [`DocHostInner::dispatching`] until dropped.
+struct DispatchGuard(Arc<AtomicUsize>);
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct DocWriter {
     doc: Arc<SessionDoc>,
     writers: Arc<AtomicUsize>,
@@ -672,6 +690,25 @@ impl Drop for ChatDocHandle {
     fn drop(&mut self) {
         lock(&self.sync_cancel).cancel();
     }
+}
+
+/// The provider the chat's own latest switch seam moved to: `None` when the
+/// chat never switched, `Some(None)` for a seam naming no known harness.
+/// Seams above a fork's seam were copied from the source chat and don't
+/// count: the fork's own provider history starts there.
+pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<HarnessId>> {
+    for entry in entries.iter().rev() {
+        for part in &entry.parts {
+            match part {
+                MessagePart::Switch { to_harness, .. } => {
+                    return Some(to_harness.as_deref().and_then(HarnessId::from_slug));
+                }
+                MessagePart::Fork { .. } => return None,
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 impl ChatDocHandle {
@@ -864,6 +901,51 @@ impl ChatDocHandle {
         })
     }
 
+    /// Record that the chat moved from provider `from` to provider `to`: a
+    /// system entry carrying the [`MessagePart::Switch`] seam, plus the
+    /// `providerSwitched` meta flag that makes the next fresh provider session
+    /// owe the transcript. Idempotent against a retried dispatch: nothing is
+    /// written while the chat's latest seam already points at `to`. Returns
+    /// whether a seam was written.
+    pub fn write_provider_switch(
+        &self,
+        from: (HarnessId, &str),
+        to: (HarnessId, &str),
+        created_at: i64,
+    ) -> Result<bool, DocError> {
+        let ((from_id, from), (to_id, to)) = (from, to);
+        let entries = self.doc.read_entries()?;
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        if latest_switch(&entries) == Some(Some(to_id)) {
+            return Ok(false);
+        }
+        let id = format!("switch:{created_at}");
+        // The send that switches wrote its message first: the seam goes
+        // before it (and any other unanswered message), so it reads as the
+        // new provider's question, not the old one's.
+        let unanswered = entries.iter().rev().take_while(|entry| entry.role == MessageRole::User).count();
+        self.doc.insert_message_before_last(unanswered, &SessionMessageEntry {
+            id: id.clone(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Switch {
+                id,
+                from: from.to_string(),
+                to: to.to_string(),
+                from_harness: Some(from_id.as_str().to_owned()),
+                to_harness: Some(to_id.as_str().to_owned()),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.doc.mark_provider_switched()?;
+        Ok(true)
+    }
+
     /// Recovery sweep: settle this device's running subagent chips (including
     /// chips in completed parent turns), then stamp abandoned `streaming`
     /// entries `aborted`, appending
@@ -973,6 +1055,9 @@ impl DocHost {
                 store,
                 config,
                 sessions: Mutex::new(None),
+                quiesced: AtomicBool::new(false),
+                quiesce_generation: AtomicU64::new(0),
+                dispatching: Arc::new(AtomicUsize::new(0)),
                 workspace: OnceLock::new(),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
@@ -1046,6 +1131,89 @@ impl DocHost {
     /// `shutdown_workers` — callers treat both as "executor unavailable".
     fn sessions(&self) -> Option<SessionsEngine> {
         lock(&self.inner.sessions).clone()
+    }
+
+    /// Entered by a drain that may start work; `None` while quiesced. Count
+    /// first, check second (both SeqCst): a quiesce that set its flag then
+    /// either sees this drain counted or this drain sees the flag.
+    fn dispatch_guard(&self) -> Option<DispatchGuard> {
+        self.inner.dispatching.fetch_add(1, Ordering::SeqCst);
+        let guard = DispatchGuard(self.inner.dispatching.clone());
+        (!self.inner.quiesced.load(Ordering::SeqCst)).then_some(guard)
+    }
+
+    /// Before a Cloud sleep stops this engine: start nothing the stop would
+    /// cut off. Commands arriving from here on stay pending in their chat's
+    /// room and run on the woken machine (its boot reconcile finds them).
+    /// `Err(why)` when a turn is in flight or a command is already waiting:
+    /// the sleep is declined and work resumes at once. A quiesce the stop
+    /// never follows lifts itself after [`QUIESCE_LEASE`].
+    pub async fn quiesce_for_sleep(&self) -> Result<(), String> {
+        let generation = self.inner.quiesce_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.quiesced.store(true, Ordering::SeqCst);
+        // Drains already past their check finish dispatching first.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.inner.dispatching.load(Ordering::SeqCst) > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                self.lift_quiesce();
+                return Err("work is still being dispatched".into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let running = self
+            .sessions()
+            .map_or(0, |sessions| sessions.active_count());
+        let busy = if running > 0 {
+            Some(format!("{running} chat(s) have a turn in flight"))
+        } else if self.has_waiting_commands() {
+            Some("a message is waiting to run".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = busy {
+            self.lift_quiesce();
+            return Err(why);
+        }
+        let host = self.clone();
+        self.spawn_worker(async move {
+            tokio::time::sleep(QUIESCE_LEASE).await;
+            if host.inner.quiesce_generation.load(Ordering::SeqCst) == generation {
+                tracing::warn!(
+                    "quiesced for a sleep that never stopped this engine; resuming work"
+                );
+                host.lift_quiesce();
+            }
+        });
+        Ok(())
+    }
+
+    /// End a quiesce and run everything that queued meanwhile.
+    pub fn lift_quiesce(&self) {
+        if !self.inner.quiesced.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
+        for handle in handles {
+            let host = self.clone();
+            self.spawn_worker(async move {
+                host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
+            });
+        }
+    }
+
+    /// A hosted chat has a command no drain has executed yet.
+    fn has_waiting_commands(&self) -> bool {
+        let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+        handles.iter().any(|handle| {
+            self.is_host(&handle.chat_id)
+                && handle.doc.read_commands().is_ok_and(|commands| {
+                    commands
+                        .iter()
+                        .any(|c| c.status == SessionCommandStatus::Pending && !is_processed(&c.id))
+                })
+        })
     }
 
     /// Wire the sessions engine (engine assembly; see `SessionsEngine::set_doc_host`).
@@ -1655,6 +1823,9 @@ impl DocHost {
                 let weak_push = Arc::downgrade(&handle);
                 let publication_store = self.inner.store.clone();
                 let publication_chat = chat_id.to_string();
+                // Concurrent commits can run their hooks out of order; this
+                // device's ops still go out in commit order (OwnOpsOrder).
+                let own_order = Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc()));
                 let sub = doc
                     .doc()
                     .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
@@ -1663,15 +1834,17 @@ impl DocHost {
                             // lock (verify pass: releasing it between the None
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
-                            let batch_id = uuid::Uuid::new_v4().to_string();
                             let client_guard = lock(&handle.chat2);
-                            if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
-                                handle.publication_failed.store(true, Ordering::Release);
-                                lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
-                                tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
-                            }
-                            if let Some(client) = &*client_guard {
-                                client.enqueue_batch(batch_id, bytes.clone());
+                            for bytes in lock(&own_order).order(handle.doc.doc(), bytes) {
+                                let batch_id = uuid::Uuid::new_v4().to_string();
+                                if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
+                                    handle.publication_failed.store(true, Ordering::Release);
+                                    lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
+                                    tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                }
+                                if let Some(client) = &*client_guard {
+                                    client.enqueue_batch(batch_id, bytes);
+                                }
                             }
                         }
                         true
@@ -4040,6 +4213,9 @@ impl DocHost {
     ///
     /// One at a time by design: each send changes the status this reads.
     pub async fn drain_queue(&self, handle: &Arc<ChatDocHandle>) {
+        let Some(_dispatch) = self.dispatch_guard() else {
+            return; // quiesced for a Cloud sleep; lifting it re-drains
+        };
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
@@ -5000,6 +5176,16 @@ impl DocHost {
     }
 
     async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
+        // A quiesced engine still serves controls (interrupt, answers): only
+        // new work waits for the machine to wake.
+        let _dispatch = if controls_only {
+            None
+        } else {
+            match self.dispatch_guard() {
+                Some(guard) => Some(guard),
+                None => return, // quiesced for a Cloud sleep; lifting it re-drains
+            }
+        };
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
@@ -5030,12 +5216,22 @@ impl DocHost {
             // between mark-processed and the outcome write. Left alone it is
             // a send no drain or retry can ever reach ("Sending…" forever,
             // 2026-08-19); terminalize it so the truth lands in the doc and
-            // a user retry can mint a fresh attempt.
+            // a user retry can mint a fresh attempt. `commands` may predate a
+            // racing drain that has since resolved the command and released
+            // its claim (resolve comes first), so once no claim is seen the
+            // status is read again rather than overwriting that outcome.
+            let still_pending = |id: &str| {
+                handle.doc.read_commands().is_ok_and(|now| {
+                    now.iter()
+                        .any(|c| c.id == id && c.status == SessionCommandStatus::Pending)
+                })
+            };
             for c in &commands {
                 if c.status == SessionCommandStatus::Pending
                     && !skipped.contains(&c.id)
                     && is_processed(&c.id)
                     && !lock(&self.inner.executing).contains(&c.id)
+                    && still_pending(&c.id)
                 {
                     tracing::warn!(chat = %handle.chat_id, command = %c.id,
                         "command consumed but never resolved (crash mid-execute?); rejecting");
@@ -5433,12 +5629,18 @@ impl DocHost {
                         reasoning: request.reasoning,
                         model_options: request.model_options.clone(),
                         sandbox: request.sandbox,
+                        access: request.access,
+                        plan: request.plan,
                     };
                     if let Err(err) = ws.set_chat_config(chat_id, &config) {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
-                if sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                // A run on another provider than the live turn's (a stale
+                // client, another device's switch) waits for the turn: the
+                // provider never changes by killing a turn mid-flight.
+                let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
+                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
@@ -5457,7 +5659,8 @@ impl DocHost {
                 // issued_at, clamped against clock skew) — not whenever this
                 // host got around to draining a queued command. Idempotent by
                 // id, so the dispatch path's own execution-time write dedupes
-                // to a no-op.
+                // to a no-op. A provider switch's seam lands with it, above.
+                sessions.note_provider_switch(chat_id, harness, handle);
                 if let Err(err) = handle.write_user_message(
                     message_id,
                     &request.prompt,
@@ -5552,6 +5755,15 @@ impl DocHost {
                         Some("no pending input request".into()),
                     ));
                 };
+                // Closed without an answer: there is nothing to deliver, and
+                // a resumed turn would only say so. Record it and stop.
+                if answers.is_empty() {
+                    handle.doc.resolve_input(request_id, answers)?;
+                    return Ok((
+                        SessionCommandStatus::Applied,
+                        Some("closed unanswered".into()),
+                    ));
+                }
                 // The run died under the question (engine restart, crash).
                 // The question is still open in the doc and the command is
                 // durable, so honor it anyway — stamp the part resolved and
@@ -5571,7 +5783,7 @@ impl DocHost {
                 request.prompt = respond_input_prompt(&questions, answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
-                if let Err(err) = handle.doc.resolve_input(request_id) {
+                if let Err(err) = handle.doc.resolve_input(request_id, answers) {
                     tracing::warn!(chat = %chat_id, request = %request_id, error = %err,
                         "orphaned input resolve failed");
                 }
@@ -5823,6 +6035,9 @@ impl DocHost {
                 setup_error: None,
             },
         };
+        if let Some(run) = &outcome.setup_action {
+            let _ = terminals.associate_chat(&run.terminal.id, chat_id);
+        }
         project_actions.complete_setup_handoff(command_id, chat_id, outcome);
     }
 
@@ -5908,9 +6123,12 @@ impl DocHost {
                 .map(|c| c.sandbox)
                 .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
+            access: config.as_ref().map(|c| c.access).unwrap_or_default(),
+            plan: config.as_ref().is_some_and(|c| c.plan),
             attachments: Vec::new(),
             resume: None,
             worktree: None,
+            env: Default::default(),
         })
     }
 

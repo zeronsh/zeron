@@ -985,6 +985,15 @@ impl RegistryDoc {
         self.pending.iter().flat_map(|b| &b.ops)
     }
 
+    /// The row with pending ops applied, tombstones included.
+    fn overlay_row_or_tombstone(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+        replay_row(
+            self.authoritative.get(kind).and_then(|m| m.get(id)),
+            self.pending_ops()
+                .filter(|op| op.kind == kind && op.id == id),
+        )
+    }
+
     /// The row as this device should display it: authoritative + pending ops.
     fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
         overlay(
@@ -1093,6 +1102,14 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Whether `id`'s device row was deleted — a tombstone, not merely an
+    /// unknown id (a Cloud session's machine leaves with its sandbox). A
+    /// device that comes back revives its row with a newer write.
+    pub fn device_deleted(&self, id: &str) -> bool {
+        self.overlay_row_or_tombstone(KIND_DEVICES, id)
+            .is_some_and(|r| r.deleted)
+    }
+
     pub fn read_devices(&self) -> Result<Vec<Device>, DocError> {
         let mut devices: Vec<Device> = self
             .read_kind::<crate::workspace::RawDevice>(KIND_DEVICES)
@@ -1115,6 +1132,7 @@ impl RegistryDoc {
             ("gitCheckedAt", opt_ms(space.git_checked_at)),
             ("checkoutId", opt_str(space.checkout_id.as_deref())),
             ("repositoryId", opt_str(space.repository_id.as_deref())),
+            ("githubRepo", opt_str(space.github_repo.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
         ]);
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
@@ -1161,6 +1179,7 @@ impl RegistryDoc {
         detected: bool,
         checkout_id: Option<&str>,
         repository_id: Option<&str>,
+        github_repo: Option<&str>,
         checked_at: DateTime<Utc>,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_SPACES, space_id) {
@@ -1174,6 +1193,7 @@ impl RegistryDoc {
                 ("gitDetected", json!(detected)),
                 ("checkoutId", opt_str(checkout_id)),
                 ("repositoryId", opt_str(repository_id)),
+                ("githubRepo", opt_str(github_repo)),
                 ("gitCheckedAt", json!(checked_at.timestamp_millis())),
             ]),
         );
@@ -1240,6 +1260,10 @@ impl RegistryDoc {
                 "harnessSessionCwd",
                 opt_str(chat.harness_session_cwd.as_deref()),
             ),
+            (
+                "harnessSessionHarness",
+                opt_str(chat.harness_session_harness.as_deref()),
+            ),
             ("spaceId", opt_str(chat.space_id.as_deref())),
             ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
             ("lastSeenAt", opt_ms(chat.last_seen_at)),
@@ -1303,6 +1327,14 @@ impl RegistryDoc {
             .overlay_row(KIND_CHATS, chat_id)
             .and_then(|row| row_to::<crate::workspace::RawChat>(&row))
             .map(Chat::from))
+    }
+
+    /// Whether `chat_id`'s row has recorded its parent: `createChat` writes
+    /// `parentChatId` either way (a null for none), a claimed row
+    /// ([`Self::claim_chat`]) doesn't.
+    pub fn chat_parent_recorded(&self, chat_id: &str) -> bool {
+        self.overlay_row(KIND_CHATS, chat_id)
+            .is_some_and(|row| row.clocks.contains_key("parentChatId"))
     }
 
     pub fn read_chats(&self) -> Result<Vec<Chat>, DocError> {
@@ -1450,6 +1482,7 @@ impl RegistryDoc {
         chat_id: &str,
         session_id: &str,
         cwd: &str,
+        harness: Option<&str>,
     ) -> Result<bool, DocError> {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
@@ -1461,6 +1494,7 @@ impl RegistryDoc {
             fields([
                 ("harnessSessionId", json!(session_id)),
                 ("harnessSessionCwd", json!(cwd)),
+                ("harnessSessionHarness", opt_str(harness)),
             ]),
         );
         Ok(true)
@@ -1506,9 +1540,18 @@ impl RegistryDoc {
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
             ("lastCompletedTurn", json!(session.last_completed_turn)),
+            ("lastTurnOutcome", json!(session.last_turn_outcome)),
+            (
+                "terminalActivity",
+                serde_json::to_value(&session.terminal_activity)?,
+            ),
             ("startedAt", opt_ms(session.started_at)),
             ("updatedAt", json!(session.updated_at.timestamp_millis())),
             ("runningSubagents", json!(session.running_subagents)),
+            (
+                "backgroundTasks",
+                serde_json::to_value(&session.background_tasks)?,
+            ),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1625,6 +1668,7 @@ impl RegistryDoc {
                     ("gitCheckedAt", opt_ms(space.git_checked_at)),
                     ("checkoutId", opt_str(space.checkout_id.as_deref())),
                     ("repositoryId", opt_str(space.repository_id.as_deref())),
+                    ("githubRepo", opt_str(space.github_repo.as_deref())),
                     ("createdAt", json!(space.created_at.timestamp_millis())),
                 ]),
             );
@@ -1666,6 +1710,10 @@ impl RegistryDoc {
                         "harnessSessionCwd",
                         opt_str(chat.harness_session_cwd.as_deref()),
                     ),
+                    (
+                        "harnessSessionHarness",
+                        opt_str(chat.harness_session_harness.as_deref()),
+                    ),
                     ("spaceId", opt_str(chat.space_id.as_deref())),
                     ("parentChatId", opt_str(chat.parent_chat_id.as_deref())),
                     ("lastSeenAt", opt_ms(chat.last_seen_at)),
@@ -1684,6 +1732,11 @@ impl RegistryDoc {
                     ("deviceId", json!(session.device_id)),
                     ("status", serde_json::to_value(session.status)?),
                     ("lastCompletedTurn", json!(session.last_completed_turn)),
+                    ("lastTurnOutcome", json!(session.last_turn_outcome)),
+                    (
+                        "terminalActivity",
+                        serde_json::to_value(&session.terminal_activity)?,
+                    ),
                     ("startedAt", opt_ms(session.started_at)),
                     ("updatedAt", json!(session.updated_at.timestamp_millis())),
                     ("runningSubagents", json!(session.running_subagents)),
@@ -1705,6 +1758,14 @@ fn overlay<'a>(
     base: Option<&RegistryRow>,
     ops: impl IntoIterator<Item = &'a RowOp>,
 ) -> Option<RegistryRow> {
+    replay_row(base, ops).filter(|r| !r.deleted)
+}
+
+/// [`overlay`] keeping a tombstone (`None` only when the row is missing).
+fn replay_row<'a>(
+    base: Option<&RegistryRow>,
+    ops: impl IntoIterator<Item = &'a RowOp>,
+) -> Option<RegistryRow> {
     let mut row = base.cloned();
     for op in ops {
         let (next, _) = apply_op(row.as_ref(), op);
@@ -1712,7 +1773,7 @@ fn overlay<'a>(
             row = Some(next);
         }
     }
-    row.filter(|r| !r.deleted)
+    row
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────

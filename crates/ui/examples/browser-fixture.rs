@@ -37,8 +37,11 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
             .arg(&path)
             .status()?
     };
+    // A nested Wayland compositor whose only output is this window: `grim`.
     #[cfg(not(target_os = "macos"))]
-    let status = {
+    let status = if let Ok(command) = std::env::var("ZERON_BROWSER_CAPTURE_COMMAND") {
+        std::process::Command::new(command).arg(&path).status()?
+    } else {
         let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
             .args([
@@ -170,6 +173,18 @@ fn main() -> anyhow::Result<()> {
             let mut request = [0; 4096];
             let n = stream.read(&mut request).unwrap_or(0);
             let request = String::from_utf8_lossy(&request[..n]);
+            // The bench's video, from `ZERON_BROWSER_BENCH_VIDEO`.
+            if request.starts_with("GET /bench.mp4 ")
+                && let Some(video) = std::env::var_os("ZERON_BROWSER_BENCH_VIDEO").and_then(|path| std::fs::read(path).ok())
+            {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    video.len()
+                );
+                let _ = stream.write_all(&video);
+                continue;
+            }
             let (title, html) = if request.starts_with("GET /two ") {
                 (
                     "Details",
@@ -222,6 +237,7 @@ fn main() -> anyhow::Result<()> {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1000.),px(680.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
+            app_id: Some("zeron-browser-fixture".into()),
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
         state.update(cx, |_, cx| cx.notify());
@@ -258,6 +274,10 @@ fn main() -> anyhow::Result<()> {
                         pause(cx, 50).await;
                     }
                     pause(cx, 500).await;
+                    #[cfg(target_os = "linux")]
+                    if let Some(seconds) = std::env::var("ZERON_BROWSER_BENCH").ok().and_then(|s| s.parse().ok()) {
+                        return linux::bench(window, first.clone(), &_origin, &output, seconds, cx).await;
+                    }
                     capture_frame(window, &output, "browser-preview-dark", cx).await?;
                     // Real DOM click, native navigation and history.
                     first.read_with(cx, |b, _| b.fixture_eval("document.getElementById('details').click()"));
@@ -364,6 +384,15 @@ fn main() -> anyhow::Result<()> {
                     let deadline = std::time::Instant::now() + Duration::from_secs(5);
                     while !first.read_with(cx, |b,_| b.page.title == "Unexpected page click") {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
+                    }
+                    // That click made the page AppKit's first responder. A click on
+                    // GPUI content must take it back, or keys keep reaching the page
+                    // before the focused GPUI input.
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "page click did not take keyboard focus");
+                    first.read_with(cx, |b,_| b.fixture_click((left*0.5) as f64,(top+150.) as f64));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while first.read_with(cx, |b,_| b.fixture_focused()) {
+                        anyhow::ensure!(std::time::Instant::now() < deadline, "page kept keyboard focus after a click on GPUI content"); pause(cx,50).await;
                     }
                     first.read_with(cx, |b,_| b.fixture_eval("document.title = 'Fieldnotes'"));
                 }
@@ -528,6 +557,12 @@ fn main() -> anyhow::Result<()> {
                 let before = first.read_with(cx, |b, _| b.page.url.clone());
                 window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("javascript:alert(1)", w, cx)))?;
                 anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "unsupported address navigated");
+                // A local path says where files open instead of loading a made-up host.
+                window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate("/Users/me/Documents/mockup.html", w, cx)))?;
+                anyhow::ensure!(first.read_with(cx, |b, _| b.page.url == before), "local path navigated");
+                pause(cx, 300).await; capture_frame(window, &output, "browser-local-file-light", cx).await?;
+                cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Dark, cx));
+                pause(cx, 600).await; capture_frame(window, &output, "browser-local-file-dark", cx).await?;
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");

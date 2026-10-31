@@ -132,31 +132,34 @@ final class VoiceStageViewController: UIViewController {
 
         let side = orb.widthAnchor.constraint(equalToConstant: 340)
         side.priority = .defaultHigh
+        // Controls and text keep to the safe area, which needn't be
+        // symmetric (landscape, the iPhone Duo's camera edge).
+        let safe = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             minimize.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            minimize.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            minimize.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
             transcript.centerYAnchor.constraint(equalTo: minimize.centerYAnchor),
-            transcript.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            transcript.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
             badge.widthAnchor.constraint(equalToConstant: 10),
             badge.heightAnchor.constraint(equalToConstant: 10),
             badge.topAnchor.constraint(equalTo: transcript.topAnchor, constant: 2),
             badge.trailingAnchor.constraint(equalTo: transcript.trailingAnchor, constant: -2),
             dot.widthAnchor.constraint(equalToConstant: 7),
             dot.heightAnchor.constraint(equalToConstant: 7),
-            header.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            header.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
             header.centerYAnchor.constraint(equalTo: minimize.centerYAnchor),
             header.leadingAnchor.constraint(greaterThanOrEqualTo: minimize.trailingAnchor, constant: 12),
 
-            orb.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            orb.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
             orb.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor, constant: -64),
             side,
-            orb.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -32),
+            orb.widthAnchor.constraint(lessThanOrEqualTo: safe.widthAnchor, constant: -32),
             orb.heightAnchor.constraint(equalTo: orb.widthAnchor),
             orb.topAnchor.constraint(greaterThanOrEqualTo: minimize.bottomAnchor, constant: 8),
 
             status.topAnchor.constraint(equalTo: orb.bottomAnchor, constant: 4),
-            status.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
-            status.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+            status.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 32),
+            status.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -32),
             caption.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 10),
             caption.leadingAnchor.constraint(equalTo: status.leadingAnchor),
             caption.trailingAnchor.constraint(equalTo: status.trailingAnchor),
@@ -165,7 +168,7 @@ final class VoiceStageViewController: UIViewController {
             previousCaption.leadingAnchor.constraint(equalTo: caption.leadingAnchor),
             previousCaption.trailingAnchor.constraint(equalTo: caption.trailingAnchor),
 
-            bar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            bar.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
             bar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
             controls.topAnchor.constraint(equalTo: bar.contentView.topAnchor, constant: 10),
             controls.bottomAnchor.constraint(equalTo: bar.contentView.bottomAnchor, constant: -10),

@@ -20,8 +20,8 @@ pub enum NoticeChipIcon {
 
 /// The failure notice both surfaces render (zeron composer.tsx `Notice`,
 /// chat-view.tsx `ErrorChip`): a tinted rounded chip — `border
-/// <accent>/[0.16]` over a `<accent>/[0.05]` wash, a subtle tinted wash,
-/// never a bare stroke — with a header row (DangerTriangle + medium label, a
+/// <accent>/[0.16]` over a `<accent>/[0.05]` wash (the transcript's tile:
+/// a borderless 0.1 wash), never a bare stroke — with a header row (DangerTriangle + medium label, a
 /// tiny copy button pinned to its top-right corner — failure payloads are
 /// meant to be pasted, not screenshotted) and the message below. The message WRAPS instead of truncating: failure payloads carry
 /// exit statuses and stderr, and a one-line ellipsis was exactly what made
@@ -36,6 +36,19 @@ pub fn notice_chip(
     message: impl Into<SharedString>,
     icon: NoticeChipIcon,
 ) -> Div {
+    notice_chip_with_action(theme, warning, label, message, icon, None)
+}
+
+/// [`notice_chip`] with an action under the message (the transcript's
+/// "Log in").
+pub fn notice_chip_with_action(
+    theme: &Theme,
+    warning: bool,
+    label: &'static str,
+    message: impl Into<SharedString>,
+    icon: NoticeChipIcon,
+    action: Option<AnyElement>,
+) -> Div {
     let (accent, muted) = if warning {
         (theme.warning, theme.warning_muted)
     } else {
@@ -44,15 +57,20 @@ pub fn notice_chip(
     let message = message.into();
     let copy_message = message.clone();
     let tile = matches!(icon, NoticeChipIcon::Tile);
+    // The transcript's block chip reads as an alert: a stronger red wash,
+    // the message in the lighter red.
+    let wash = if tile { 0.1 } else { 0.05 };
     let frame = |inset: f32| {
         div()
             .flex()
             .flex_col()
             .gap(px(6.0))
             .rounded(px(inset))
-            .border_1()
-            .border_color(accent.opacity(0.16))
-            .bg(accent.opacity(0.05))
+            // The transcript's alert is borderless: the wash alone.
+            .when(!tile, |chip| {
+                chip.border_1().border_color(accent.opacity(0.16))
+            })
+            .bg(accent.opacity(wash))
             .px(px(inset))
             .py(px(8.0))
     };
@@ -87,51 +105,50 @@ pub fn notice_chip(
     };
     // The tile pins its own label/message colors; the plain icon inherits the
     // chip-wide muted accent.
-    chip.child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(header_icon)
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .when(tile, |label| label.text_color(muted.opacity(0.8)))
-                    .child(label),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("notice-copy")
-                    .flex_none()
-                    .size(px(20.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(accent.opacity(0.12)))
-                    // The composer chip dismisses on click; copying must
-                    // not take the notice with it.
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            copy_message.to_string(),
-                        ));
-                    })
-                    .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
-                    .child(
-                        crate::icons::icon(crate::icons::COPY)
-                            .size(px(12.0))
-                            .text_color(muted.opacity(0.8)),
-                    ),
-            ),
-    )
-    .child(
-        div()
-            .min_w_0()
-            .w_full()
-            .when(tile, |message| message.text_color(theme.text.opacity(0.8)))
-            .child(message),
-    )
+    let copy = div()
+        .id("notice-copy")
+        .flex_none()
+        .size(px(20.0))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(move |s| s.bg(accent.opacity(0.12)))
+        // The composer chip dismisses on click; copying must
+        // not take the notice with it.
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_message.to_string()));
+        })
+        .tooltip(crate::settings::widgets::text_tooltip("Copy message"))
+        .child(
+            crate::icons::icon(crate::icons::COPY)
+                .size(px(12.0))
+                .text_color(muted.opacity(0.8)),
+        );
+    let header = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(header_icon)
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .when(tile, |label| label.text_color(muted.opacity(0.8)))
+                .child(label),
+        )
+        .child(div().flex_1());
+    let message = div()
+        .min_w_0()
+        .w_full()
+        .when(tile, |message| message.text_color(muted))
+        .child(message);
+    // Copy pinned to the header's top-right corner; an action goes under
+    // the message.
+    chip.child(header.child(copy))
+        .child(message)
+        .when_some(action, |chip, action| {
+            chip.child(div().pt(px(2.0)).flex().child(action))
+        })
 }

@@ -78,8 +78,8 @@ const BROWSER_TOOLS: &[&str] = &[
     "browser_pointer",
 ];
 
-/// Desktop input: gated by Escape/Stop and abortable in flight. `run_steps` and
-/// `run_script` belong here because cua-driver 0.34+ dispatches mutating input
+/// Desktop input: gated by Escape/Stop and abortable in flight. `run_steps`
+/// and `run_script` belong here because cua-driver dispatches mutating input
 /// through them: a batch or script must stop when the user hits Escape.
 const ACTION_TOOLS: &[&str] = &[
     "click",
@@ -101,6 +101,21 @@ const ACTION_TOOLS: &[&str] = &[
     "kill_app",
     "run_steps",
     "run_script",
+];
+
+/// Tools whose arguments can reach the user's real pointer: `scope:"desktop"`
+/// acts in true screen pixels instead of window pixels, and
+/// `delivery_mode:"foreground"` drives the physical cursor through the
+/// gesture. Everywhere else cua-driver posts input to the window and Zeron's
+/// agent cursor shows the act, so [`pointer_refusal`] rejects those arguments
+/// before anything is dispatched.
+const POINTER_TOOLS: &[&str] = &[
+    "click",
+    "double_click",
+    "right_click",
+    "move_cursor",
+    "drag",
+    "scroll",
 ];
 
 /// Browser input (Synara's `CUA_BROWSER_MUTATION_TOOLS`).
@@ -160,19 +175,24 @@ token: row [N] of a read is element_token \"<snapshot_id>:N\" (for example \"s00
 to get only changed rows. set_value replaces a field; type_text inserts the whole string into the \
 focused field: never spell text out through press_key. press_key takes one key with modifiers; \
 computer_hotkey takes a chord.\n\
-Batch known steps with computer_run_steps (it stops at the first failure and returns what \
-changed with observe:{}), and use computer_run_script only when the flow needs a loop, a branch or \
-a retry between actions. Both deliver real input: Escape and Stop interrupt them like any action.\n\
+Do not look for a mouse: Zeron's computer use never moves the user's real pointer, so \
+`scope:\"desktop\"` and `delivery_mode:\"foreground\"` on the pointer tools (computer_click, \
+computer_drag, computer_scroll, computer_move_cursor), inside computer_run_steps, and \
+`foreground_fallback` are refused. Act in the background by element token; if a control is missing \
+from the tree, re-read with a query or hand the task back.\n\
+Batch known steps with computer_run_steps (it stops at the first failure and returns what changed with \
+observe:{}), and reach for computer_run_script only when the flow needs a loop, a branch or a retry: \
+the script runs inside the driver, so it must stay in the background and may not name a desktop or \
+foreground route. Both dispatch real input, so Escape and Stop interrupt them.\n\
 Verify instead of assuming: computer_verify_state(pid, window_id, expect) or a fresh \
 computer_get_window_state. `unknown` is not success, and transport success alone proves nothing. \
 An uncertain effect may already have happened: inspect, never replay it blindly. On a stale \
 element or target error, observe again and re-address.\n\
 Background first: computer_bring_to_front, computer_invoke_menu and delivery_mode \"foreground\" \
 raise the app; use them only when the user asked to see the screen or nothing in the background \
-works. Since 0.36 the background route also covers dragging, menu commands, dropdowns that stay \
-in place, typing into LibreOffice documents and spreadsheets, and reading a page on another \
-Space, so an ordinary task rarely needs the foreground. Chrome sometimes refuses a background \
-drag in an Electron window while offering a foreground drag instead.\n\
+works. Since 0.36 the background route also covers menu commands, dropdowns that stay in \
+place, typing into LibreOffice documents and spreadsheets, and reading a page on another Space, \
+so an ordinary task rarely needs the foreground.\n\
 Stop and Escape: the user can halt your input at any moment. computer_input_stopped or \
 computer_input_paused means stop acting, tell the user where you stopped, and continue only if \
 they ask, after a fresh computer_get_window_state.\n\
@@ -392,6 +412,9 @@ impl Computer {
             return Err(format!("unknown computer tool: {name}"));
         }
         self.used.store(true, Ordering::Release);
+        if let Some(refusal) = pointer_refusal(tool, &arguments) {
+            return Ok(refusal);
+        }
         let action = ACTION_TOOLS.contains(&tool) || BROWSER_MUTATION_TOOLS.contains(&tool);
         // Subscribe before admission: an interrupt landing in between still
         // aborts this call, and its epoch marks any reply as stale.
@@ -616,6 +639,102 @@ fn refusal(code: &str, text: &str, wait_seconds: Option<f64>) -> Value {
     })
 }
 
+/// Why a pointer call is refused: the offending route, and the background
+/// alternative the agent should have used.
+const POINTER_TEXT: &str = "Zeron: this call would move the user's real pointer, which computer \
+use never does. Drop `scope:\"desktop\"` and `delivery_mode:\"foreground\"`: act in the \
+background, where Zeron's agent cursor shows the act, and address an element token instead of \
+screen pixels.";
+
+/// One tool call that asks for the physical pointer.
+fn pointer_arguments(tool: &str, arguments: &Value) -> bool {
+    POINTER_TOOLS.contains(&tool)
+        && (arguments.get("scope").and_then(Value::as_str) == Some("desktop")
+            || arguments.get("delivery_mode").and_then(Value::as_str) == Some("foreground"))
+}
+
+/// A `run_steps` entry names its tool either as `{tool, args}` or with the
+/// `{<tool>: args}` shorthand; anything else is not a pointer step.
+fn step_target(step: &Value) -> Option<(&str, &Value)> {
+    if let Some(tool) = step.get("tool").and_then(Value::as_str) {
+        return Some((tool, step.get("args").unwrap_or(&Value::Null)));
+    }
+    step.as_object()?.iter().find_map(|(tool, arguments)| {
+        POINTER_TOOLS
+            .contains(&tool.as_str())
+            .then_some((tool.as_str(), arguments))
+    })
+}
+
+/// Zeron's computer use never moves the user's real pointer: the pointer tools
+/// may act in the background, where the agent cursor shows the act, but never
+/// in desktop pixels or through foreground delivery.
+fn pointer_refusal(tool: &str, arguments: &Value) -> Option<Value> {
+    if reaches_pointer(tool, arguments, 0) || escalates_to_foreground(tool, arguments) {
+        return Some(refusal("computer_pointer_forbidden", POINTER_TEXT, None));
+    }
+    script_names_pointer_route(tool, arguments)
+        .then(|| refusal("computer_pointer_forbidden", SCRIPT_TEXT, None))
+}
+
+/// `run_steps` can escalate on its own: `foreground_fallback` retries a step
+/// that the app refused in the background, and that retry activates the window
+/// with input the bridge never sees per step.
+fn escalates_to_foreground(tool: &str, arguments: &Value) -> bool {
+    tool == "run_steps"
+        && arguments
+            .get("foreground_fallback")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+/// A script runs inside the driver, so its calls never pass through this
+/// bridge and the words are all it can check. Coarse on purpose: a script that
+/// really wants the physical pointer has to name the route.
+fn script_names_pointer_route(tool: &str, arguments: &Value) -> bool {
+    tool == "run_script"
+        && arguments
+            .get("script")
+            .and_then(Value::as_str)
+            .is_some_and(|script| {
+                let script = script.to_ascii_lowercase();
+                script.contains("desktop") || script.contains("foreground")
+            })
+}
+
+/// A batch carries the same arguments one level down, and a batch can nest a
+/// batch, so the scan follows the tool name down. Deeper nesting than the
+/// driver accepts is refused rather than walked.
+const MAX_STEP_DEPTH: usize = 16;
+
+fn reaches_pointer(tool: &str, arguments: &Value, depth: usize) -> bool {
+    if depth > MAX_STEP_DEPTH {
+        return true;
+    }
+    if pointer_arguments(tool, arguments) {
+        return true;
+    }
+    if tool != "run_steps" {
+        return false;
+    }
+    arguments
+        .get("steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            steps
+                .iter()
+                .filter_map(step_target)
+                .any(|(tool, arguments)| reaches_pointer(tool, arguments, depth + 1))
+        })
+}
+
+/// Why a script is refused: the sandbox cannot be inspected, so the bridge
+/// refuses one that spells out a physical-pointer route at all.
+const SCRIPT_TEXT: &str = "Zeron: this script names a desktop or foreground route, which computer \
+use never allows. A script's calls are checked inside the driver, not by this bridge, so the \
+word itself is refused. Rewrite it in the background: element tokens, roles and window pixels \
+only.";
+
 /// The proxy's own tool: Synara's `computer_help` playbooks.
 const HELP_TOOL: &str = "help";
 
@@ -699,11 +818,13 @@ output merely because they appear on screen.",
         "Use computer_run_steps when the next steps are already known: it takes {steps:[{tool, args}], \
 observe:{}} and stops at the first failure. Observation tools do not run inside a batch: a read \
 between actions is skipped, a trailing get_window_state is the observation, and a trailing zoom runs \
-after it. Up to 64 steps. Use computer_run_script only when the flow needs logic between actions (a \
-loop over rows, a branch on what the app shows, a retry); it runs sandboxed JavaScript over the cua \
-API with time and call limits. Both deliver real input, so Escape and Stop interrupt them, and an \
-interrupted batch leaves the earlier steps applied: re-read state and never replay the whole batch. \
-Prefer several small batches over one long one when each step depends on what the previous returned.",
+after it. Up to 64 steps. Use computer_run_script when the flow needs logic between actions (a loop \
+over rows, a branch on what the app shows, a retry): its calls are checked inside the driver, so the \
+bridge refuses a script that names a desktop or foreground route. A step that asks a pointer tool for \
+`scope:\"desktop\"` or `delivery_mode:\"foreground\"`, and `foreground_fallback`, are refused, so \
+keep every step in the background. Escape and Stop interrupt a batch or script like any action, and an \
+interrupted batch leaves the earlier steps applied: re-read state and never replay it. Prefer several \
+small batches over one long one when each step depends on what the previous returned.",
     ),
     (
         "finder",
@@ -1468,18 +1589,12 @@ const BROWSER_FALLBACK_HINT: &str = "Zeron: the CDP route cannot attach to the u
 
 /// File under the data dir whose presence turns computer use off. Written by
 /// Settings → Computer use; read by every `zeron mcp` bridge at startup.
-pub const DISABLED_MARKER: &str = "computer-use-disabled";
+pub const DISABLED_MARKER: &str = zeron_proto::mcp_settings::COMPUTER_DISABLED_MARKER;
 
 /// Zeron's data dir: the given one, `ZERON_DATA_DIR` (the engine passes it
 /// through), otherwise the desktop default `~/.zeron`.
 fn settings_dir(data_dir: Option<&Path>) -> Option<PathBuf> {
-    match data_dir {
-        Some(dir) => Some(dir.to_path_buf()),
-        None => match std::env::var_os("ZERON_DATA_DIR") {
-            Some(dir) => Some(PathBuf::from(dir)),
-            None => Some(PathBuf::from(std::env::var_os("HOME")?).join(".zeron")),
-        },
-    }
+    zeron_proto::mcp_settings::settings_dir(data_dir)
 }
 
 /// Where the marker lives (see [`settings_dir`]).
@@ -1677,6 +1792,9 @@ TOOLS = [
     {"name": "click", "description": "click", "input_schema": {"type": "object"}},
     {"name": "end_session", "description": "end", "input_schema": {"type": "object"}},
     {"name": "set_agent_cursor_enabled", "description": "cursor", "input_schema": {"type": "object"}},
+    {"name": "drag", "description": "drag", "input_schema": {"type": "object"}},
+    {"name": "run_steps", "description": "batch", "input_schema": {"type": "object"}},
+    {"name": "run_script", "description": "script", "input_schema": {"type": "object"}},
 ]
 def ok(text, **extra):
     return {"ok": True, "result": dict({"content": [{"type": "text", "text": text}]}, **extra)}
@@ -1702,6 +1820,12 @@ def call(m):
     if name == "click":
         time.sleep(float(args.get("slow", 0)))
         return ok("clicked")
+    if name == "drag":
+        return ok("dragged")
+    if name == "run_steps":
+        return ok("batched")
+    if name == "run_script":
+        return ok("scripted")
     if name == "get_window_state":
         return {"ok": True, "result": {"content": [{"type": "text", "text": "tree"}],
             "structuredContent": {"window_id": 7, "tree_markdown": "big",
@@ -1776,6 +1900,9 @@ while True:
                 "computer_get_window_state",
                 "computer_get_browser_state",
                 "computer_click",
+                "computer_drag",
+                "computer_run_steps",
+                "computer_run_script",
                 "computer_help",
             ],
             "bridge-owned session/cursor tools are hidden; computer_help is added"
@@ -1951,12 +2078,130 @@ while True:
         let (dir, path) = fake_driver();
         std::fs::write(dir.path().join("upstream"), b"").unwrap();
         let computer = Computer::with_binary(path);
-        assert_eq!(computer.tools().await.len(), 5);
+        assert_eq!(computer.tools().await.len(), 8);
         let result = computer
             .call("computer_get_screen_size", json!({}))
             .await
             .unwrap();
         assert_eq!(result["content"][0]["text"], "called get_screen_size");
+    }
+
+    #[tokio::test]
+    async fn refuses_the_calls_that_would_move_the_real_pointer() {
+        let (dir, path) = fake_driver();
+        let computer = Computer::with_binary(path);
+
+        let desktop = computer
+            .call(
+                "computer_click",
+                json!({ "x": 10, "y": 20, "scope": "desktop" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&desktop), "computer_pointer_forbidden");
+        assert!(
+            desktop["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("scope:\"desktop\""),
+            "the refusal names the offending argument"
+        );
+
+        let foreground = computer
+            .call(
+                "computer_drag",
+                json!({ "from_x": 1, "from_y": 1, "to_x": 2, "to_y": 2,
+                        "delivery_mode": "foreground" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&foreground), "computer_pointer_forbidden");
+
+        // A batch carries the same arguments one level down, in both forms.
+        let batch = computer
+            .call(
+                "computer_run_steps",
+                json!({ "steps": [
+                    { "tool": "click", "args": { "x": 3, "y": 4, "scope": "desktop" } }
+                ]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&batch), "computer_pointer_forbidden");
+        let shorthand = computer
+            .call(
+                "computer_run_steps",
+                json!({ "steps": [ { "scroll": { "delta_y": 10, "scope": "desktop" } } ] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&shorthand), "computer_pointer_forbidden");
+        let nested = computer
+            .call(
+                "computer_run_steps",
+                json!({ "steps": [ { "tool": "run_steps", "args": { "steps": [
+                    { "tool": "click", "args": { "x": 1, "y": 1,
+                        "delivery_mode": "foreground" } }
+                ]}}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&nested), "computer_pointer_forbidden");
+
+        assert!(
+            logged(&dir)
+                .iter()
+                .all(|call| call["name"] != "drag"
+                    && call["args"].get("foreground_fallback").is_none()),
+            "a refused pointer call never reaches the driver with its route"
+        );
+
+        // The background route keeps working: same tools, no physical pointer.
+        let clicked = computer
+            .call("computer_click", json!({ "element_token": "snap-1:0" }))
+            .await
+            .unwrap();
+        assert_eq!(clicked["content"][0]["text"], "clicked");
+        let batched = computer
+            .call(
+                "computer_run_steps",
+                json!({ "steps": [
+                    { "tool": "click", "args": { "element_token": "snap-1:0" } }
+                ]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(batched["content"][0]["text"], "batched");
+
+        // A script's own calls never reach this bridge, so the route has to be
+        // refused by name; a background script still runs.
+        let pointer_script = computer
+            .call(
+                "computer_run_script",
+                json!({ "script": "await cua.call('click', {x: 1, y: 2, scope: 'desktop'})" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&pointer_script), "computer_pointer_forbidden");
+        let background_script = computer
+            .call(
+                "computer_run_script",
+                json!({ "script": "const app = await cua.getApp('TextEdit'); return 1" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(background_script["content"][0]["text"], "scripted");
+
+        // `run_steps` can escalate on its own, so the flag is refused too.
+        let escalation = computer
+            .call(
+                "computer_run_steps",
+                json!({ "steps": [ { "tool": "click", "args": { "x": 1, "y": 1 } } ],
+                        "foreground_fallback": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(&escalation), "computer_pointer_forbidden");
     }
 
     #[test]

@@ -675,15 +675,20 @@ impl Shell {
                 .iter()
                 .filter(|found| found.kind != WorkspaceEntryKind::Directory)
                 .map(|found| (found.path.clone(), false));
-            PaletteSection::new(
+            let section = PaletteSection::new(
                 Section::RecentFiles,
                 opened
                     .chain(changed)
                     .filter(|(path, _)| seen.insert(path.clone()))
                     .take(limit)
                     .map(|(path, is_dir)| RowKind::File { path, is_dir }),
-            )
-            .with_status(palette.files.progress())
+            );
+            // Only once there are files to show: an empty "Searching…"
+            // section that then finds nothing would shrink the card away.
+            let status = (!section.rows.is_empty())
+                .then(|| palette.files.progress())
+                .flatten();
+            section.with_status(status)
         };
         let files = |limit| {
             PaletteSection::new(
@@ -768,33 +773,37 @@ impl Shell {
             .iter()
             .filter(|chat| chat.is_top_level())
             .filter_map(|chat| {
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
-                    })
-                    .unwrap_or_default();
-                let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state
-                        .space_for_chat(chat)
-                        .map(|s| s.display_name())
-                        .unwrap_or(""),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces)
-                        .unwrap_or(""),
-                    device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
-                    archived: chat.archived,
-                };
-                let score = thread_search::score_thread(&fields, &terms)?;
+                let score = Self::thread_match_score(chat, state, &terms)?;
                 let active = chat.last_message_at.unwrap_or(chat.created_at);
                 Some((chat.id.clone(), score, active.timestamp_millis()))
             })
             .collect();
         thread_search::rank(scored, limit)
+    }
+
+    /// One shared matcher for the global palette and project-scoped sidebar.
+    pub(super) fn thread_match_score(
+        chat: &zeron_proto::Chat,
+        state: &AppState,
+        terms: &[String],
+    ) -> Option<u32> {
+        let pull_request = state
+            .change_request_for_chat(chat)
+            .map(|pr| format!("#{} {} {} {}", pr.number, pr.title, pr.head_ref, pr.base_ref))
+            .unwrap_or_default();
+        let project = state.space_for_chat(chat);
+        let fields = thread_search::ThreadFields {
+            title: chat.title.as_deref().unwrap_or("New session"),
+            project: project.map(|s| s.display_name()).unwrap_or(""),
+            project_path: chat.cwd.as_deref().or_else(|| project.map(|s| s.path.as_str())).unwrap_or(""),
+            preview: chat.last_message_preview.as_deref().unwrap_or(""),
+            id: &chat.id,
+            branch: crate::change_requests::conversation_branch(chat, &state.spaces).unwrap_or(""),
+            device: state.device_name(&chat.device_id).unwrap_or(""),
+            pull_request: &pull_request,
+            archived: chat.archived,
+        };
+        thread_search::score_thread(&fields, terms)
     }
 
     /// Pointer motion moves the highlight, so hover and keyboard never light
@@ -1075,7 +1084,11 @@ impl Shell {
                     (None, None) => None,
                     _ => Some("?"),
                 };
-                let folder = match (project, state.device_name(&chat.device_id)) {
+                // A Cloud chat's own machine isn't a device worth naming.
+                let device = (!zeron_proto::is_cloud_device(&chat.device_id, ""))
+                    .then(|| state.device_name(&chat.device_id))
+                    .flatten();
+                let folder = match (project, device) {
                     (Some(project), Some(device)) => format!("{project} @ {device}"),
                     (Some(project), None) => project.to_string(),
                     (None, device) => device.unwrap_or_default().to_string(),
@@ -1143,6 +1156,7 @@ impl Shell {
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let current_tab = palette.tab;
+        let files_loading = palette.files.loading || palette.files.indexing;
         let theme = Theme::of(cx).for_popup();
         let mut children = Vec::new();
         let mut ix = 0;
@@ -1196,11 +1210,15 @@ impl Shell {
             .gap(px(SIDEBAR_LIST_GAP))
             .children(children)
             .when(sections.is_empty(), |el| {
-                el.child(palette_empty(
-                    &theme,
-                    "No results",
-                    "Try a command, chat title, project, or device.",
-                ))
+                let (title, hint) = match (current_tab, query.is_empty()) {
+                    (Tab::Files, true) if files_loading => ("Looking for recent files…", ""),
+                    (Tab::Files, true) => (
+                        "No recent files",
+                        "Files you open or change in this workspace show up here.",
+                    ),
+                    _ => ("No results", "Try a command, chat title, project, or device."),
+                };
+                el.child(palette_empty(&theme, title, hint))
             });
         let body = palette_results_fade(body, &scroll);
         let tabs = div()
@@ -1402,6 +1420,20 @@ pub(super) fn palette_footer() -> gpui::Div {
         .gap(px(12.0))
 }
 
+/// The card's chrome beside its results at their tallest: the search header,
+/// New project's breadcrumbs and the footer (Cmd+K has no crumbs and simply
+/// ends shorter).
+const PALETTE_CHROME_HEIGHT: f32 = 120.0;
+
+/// Where a palette card's top sits: where a card at its tallest would sit
+/// centered, never under the titlebar. Results growing or shrinking only
+/// move the bottom edge, and Cmd+K and New project share the line, so
+/// typing or switching between them never jumps the card.
+fn palette_top(viewport: gpui::Size<Pixels>) -> f32 {
+    let tallest = palette_results_height(viewport) + PALETTE_CHROME_HEIGHT;
+    ((f32::from(viewport.height) - tallest) / 2.0).max(Theme::TITLEBAR_HEIGHT + 16.0)
+}
+
 /// Mount a palette card over the scrimmed window, frosted like the composer.
 pub(super) fn palette_overlay(
     viewport: gpui::Size<Pixels>,
@@ -1421,8 +1453,9 @@ pub(super) fn palette_overlay(
                     // preserving its color through the frosted palette.
                     .bg(popover::scrim_alpha(0.35))
                     .flex()
+                    .flex_col()
                     .items_center()
-                    .justify_center()
+                    .pt(px(palette_top(viewport)))
                     .child(card),
             ),
     )
@@ -1639,6 +1672,22 @@ mod tests {
                 assert_eq!(search_chats(shell, "deploy staging", cx), ["older"]);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn history_finds_reordered_words_typos_preview_and_chat_id(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window.update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                let mut chat = titled("unique-4729", "Поиск ёмкого кэша", true, 3);
+                chat.last_message_preview = Some("Investigate sidebar rendering".into());
+                state.apply_chats(vec![chat]);
+            });
+            shell.toggle_command_palette(window, cx);
+            for query in ["кэша поиск", "емкого", "поискк", "sidebar rendering", "unique-4729"] {
+                assert_eq!(search_chats(shell, query, cx), ["unique-4729"], "{query}");
+            }
+        }).unwrap();
     }
 
     #[gpui::test]

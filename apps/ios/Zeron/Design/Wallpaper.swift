@@ -1,3 +1,4 @@
+import CoreImage
 import ImageIO
 import PhotosUI
 import UIKit
@@ -121,6 +122,31 @@ enum WallpaperStore {
         let opacity: CGFloat
     }
 
+    /// `render` blurred heavily (off the main thread): its colours without
+    /// its detail. Delivered on the main queue.
+    static func soften(_ render: Render, done: @escaping (Render) -> Void) {
+        queue.async {
+            let soft = blurred(render.image).map { Render(image: $0, opacity: render.opacity) } ?? render
+            DispatchQueue.main.async { done(soft) }
+        }
+    }
+
+    private static func blurred(_ image: UIImage) -> UIImage? {
+        // Small first: a heavy blur needs no detail, and it's cheap.
+        let width: CGFloat = 240
+        let size = CGSize(width: width, height: (width * image.size.height / max(1, image.size.width)).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let small = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let input = CIImage(image: small) else { return nil }
+        let output = input.clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 14])
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.15])
+            .cropped(to: input.extent)
+        guard let cg = CIContext().createCGImage(output, from: input.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
     private static let lock = NSLock()
     private static var cache: [String: Render] = [:]
     private static var generation = 0
@@ -199,6 +225,8 @@ final class WallpaperView: UIView {
     var scrollFade: CGFloat = 1 { didSet { applyAlpha() } }
     /// A rect (in this view's coordinates) to soften — the composer.
     var cutout: CGRect? { didSet { if cutout != oldValue { setNeedsLayout() } } }
+    /// Blurred to a wash of its colours, for pages whose text runs over it.
+    var softened = false { didSet { if softened != oldValue { reload() } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -227,17 +255,28 @@ final class WallpaperView: UIView {
         let dark = traitCollection.userInterfaceStyle == .dark
         WallpaperStore.render(dark: dark) { [weak self] render in
             guard let self else { return }
-            let first = self.render == nil
-            self.render = render
-            self.imageView.image = render?.image
-            self.isHidden = render == nil
-            // Artwork arriving late fades in (desktop: 120 ms).
-            if first, render != nil, window != nil, !UIAccessibility.isReduceMotionEnabled {
-                self.alpha = 0
-                UIView.animate(withDuration: 0.12) { self.applyAlpha() }
+            if self.softened, let render {
+                WallpaperStore.soften(render) { [weak self] soft in
+                    guard let self, self.softened else { return }
+                    self.show(soft)
+                }
             } else {
-                self.applyAlpha()
+                self.show(render)
             }
+        }
+    }
+
+    private func show(_ render: WallpaperStore.Render?) {
+        let first = self.render == nil
+        self.render = render
+        self.imageView.image = render?.image
+        self.isHidden = render == nil
+        // Artwork arriving late fades in (desktop: 120 ms).
+        if first, render != nil, window != nil, !UIAccessibility.isReduceMotionEnabled {
+            self.alpha = 0
+            UIView.animate(withDuration: 0.12) { self.applyAlpha() }
+        } else {
+            self.applyAlpha()
         }
     }
 

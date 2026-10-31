@@ -233,6 +233,7 @@ fn rig_full(adopts_config: bool, turn_boundary: bool) -> Rig {
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
         mcp: None,
+        env: Default::default(),
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: Some("process-1".into()),
@@ -241,6 +242,8 @@ fn request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: false,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,

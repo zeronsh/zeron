@@ -19,7 +19,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -34,6 +34,9 @@ const RESUBSCRIBE_DELAY: Duration = Duration::from_millis(300);
 pub struct Origin {
     pub chat_id: Option<String>,
     pub device_id: Option<String>,
+    /// The host launched the agent without its own subagent tools
+    /// ([`zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV`]).
+    pub side_chats_only: bool,
 }
 
 impl Origin {
@@ -47,6 +50,8 @@ impl Origin {
         Self {
             chat_id: read("ZERON_CHAT_ID"),
             device_id: read("ZERON_DEVICE_ID"),
+            side_chats_only: read(zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV).as_deref()
+                == Some("1"),
         }
     }
 }
@@ -68,6 +73,16 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub access_modes: Vec<zeron_proto::AccessMode>,
+    #[serde(default)]
+    pub supports_plan: bool,
+    /// Whether a login for this harness is present on the device, from
+    /// `ListAgentAccounts`. `None` = not asked or not answerable. Advisory:
+    /// detection does not see every credential source (an API key in the
+    /// environment, say), so only an explicit `false` counts against a harness.
+    #[serde(skip)]
+    pub signed_in: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -82,6 +97,12 @@ impl HarnessInfo {
     /// Offered on this device: installed and not switched off in Settings.
     pub fn available(&self) -> bool {
         self.installed && self.enabled.unwrap_or(true)
+    }
+
+    /// Ready to take work: installed, enabled, and not known to be signed out.
+    /// What an agent picking a delegate should choose from.
+    pub fn connected(&self) -> bool {
+        self.available() && self.signed_in != Some(false)
     }
 
     /// Can take a prompt inside the running turn (the composer's "Steer").
@@ -100,12 +121,17 @@ pub enum TurnOutcome {
     AwaitingInput,
     /// The run failed.
     Errored,
+    /// The native turn was interrupted; no success receipt was produced.
+    Interrupted,
     /// The deadline passed with the chat still working (or never starting).
     TimedOut,
 }
 
 pub struct Zeron {
-    url: String,
+    /// Engine IPC port; `None` = wrapped client only (no redial).
+    port: Option<u16>,
+    /// Data dir whose `ipc-token` authenticates each (re)dial.
+    data_dir: Option<std::path::PathBuf>,
     origin: Origin,
     rpc: Mutex<Option<Arc<RpcClient>>>,
 }
@@ -113,9 +139,11 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    pub fn new(url: String, origin: Origin) -> Self {
+    /// Every (re)dial re-reads the engine's IPC token ([`connect_ipc`]).
+    pub fn new(port: u16, data_dir: Option<std::path::PathBuf>, origin: Origin) -> Self {
         Self {
-            url,
+            port: Some(port),
+            data_dir,
             origin,
             rpc: Mutex::new(None),
         }
@@ -124,7 +152,8 @@ impl Zeron {
     /// Wrap an already-connected client (tests, in-process embedding).
     pub fn with_client(client: RpcClient, origin: Origin) -> Self {
         Self {
-            url: String::new(),
+            port: None,
+            data_dir: None,
             origin,
             rpc: Mutex::new(Some(Arc::new(client))),
         }
@@ -139,15 +168,16 @@ impl Zeron {
         if let Some(client) = slot.as_ref() {
             return Ok(client.clone());
         }
-        if self.url.is_empty() {
+        let Some(port) = self.port else {
             bail!("engine connection closed");
-        }
-        let client = connect_ws(&self.url).await.map_err(|e| {
-            anyhow!(
-                "no Zeron engine listening at {} ({e}) — is Zeron running?",
-                self.url
-            )
-        })?;
+        };
+        let client = connect_ipc(port, self.data_dir.as_deref())
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "no Zeron engine reachable at ws://127.0.0.1:{port} ({e}) — is Zeron running?"
+                )
+            })?;
         let client = Arc::new(client);
         *slot = Some(client.clone());
         Ok(client)
@@ -243,6 +273,9 @@ impl Zeron {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }
 
+    /// The harness catalog with each row's login state filled in. The login
+    /// lookup is best-effort: when the accounts listing is unavailable every
+    /// `signed_in` stays `None` and nothing is held against a harness.
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
         self.harnesses_on(None).await
     }
@@ -253,15 +286,31 @@ impl Zeron {
             params["targetDeviceId"] = json!(device);
         }
         let value = self
-            .call(methods::LIST_HARNESSES, params)
+            .call(methods::LIST_HARNESSES, params.clone())
             .await
             .with_context(|| format!("harness catalog on device {}", device.unwrap_or("local")))?;
-        serde_json::from_value(value).with_context(|| {
+        let mut harnesses: Vec<HarnessInfo> = serde_json::from_value(value).with_context(|| {
             format!(
                 "ListHarnesses: unexpected catalog on device {}",
                 device.unwrap_or("local")
             )
-        })
+        })?;
+        let accounts = self
+            .call(methods::LIST_AGENT_ACCOUNTS, params)
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<zeron_proto::AgentAccountsSnapshot>(v).ok());
+        if let Some(snapshot) = accounts {
+            for harness in &mut harnesses {
+                harness.signed_in = Some(
+                    snapshot
+                        .accounts
+                        .iter()
+                        .any(|a| a.harness == harness.id && a.active),
+                );
+            }
+        }
+        Ok(harnesses)
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
@@ -520,10 +569,19 @@ impl Zeron {
                 let advanced = baseline.is_none_or(|b| {
                     session.updated_at > b.updated_at
                         || session.last_completed_turn != b.last_completed_turn
+                        || session.last_turn_outcome != b.last_turn_outcome
                 });
-                match session.status {
+                // Liveness expiry is not a completion edge. Keep waiting for
+                // fresh evidence (or the deadline), just like the sidebar.
+                if zeron_proto::view::session_stale(&session, chrono::Utc::now()) {
+                    last = Some(session);
+                    continue;
+                }
+                match session.activity_status() {
                     SessionStatus::Working => {
-                        saw_working = true;
+                        // A terminal may be working beside an idle native
+                        // session. It cannot satisfy a pending native send.
+                        saw_working |= !expect_turn || session.status == SessionStatus::Working;
                         last = Some(session);
                     }
                     SessionStatus::AwaitingInput if advanced || saw_working => {
@@ -533,6 +591,18 @@ impl Zeron {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }
                     SessionStatus::Idle => {
+                        if session
+                            .last_turn_outcome
+                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
+                            && (!expect_turn
+                                || saw_working
+                                || advanced
+                                    && baseline.is_none_or(|b| {
+                                        b.last_turn_outcome != session.last_turn_outcome
+                                    }))
+                        {
+                            return Ok((TurnOutcome::Interrupted, Some(session)));
+                        }
                         let turn_changed = match baseline {
                             Some(b) => b.last_completed_turn != session.last_completed_turn,
                             // A row that did not exist at send time only
@@ -666,6 +736,55 @@ mod tests {
     use chrono::Utc;
 
     #[tokio::test]
+    async fn coalesced_repeated_interrupts_need_fresh_native_outcome_evidence() {
+        use futures::StreamExt;
+        struct Service(Session);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(&self, _: &str, _: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::iter([json!([self.0])])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                ))
+            }
+        }
+        let now = Utc::now();
+        let earlier = now - chrono::Duration::seconds(1);
+        let baseline: Session = serde_json::from_value(json!({
+            "chatId":"chat", "deviceId":"dev", "status":"idle", "updatedAt":earlier,
+            "lastTurnOutcome":{"status":"interrupted", "finishedAt":earlier}
+        }))
+        .unwrap();
+        for native_finished in [false, true] {
+            let mut current = baseline.clone();
+            current.updated_at = now; // Could also be a terminal liveness update.
+            if native_finished {
+                current.last_turn_outcome.as_mut().unwrap().finished_at = now;
+            }
+            let rpc = zeron_rpc::memory_client(Arc::new(Service(current)));
+            let client = Zeron::with_client(rpc, Origin::default());
+            let (outcome, _) = client
+                .wait_for_turn(
+                    &chat("chat", None),
+                    Some(&baseline),
+                    true,
+                    Duration::from_millis(50),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if native_finished {
+                    TurnOutcome::Interrupted
+                } else {
+                    TurnOutcome::TimedOut
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn one_shot_reads_release_quiet_watches() {
         use futures::StreamExt;
         struct Service(tokio::sync::watch::Sender<()>);
@@ -734,6 +853,7 @@ mod tests {
             created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             parent_chat_id: None,
             space_id: None,
             last_seen_at: None,
@@ -773,6 +893,7 @@ mod tests {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         }
     }

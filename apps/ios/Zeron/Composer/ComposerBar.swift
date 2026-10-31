@@ -117,6 +117,8 @@ final class ComposerBar: UIView, UITextViewDelegate, UIGestureRecognizerDelegate
     }
     private static let control: CGFloat = 34
     private static let compactHeight: CGFloat = 50
+    /// The bar's height at rest: one line, no attachments.
+    static var restHeight: CGFloat { compactHeight }
 
     override init(frame: CGRect) {
         super.init(frame: frame)

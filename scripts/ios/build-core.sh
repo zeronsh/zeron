@@ -33,9 +33,18 @@ fi
 
 # Xcode exports SDKROOT/deployment vars for the *app* SDK; host build scripts
 # (proc macros, build.rs) must not see them, so cargo runs in a clean env.
+# Keep whichever cargo the caller's PATH finds, and rustup's homes: rustup
+# isn't always in ~/.cargo/bin (a CI runner image moved it).
+CARGO_DIRS="$HOME/.cargo/bin"
+if FOUND="$(command -v cargo)"; then CARGO_DIRS="$(dirname "$FOUND"):$CARGO_DIRS"; fi
+KEEP=()
+for name in CARGO_HOME RUSTUP_HOME; do
+  if [[ -n "${!name:-}" ]]; then KEEP+=("$name=${!name}"); fi
+done
 run_cargo() {
   env -i HOME="$HOME" USER="${USER:-}" TERM="${TERM:-dumb}" \
-    PATH="$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    ${KEEP[@]+"${KEEP[@]}"} \
+    PATH="$CARGO_DIRS:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     IPHONEOS_DEPLOYMENT_TARGET=26.0 \
     CARGO_TARGET_DIR="$ROOT/target" \
     cargo "$@"

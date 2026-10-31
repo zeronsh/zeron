@@ -4,9 +4,14 @@
 //! image, so cropping, zoom, the composer cutout, and fades all apply.
 //!
 //! Playback is demand-driven: the decoder only advances while something has
-//! asked for a frame recently, so a hidden window stops costing decode work.
+//! asked for a frame recently, so a hidden window stops costing decode work;
+//! an idle decoder parks its thread until the next request.
 //! Frames the renderer no longer needs are queued for `release_retired`, which
 //! frees their GPU atlas entries from the painting window.
+//!
+//! Energy saver keeps the video moving but lighter: frames decode at a smaller
+//! size and publish at a lower rate (see [`Quality`]). The painting window
+//! alone is repainted at the video cadence, not every open window.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -16,7 +21,7 @@ use std::time::{Duration, Instant};
 /// Extensions AVFoundation plays natively.
 const VIDEO_EXTENSIONS: [&str; 3] = ["mp4", "mov", "m4v"];
 
-/// Frames wider than this are box-downscaled before upload: a wallpaper
+/// Frames wider than this are downscaled before upload: a wallpaper
 /// never needs 4K texels, and smaller frames keep per-frame copies cheap.
 const MAX_FRAME_WIDTH: usize = 1920;
 
@@ -25,6 +30,33 @@ const DEMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// UI refresh cadence while a video is playing (roughly 30 fps).
 const REFRESH_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Energy saver: a quarter of the pixels per frame (960 px wide) at 20 fps.
+/// The wallpaper sits behind translucent UI, so the drop is barely visible.
+const SAVER_FRAME_WIDTH: usize = 960;
+const SAVER_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How hard playback works: decode width and publish cadence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Quality {
+    max_width: usize,
+    interval: Duration,
+}
+
+impl Quality {
+    const FULL: Self = Self {
+        max_width: MAX_FRAME_WIDTH,
+        interval: REFRESH_INTERVAL,
+    };
+    const SAVER: Self = Self {
+        max_width: SAVER_FRAME_WIDTH,
+        interval: SAVER_REFRESH_INTERVAL,
+    };
+
+    fn for_energy_saver(saving: bool) -> Self {
+        if saving { Self::SAVER } else { Self::FULL }
+    }
+}
 
 /// Largest accepted video file (bytes).
 pub(crate) const MAX_VIDEO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -52,27 +84,74 @@ pub(crate) fn duration(path: &Path) -> Option<f64> {
     value
 }
 
-/// A still frame near `seconds`, for the trim bar's scrub preview. Decoded
-/// off the UI thread and cached per (path, 0.2 s) while a handle is held.
-pub(crate) fn frame_at(path: &Path, seconds: f64) -> Option<Arc<gpui::RenderImage>> {
-    let quantized = (seconds.max(0.0) * 5.0).round() / 5.0;
-    static CACHE: OnceLock<Mutex<Vec<(PathBuf, f64, Arc<gpui::RenderImage>)>>> = OnceLock::new();
+/// Quarter turn the file's own capture transform asks for. A portrait phone
+/// video stores landscape pixels plus a rotation matrix; the decoder reads raw
+/// pixels, so playback has to turn them itself. Mirrored captures (front
+/// camera) report 0: guessing would be worse than leaving them untouched.
+pub(crate) fn capture_rotation(path: &Path) -> u16 {
+    static CACHE: OnceLock<Mutex<Vec<(PathBuf, u16)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some((_, _, frame)) = cache
+    if let Some((_, rotation)) = cache
         .lock()
         .unwrap()
         .iter()
-        .find(|(cached, at, _)| cached == path && *at == quantized)
+        .find(|(cached, _)| cached == path)
+    {
+        return *rotation;
+    }
+    #[cfg(target_os = "macos")]
+    let rotation = macos::capture_rotation(path);
+    #[cfg(not(target_os = "macos"))]
+    let rotation = 0;
+    let mut cache = cache.lock().unwrap();
+    cache.push((path.to_path_buf(), rotation));
+    if cache.len() > 8 {
+        cache.remove(0);
+    }
+    rotation
+}
+
+/// Quarter turn a track's capture transform asks for, or 0 when the transform
+/// mirrors the frame: front-camera clips need a flip, not a turn, and guessing
+/// would look worse than leaving the pixels alone.
+fn rotation_from_transform(a: f64, b: f64, c: f64, d: f64) -> u16 {
+    if a * d - b * c < 0.0 {
+        return 0;
+    }
+    let degrees = b.atan2(a).to_degrees().round();
+    if !degrees.is_finite() {
+        return 0;
+    }
+    crate::settings::normalize_rotation(degrees.rem_euclid(360.0) as u16)
+}
+
+/// A still frame near `seconds`, for the trim bar's scrub preview. Decoded
+/// off the UI thread and cached per (path, rotation, 0.2 s) while a handle is held.
+pub(crate) fn frame_at(path: &Path, seconds: f64, rotation: u16) -> Option<Arc<gpui::RenderImage>> {
+    let rotation = crate::settings::normalize_rotation(rotation);
+    let quantized = (seconds.max(0.0) * 5.0).round() / 5.0;
+    static CACHE: OnceLock<Mutex<Vec<(PathBuf, u16, f64, Arc<gpui::RenderImage>)>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((_, _, _, frame)) =
+        cache
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(cached, cached_rotation, at, _)| {
+                cached == path && *cached_rotation == rotation && *at == quantized
+            })
     {
         return Some(frame.clone());
     }
     #[cfg(target_os = "macos")]
-    let pixels = macos::frame_at(path, quantized);
+    let pixels = macos::frame_at(path, quantized)
+        .map(|frame| crate::new_thread_background_image::rotate(frame, rotation));
     #[cfg(not(target_os = "macos"))]
     let pixels = None;
     let frame = Arc::new(gpui::RenderImage::new([image::Frame::new(pixels?)]));
     let mut cache = cache.lock().unwrap();
-    cache.push((path.to_path_buf(), quantized, frame.clone()));
+    cache.push((path.to_path_buf(), rotation, quantized, frame.clone()));
     if cache.len() > 8 {
         cache.remove(0);
     }
@@ -81,7 +160,7 @@ pub(crate) fn frame_at(path: &Path, seconds: f64) -> Option<Arc<gpui::RenderImag
 
 /// `count` small stills spread evenly over the video, for the trim bar's
 /// filmstrip. Slow (one decode per still): call off the UI thread.
-pub(crate) fn filmstrip(path: &Path, count: usize) -> Vec<Arc<gpui::RenderImage>> {
+pub(crate) fn filmstrip(path: &Path, count: usize, rotation: u16) -> Vec<Arc<gpui::RenderImage>> {
     #[cfg(target_os = "macos")]
     let frames = macos::filmstrip(path, count);
     #[cfg(not(target_os = "macos"))]
@@ -91,7 +170,11 @@ pub(crate) fn filmstrip(path: &Path, count: usize) -> Vec<Arc<gpui::RenderImage>
     };
     frames
         .into_iter()
-        .map(|pixels| Arc::new(gpui::RenderImage::new([image::Frame::new(pixels)])))
+        .map(|pixels| {
+            Arc::new(gpui::RenderImage::new([image::Frame::new(
+                crate::new_thread_background_image::rotate(pixels, rotation),
+            )]))
+        })
         .collect()
 }
 
@@ -101,14 +184,73 @@ struct Treatment {
     effect: crate::settings::NewThreadBackgroundEffect,
     light: bool,
     blur: f32,
+    rotation: u16,
 }
 
-/// A decoded frame in two forms: the untouched source (so a treatment change
-/// can re-render a held frame without decoding) and the painted image.
+impl Treatment {
+    /// Paints the frame exactly as decoded (no effect, blur or turn).
+    fn is_identity(&self) -> bool {
+        crate::new_thread_background_effects::frame_effect_is_identity(
+            self.effect,
+            self.blur,
+            self.rotation,
+        )
+    }
+}
+
+/// A decoded frame ready to paint. Under a treatment the untouched source is
+/// kept too, so a treatment change can re-render a held frame without
+/// decoding. Without one the painted image *is* the source: no second
+/// multi-megabyte copy per frame.
 struct Slot {
-    raw: Arc<image::RgbaImage>,
+    raw: Option<Arc<image::RgbaImage>>,
     painted: Arc<gpui::RenderImage>,
     treatment: Treatment,
+}
+
+impl Slot {
+    fn new(frame: image::RgbaImage, treatment: Treatment) -> Self {
+        if treatment.is_identity() {
+            return Self {
+                raw: None,
+                painted: Arc::new(gpui::RenderImage::new([image::Frame::new(frame)])),
+                treatment,
+            };
+        }
+        let raw = Arc::new(frame);
+        Self {
+            painted: paint(&raw, treatment),
+            raw: Some(raw),
+            treatment,
+        }
+    }
+
+    /// Rebuild from a source frame (`Arc` to avoid copying a kept one).
+    fn from_source(source: Arc<image::RgbaImage>, treatment: Treatment) -> Self {
+        if treatment.is_identity() {
+            let frame = Arc::try_unwrap(source).unwrap_or_else(|shared| (*shared).clone());
+            return Self::new(frame, treatment);
+        }
+        Self {
+            painted: paint(&source, treatment),
+            raw: Some(source),
+            treatment,
+        }
+    }
+}
+
+/// The untouched pixels behind `painted`: the kept source, or the painted
+/// image itself when it was painted without a treatment.
+fn source_of(
+    raw: Option<Arc<image::RgbaImage>>,
+    painted: &gpui::RenderImage,
+) -> Option<Arc<image::RgbaImage>> {
+    if raw.is_some() {
+        return raw;
+    }
+    let size = painted.size(0);
+    let bytes = painted.as_bytes(0)?.to_vec();
+    image::RgbaImage::from_raw(size.width.0 as u32, size.height.0 as u32, bytes).map(Arc::new)
 }
 
 struct Shared {
@@ -117,12 +259,17 @@ struct Shared {
     retired: Mutex<Vec<Arc<gpui::RenderImage>>>,
     /// Treatment requested by the UI thread; applied to every new frame.
     treatment: Mutex<Treatment>,
+    /// Decode width and cadence; fixed for the life of a player.
+    quality: Quality,
     /// Playback speed (f32 bits), refreshed from settings.
     speed: AtomicU32,
     /// Loop segment start in source seconds (f32 bits), refreshed from settings.
     start: AtomicU32,
     /// Loop segment end in source seconds (f32 bits); 0 plays to the end.
     end: AtomicU32,
+    /// Source time of the newest published frame (f64 bits), so a
+    /// replacement player (quality change) resumes instead of restarting.
+    position: AtomicU64,
     /// A held frame is already being re-rendered for a new treatment.
     reprocessing: AtomicBool,
     generation: AtomicU64,
@@ -130,33 +277,61 @@ struct Shared {
     /// Milliseconds since `epoch` of the latest frame request.
     demanded_at: AtomicU64,
     epoch: Instant,
+    /// The decoder thread, once started; unparked by demand and stop.
+    decoder: OnceLock<std::thread::Thread>,
+    /// The decoder sleeps for lack of demand and needs an unpark to resume.
+    parked: AtomicBool,
 }
 
 impl Shared {
-    fn new(treatment: Treatment) -> Self {
+    fn new(treatment: Treatment, quality: Quality) -> Self {
         Self {
             latest: Mutex::new(None),
             retired: Mutex::new(Vec::new()),
             treatment: Mutex::new(treatment),
+            quality,
             speed: AtomicU32::new(crate::settings::VIDEO_SPEED_DEFAULT.to_bits()),
             start: AtomicU32::new(0.0f32.to_bits()),
             end: AtomicU32::new(0.0f32.to_bits()),
+            position: AtomicU64::new(0.0f64.to_bits()),
             reprocessing: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             demanded_at: AtomicU64::new(0),
             epoch: Instant::now(),
+            decoder: OnceLock::new(),
+            parked: AtomicBool::new(false),
         }
     }
 
     fn demand(&self) {
         self.demanded_at
-            .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+            .store(self.epoch.elapsed().as_millis() as u64, Ordering::SeqCst);
+        // Paired with the decoder's store-then-recheck before parking: either
+        // it sees this demand, or this sees it parked and wakes it.
+        if self.parked.load(Ordering::SeqCst) {
+            self.wake();
+        }
+    }
+
+    fn wake(&self) {
+        if let Some(thread) = self.decoder.get() {
+            thread.unpark();
+        }
+    }
+
+    fn halt(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.wake();
     }
 
     fn demanded_recently(&self) -> bool {
-        let last = Duration::from_millis(self.demanded_at.load(Ordering::Relaxed));
+        let last = Duration::from_millis(self.demanded_at.load(Ordering::SeqCst));
         self.epoch.elapsed().saturating_sub(last) < DEMAND_TIMEOUT
+    }
+
+    fn position(&self) -> f64 {
+        f64::from_bits(self.position.load(Ordering::Relaxed))
     }
 
     /// Playback rate for the timeline; never frozen or reversed.
@@ -180,22 +355,21 @@ impl Shared {
         *self.treatment.lock().unwrap()
     }
 
-    /// Publish a freshly decoded BGRA frame under the current treatment.
-    fn publish(&self, frame: image::RgbaImage) {
-        self.publish_with(frame, self.treatment());
-    }
-
-    fn publish_with(&self, frame: image::RgbaImage, treatment: Treatment) {
-        let raw = Arc::new(frame);
-        let slot = Slot {
-            painted: paint(&raw, treatment),
-            raw,
-            treatment,
-        };
-        let previous = self.latest.lock().unwrap().replace(slot);
-        if let Some(previous) = previous {
+    /// Publish a freshly decoded BGRA frame at source time `time` under the
+    /// current treatment. A stopped player drops it: its slot may already
+    /// have been handed off, and nothing would ever release a late frame.
+    fn publish(&self, frame: image::RgbaImage, time: f64) {
+        let slot = Slot::new(frame, self.treatment());
+        let mut latest = self.latest.lock().unwrap();
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(previous) = latest.replace(slot) {
+            // Lock order everywhere: `latest`, then `retired`.
             self.retired.lock().unwrap().push(previous.painted);
         }
+        drop(latest);
+        self.position.store(time.to_bits(), Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Release);
     }
 }
@@ -208,6 +382,7 @@ fn paint(raw: &Arc<image::RgbaImage>, treatment: Treatment) -> Arc<gpui::RenderI
             treatment.effect,
             treatment.light,
             treatment.blur,
+            treatment.rotation,
         ),
     )]))
 }
@@ -219,7 +394,7 @@ struct Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.halt();
     }
 }
 
@@ -229,6 +404,9 @@ struct Registry {
     /// Frames of a stopped player still awaiting atlas release.
     orphaned: Vec<Arc<gpui::RenderImage>>,
     refresh_task_running: bool,
+    /// Windows that painted the video recently; only these are repainted at
+    /// the video cadence (not the pet, not other windows).
+    painting: Vec<(gpui::AnyWindowHandle, Instant)>,
 }
 
 fn registry() -> &'static Mutex<Registry> {
@@ -238,33 +416,59 @@ fn registry() -> &'static Mutex<Registry> {
 
 /// The frame to paint for the video at `path`, starting playback on first
 /// use. `None` until the first frame has decoded. With `animate` false the
-/// current frame is held still (reduced motion / unfocused window).
+/// current frame is held still (reduced motion / unfocused window). Energy
+/// saver plays a lighter stream instead of stopping.
 pub(crate) fn current_frame(
     path: &Path,
     animate: bool,
     effect: crate::settings::NewThreadBackgroundEffect,
     light: bool,
     blur: f32,
+    rotation: u16,
     cx: &mut gpui::App,
 ) -> Option<Arc<gpui::RenderImage>> {
+    // The trim stills come out of AVFoundation already turned upright, so the
+    // played frames get the same turn here and the two always agree.
     let treatment = Treatment {
         effect,
         light,
         blur,
+        rotation: crate::settings::normalize_rotation(
+            rotation.wrapping_add(capture_rotation(path)),
+        ),
     };
+    let quality = Quality::for_energy_saver(crate::motion::energy_saver(cx));
     let (speed, start, end) = crate::settings::new_thread_video_playback(cx);
     let mut registry = registry().lock().unwrap();
     if registry
         .player
         .as_ref()
-        .is_none_or(|player| player.path != path)
+        .is_none_or(|player| player.path != path || player.shared.quality != quality)
     {
+        let shared = Arc::new(Shared::new(treatment, quality));
+        let mut resume_at = None;
         if let Some(old) = registry.player.take() {
-            orphan(&mut registry, &old);
+            if old.path == path {
+                // Same video, new quality: keep the held frame on screen and
+                // continue from it rather than flashing blank and restarting.
+                old.shared.halt();
+                let held = old.shared.latest.lock().unwrap().take();
+                let retired = std::mem::take(&mut *old.shared.retired.lock().unwrap());
+                registry.orphaned.extend(retired);
+                if let Some(held) = held {
+                    resume_at = Some(old.shared.position());
+                    *shared.latest.lock().unwrap() = Some(held);
+                    shared.generation.fetch_add(1, Ordering::Release);
+                }
+            } else {
+                orphan(&mut registry, &old);
+            }
         }
-        let shared = Arc::new(Shared::new(treatment));
+        shared.speed.store(speed.to_bits(), Ordering::Relaxed);
+        shared.start.store(start.to_bits(), Ordering::Relaxed);
+        shared.end.store(end.to_bits(), Ordering::Relaxed);
         shared.demand();
-        spawn_decoder(path.to_path_buf(), shared.clone());
+        spawn_decoder(path.to_path_buf(), shared.clone(), resume_at);
         registry.player = Some(Player {
             path: path.to_path_buf(),
             shared,
@@ -290,10 +494,11 @@ pub(crate) fn current_frame(
     if animate || frame.is_none() {
         shared.demand();
     }
-    // A held frame keeps its old treatment until re-rendered in place.
+    // A first frame must reach the screen even when held still, so the
+    // refresh task also runs until it lands (it exits once demand lapses).
     let reprocess = stale && !shared.reprocessing.swap(true, Ordering::Relaxed);
     let mut refresh = false;
-    if animate && !registry.refresh_task_running {
+    if (animate || frame.is_none()) && !registry.refresh_task_running {
         registry.refresh_task_running = true;
         refresh = true;
     }
@@ -311,32 +516,34 @@ pub(crate) fn current_frame(
 /// The decoder applies the new treatment to its next frame on its own.
 fn spawn_reprocess(shared: Arc<Shared>, cx: &mut gpui::App) {
     let treatment = shared.treatment();
-    let raw = shared
+    let held = shared
         .latest
         .lock()
         .unwrap()
         .as_ref()
-        .map(|slot| slot.raw.clone());
-    let Some(raw) = raw else {
+        .map(|slot| (slot.raw.clone(), slot.painted.clone()));
+    let Some((raw, painted)) = held else {
         shared.reprocessing.store(false, Ordering::Relaxed);
         return;
     };
     cx.spawn(async move |cx| {
-        let source = raw.clone();
-        let painted = cx
+        let source = painted.clone();
+        let slot = cx
             .background_executor()
-            .spawn(async move { paint(&source, treatment) })
+            .spawn(async move {
+                source_of(raw, &source).map(|source| Slot::from_source(source, treatment))
+            })
             .await;
         cx.update(|cx| {
             {
                 let mut latest = shared.latest.lock().unwrap();
-                if let Some(slot) = latest.as_mut()
-                    && Arc::ptr_eq(&slot.raw, &raw)
-                    && slot.treatment != treatment
+                if let Some(current) = latest.as_mut()
+                    && let Some(slot) = slot
+                    && Arc::ptr_eq(&current.painted, &painted)
+                    && current.treatment != treatment
                 {
-                    slot.treatment = treatment;
-                    let previous = std::mem::replace(&mut slot.painted, painted);
-                    shared.retired.lock().unwrap().push(previous);
+                    let previous = std::mem::replace(current, slot);
+                    shared.retired.lock().unwrap().push(previous.painted);
                 }
             }
             shared.reprocessing.store(false, Ordering::Relaxed);
@@ -353,25 +560,40 @@ pub(crate) fn stop(cx: &mut gpui::App) {
     if let Some(old) = registry.player.take() {
         orphan(&mut registry, &old);
     }
+    registry.painting.clear();
 }
 
 fn orphan(registry: &mut Registry, player: &Player) {
-    player.shared.stop.store(true, Ordering::Relaxed);
+    player.shared.halt();
+    // `latest` before `retired`, like `publish`: once stopped (checked under
+    // the `latest` lock) the decoder adds nothing either list could miss.
+    let latest = player.shared.latest.lock().unwrap().take();
     let retired = std::mem::take(&mut *player.shared.retired.lock().unwrap());
     registry.orphaned.extend(retired);
-    if let Some(latest) = player.shared.latest.lock().unwrap().take() {
+    if let Some(latest) = latest {
         registry.orphaned.push(latest.painted);
     }
 }
 
 /// Free atlas entries of frames that are no longer painted. Call from the
-/// window that paints the video, before painting the next frame.
+/// window that paints the video, before painting the next frame; that window
+/// is then repainted at the video cadence.
 pub(crate) fn release_retired(window: &mut gpui::Window) {
     let retired = {
         let mut registry = registry().lock().unwrap();
         let mut retired = std::mem::take(&mut registry.orphaned);
         if let Some(player) = registry.player.as_ref() {
             retired.extend(std::mem::take(&mut *player.shared.retired.lock().unwrap()));
+            let handle = window.window_handle();
+            let now = Instant::now();
+            match registry
+                .painting
+                .iter_mut()
+                .find(|(painting, _)| *painting == handle)
+            {
+                Some((_, at)) => *at = now,
+                None => registry.painting.push((handle, now)),
+            }
         }
         retired
     };
@@ -380,27 +602,51 @@ pub(crate) fn release_retired(window: &mut gpui::Window) {
     }
 }
 
-/// Repaint windows while a video is playing, at the video cadence rather than
-/// the display refresh rate. Exits once playback stops or loses demand.
+/// Repaint the painting windows while a video is playing, at the video
+/// cadence rather than the display refresh rate. Exits once playback stops
+/// or loses demand.
 fn spawn_refresh_task(cx: &mut gpui::App) {
     cx.spawn(async move |cx| {
         let mut seen = u64::MAX;
+        let mut interval = REFRESH_INTERVAL;
         loop {
-            cx.background_executor().timer(REFRESH_INTERVAL).await;
+            cx.background_executor().timer(interval).await;
             let state = {
-                let registry = registry().lock().unwrap();
+                let mut registry = registry().lock().unwrap();
+                // A window that stopped painting the video (closed, other
+                // route) drops off after the demand window.
+                registry
+                    .painting
+                    .retain(|(_, at)| at.elapsed() < DEMAND_TIMEOUT);
+                let windows: Vec<_> = registry
+                    .painting
+                    .iter()
+                    .map(|(handle, _)| *handle)
+                    .collect();
                 registry.player.as_ref().map(|player| {
                     (
                         player.shared.generation.load(Ordering::Acquire),
                         player.shared.demanded_recently(),
+                        player.shared.quality.interval,
+                        windows,
                     )
                 })
             };
             match state {
-                Some((generation, true)) => {
+                Some((generation, true, cadence, windows)) => {
+                    interval = cadence;
                     if generation != seen {
                         seen = generation;
-                        cx.update(|cx| cx.refresh_windows());
+                        cx.update(|cx| {
+                            if windows.is_empty() {
+                                // Nothing painted yet (first frame): any
+                                // window may be the one waiting for it.
+                                cx.refresh_windows();
+                            }
+                            for handle in windows {
+                                let _ = handle.update(cx, |_, window, _| window.refresh());
+                            }
+                        });
                     }
                 }
                 _ => {
@@ -419,7 +665,7 @@ fn spawn_refresh_task(cx: &mut gpui::App) {
 pub(crate) fn first_frame(path: &Path) -> Result<image::RgbaImage, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut decoder = macos::Decoder::open(path)?;
+        let mut decoder = macos::Decoder::open(path, MAX_FRAME_WIDTH)?;
         let frame = decoder
             .next_frame()
             .ok_or_else(|| "This video has no decodable frames.".to_string())?;
@@ -437,14 +683,15 @@ pub(crate) fn first_frame(path: &Path) -> Result<image::RgbaImage, String> {
     }
 }
 
-fn spawn_decoder(path: PathBuf, shared: Arc<Shared>) {
+fn spawn_decoder(path: PathBuf, shared: Arc<Shared>, resume_at: Option<f64>) {
     let spawned = std::thread::Builder::new()
         .name("zeron-video-wallpaper".into())
         .spawn(move || {
+            let _ = shared.decoder.set(std::thread::current());
             #[cfg(target_os = "macos")]
-            macos::run(&path, &shared);
+            macos::run(&path, &shared, resume_at);
             #[cfg(not(target_os = "macos"))]
-            let _ = (&path, &shared);
+            let _ = (&path, &shared, resume_at);
         });
     if let Err(error) = spawned {
         tracing::warn!(%error, "could not start the video wallpaper decoder");
@@ -463,9 +710,8 @@ mod macos {
     };
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
-        CGBitmapContextCreate, CGColorSpaceCreateDeviceRGB, CGContextDrawImage, CGContextScaleCTM,
-        CGContextTranslateCTM, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGImageGetHeight,
-        CGImageGetWidth,
+        CGBitmapContextCreate, CGColorSpaceCreateDeviceRGB, CGContextDrawImage, CGImage,
+        CGImageAlphaInfo, CGImageByteOrderInfo, CGImageGetHeight, CGImageGetWidth,
     };
     use objc2_core_media::CMTime;
     use objc2_core_video::{
@@ -480,7 +726,29 @@ mod macos {
         /// BGRA pixels, as `RenderImage` expects.
         pub pixels: image::RgbaImage,
         /// Presentation time in seconds from the start of the file.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub time: f64,
+    }
+
+    /// Quarter turn encoded in the track's capture transform, or 0.
+    pub(super) fn capture_rotation(path: &Path) -> u16 {
+        let Some(url) = NSURL::from_file_path(path) else {
+            return 0;
+        };
+        let asset: Retained<AVAsset> =
+            unsafe { Retained::into_super(AVURLAsset::assetWithURL(&url)) };
+        let Some(media_type) = (unsafe { AVMediaTypeVideo }) else {
+            return 0;
+        };
+        #[allow(deprecated)]
+        let tracks = unsafe { asset.tracksWithMediaType(media_type) };
+        let Some(track) = tracks.firstObject() else {
+            return 0;
+        };
+        #[allow(deprecated)]
+        let transform = unsafe { track.preferredTransform() };
+        let (a, b, c, d) = (transform.a, transform.b, transform.c, transform.d);
+        super::rotation_from_transform(a, b, c, d)
     }
 
     /// Media duration without decoding; used by the trim bar.
@@ -545,7 +813,7 @@ mod macos {
     }
 
     /// Rasterize a CGImage into BGRA pixels for `RenderImage`.
-    fn rasterize(image: &CGImage) -> Option<image::RgbaImage> {
+    pub(super) fn rasterize(image: &CGImage) -> Option<image::RgbaImage> {
         let width = CGImageGetWidth(Some(image));
         let height = CGImageGetHeight(Some(image));
         if width == 0 || height == 0 {
@@ -564,9 +832,9 @@ mod macos {
                 CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
             )
         }?;
-        // CG draws bottom-up; flip so memory row 0 is the frame's top.
-        CGContextTranslateCTM(Some(&context), 0.0, height as f64);
-        CGContextScaleCTM(Some(&context), 1.0, -1.0);
+        // A bitmap context stores row 0 at the top, so drawing as-is keeps the
+        // frame upright (a CTM flip here turned stills upside down relative to
+        // the frames the player decodes).
         CGContextDrawImage(
             Some(&context),
             CGRect {
@@ -590,21 +858,38 @@ mod macos {
         asset: Retained<AVAsset>,
         reader: Retained<AVAssetReader>,
         output: Retained<AVAssetReaderTrackOutput>,
+        /// Frames are decoded and copied at most this wide.
+        max_width: usize,
+    }
+
+    /// A decoded frame not yet copied out of its pixel buffer: frames the UI
+    /// would never show are dropped without touching their pixels.
+    pub(super) struct Sample {
+        buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+        /// Presentation time in seconds from the start of the file.
+        pub time: f64,
+        max_width: usize,
+    }
+
+    impl Sample {
+        pub fn pixels(&self) -> Option<image::RgbaImage> {
+            copy_pixels(&self.buffer, self.max_width)
+        }
     }
 
     // AVFoundation objects are used from the one decoder thread that owns them.
     unsafe impl Send for Decoder {}
 
     impl Decoder {
-        pub fn open(path: &Path) -> Result<Self, String> {
+        pub fn open(path: &Path, max_width: usize) -> Result<Self, String> {
             let url = NSURL::from_file_path(path)
                 .ok_or_else(|| "The video path is not valid.".to_string())?;
             let asset: Retained<AVAsset> =
                 unsafe { Retained::into_super(AVURLAsset::assetWithURL(&url)) };
-            Self::start(asset)
+            Self::start(asset, max_width.max(2))
         }
 
-        fn start(asset: Retained<AVAsset>) -> Result<Self, String> {
+        fn start(asset: Retained<AVAsset>, max_width: usize) -> Result<Self, String> {
             let unsupported =
                 || "This video is unsupported or damaged. Choose an MP4 or MOV file.".to_string();
             let media_type = unsafe { AVMediaTypeVideo }.ok_or_else(unsupported)?;
@@ -617,12 +902,13 @@ mod macos {
             let format = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
             let mut keys = vec![cf_key(unsafe { kCVPixelBufferPixelFormatTypeKey })];
             let mut values = vec![format];
-            // Wide (4K+) sources: let VideoToolbox scale while decoding instead
-            // of box-downscaling every frame on the CPU.
+            // Wide sources (4K+, or anything above the energy saver width):
+            // let VideoToolbox scale while decoding instead of
+            // box-downscaling every frame on the CPU.
             #[allow(deprecated)]
             let natural = unsafe { track.naturalSize() };
-            if natural.width > MAX_FRAME_WIDTH as f64 && natural.height > 0.0 {
-                let width = MAX_FRAME_WIDTH as f64;
+            if natural.width > max_width as f64 && natural.height > 0.0 {
+                let width = max_width as f64;
                 let height = (natural.height * width / natural.width / 2.0).round() * 2.0;
                 keys.push(cf_key(unsafe { kCVPixelBufferWidthKey }));
                 values.push(NSNumber::new_u32(width as u32));
@@ -653,44 +939,60 @@ mod macos {
                 asset,
                 reader,
                 output,
+                max_width,
             })
         }
 
         /// Restart from the first frame (looping).
         pub fn rewind(self) -> Result<Self, String> {
             unsafe { self.reader.cancelReading() };
-            Self::start(self.asset.clone())
+            Self::start(self.asset.clone(), self.max_width)
         }
 
         pub fn completed(&self) -> bool {
             (unsafe { self.reader.status() }) == AVAssetReaderStatus::Completed
         }
 
-        /// The next decoded frame, or `None` at the end of the file / on error.
-        pub fn next_frame(&mut self) -> Option<Frame> {
+        /// The next decoded sample, pixels not yet copied, or `None` at the
+        /// end of the file / on error.
+        pub fn next_sample(&mut self) -> Option<Sample> {
             loop {
                 let next = autoreleasepool(|_| {
                     let sample = unsafe { self.output.copyNextSampleBuffer() }?;
                     let time = unsafe { sample.presentation_time_stamp().seconds() };
-                    let Some(buffer) = (unsafe { sample.image_buffer() }) else {
-                        // Marker-only sample: keep reading.
-                        return Some(None);
-                    };
-                    Some(copy_pixels(&buffer).map(|pixels| Frame {
-                        pixels,
+                    // Marker-only samples carry no image: keep reading.
+                    Some(unsafe { sample.image_buffer() }.map(|buffer| Sample {
+                        buffer,
                         time: if time.is_finite() { time } else { 0.0 },
+                        max_width: self.max_width,
                     }))
                 })?;
-                if let Some(frame) = next {
-                    return Some(frame);
+                if let Some(sample) = next {
+                    return Some(sample);
+                }
+            }
+        }
+
+        /// The next decoded frame, or `None` at the end of the file / on error.
+        pub fn next_frame(&mut self) -> Option<Frame> {
+            loop {
+                let sample = self.next_sample()?;
+                if let Some(pixels) = sample.pixels() {
+                    return Some(Frame {
+                        pixels,
+                        time: sample.time,
+                    });
                 }
             }
         }
     }
 
     /// Copy a locked BGRA pixel buffer into an owned image, box-downscaling
-    /// wide frames by an integer factor.
-    fn copy_pixels(buffer: &objc2_core_video::CVPixelBuffer) -> Option<image::RgbaImage> {
+    /// frames wider than `max_width` by an integer factor.
+    fn copy_pixels(
+        buffer: &objc2_core_video::CVPixelBuffer,
+        max_width: usize,
+    ) -> Option<image::RgbaImage> {
         let flags = CVPixelBufferLockFlags::ReadOnly;
         if unsafe { CVPixelBufferLockBaseAddress(buffer, flags) } != 0 {
             return None;
@@ -702,14 +1004,20 @@ mod macos {
         let result =
             (!base.is_null() && width > 0 && height > 0 && stride >= width * 4).then(|| {
                 let source = unsafe { std::slice::from_raw_parts(base, stride * height) };
-                downscale(source, width, height, stride)
+                downscale(source, width, height, stride, max_width)
             });
         unsafe { CVPixelBufferUnlockBaseAddress(buffer, flags) };
         result
     }
 
-    fn downscale(source: &[u8], width: usize, height: usize, stride: usize) -> image::RgbaImage {
-        let factor = width.div_ceil(MAX_FRAME_WIDTH).max(1);
+    fn downscale(
+        source: &[u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        max_width: usize,
+    ) -> image::RgbaImage {
+        let factor = width.div_ceil(max_width.max(1)).max(1);
         let out_w = (width / factor).max(1);
         let out_h = (height / factor).max(1);
         let mut out = vec![0u8; out_w * out_h * 4];
@@ -743,9 +1051,11 @@ mod macos {
     }
 
     /// Decoder thread body: publish frames at their presentation times, loop
-    /// at the end, idle without demand, exit on stop or a broken file.
-    pub(super) fn run(path: &Path, shared: &Shared) {
-        let mut decoder = match Decoder::open(path) {
+    /// at the end, park without demand, exit on stop or a broken file.
+    /// `resume_at` (source seconds) continues a replaced player's playback.
+    pub(super) fn run(path: &Path, shared: &Shared, resume_at: Option<f64>) {
+        let quality = shared.quality;
+        let mut decoder = match Decoder::open(path, quality.max_width) {
             Ok(decoder) => decoder,
             Err(error) => {
                 tracing::warn!(%error, path = %path.display(), "video wallpaper failed to open");
@@ -757,10 +1067,20 @@ mod macos {
         let mut last_time = 0.0f64;
         let mut paused = false;
         let mut last_due: Option<Instant> = None;
-        while !shared.stop.load(Ordering::Relaxed) {
-            if !shared.demanded_recently() && shared.latest.lock().unwrap().is_some() {
+        // Frames before this are skipped without copying their pixels.
+        let mut resume = resume_at.filter(|at| at.is_finite() && *at > 0.0);
+        let held = |shared: &Shared| shared.latest.lock().unwrap().is_some();
+        while !shared.stop.load(Ordering::SeqCst) {
+            if !shared.demanded_recently() && held(shared) {
+                // Idle: park until demand or stop wakes the thread. The
+                // recheck after raising `parked` closes the race with
+                // `Shared::demand`; the timeout is only a safety net.
                 paused = true;
-                std::thread::sleep(Duration::from_millis(100));
+                shared.parked.store(true, Ordering::SeqCst);
+                if !shared.demanded_recently() && !shared.stop.load(Ordering::SeqCst) {
+                    std::thread::park_timeout(Duration::from_secs(5));
+                }
+                shared.parked.store(false, Ordering::SeqCst);
                 continue;
             }
             if paused {
@@ -770,8 +1090,8 @@ mod macos {
                 loop_start =
                     Instant::now() - Duration::from_secs_f64(segment / shared.speed() as f64);
             }
-            let Some(frame) = decoder.next_frame() else {
-                if !decoder.completed() || frames_this_loop == 0 {
+            let Some(sample) = decoder.next_sample() else {
+                if !decoder.completed() || (frames_this_loop == 0 && resume.is_none()) {
                     // Read error, or a file without frames: never spin.
                     return;
                 }
@@ -779,17 +1099,18 @@ mod macos {
                     Ok(decoder) => decoder,
                     Err(_) => return,
                 };
+                resume = None;
                 loop_start = Instant::now();
                 frames_this_loop = 0;
                 continue;
             };
             // The trim bar sets the loop segment: skip its head, restart at its tail.
-            if frame.time < shared.start() {
+            if sample.time < shared.start() {
                 continue;
             }
             let end = shared.end();
-            if end > shared.start() && frame.time >= end {
-                if frames_this_loop == 0 {
+            if end > shared.start() && sample.time >= end {
+                if frames_this_loop == 0 && resume.is_none() {
                     // The segment holds no frames; never spin on a rewind loop.
                     return;
                 }
@@ -797,21 +1118,33 @@ mod macos {
                     Ok(decoder) => decoder,
                     Err(_) => return,
                 };
+                resume = None;
                 loop_start = Instant::now();
                 frames_this_loop = 0;
                 last_time = shared.start();
                 continue;
             }
+            if let Some(at) = resume {
+                if sample.time < at {
+                    continue;
+                }
+                // Continue the timeline from here, as if it never stopped.
+                resume = None;
+                let segment = (sample.time - shared.start()).max(0.0);
+                loop_start =
+                    Instant::now() - Duration::from_secs_f64(segment / shared.speed() as f64);
+            }
             frames_this_loop += 1;
-            last_time = frame.time;
-            let segment = (frame.time - shared.start()).max(0.0);
+            last_time = sample.time;
+            let segment = (sample.time - shared.start()).max(0.0);
             let due = loop_start + Duration::from_secs_f64(segment / shared.speed() as f64);
-            // The UI repaints at REFRESH_INTERVAL: a frame due sooner than that after
-            // the last published one would never be seen, so skip its effect work.
+            // The UI repaints at the quality's cadence: a frame due sooner than
+            // that after the last published one would never be seen, so skip
+            // its pixel copy and effect work.
             if last_due.is_some_and(|last| {
                 due.checked_duration_since(last)
-                    .is_some_and(|gap| gap + Duration::from_millis(4) < REFRESH_INTERVAL)
-            }) && shared.latest.lock().unwrap().is_some()
+                    .is_some_and(|gap| gap + Duration::from_millis(4) < quality.interval)
+            }) && held(shared)
             {
                 continue;
             }
@@ -819,13 +1152,13 @@ mod macos {
             let now = Instant::now();
             if due > now {
                 std::thread::sleep(due - now);
-            } else if now - due > Duration::from_millis(100)
-                && shared.latest.lock().unwrap().is_some()
-            {
+            } else if now - due > Duration::from_millis(100) && held(shared) {
                 // Running behind (e.g. after a stall): drop this frame.
                 continue;
             }
-            shared.publish(frame.pixels);
+            if let Some(pixels) = sample.pixels() {
+                shared.publish(pixels, sample.time);
+            }
         }
     }
 }
@@ -852,12 +1185,12 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let frame = frame_at(path, 0.5).expect("frame near 0.5 s");
+        let frame = frame_at(path, 0.5, 0).expect("frame near 0.5 s");
         assert!(frame.size(0).width.0 > 0);
         // The cache answers a repeated request with the very same frame.
         assert!(Arc::ptr_eq(
             &frame,
-            &frame_at(path, 0.5).expect("cached frame")
+            &frame_at(path, 0.5, 0).expect("cached frame")
         ));
     }
 
@@ -867,7 +1200,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let frames = filmstrip(path, 4);
+        let frames = filmstrip(path, 4, 0);
         assert_eq!(frames.len(), 4);
         assert!(frames.iter().all(|frame| frame.size(0).width.0 > 0));
     }
@@ -882,7 +1215,7 @@ mod tests {
         assert!(frame.width() > 0 && frame.width() as usize <= MAX_FRAME_WIDTH);
         assert!(frame.height() > 0);
 
-        let mut decoder = macos::Decoder::open(path).unwrap();
+        let mut decoder = macos::Decoder::open(path, MAX_FRAME_WIDTH).unwrap();
         let mut count = 0;
         let mut last = -1.0;
         while let Some(frame) = decoder.next_frame() {
@@ -899,11 +1232,207 @@ mod tests {
         assert!(rewound.next_frame().is_some(), "loops back to the start");
     }
 
+    fn treatment(effect: crate::settings::NewThreadBackgroundEffect, rotation: u16) -> Treatment {
+        Treatment {
+            effect,
+            light: false,
+            blur: 0.0,
+            rotation,
+        }
+    }
+
+    fn pixels() -> image::RgbaImage {
+        image::RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8, y as u8, 7, 255]))
+    }
+
+    #[test]
+    fn untreated_frames_are_painted_without_a_second_copy() {
+        let plain = treatment(crate::settings::NewThreadBackgroundEffect::None, 0);
+        let slot = Slot::new(pixels(), plain);
+        assert!(slot.raw.is_none(), "the painted image is the source");
+        // A later treatment change still recovers the exact source pixels.
+        let source = source_of(slot.raw.clone(), &slot.painted).expect("source");
+        assert_eq!(*source, pixels());
+
+        let turned = Slot::from_source(source, treatment(plain.effect, 90));
+        assert!(turned.raw.is_some(), "a treated frame keeps its source");
+        assert_eq!(turned.painted.size(0).width.0, 2, "turned a quarter");
+        let back = Slot::from_source(turned.raw.clone().unwrap(), plain);
+        assert_eq!(
+            back.painted.as_bytes(0).unwrap(),
+            pixels().as_raw().as_slice()
+        );
+    }
+
+    #[test]
+    fn a_stopped_player_drops_late_frames() {
+        let plain = treatment(crate::settings::NewThreadBackgroundEffect::None, 0);
+        let shared = Shared::new(plain, Quality::FULL);
+        shared.publish(pixels(), 1.5);
+        assert_eq!(shared.position(), 1.5);
+        shared.publish(pixels(), 2.0);
+        assert_eq!(shared.retired.lock().unwrap().len(), 1);
+        shared.halt();
+        let before = shared
+            .latest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .painted
+            .clone();
+        shared.publish(pixels(), 3.0);
+        let after = shared
+            .latest
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .painted
+            .clone();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "nothing replaces a handed-off frame"
+        );
+        assert_eq!(shared.position(), 2.0);
+    }
+
+    #[test]
+    fn energy_saver_quality_is_lighter() {
+        assert_eq!(Quality::for_energy_saver(false), Quality::FULL);
+        let saver = Quality::for_energy_saver(true);
+        assert!(saver.max_width * 2 <= Quality::FULL.max_width);
+        assert!(saver.interval > Quality::FULL.interval);
+    }
+
+    #[test]
+    fn energy_saver_decodes_smaller_frames() {
+        let path = Path::new(SAMPLE);
+        if !path.exists() {
+            return;
+        }
+        let mut decoder = macos::Decoder::open(path, SAVER_FRAME_WIDTH).unwrap();
+        let frame = decoder.next_frame().expect("a frame");
+        assert!(frame.pixels.width() as usize <= SAVER_FRAME_WIDTH);
+        assert!(frame.pixels.height() > 0);
+    }
+
+    #[test]
+    fn idle_decoder_parks_and_wakes_on_demand() {
+        let path = Path::new(SAMPLE);
+        if !path.exists() {
+            return;
+        }
+        let plain = treatment(crate::settings::NewThreadBackgroundEffect::None, 0);
+        let shared = Arc::new(Shared::new(plain, Quality::SAVER));
+        shared.demand();
+        spawn_decoder(path.to_path_buf(), shared.clone(), None);
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait("the first frame", &|| {
+            shared.generation.load(Ordering::Acquire) > 0
+        });
+        // Without demand the decoder parks instead of polling.
+        wait("the decoder to park", &|| {
+            shared.parked.load(Ordering::SeqCst)
+        });
+        let parked_at = shared.generation.load(Ordering::Acquire);
+        shared.demand();
+        wait("playback to resume", &|| {
+            shared.generation.load(Ordering::Acquire) > parked_at
+        });
+        shared.halt();
+    }
+
     #[test]
     fn rejects_non_video_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fake.mp4");
         std::fs::write(&path, b"definitely not a movie").unwrap();
         assert!(first_frame(&path).is_err());
+    }
+
+    #[test]
+    fn capture_transforms_map_to_quarter_turns() {
+        // AVFoundation's preferred transform for each upright orientation.
+        for (label, transform, expected) in [
+            ("upright", (1.0, 0.0, 0.0, 1.0), 0),
+            ("turned right", (0.0, 1.0, -1.0, 0.0), 90),
+            ("upside down", (-1.0, 0.0, 0.0, -1.0), 180),
+            ("turned left", (0.0, -1.0, 1.0, 0.0), 270),
+            // Front-camera clips mirror; no quarter turn describes them.
+            ("mirrored", (-1.0, 0.0, 0.0, 1.0), 0),
+            ("mirrored and turned", (0.0, 1.0, 1.0, 0.0), 0),
+        ] {
+            let (a, b, c, d) = transform;
+            assert_eq!(
+                rotation_from_transform(a, b, c, d),
+                expected,
+                "{label} ({a}, {b}, {c}, {d})"
+            );
+        }
+    }
+
+    /// The player copies pixel-buffer rows top-down. Painting a still through
+    /// a flipped context put row 0 at the bottom, so the trim preview and the
+    /// filmstrip showed the video upside down.
+    #[test]
+    fn stills_keep_the_frame_upright() {
+        use objc2_core_graphics::{
+            CGBitmapInfo, CGColorRenderingIntent, CGColorSpaceCreateDeviceRGB, CGDataProvider,
+            CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+        };
+        // RGBA rows: the frame's top row is red, its bottom row is blue.
+        let red = [230u8, 40, 40, 255];
+        let blue = [40u8, 80, 220, 255];
+        let source: Vec<u8> = [red, red, blue, blue].concat();
+        let provider = unsafe {
+            CGDataProvider::with_data(
+                std::ptr::null_mut(),
+                source.as_ptr().cast(),
+                source.len(),
+                None,
+            )
+        }
+        .expect("data provider");
+        let space = CGColorSpaceCreateDeviceRGB().expect("device RGB");
+        let bitmap_info = CGBitmapInfo(
+            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        );
+        let image = unsafe {
+            CGImage::new(
+                2,
+                2,
+                8,
+                32,
+                8,
+                Some(&space),
+                bitmap_info,
+                Some(&provider),
+                std::ptr::null(),
+                false,
+                CGColorRenderingIntent::RenderingIntentDefault,
+            )
+        }
+        .expect("two by two image");
+
+        // The raster is BGRA, the order `RenderImage` expects.
+        let rasterized = macos::rasterize(&image).expect("rasterized still");
+        assert_eq!(rasterized.dimensions(), (2, 2));
+        assert_eq!(
+            rasterized.get_pixel(0, 0).0,
+            [40, 40, 230, 255],
+            "the source's top row stays on top"
+        );
+        assert_eq!(
+            rasterized.get_pixel(0, 1).0,
+            [220, 80, 40, 255],
+            "the source's bottom row stays at the bottom"
+        );
     }
 }

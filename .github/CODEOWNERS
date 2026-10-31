@@ -1,0 +1,4 @@
+# The credential vault and CI/deploy configuration are security-sensitive:
+# changes need the owner's review (docs/design/cloud-device.md).
+/edge/vault/ @wingleeio
+/.github/ @wingleeio

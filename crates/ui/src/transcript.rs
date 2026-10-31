@@ -35,12 +35,14 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextAlign,
-    TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
+    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StyledImage as _, StyledText,
+    Subscription, Task, TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px,
+    size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::view::{AnswerLine, InputOutcome};
+use zeron_proto::{HarnessId, ToolCall};
 
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
@@ -49,7 +51,7 @@ use crate::markdown::parser::{
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
-use crate::notice::{NoticeChipIcon::Tile, notice_chip};
+use crate::notice::{NoticeChipIcon::Tile, notice_chip_with_action};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
@@ -80,6 +82,11 @@ fn jump_visibility(was_shown: bool, distance: f32) -> bool {
 const MAX_SAVED_VIEWPORTS: usize = 256;
 /// Bound locally-authored queue ids waiting to become transcript prompts.
 const MAX_PENDING_QUEUED_TURNS: usize = 256;
+
+/// A blank transcript waits this long before showing its loader, so a quick
+/// open never flashes one. An executor timer, not an animation delay:
+/// reduced motion snaps animations, it never skips a wait.
+const LOADER_DELAY: Duration = Duration::from_millis(300);
 /// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
 /// smooth enough to track text while avoiding a permanent animation-frame loop
 /// on low-end devices.
@@ -120,6 +127,9 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
 const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
+/// A send waiting on its Cloud machine names that in the working line only
+/// after this long: a send from this device shows its setup chip by then.
+const CLOUD_BOOT_WORD_AFTER_MS: i64 = 1_500;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -174,6 +184,13 @@ pub const USER_LINE_HEIGHT: f32 = 22.0;
 pub const USER_COLLAPSE_CHARS: usize = 400;
 /// Vertical separation before the plain expand/collapse link.
 const USER_TOGGLE_GAP: f32 = 8.0;
+/// Lines a folded bubble's bottom fade spans.
+const USER_FOLD_FADE_LINES: f32 = 1.5;
+/// Lines a folded prompt's Markdown lays out past the fold, under its fade.
+const USER_FOLD_OVERDRAW_LINES: usize = 2;
+/// Between a caption over a user bubble (provider switch, agent sender) and
+/// the bubble.
+const USER_CAPTION_GAP: f32 = 6.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
 /// shifting the virtualizer.
@@ -486,6 +503,21 @@ fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineR
     let budget = THOUGHT_WRAP_COLS.saturating_sub(indent).max(16);
     let mut segments: Vec<Vec<InlineRun>> = vec![Vec::new()];
     for run in runs {
+        // Inline math shows its `$tex$` source in the code style.
+        let math;
+        let run = if run.style.math {
+            math = InlineRun {
+                text: format!("${}$", run.text),
+                style: InlineStyle {
+                    code: true,
+                    math: false,
+                    ..run.style.clone()
+                },
+            };
+            &math
+        } else {
+            run
+        };
         for (ix, piece) in run.text.split('\n').enumerate() {
             if ix > 0 {
                 segments.push(Vec::new());
@@ -590,7 +622,8 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
                 .collect();
             wrap_styled_runs(&bold, indent, out);
         }
-        Block::CodeBlock { code, .. } => {
+        // Interim: display math shows its TeX source like a code block.
+        Block::CodeBlock { code, .. } | Block::Math { tex: code } => {
             let style = InlineStyle {
                 code: true,
                 ..InlineStyle::default()
@@ -1040,13 +1073,30 @@ pub enum RowKind {
         /// once per entry change in [`rows_for_entry`] (rows are cached by
         /// fingerprint), never per frame. Empty for ordinary prompts.
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        /// `text` parsed as Markdown, when it uses any and carries no chips
+        /// (their pills paint over `text`'s own layout). `None` shows `text`
+        /// as typed.
+        markdown: Option<UserMarkdown>,
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// Context the prompt folded in as text, lifted back out by `badges`.
         badges: Arc<Vec<crate::badges::MessageBadge>>,
+        /// The chat that sent this message through Zeron's `send_message`,
+        /// lifted out of the routing header the receiving agent still reads.
+        sender: Option<AgentSender>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+    },
+    /// A message this chat's agent sent another chat through Zeron's
+    /// `send_message`: one `Message to [logo] Chat` line, not the tool call.
+    SentMessage {
+        /// The recipient as the call named it (id, id prefix, or title),
+        /// resolved against the chat list at render.
+        to: SharedString,
+        /// The call hasn't returned yet.
+        pending: bool,
+        failed: bool,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1072,13 +1122,15 @@ pub enum RowKind {
         compact_shell: bool,
     },
     InputChip {
-        /// First question's header (chat-view.tsx `InputChip`: the resolved
-        /// chip shows it; unresolved shows "Awaiting your answer…" — which
-        /// stays TRUE even across a run death: the composer keeps the panel
-        /// up until the user answers, and the engine delivers a dead run's
-        /// answer as a resumed turn).
+        /// First question's header (chat-view.tsx `InputChip`): the value of
+        /// a chip whose answers were never recorded, and the label of one
+        /// that closed unanswered.
         header: SharedString,
-        resolved: bool,
+        /// What became of the questions. Pending shows "Awaiting your
+        /// answer…" — which stays TRUE even across a run death: the composer
+        /// keeps the panel up until the user answers or closes it, and the
+        /// engine delivers a dead run's answer as a resumed turn.
+        outcome: InputOutcome,
     },
     ErrorChip {
         message: SharedString,
@@ -1088,6 +1140,13 @@ pub enum RowKind {
     ForkMarker {
         source_chat_id: SharedString,
         source_title: SharedString,
+    },
+    /// The provider-switch seam: a labeled divider over `[logo] From → [logo] To`.
+    SwitchMarker {
+        from: SharedString,
+        to: SharedString,
+        from_harness: Option<HarnessId>,
+        to_harness: Option<HarnessId>,
     },
 }
 
@@ -1195,7 +1254,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                                 | (run.style.italic as u8) << 1
                                 | (run.style.code as u8) << 2
                                 | (run.style.strikethrough as u8) << 3
-                                | (run.style.link.is_some() as u8) << 4,
+                                | (run.style.link.is_some() as u8) << 4
+                                | (run.style.math as u8) << 5,
                         );
                     }
                     acc.push(b'\n');
@@ -1343,7 +1403,10 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let body = agent_message_display(&body);
+        let (sender, body) = match agent_message_sender(&body) {
+            Some((sender, body)) => (Some(sender), body.to_owned()),
+            None => (None, body),
+        };
         // Chips stand in for their attachments: those leave the strip, and a
         // chip carries its upload's path for its progress and, for an image,
         // a click opening it.
@@ -1371,6 +1434,15 @@ pub fn rows_for_entry(
                     .iter()
                     .any(|chip| crate::attachments::chip_names_attachment(chip, &att.path))
         });
+        let markdown = mentions
+            .is_empty()
+            .then(|| crate::markdown::parse_message(&text))
+            .filter(|tree| !plain_markdown(tree))
+            .map(|tree| UserMarkdown {
+                folded: folded_markdown(&tree, USER_COLLAPSED_LINES + USER_FOLD_OVERDRAW_LINES)
+                    .map(Arc::new),
+                full: Arc::new(tree),
+            });
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
@@ -1379,8 +1451,10 @@ pub fn rows_for_entry(
             kind: RowKind::User {
                 text: text.into(),
                 mentions: Arc::new(mentions),
+                markdown,
                 attachments: Arc::new(attachments),
                 badges: Arc::new(badges),
+                sender,
                 pending,
             },
             entry_id,
@@ -1470,6 +1544,41 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                // A message to another chat reads as one line naming the
+                // recipient, one per recipient, out of the tool fold (compact
+                // mode folds it with the rest of the work).
+                if !compact && let Some(sent) = zeron_proto::agent_messages::outgoing_messages(call)
+                {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                    for (message_ix, message) in sent.into_iter().enumerate() {
+                        let version = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            (&message.chat, *resolved, *is_error).hash(&mut h);
+                            h.finish()
+                        };
+                        rows.push(Row {
+                            id: format!("{}#{}.m{message_ix}", entry.id, part.id()).into(),
+                            version,
+                            turn_start: false,
+                            copy_text: None,
+                            kind: RowKind::SentMessage {
+                                to: message.chat.into(),
+                                pending: !*resolved,
+                                failed: *is_error,
+                            },
+                            entry_id: entry.id.clone().into(),
+                            timestamp: None,
+                            compact_fold: None,
+                        });
+                    }
+                    continue;
+                }
                 let item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
@@ -1657,24 +1766,22 @@ pub fn rows_for_entry(
                         id: part_id,
                         questions,
                         resolved,
+                        answers,
                         ..
                     } => {
                         // Model-generated header onto the one-line chip.
-                        let header: SharedString = single_line(
-                            &questions
-                                .first()
-                                .map(|q| q.header.clone())
-                                .unwrap_or_else(|| "Question".to_string()),
-                        )
-                        .into();
+                        let header: SharedString =
+                            zeron_proto::view::input_header(questions).into();
+                        let outcome = zeron_proto::view::input_outcome(
+                            questions,
+                            *resolved,
+                            answers.as_deref(),
+                        );
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(header.as_bytes()) << 1 | *resolved as u64,
+                            version: fnv1a(format!("{header}\0{outcome:?}").as_bytes()),
                             turn_start: false,
-                            kind: RowKind::InputChip {
-                                header,
-                                resolved: *resolved,
-                            },
+                            kind: RowKind::InputChip { header, outcome },
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
@@ -1711,6 +1818,34 @@ pub fn rows_for_entry(
                             kind: RowKind::ForkMarker {
                                 source_chat_id: source_chat_id.clone().into(),
                                 source_title: single_line(source_title).into(),
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Switch {
+                        id: part_id,
+                        from,
+                        to,
+                        from_harness,
+                        to_harness,
+                    } => {
+                        let from_harness = from_harness.as_deref().and_then(HarnessId::from_slug);
+                        let to_harness = to_harness.as_deref().and_then(HarnessId::from_slug);
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(
+                                format!("{from}\u{1}{to}\u{1}{from_harness:?}\u{1}{to_harness:?}")
+                                    .as_bytes(),
+                            ),
+                            turn_start: false,
+                            kind: RowKind::SwitchMarker {
+                                from: single_line(from).into(),
+                                to: single_line(to).into(),
+                                from_harness,
+                                to_harness,
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -1802,7 +1937,10 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming
         && let Some(last) = rows.last_mut()
-        && !matches!(last.kind, RowKind::ForkMarker { .. })
+        && !matches!(
+            last.kind,
+            RowKind::ForkMarker { .. } | RowKind::SwitchMarker { .. }
+        )
     {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
@@ -1971,7 +2109,14 @@ fn part_prefix(id: &str) -> &str {
 /// part — matching the live row's internal spacing exactly, so the
 /// live→split handoff cannot shift a pixel. Tool groups get one larger global
 /// step on either boundary so their dense chip stack has room to breathe.
+/// A provider-switch seam is the caption of the message under it, so that
+/// message sits right below it.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
+    if matches!(row.kind, RowKind::User { .. })
+        && prev.is_some_and(|prev| matches!(prev.kind, RowKind::SwitchMarker { .. }))
+    {
+        return USER_CAPTION_GAP;
+    }
     if row.turn_start {
         return Theme::SPACE_LG;
     }
@@ -2212,6 +2357,9 @@ const TOOL_IMAGE_STRIP_HEIGHT: f32 = DETAIL_SEPARATOR + TOOL_IMAGE_HEIGHT + 2.0 
 struct ImageMenu {
     path: String,
     devices: Vec<String>,
+    /// A reply's Markdown image: its chat and type. Copy image reads it
+    /// through `ReadChatImageChunk`, under that chat's jail, like the preview.
+    chat_image: Option<(String, &'static str)>,
     position: Point<Pixels>,
     active: Option<usize>,
 }
@@ -2477,6 +2625,7 @@ impl HighlightStore {
                             Lang::Php => "php",
                             Lang::Sql => "sql",
                             Lang::Lua => "lua",
+                            Lang::Luau => "luau",
                             Lang::Dockerfile => "dockerfile",
                             Lang::Nix => "nix",
                             Lang::Make => "make",
@@ -3157,6 +3306,12 @@ pub struct Transcript {
     /// only then may the working trailer render — a frozen snapshot must
     /// never spin, whatever its entries claim.
     doc_live: bool,
+    /// Why this blank transcript is still loading (see
+    /// [`AppState::transcript_loading`]). Its loader shows once it has held
+    /// for [`LOADER_DELAY`].
+    loading: Option<crate::state::TranscriptLoading>,
+    loader_shown: bool,
+    loader_delay: Option<Task<()>>,
     /// Memory-only viewport state for primary chats visited in this window.
     /// A transcript instance is shared across tabs, so the active ListState is
     /// reset on every attach and cannot retain these positions by itself.
@@ -3259,6 +3414,10 @@ pub struct Transcript {
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
     code_fences_generation: u64,
+    /// Last math-style generation applied (see
+    /// [`crate::settings::math_generation`]); like the code-fence one, each
+    /// instance remeasures its own rows.
+    math_generation: u64,
     /// Compact mode as last applied to this instance's row split. Render
     /// polls the setting each frame; a flip rebuilds every row.
     compact_mode: bool,
@@ -3288,6 +3447,15 @@ pub struct Transcript {
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
     pinned: bool,
+    /// The latest wheel/touch input headed for the top of a scrollable list
+    /// and broke the pin as it arrived ([`Transcript::on_scroll_wheel`]); the
+    /// deferred decision in [`Transcript::handle_scroll`] must not re-engage
+    /// it.
+    input_escaped: bool,
+    /// The list took the wheel event in flight ([`Transcript::handle_scroll`]
+    /// runs first): a wheel the list never saw (one an overlay above it let
+    /// bubble) must not break the pin.
+    list_took_input: bool,
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
@@ -3324,6 +3492,22 @@ pub struct Transcript {
     bottom_clearance: f32,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
+    /// The rail's tick stack bounds (painted last frame): maps pointer y to
+    /// a prompt index.
+    rail_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The rail's own scroll, once its ticks outgrow the room beside the
+    /// reading column.
+    rail_scroll: gpui::ScrollHandle,
+    /// The lit tick span the rail last scrolled into view, by message id: it
+    /// follows only when what's lit changes, so scrolling the rail by hand
+    /// holds.
+    rail_followed: Option<(SharedString, SharedString)>,
+    /// The rail's ticks paired with their rows, kept until the transcript,
+    /// its echoes or its rows change: rebuilding them walks every entry, too
+    /// much for each scroll frame of a long chat.
+    rail_ticks: Option<crate::rail::RailTicks>,
+    /// Bumped whenever `rows` is replaced.
+    rows_revision: u64,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -3367,6 +3551,11 @@ pub struct Transcript {
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
+    /// Local images replies name in Markdown: the open chat, the reads its
+    /// rows ask for while laying out, and the rows each image shows in.
+    reply_images: Rc<RefCell<crate::reply_images::ReplyImages>>,
+    /// In-flight ReadChatImageChunk loads (at most `reply_images::MAX_LOADS`).
+    reply_image_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
     /// Inline `show_visual` visuals, keyed by row id.
     visuals: HashMap<SharedString, Entity<crate::visuals::VisualFrame>>,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
@@ -3397,6 +3586,9 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// An error card's "Log in": sign in to the provider this chat's run
+    /// was refused by (signed out, or out of usage).
+    SignIn { chat_id: String },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -3407,6 +3599,8 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// An agent message's sender caption: open the chat that sent it.
+    OpenChat { chat_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3547,7 +3741,10 @@ impl Transcript {
             })
             .ok();
         });
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let observe = cx.observe(&state, |this: &mut Self, _, cx| {
+            this.sync(cx);
+            this.sync_loader(cx);
+        });
         cx.on_release(|this: &mut Self, cx| {
             this.close_diagram_zoom(cx);
             crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
@@ -3587,6 +3784,9 @@ impl Transcript {
             retain_on_deselect: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
+            loading: None,
+            loader_shown: false,
+            loader_delay: None,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
             pending_viewport: None,
@@ -3620,6 +3820,7 @@ impl Transcript {
             content_width: crate::settings::transcript_width(cx),
             right_reserve: 0.0,
             code_fences_generation: crate::settings::code_fences_generation(cx),
+            math_generation: crate::settings::math_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
@@ -3630,6 +3831,8 @@ impl Transcript {
             show_jump_button: false,
             last_scroll_distance: 0.0,
             pinned,
+            input_escaped: false,
+            list_took_input: false,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
             own_turn_kick: false,
@@ -3646,6 +3849,11 @@ impl Transcript {
             rail_enabled,
             bottom_clearance: 0.0,
             rail_hover: None,
+            rail_bounds: Rc::new(Cell::new(None)),
+            rail_scroll: gpui::ScrollHandle::new(),
+            rail_followed: None,
+            rail_ticks: None,
+            rows_revision: 0,
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
@@ -3664,6 +3872,8 @@ impl Transcript {
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
             attachment_loads: HashMap::new(),
+            reply_images: Rc::default(),
+            reply_image_loads: HashMap::new(),
             visuals: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
@@ -3673,7 +3883,100 @@ impl Transcript {
             _text_changes: text_changes,
         };
         this.sync(cx);
+        this.sync_loader(cx);
         this
+    }
+
+    /// Follow [`AppState::transcript_loading`], arming the loader's delay
+    /// when loading begins and dropping it the moment anything shows.
+    fn sync_loader(&mut self, cx: &mut Context<Self>) {
+        // A subagent tab reads a doc its parent's sync never speaks for.
+        let loading = if self.doc_override.is_some() {
+            None
+        } else {
+            self.state
+                .read(cx)
+                .transcript_loading(crate::state::clock_now())
+        };
+        if loading == self.loading {
+            return;
+        }
+        self.loading = loading;
+        if loading.is_none() {
+            self.loader_delay = None;
+            if std::mem::take(&mut self.loader_shown) {
+                cx.notify();
+            }
+        } else if self.loader_shown {
+            cx.notify(); // its caption changed
+        } else if self.loader_delay.is_none() {
+            self.loader_delay = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LOADER_DELAY).await;
+                this.update(cx, |this, cx| {
+                    this.loader_delay = None;
+                    if this.loading.is_some() {
+                        this.loader_shown = true;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
+        }
+    }
+
+    /// Centered over the blank list: the zeron loader and what it waits on.
+    fn render_loader(
+        &self,
+        loading: crate::state::TranscriptLoading,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::state::TranscriptLoading as L;
+        let theme = Theme::of(cx).clone();
+        let caption = match loading {
+            L::Opening => "Opening…",
+            L::Syncing => "Syncing…",
+            L::Reconnecting => "Reconnecting…",
+            L::Offline => "Offline — this chat loads when you're back online",
+        };
+        let caption = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(theme.text_faint)
+            // Hard offline waits on nothing this app does: the amber dot the
+            // composer and sidebar use, not a spinner.
+            .when(loading == L::Offline, |row| {
+                row.child(div().size(px(5.0)).rounded_full().bg(theme.warning))
+            })
+            .child(SharedString::from(caption));
+        // The overlay is positioned by a still wrapper: `fade_in` restyles
+        // its element `relative` every frame, which would drop it into the
+        // flow below the full-height list, where the pane clips it.
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(motion::fade_in(
+                "transcript-loader",
+                div()
+                    .debug_selector(|| "transcript-loader".into())
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when(loading != L::Offline, |column| {
+                        column.child(crate::loaders::ring_spinner(
+                            "transcript-loader",
+                            20.0,
+                            theme.text_muted,
+                        ))
+                    })
+                    .child(caption),
+            ))
+            .into_any_element()
     }
 
     // ---- rail plumbing (rendering lives in crate::rail) ----
@@ -3725,6 +4028,30 @@ impl Transcript {
 
     pub(crate) fn set_rail_hover(&mut self, hover: Option<usize>) {
         self.rail_hover = hover;
+    }
+
+    pub(crate) fn rail_scroll(&self) -> &gpui::ScrollHandle {
+        &self.rail_scroll
+    }
+
+    pub(crate) fn rail_followed_mut(&mut self) -> &mut Option<(SharedString, SharedString)> {
+        &mut self.rail_followed
+    }
+
+    pub(crate) fn rail_ticks_mut(&mut self) -> &mut Option<crate::rail::RailTicks> {
+        &mut self.rail_ticks
+    }
+
+    pub(crate) fn rows_revision(&self) -> u64 {
+        self.rows_revision
+    }
+
+    pub(crate) fn rail_bounds(&self) -> &Rc<Cell<Option<Bounds<Pixels>>>> {
+        &self.rail_bounds
+    }
+
+    pub(crate) fn bottom_clearance(&self) -> f32 {
+        self.bottom_clearance
     }
 
     pub(crate) fn rows(&self) -> &[Row] {
@@ -3891,6 +4218,7 @@ impl Transcript {
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
+        self.list_took_input = true;
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
         self.release_own_turn_hold();
         if self.own_turn.is_some() {
@@ -3909,6 +4237,8 @@ impl Transcript {
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
+                this.list_took_input = false;
+                let escaped = std::mem::take(&mut this.input_escaped);
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
@@ -3919,8 +4249,8 @@ impl Transcript {
                     this.last_scroll_distance = distance;
                     // Reaching the end preserves normal tail-follow intent
                     // without reasserting a possibly stale prompt hold.
-                    this.pinned =
-                        distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous);
+                    this.pinned = !escaped
+                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous));
                     this.spring.reset();
                     this.spring_last_tick = None;
                     // Re-stick only when returning to a short turn's actual
@@ -3932,7 +4262,11 @@ impl Transcript {
                                 >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
                         })
                     });
-                    if !released_own_turn && at_hold && Self::should_restick(distance, previous) {
+                    if !released_own_turn
+                        && !escaped
+                        && at_hold
+                        && Self::should_restick(distance, previous)
+                    {
                         if let Some(anchor) = this.own_turn.as_mut() {
                             anchor.held = true;
                             anchor.positioned = false;
@@ -3951,7 +4285,7 @@ impl Transcript {
                 let distance = this.distance_from_bottom();
                 let previous = this.last_scroll_distance;
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
+                if escaped || (distance > previous + 1.0 && distance > AT_BOTTOM_PX) {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
                     // scroll handler (mugen §1e: interrupt from input, not
@@ -3975,6 +4309,32 @@ impl Transcript {
             })
             .ok();
         });
+    }
+
+    /// A wheel notch headed for the top breaks the pin as it arrives, however
+    /// little it moved, as use-stick-to-bottom's wheel handler does. The
+    /// distance test in [`Self::handle_scroll`] can't see that on its own: a
+    /// smoothed notch starts and ends with sub-pixel slices, and its slices
+    /// arrive on frames, where the spring's step runs before that deferred
+    /// decision, pulling the view back and recording the distance it then
+    /// compares against. Precise (trackpad) input keeps the distance test.
+    /// Children bubble first, so the list has applied the input by now, or
+    /// never saw it.
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let toward_top = matches!(event.delta, ScrollDelta::Lines(delta) if delta.y > 0.0);
+        self.input_escaped = std::mem::take(&mut self.list_took_input)
+            && toward_top
+            && self.list.max_offset_for_scrollbar().y > px(0.0);
+        if self.input_escaped {
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+        }
     }
 
     fn on_selection_mouse_move(
@@ -4208,7 +4568,7 @@ impl Transcript {
     /// carries the titlebar chrome inside its own box (the first row's
     /// top gap), so the hold adds nothing — adding the inset on top parked
     /// a new chat's first prompt a double-chrome ~66px low (user report).
-    fn own_send_inset(anchor_ix: usize) -> f32 {
+    pub(crate) fn own_send_inset(anchor_ix: usize) -> f32 {
         if anchor_ix == 0 {
             0.0
         } else {
@@ -4744,6 +5104,7 @@ impl Transcript {
             }
             self.chat_id = selected;
             self.rows.clear();
+            self.rows_revision = self.rows_revision.wrapping_add(1);
             self.tool_images.clear(cx);
             self.row_cache.clear();
             self.live_parsers.clear();
@@ -5111,6 +5472,7 @@ impl Transcript {
         match diff_rows(&self.rows, &new_rows) {
             None => {
                 self.rows = new_rows;
+                self.rows_revision = self.rows_revision.wrapping_add(1);
                 self.refresh_protected_attachments(cx);
                 self.release_departed_tool_images(cx);
                 self.reconcile_own_turn_prompt();
@@ -5129,8 +5491,13 @@ impl Transcript {
                 // changed (the tail), this is O(changed rows) per commit, never
                 // O(reply).
                 for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
+                    let mut cache = self.render_cache.borrow_mut();
+                    cache.invalidate_row(&row.id);
+                    if matches!(row.kind, RowKind::User { .. }) {
+                        cache.invalidate_row(&user_markdown_key(&row.id));
+                    }
                 }
+                let after = old_range.start + count;
                 if old_range.len() == count {
                     // In-place content change, same row count — notably the
                     // live→complete flip, where EVERY row of the streamed
@@ -5146,10 +5513,17 @@ impl Transcript {
                 } else {
                     self.list.splice(old_range, count);
                 }
+                // A row's top gap reads its predecessor, so the row after the
+                // splice can gain a new one (a switch seam landing over the
+                // message already shown under it).
+                if after < new_rows.len() {
+                    self.list.remeasure_items(after..after + 1);
+                }
                 self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
             }
         }
         self.rows = new_rows;
+        self.rows_revision = self.rows_revision.wrapping_add(1);
         if old_last != self.rows.len().checked_sub(1) {
             if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
                 // Bottom chrome moves to the new tail too.
@@ -6100,6 +6474,27 @@ impl Transcript {
         self.image_menu.open(ImageMenu {
             path,
             devices,
+            chat_image: None,
+            position,
+            active: None,
+        });
+        window.focus(&self.image_menu_focus, cx);
+        cx.notify();
+    }
+
+    /// The image menu for an image a reply in `chat` names in Markdown, read
+    /// from `host` within that chat's folder.
+    fn open_chat_image_menu(
+        &mut self,
+        request: &crate::reply_images::ReplyImageRequest,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_menu.open(ImageMenu {
+            path: request.path.clone(),
+            devices: vec![request.host.clone()],
+            chat_image: Some((request.chat_id.clone(), request.mime)),
             position,
             active: None,
         });
@@ -6143,16 +6538,23 @@ impl Transcript {
             return;
         };
         let (path, devices) = (menu.path.clone(), menu.devices.clone());
+        let chat_image = menu.chat_image.clone();
         self.close_image_menu(cx);
         match action {
             0 => cx.write_to_clipboard(gpui::ClipboardItem::new_string(path)),
-            1 => self.copy_image(path, devices, cx),
+            1 => self.copy_image(path, devices, chat_image, cx),
             _ => {}
         }
     }
 
     /// Copy the original file (not the preview) from its owning device.
-    fn copy_image(&mut self, path: String, devices: Vec<String>, cx: &mut Context<Self>) {
+    fn copy_image(
+        &mut self,
+        path: String,
+        devices: Vec<String>,
+        chat_image: Option<(String, &'static str)>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -6161,11 +6563,21 @@ impl Transcript {
             let executor = cx.background_executor().clone();
             for device in &devices {
                 let target = (local.as_deref() != Some(device.as_str())).then_some(device.as_str());
-                if let Some((_, mime, bytes)) = crate::attachments::read_attachment_bytes(
-                    &engine, &executor, target, &path, None,
-                )
-                .await
-                {
+                let read = match &chat_image {
+                    Some((chat, mime)) => {
+                        crate::attachments::read_chat_image_bytes(
+                            &engine, &executor, target, chat, &path, mime,
+                        )
+                        .await
+                    }
+                    None => {
+                        crate::attachments::read_attachment_bytes(
+                            &engine, &executor, target, &path, None,
+                        )
+                        .await
+                    }
+                };
+                if let Some((_, mime, bytes)) = read {
                     let format =
                         gpui::ImageFormat::from_mime_type(&mime).unwrap_or(gpui::ImageFormat::Png);
                     // SVG is markup an agent may have written: copy the parsed,
@@ -6249,13 +6661,16 @@ impl Transcript {
     /// flex item it answers intrinsic-width probes with the truncated layout,
     /// collapsing the bubble to min-content width (one character per line).
     /// A plain height clip preserves the original bubble width calculation and
-    /// never feeds measured layout back into the virtualized list.
+    /// never feeds measured layout back into the virtualized list. The clip's
+    /// bottom fades out rather than cutting: Markdown's block gaps and code
+    /// washes don't sit on the line grid, so a hard edge would slice a line.
     fn render_user_body(
         &mut self,
         row_id: &SharedString,
         row_ix: usize,
         text: SharedString,
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        markdown: Option<UserMarkdown>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -6265,10 +6680,7 @@ impl Transcript {
         let expanded = fold.open.unwrap_or(false);
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
-        let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
-        // Include the continuation line in the resize endpoints so removing
-        // it on expansion does not make the bubble jump by a line.
-        let collapsed_h = collapsed_text_h + line_height;
+        let collapsed_h = USER_COLLAPSED_LINES as f32 * line_height;
         let measured_h = self
             .user_heights
             .entry(row_id.clone())
@@ -6276,13 +6688,30 @@ impl Transcript {
             .clone();
         let measured = measured_h.get();
         let collapsible = text.lines().count() > USER_COLLAPSED_LINES
-            || (measured > 0.0 && measured > collapsed_text_h + 0.5)
+            || (measured > 0.0 && measured > collapsed_h + 0.5)
             || (measured == 0.0 && user_message_needs_collapse(&text));
         let full_h = measured_h.get().max(collapsed_h);
         if let Some(fold) = self.user_folds.get_mut(row_id) {
             // Wrapping can change with the window width while expanded.
             fold.user_expansion_height = (full_h - collapsed_h).max(0.0);
         }
+
+        // Height motion uses the same ease-out curve as sidebars, tool folds,
+        // and pane transitions, with duration scaled to travel distance. The
+        // full text remains laid out behind the clip; only the viewport over it
+        // changes, so glyph wrapping never shifts.
+        let duration_ms = fold
+            .duration_ms
+            .max(user_resize_duration_ms(full_h - collapsed_h));
+        let animating = collapsible
+            && fold.epoch > 0
+            && fold
+                .toggled_at
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
+            && !motion::reduced_motion(cx);
+        // At rest folded, a long prompt's Markdown lays out only what fills
+        // the fold; motion and the open bubble need all of it.
+        let folded = collapsible && !expanded && !animating;
 
         let hold_key = row_id.clone();
         let hold_height = measured_h.clone();
@@ -6325,50 +6754,65 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(
-                row_id,
-                text,
-                mentions,
-                theme,
-                measured_h.clone(),
-                cx.entity_id(),
-                chip_overlays,
-                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip_image(path, window, cx);
-                })),
-            ));
-        // Height motion uses the same ease-out curve as sidebars, tool folds,
-        // and pane transitions, with duration scaled to travel distance. The
-        // full text remains laid out behind the clip; only the viewport over it
-        // changes, so glyph wrapping never shifts.
-        let duration_ms = fold
-            .duration_ms
-            .max(user_resize_duration_ms(full_h - collapsed_h));
-        let animating = collapsible
-            && fold.epoch > 0
-            && fold
-                .toggled_at
-                .is_some_and(|at| at.elapsed() < Duration::from_millis(duration_ms + 200))
-            && !motion::reduced_motion(cx);
-        let ellipsis = || div().h(px(line_height)).child("...");
+            .child(match markdown {
+                Some(UserMarkdown {
+                    folded: Some(part), ..
+                }) if folded => {
+                    // The part is shorter than the prompt: its height isn't
+                    // the one the fold animates to.
+                    self.render_user_markdown(row_id, &part, None, theme, window, cx)
+                }
+                Some(UserMarkdown { full, .. }) => self.render_user_markdown(
+                    row_id,
+                    &full,
+                    Some(measured_h.clone()),
+                    theme,
+                    window,
+                    cx,
+                ),
+                None => user_bubble_text(
+                    row_id,
+                    text,
+                    mentions,
+                    theme,
+                    measured_h.clone(),
+                    cx.entity_id(),
+                    chip_overlays,
+                    Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
+                        this.open_chip_image(path, window, cx);
+                    })),
+                ),
+            });
+        // The fade covers the last line and a half, so the clip never shows
+        // a sliced glyph row. It rides a collapse down; an expansion reveals
+        // from a plain edge.
+        let fade = |clip: gpui::AnyElement| {
+            crate::edge_fade::edge_faded(line_height * USER_FOLD_FADE_LINES, false, true, clip)
+                .compose_vertical()
+                .into_any_element()
+        };
         let body: AnyElement = if animating {
             let from = fold.from;
             let to = if expanded { full_h } else { collapsed_h };
             let resize = user_resize_spec(full_h - collapsed_h);
-            let ellipsis_h = if expanded { 0.0 } else { line_height };
-            div()
-                .child(div().overflow_hidden().child(body).with_animation(
+            let clip = div()
+                .overflow_hidden()
+                .child(body)
+                .with_animation(
                     SharedString::from(format!("{row_id}-user-resize-{}", fold.epoch)),
                     resize.animation(),
-                    move |el, t| el.h(px((motion::lerp(from, to, t) - ellipsis_h).max(0.0))),
-                ))
-                .when(!expanded, |el| el.child(ellipsis()))
-                .into_any_element()
+                    move |el, t| el.h(px(motion::lerp(from, to, t).max(0.0))),
+                )
+                .into_any_element();
+            if expanded { clip } else { fade(clip) }
         } else if collapsible && !expanded {
-            div()
-                .child(div().h(px(collapsed_text_h)).overflow_hidden().child(body))
-                .child(ellipsis())
-                .into_any_element()
+            fade(
+                div()
+                    .h(px(collapsed_h))
+                    .overflow_hidden()
+                    .child(body)
+                    .into_any_element(),
+            )
         } else {
             body.into_any_element()
         };
@@ -6389,8 +6833,153 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The chat's checkout, which tells a workspace-file link from a web one.
+    fn workspace_root(&self, cx: &gpui::App) -> Option<SharedString> {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row())
+            .and_then(|chat| chat.cwd.as_deref())
+            .map(SharedString::from)
+    }
+
+    /// A prompt's Markdown, rendered like a reply's at the bubble's size: its
+    /// own selection keys, links and fences. The canvas behind it records the
+    /// full height for the fold, as [`user_bubble_text`] does for plain text.
+    fn render_user_markdown(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        measured_h: Option<Rc<Cell<f32>>>,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_key = user_markdown_key(row_id);
+        // Kept across frames like a reply's blocks; replacing the row drops it.
+        self.rendered_rows.insert(row_key.clone());
+        let link = self.link_ui(cx);
+        let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+        let code = tree
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, top)| self.code_uis_for(&row_key, &top.block, ix, cx))
+            .flatten()
+            .collect::<HashMap<_, _>>();
+        let opts = RenderOptions {
+            tasks: None,
+            media: None,
+            row_key: row_key.clone(),
+            veil: None,
+            cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+            now: Instant::now(),
+            copy: Some(self.copy_ui_for(&row_key, cx)),
+            link,
+            workspace_root: self.workspace_root(cx),
+            code: (!code.is_empty()).then_some(code),
+            math: crate::settings::math_style(cx),
+        };
+        let highlight = self.code_highlight_for(&row_key, &tree, None, cx);
+        let entity_id = cx.entity_id();
+        div()
+            .relative()
+            .when_some(measured_h, |el, measured_h| {
+                el.child(
+                    canvas(
+                        move |bounds, _, _| bounds.size.height,
+                        move |_, height, _, cx| {
+                            // Passive geometry cache, like the plain bubble's.
+                            let height = f32::from(height);
+                            if (measured_h.get() - height).abs() > 0.5 {
+                                measured_h.set(height);
+                                cx.notify(entity_id);
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
+            .child(render::render_tree(&tree, &opts, theme, window, &|ix| {
+                highlight.get(&ix).cloned().flatten()
+            }))
+            .into_any_element()
+    }
+
+    /// `Message from [logo] Chat` over an agent-sent bubble, in the switch
+    /// seam's caption style: the sending chat's provider mark and live title
+    /// (the header's title for a chat this workspace doesn't list). A known
+    /// chat opens on click.
+    fn render_agent_sender(
+        &self,
+        row_id: &SharedString,
+        sender: &AgentSender,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .pb(px(USER_CAPTION_GAP))
+            .child(self.render_chat_caption(
+                row_id,
+                "Message from",
+                Some(sender.chat_id.as_ref()),
+                sender.title.clone(),
+                true,
+                theme,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// `{lead} [logo] Chat` over a message between chats: chat `chat_id`'s
+    /// provider mark and live title, `fallback` for one this workspace doesn't
+    /// list. A listed chat opens on click. `end` aligns it over a user bubble;
+    /// otherwise it sits over the agent's side.
+    #[allow(clippy::too_many_arguments)]
+    fn render_chat_caption(
+        &self,
+        row_id: &SharedString,
+        lead: &'static str,
+        chat_id: Option<&str>,
+        fallback: SharedString,
+        end: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ChatIdentity { title, mark, known } =
+            chat_identity(self.state.read(cx), chat_id, &fallback);
+        let chat_id = chat_id.unwrap_or_default().to_owned();
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .when(end, |el| el.justify_end())
+            .when(!end, |el| el.justify_start())
+            .child(
+                user_caption(theme)
+                    .id(SharedString::from(format!("{row_id}-chat")))
+                    .max_w(px(self.content_width * 0.8))
+                    .child(div().flex_none().child(lead))
+                    .child(caption_label(title, Some(mark), theme.text_muted))
+                    .when(known, |el| {
+                        el.role(gpui::Role::Link)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                                cx.emit(TranscriptEvent::OpenChat {
+                                    chat_id: chat_id.clone(),
+                                });
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// A plain text link aligned with the message's left edge, following the
-    /// continuation ellipsis when collapsed. No pill, border, or button wash.
+    /// folded text. No pill, border, or button wash.
     fn render_user_expander(
         &mut self,
         row_id: &SharedString,
@@ -6451,14 +7040,77 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The chat whose replies this transcript shows, for the images they
+    /// name. A subagent tab draws none: its doc isn't the chat it borrows.
+    fn reply_chat(&self, cx: &gpui::App) -> Option<crate::reply_images::ReplyChat> {
+        if self.doc_override.is_some() {
+            return None;
+        }
+        let id = self.chat_id.as_deref()?;
+        let chat = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)?;
+        Some(crate::reply_images::ReplyChat {
+            id: chat.id.clone(),
+            cwd: chat.cwd.clone(),
+            host: chat.device_id.clone(),
+        })
+    }
+
     /// Media wiring for settled Markdown: Mermaid fences become diagrams
-    /// once rendered and keep their source until then (or on failure).
-    /// Inline images keep their ordinary chat rendering.
+    /// once rendered and keep their source until then (or on failure), and
+    /// local images the chat's folder holds are drawn (`reply_images`).
     fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
+        self.reply_images.borrow_mut().show(self.reply_chat(cx));
         let cache = self.diagrams.clone();
+        let images = self.reply_images.clone();
         let owner = cx.weak_entity();
+        let viewer = owner.clone();
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
-            image: None,
+            image: Some(Rc::new(move |image, id, theme| {
+                use crate::reply_images::{ReplyImage, frame, sized};
+                // `{row}-image-{block}-{run}`: the row to remeasure on landing.
+                let row = SharedString::from(id.rsplit_once("-image-")?.0.to_owned());
+                let element = match images.borrow_mut().lookup(&image.source, row)? {
+                    ReplyImage::Loaded(loaded, request) => {
+                        let (open, menu) = (viewer.clone(), viewer.clone());
+                        sized(frame(id), &loaded.image, theme)
+                            .debug_selector(|| "reply-image".into())
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                move |event: &gpui::MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    let _ = menu.update(cx, |this, cx| {
+                                        this.open_chat_image_menu(
+                                            &request,
+                                            event.position,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                },
+                            )
+                            .on_click(move |_, window, cx| {
+                                let preview = crate::attachments::PreviewImage::new(
+                                    loaded.name.clone(),
+                                    loaded.image.clone(),
+                                );
+                                let _ = open.update(cx, |this, cx| {
+                                    this.open_image_preview(preview, window, cx)
+                                });
+                            })
+                            .into_any_element()
+                    }
+                    ReplyImage::Loading => frame(id)
+                        .text_color(theme.text_muted)
+                        .child("Loading image…")
+                        .into_any_element(),
+                };
+                Some(element)
+            })),
             diagram: Some(Rc::new(move |code, id, _theme| {
                 let lookup = cache.borrow_mut().request(code, &id);
                 match lookup {
@@ -6543,6 +7195,66 @@ impl Transcript {
         }));
     }
 
+    /// Start the image reads this paint asked for, a few at a time: a landed
+    /// read repaints, and the repaint asks again for the rest.
+    fn ensure_reply_image_loads(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.reply_images.borrow_mut().take_wanted();
+        for request in wanted {
+            if self.reply_image_loads.len() >= crate::reply_images::MAX_LOADS {
+                return;
+            }
+            if self.reply_image_loads.contains_key(&request.key)
+                || !crate::attachments::begin_load_for(&request.key)
+            {
+                continue;
+            }
+            self.spawn_reply_image_load(request, cx);
+        }
+    }
+
+    fn spawn_reply_image_load(
+        &mut self,
+        request: crate::reply_images::ReplyImageRequest,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::attachments::{read_chat_image, store_error_for, store_loaded_for};
+        let key = request.key.clone();
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            store_error_for(&key);
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        // Only the chat's host reads its folder; the relay forwards there.
+        let target =
+            (local.as_deref() != Some(request.host.as_str())).then(|| request.host.clone());
+        let claim = crate::attachments::AttachmentLoadGuard(key.clone());
+        let task = cx.spawn(async move |this, cx| {
+            let _claim = claim;
+            let loaded = read_chat_image(
+                &engine,
+                cx.background_executor(),
+                target.as_deref(),
+                &request.chat_id,
+                &request.path,
+                request.mime,
+            )
+            .await;
+            let landed = loaded.is_some();
+            match loaded {
+                Some(loaded) => store_loaded_for(&request.key, loaded.name.into(), loaded.image),
+                None => store_error_for(&request.key),
+            }
+            this.update(cx, |this, cx| {
+                this.reply_image_loads.remove(&request.key);
+                let rows = this.reply_images.borrow_mut().finish(&request.key, landed);
+                this.diagram_layout_changed(&rows, cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.reply_image_loads.insert(key, task);
+    }
+
     fn finish_diagram(
         &mut self,
         code: String,
@@ -6625,6 +7337,20 @@ impl Transcript {
         }
     }
 
+    /// Open an image in the shared lightbox; Escape returns focus here.
+    fn open_image_preview(
+        &mut self,
+        preview: crate::attachments::PreviewImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachment_preview_return_focus = window.focused(cx);
+        preview.viewer.reset();
+        self.attachment_preview = Some(preview);
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
+    }
+
     fn render_generated_image(
         &mut self,
         row_id: &SharedString,
@@ -6638,29 +7364,13 @@ impl Transcript {
         let devices = self.generated_attachment_device_ids(owner, cx);
         let state = self.attachment_state(&devices, path, Some(mime_type), cx);
         let theme = Theme::of(cx).clone();
-        let frame = div()
-            .id(SharedString::from(format!("{row_id}-generated")))
-            .w(px(512.0))
-            .max_w_full()
-            .h(px(320.0))
-            .max_h(px(420.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(12.0))
-            .overflow_hidden()
-            .bg(crate::theme::ink(0.045));
+        let frame = crate::reply_images::frame(SharedString::from(format!("{row_id}-generated")));
         match state {
             AttachmentSnapshot::Loaded(loaded) => {
-                let dimensions =
-                    crate::appshots::png_dimensions(&loaded.image.bytes).unwrap_or((512, 320));
-                let scale = (512.0 / dimensions.0 as f32)
-                    .min(420.0 / dimensions.1 as f32)
-                    .min(1.0);
                 let preview =
                     crate::attachments::PreviewImage::new(name.to_owned(), loaded.image.clone());
                 let menu_path = path.to_owned();
-                frame
+                crate::reply_images::sized(frame, &loaded.image, &theme)
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -6674,36 +7384,18 @@ impl Transcript {
                             );
                         }),
                     )
-                    .w(px(dimensions.0 as f32 * scale))
-                    .h(px(dimensions.1 as f32 * scale))
-                    .role(gpui::Role::Button)
-                    .aria_label("Preview generated image")
-                    .tab_index(0)
-                    .cursor_pointer()
-                    .focus_visible(move |style| style.border_2().border_color(theme.accent))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.attachment_preview_return_focus = window.focused(cx);
-                        preview.viewer.reset();
-                        this.attachment_preview = Some(preview.clone());
-                        window.focus(&this.attachment_preview_focus, cx);
-                        cx.notify();
+                        this.open_image_preview(preview.clone(), window, cx)
                     }))
-                    .child(
-                        gpui::img(loaded.image)
-                            .size_full()
-                            // The frame's overflow clip is rectangular; round the image itself.
-                            .rounded(px(12.0))
-                            .object_fit(gpui::ObjectFit::Contain),
-                    )
                     .into_any_element()
             }
             AttachmentSnapshot::Loading => frame
                 .text_color(theme.text_muted)
-                .child("Loading generated image…")
+                .child("Loading image…")
                 .into_any_element(),
             AttachmentSnapshot::Error { .. } => frame
                 .text_color(theme.text_muted)
-                .child("Generated image unavailable")
+                .child("Image unavailable")
                 .into_any_element(),
         }
     }
@@ -7091,7 +7783,9 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
+        let (sending, queued, elapsed_secs, seed, turn, booting) = if let Some(doc_id) =
+            &self.doc_override
+        {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
             // doc itself instead: the sink's assistant entry streams until
@@ -7109,7 +7803,14 @@ impl Transcript {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, false, elapsed, flavour_seed(doc_id), last.created_at)
+            (
+                false,
+                false,
+                elapsed,
+                flavour_seed(doc_id),
+                last.created_at,
+                None,
+            )
         } else {
             let chat_id = self.chat_id.clone()?;
             // Failed-send state first: past the grace window the trailer IS
@@ -7132,36 +7833,66 @@ impl Transcript {
                         .into_any_element(),
                 );
             }
-            let (sending, queued, elapsed, turn) = {
+            let (sending, queued, elapsed, turn, booting) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
                 }
-                // During the send→turn window the session row's `started_at`
-                // still belongs to the PREVIOUS turn — a timer based on the
-                // send counted the round-trip and then restarted when the
-                // turn actually began (user report). Bridge it as "Sending…"
-                // with no timer instead; the word + timer start with the
-                // turn.
-                let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                let send_started = state.pending_send_started(&chat_id, now);
-                let sending = sending_bridge(send_started, turn_started);
-                // Degraded delivery path: the send is a durable local write
-                // waiting on connectivity — say so instead of faking
-                // progress. (The overlay holds while degraded, so this line
-                // owns the surface until the ack or the failed state.)
-                let queued = sending && state.chat_delivery_degraded(&chat_id);
-                let elapsed = turn_started
-                    .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                    .unwrap_or(0);
-                // While sending, the session row still carries the PREVIOUS
-                // turn: the bridge keys on its own send instead, so it never
-                // rolls out of that turn's word or an earlier send's.
-                let turn = if sending { send_started } else { turn_started }
-                    .map_or(0, |t| t.timestamp_millis());
-                (sending, queued, elapsed, turn)
+                // The Cloud setup steps say what the send waits on; the
+                // line under them is the turn's working word, timed from
+                // the send — setting the machine up is part of the work —
+                // and keyed on it, so neither restarts when the machine's
+                // turn begins.
+                if let Some(sent) = state.cloud_setup_turn_started() {
+                    let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
+                    (false, false, elapsed, sent, None)
+                } else {
+                    // During the send→turn window the session row's `started_at`
+                    // still belongs to the PREVIOUS turn — a timer based on the
+                    // send counted the round-trip and then restarted when the
+                    // turn actually began (user report). Bridge it as "Sending…"
+                    // with no timer instead; the word + timer start with the
+                    // turn.
+                    let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                    let send_started = state.pending_send_started(&chat_id, now);
+                    let sending = sending_bridge(send_started, turn_started);
+                    // A path that would hold the send: it is a durable local
+                    // write waiting on connectivity — say so instead of faking
+                    // progress. A syncing chat still delivers. (The overlay
+                    // holds while delivery is unconfirmed, so this line owns
+                    // the surface until the ack or the failed state.)
+                    let queued = sending && state.chat_link_at(&chat_id, now).send_would_queue();
+                    let elapsed = turn_started
+                        .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                        .unwrap_or(0);
+                    // While sending, the session row still carries the PREVIOUS
+                    // turn: the bridge keys on its own send instead, so it never
+                    // rolls out of that turn's word or an earlier send's.
+                    let turn = if sending { send_started } else { turn_started }
+                        .map_or(0, |t| t.timestamp_millis());
+                    // The send waits for the chat's own Cloud machine to come up.
+                    // (Past the beat in which this device's own send puts
+                    // up its setup chip, so the words never flash twice.)
+                    let booting = if sending
+                        && send_started.is_some_and(|t| {
+                            now.signed_duration_since(t).num_milliseconds()
+                                >= CLOUD_BOOT_WORD_AFTER_MS
+                        }) {
+                        state.cloud_machine_booting(&chat_id)
+                    } else {
+                        None
+                    };
+                    (sending, queued, elapsed, turn, booting)
+                }
             };
-            (sending, queued, elapsed, flavour_seed(&chat_id), turn)
+            (
+                sending,
+                queued,
+                elapsed,
+                flavour_seed(&chat_id),
+                turn,
+                booting,
+            )
         };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
@@ -7185,6 +7916,13 @@ impl Transcript {
         }
         let word = if queued {
             "Queued — will send automatically"
+        } else if let Some(state) = booting {
+            // The send waits for the chat's own Cloud machine.
+            if state == zeron_proto::CloudState::Provisioning {
+                "Starting a Cloud machine"
+            } else {
+                "Waking the Cloud machine"
+            }
         } else if sending {
             "Sending"
         } else {
@@ -7250,15 +7988,7 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let workspace_root = {
-            let state = self.state.read(cx);
-            self.chat_id
-                .as_deref()
-                .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .or_else(|| state.selected_chat_row())
-                .and_then(|chat| chat.cwd.as_deref())
-                .map(SharedString::from)
-        };
+        let workspace_root = self.workspace_root(cx);
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
         // rests below the chrome it fades under. The right pane already pads
@@ -7293,19 +8023,25 @@ impl Transcript {
             RowKind::User {
                 text,
                 mentions,
+                markdown,
                 attachments,
                 badges,
+                sender,
                 pending,
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
+                let markdown = markdown.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
                 let mut column = div().w_full().flex().flex_col();
+                if let Some(sender) = sender {
+                    column = column.child(self.render_agent_sender(&row.id, sender, &theme, cx));
+                }
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(
                         &row.id,
@@ -7355,12 +8091,45 @@ impl Transcript {
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
                                 .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
+                                    &row.id, ix, text, mentions, markdown, &theme, window, cx,
                                 )),
                         ),
                     );
                 }
                 column.into_any_element()
+            }
+            RowKind::SentMessage {
+                to,
+                pending,
+                failed,
+            } => {
+                let chat = {
+                    let state = self.state.read(cx);
+                    let chats: Vec<(&str, Option<&str>)> = state
+                        .chats
+                        .iter()
+                        .map(|chat| (chat.id.as_str(), chat.title.as_deref()))
+                        .collect();
+                    zeron_proto::agent_messages::resolve_chat_key(to, &chats).map(str::to_owned)
+                };
+                let lead = if *failed {
+                    "Couldn't message"
+                } else {
+                    "Message to"
+                };
+                div()
+                    .w_full()
+                    .when(*pending, |el| el.opacity(0.65))
+                    .child(self.render_chat_caption(
+                        &row.id,
+                        lead,
+                        chat.as_deref(),
+                        to.clone(),
+                        false,
+                        &theme,
+                        cx,
+                    ))
+                    .into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
@@ -7380,6 +8149,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    math: crate::settings::math_style(cx),
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -7450,6 +8220,7 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
+                    math: crate::settings::math_style(cx),
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7518,9 +8289,7 @@ impl Transcript {
                 &theme,
                 cx,
             ),
-            RowKind::InputChip { header, resolved } => {
-                input_chip(header.clone(), *resolved, &theme)
-            }
+            RowKind::InputChip { header, outcome } => input_chip(header.clone(), outcome, &theme),
             RowKind::GeneratedImage {
                 owner,
                 path,
@@ -7530,11 +8299,33 @@ impl Transcript {
             RowKind::Visual { owner, path, title } => {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ErrorChip { message } => {
+                let problem = zeron_proto::run_errors::provider_problem(message);
+                let sign_in = self
+                    .chat_id
+                    .clone()
+                    .filter(|_| problem.is_some())
+                    .map(|chat_id| {
+                        let chat_id = chat_id.to_string();
+                        cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                            cx.emit(TranscriptEvent::SignIn {
+                                chat_id: chat_id.clone(),
+                            });
+                        })
+                    });
+                error_chip(message.clone(), problem, sign_in, &theme)
+            }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::SwitchMarker {
+                from,
+                to,
+                from_harness,
+                to_harness,
+            } => switch_marker(from.clone(), to.clone(), *from_harness, *to_harness, &theme),
         };
-        // Diagram fences this row just requested start rendering after layout.
+        // Diagram fences and images this row just requested start loading.
         self.ensure_diagram_worker(cx);
+        self.ensure_reply_image_loads(cx);
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
         // entry's last row. Timestamp, copy action, and copied feedback only
@@ -8131,6 +8922,12 @@ impl Transcript {
             .zip(tools.iter())
             .map(
                 |(((((detail, invocation), affordance), open), fold), tool)| {
+                    // A spawn link is always `subagent_chip`'s full card row,
+                    // even under a compact fold: budgeting it at the tree
+                    // row's height clipped the last cards off the fold.
+                    if is_spawn_link(tool) {
+                        return CHIP_HEIGHT;
+                    }
                     let target = if *open {
                         base_row_height
                             + invocation.as_deref().map_or(0.0, detail_height)
@@ -8627,31 +9424,196 @@ impl Transcript {
 /// run when there are none), with the same selection machinery as rendered
 /// markdown — the element registers into the frame's document-ordered
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
-/// Keep routing instructions in the stored prompt for agents, but show a
-/// concise attribution in the human transcript (including existing messages).
-fn agent_message_display(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("[Message from Zeron chat ") else {
-        return text.to_owned();
-    };
-    let Some((header, body)) = rest.split_once("]\n\n") else {
-        return text.to_owned();
-    };
-    let Some((label, id)) =
-        header.rsplit_once(". Reply to it with the Zeron `send_message` tool, chat ")
-    else {
-        return text.to_owned();
-    };
-    let Some(id) = id.strip_suffix('.') else {
-        return text.to_owned();
-    };
-    let suffix = format!(" ({id})");
-    let name = label.strip_suffix(&suffix).unwrap_or(label);
-    format!("Message from {name}\n\n{body}")
+/// The chat an agent-to-agent message came from: its id, and its title as the
+/// sender's header recorded it (the live title wins when the chat is known).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSender {
+    pub chat_id: SharedString,
+    pub title: SharedString,
 }
 
-/// The bubble text's runs: body text in the sans font, chips as labels in it
-/// with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`], and an
-/// agent attribution's name in bold.
+/// How a chat between chats shows: chat `chat_id`'s live title and provider
+/// mark when this workspace lists it, else `fallback` (the title its header
+/// recorded).
+pub(crate) struct ChatIdentity {
+    pub title: SharedString,
+    pub mark: (&'static str, Option<gpui::Hsla>),
+    /// Whether the chat is listed, so it can open.
+    pub known: bool,
+}
+
+pub(crate) fn chat_identity(
+    state: &AppState,
+    chat_id: Option<&str>,
+    fallback: &str,
+) -> ChatIdentity {
+    let chat = chat_id.and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+    let title: SharedString = chat
+        .and_then(|chat| chat.title.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map_or_else(
+            || {
+                if chat.is_some() {
+                    // Listed but untitled: its short id, as the header says.
+                    chat_id
+                        .unwrap_or_default()
+                        .chars()
+                        .take(8)
+                        .collect::<String>()
+                        .into()
+                } else {
+                    single_line(fallback).into()
+                }
+            },
+            |title| single_line(title).into(),
+        );
+    ChatIdentity {
+        title,
+        mark: chat
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| crate::pickers::harness_brand_icon(config.harness))
+            .unwrap_or((crate::icons::CHAT_ROUND_LINE, None)),
+        known: chat.is_some(),
+    }
+}
+
+/// Split the routing header (`[Message from Zeron chat …]`) off a message an
+/// agent sent: the agent keeps reading it in the stored prompt, while the
+/// transcript shows the sender above the bubble and only the body inside it.
+pub(crate) fn agent_message_sender(text: &str) -> Option<(AgentSender, &str)> {
+    let (sender, body) = zeron_proto::agent_messages::agent_message_sender(text)?;
+    Some((
+        AgentSender {
+            chat_id: sender.chat_id.into(),
+            title: sender.title.into(),
+        },
+        body,
+    ))
+}
+
+/// A prompt's Markdown, and for one too long to fold whole, the leading part
+/// that fills the fold.
+#[derive(Clone)]
+pub struct UserMarkdown {
+    pub full: Arc<BlockTree>,
+    pub folded: Option<Arc<BlockTree>>,
+}
+
+/// The leading part of `tree` that fills `lines` lines: whole blocks, then
+/// the first items of a list, rows of a table or lines of a fence. Counts
+/// source lines, which never outnumber the lines they wrap to, so the part
+/// is never shorter than the fold. `None` when the whole tree is that short.
+fn folded_markdown(tree: &BlockTree, lines: usize) -> Option<BlockTree> {
+    fn take(block: &Block, budget: &mut usize) -> Option<Block> {
+        if *budget == 0 {
+            return None;
+        }
+        let spend =
+            |budget: &mut usize, lines: usize| *budget = budget.saturating_sub(lines.max(1));
+        let runs_lines = |runs: &[InlineRun]| {
+            1 + runs
+                .iter()
+                .map(|r| r.text.matches('\n').count())
+                .sum::<usize>()
+        };
+        Some(match block {
+            Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                spend(budget, runs_lines(runs));
+                block.clone()
+            }
+            Block::CodeBlock { language, code } => {
+                // The fence's header takes a line of its own.
+                spend(budget, 1);
+                let kept: Vec<&str> = code.lines().take((*budget).max(1)).collect();
+                spend(budget, kept.len());
+                Block::CodeBlock {
+                    language: language.clone(),
+                    code: kept.join("\n"),
+                }
+            }
+            Block::Table {
+                header,
+                rows,
+                align,
+            } => {
+                spend(budget, 1);
+                let kept = rows.len().min((*budget).max(1));
+                spend(budget, kept);
+                Block::Table {
+                    header: header.clone(),
+                    rows: rows[..kept].to_vec(),
+                    align: align.clone(),
+                }
+            }
+            Block::BlockQuote { children } => Block::BlockQuote {
+                children: children
+                    .iter()
+                    .map_while(|child| take(child, budget))
+                    .collect(),
+            },
+            Block::List {
+                ordered_start,
+                items,
+            } => Block::List {
+                ordered_start: *ordered_start,
+                items: items
+                    .iter()
+                    .map_while(|item| {
+                        let kept: Vec<Block> =
+                            item.iter().map_while(|child| take(child, budget)).collect();
+                        (!kept.is_empty()).then_some(kept)
+                    })
+                    .collect(),
+            },
+            Block::Math { .. } => {
+                spend(budget, 2);
+                block.clone()
+            }
+            Block::Rule => {
+                spend(budget, 1);
+                block.clone()
+            }
+        })
+    }
+    let mut budget = lines;
+    let blocks: Vec<Arc<crate::markdown::parser::TopBlock>> = tree
+        .blocks
+        .iter()
+        .map_while(|top| {
+            let block = take(&top.block, &mut budget)?;
+            Some(Arc::new(crate::markdown::parser::TopBlock {
+                range: top.range.clone(),
+                block,
+            }))
+        })
+        .collect();
+    // Something left out: the last block cut short, or blocks after it.
+    let whole = blocks.len() == tree.blocks.len()
+        && blocks
+            .iter()
+            .zip(&tree.blocks)
+            .all(|(part, top)| part.block == top.block);
+    (!whole).then_some(BlockTree { blocks })
+}
+
+/// The render key of a user row's Markdown: its selection, element ids and
+/// cached flattening, apart from the row's own.
+fn user_markdown_key(row_id: &str) -> SharedString {
+    format!("{row_id}:u").into()
+}
+
+/// Whether a prompt's Markdown is only unstyled paragraphs: it reads the same
+/// as typed, so the bubble keeps its plain text.
+fn plain_markdown(tree: &BlockTree) -> bool {
+    tree.blocks.iter().all(|top| match &top.block {
+        Block::Paragraph { runs } => runs.iter().all(|run| run.style == InlineStyle::default()),
+        _ => false,
+    })
+}
+
+/// The bubble text's runs: body text in the sans font, and chips as labels in
+/// it with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`].
 fn user_bubble_runs(
     text: &str,
     mentions: &[crate::composer::SentMentionSpan],
@@ -8693,39 +9655,6 @@ fn user_bubble_runs(
     }
     if at < text.len() {
         runs.push(body_run(text.len() - at));
-    }
-    // Attribution names are bold sans text, never Markdown/italic. Split
-    // existing runs so file-mention styling and selection offsets stay intact.
-    if let Some(rest) = text.strip_prefix("Message from ")
-        && let Some((name, _)) = rest.split_once("\n\n")
-    {
-        let bold = "Message from ".len().."Message from ".len() + name.len();
-        let mut offset = 0;
-        runs = runs
-            .into_iter()
-            .flat_map(|run| {
-                let end = offset + run.len;
-                let mut pieces = Vec::new();
-                while offset < end {
-                    let in_name = bold.contains(&offset);
-                    let next = if offset < bold.start {
-                        end.min(bold.start)
-                    } else if in_name {
-                        end.min(bold.end)
-                    } else {
-                        end
-                    };
-                    let mut piece = run.clone();
-                    piece.len = next - offset;
-                    if in_name {
-                        piece.font.weight = gpui::FontWeight::BOLD;
-                    }
-                    pieces.push(piece);
-                    offset = next;
-                }
-                pieces
-            })
-            .collect();
     }
     runs
 }
@@ -9008,21 +9937,63 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The transcript ErrorChip — the shared [`notice_chip`] in its tile
+/// The transcript ErrorChip — the shared [`notice_chip_with_action`] in its tile
 /// treatment (a port of zeron chat-view.tsx `ErrorChip`, restacked for long
 /// payloads: header row with the red-washed tile and the medium "Error"
 /// label, then the human message below). Unlike the web port, the message
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// zeronsh/comet#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
+///
+/// A refusal that signing in fixes (signed out, out of usage) says so in the
+/// label and carries a "Log in" button for that chat's provider.
+fn error_chip(
+    message: SharedString,
+    problem: Option<zeron_proto::run_errors::ProviderProblem>,
+    sign_in: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
+    theme: &Theme,
+) -> AnyElement {
+    use zeron_proto::run_errors::ProviderProblem;
+    let label = match problem {
+        Some(ProviderProblem::SignedOut) => "Signed out",
+        Some(ProviderProblem::LimitReached) => "Limit reached",
+        None => "Error",
+    };
+    let button = sign_in.map(|on_click| {
+        // The app's button metrics (popover::btn_*), compact for the card,
+        // tinted in the card's red rather than a solid fill.
+        let danger = theme.danger;
+        div()
+            .id("error-sign-in")
+            .flex_none()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .bg(danger.opacity(0.14))
+            .text_color(theme.danger_muted)
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_size(crate::typography::ui_rems(12.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(danger.opacity(0.22)))
+            .on_click(on_click)
+            .child(problem.map_or("Log in", ProviderProblem::action_label))
+    });
     div()
         .py(px(4.0))
         .w_full()
         .child(
-            notice_chip(theme, false, "Error", message, Tile)
-                .overflow_hidden()
-                .w_full(),
+            notice_chip_with_action(
+                theme,
+                false,
+                label,
+                message,
+                Tile,
+                button.map(IntoElement::into_any_element),
+            )
+            .overflow_hidden()
+            .w_full(),
         )
         .into_any_element()
 }
@@ -9056,43 +10027,189 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 )
                 .child(rule()),
         )
+        // Centered by flex, not `text_center()`: gpui registers a text line's
+        // layer at the line origin with the text's own width, so glyphs shifted
+        // by alignment paint outside it and can draw over popovers above them.
         .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_center()
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .child(source_title),
+            div().w_full().min_w_0().flex().justify_center().child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(source_title),
+            ),
         )
         .into_any_element()
 }
 
-/// A passive one-line chip marking a question the agent asked — the
-/// interactive controls live in the composer (chat-view.tsx `InputChip`):
-/// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
-/// text-[12px]`, a 20px `bg-white/[0.09]` icon tile with a 12px
-/// ChatRoundLine, the medium "Question" label, then the truncating value —
-/// the first question's header once resolved, "Awaiting your answer…" while
-/// pending. Neutral tones throughout; resolution never recolors the chip.
-fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
+/// `[mark] Name` in a user-message caption: a provider's brand mark (or any
+/// glyph) beside its name. A side without a mark shows its name alone.
+pub(crate) fn caption_label(
+    name: SharedString,
+    mark: Option<(&'static str, Option<gpui::Hsla>)>,
+    color: gpui::Hsla,
+) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .when_some(mark, |el, (path, tint)| {
+            el.child(
+                crate::icons::icon(path)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(tint.unwrap_or(color)),
+            )
+        })
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(name),
+        )
+}
+
+/// A muted one-line caption riding right-aligned over a user bubble: the
+/// provider-switch seam and an agent message's sender.
+fn user_caption(theme: &Theme) -> gpui::Div {
+    div()
+        .min_w_0()
+        .max_w_full()
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted)
+}
+
+/// The provider-switch seam: `[logo] From → [logo] To`, each side in its
+/// provider's brand mark, right-aligned over the message that switched. A
+/// side without a known harness (a seam from a build that didn't record one)
+/// shows its name alone.
+fn switch_marker(
+    from: SharedString,
+    to: SharedString,
+    from_harness: Option<HarnessId>,
+    to_harness: Option<HarnessId>,
+    theme: &Theme,
+) -> AnyElement {
+    let mark = |harness: Option<HarnessId>| harness.map(crate::pickers::harness_brand_icon);
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .justify_end()
+        .child(
+            user_caption(theme)
+                .child(caption_label(from, mark(from_harness), theme.text_muted))
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_RIGHT)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.7)),
+                )
+                .child(caption_label(to, mark(to_harness), theme.text_muted)),
+        )
+        .into_any_element()
+}
+
+/// A passive chip marking a question the agent asked — the interactive
+/// controls live in the composer (chat-view.tsx `InputChip`): 34px row,
+/// `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2 text-[12px]`, a
+/// 20px `bg-white/[0.09]` icon tile with a 12px ChatRoundLine, the medium
+/// "Question" label, then the truncating value: "Awaiting your answer…"
+/// while pending, `header → answer` once answered (`header → Not answered`
+/// when it closed without one), the bare header on parts from before answers
+/// were recorded. Several questions read "N questions", one `label → answer`
+/// line each under the row. Neutral tones throughout; resolution never
+/// recolors the chip.
+fn input_chip(header: SharedString, outcome: &InputOutcome, theme: &Theme) -> AnyElement {
+    // `label → answer`, the answer truncating first; a quiet answer is one
+    // that says nothing was given.
+    let answer_line = |label: SharedString, answer: SharedString, quiet: bool| {
+        div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.5))
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+            .child(
+                crate::icons::icon(crate::icons::ARROW_RIGHT)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(if quiet {
+                        theme.text_muted.opacity(0.7)
+                    } else {
+                        theme.text.opacity(0.9)
+                    })
+                    .child(answer),
+            )
+            .into_any_element()
+    };
+    let plain = |value: SharedString| {
+        div()
+            .min_w_0()
+            .flex_1()
+            .truncate()
+            .text_color(theme.text.opacity(0.9))
+            .child(value)
+            .into_any_element()
+    };
+    let lines: &[AnswerLine] = match outcome {
+        InputOutcome::Answered(lines) if lines.len() > 1 => lines,
+        _ => &[],
+    };
+    let label: SharedString = if lines.is_empty() {
+        "Question".into()
     } else {
-        "Awaiting your answer…".into()
+        format!("{} questions", lines.len()).into()
+    };
+    let value = match outcome {
+        InputOutcome::Pending => Some(plain("Awaiting your answer…".into())),
+        InputOutcome::Unrecorded => Some(plain(header)),
+        InputOutcome::Closed(line) => Some(answer_line(
+            line.label.clone().into(),
+            line.answer.clone().into(),
+            line.skipped,
+        )),
+        InputOutcome::Answered(answered) => match answered.as_slice() {
+            [line] => Some(answer_line(
+                line.label.clone().into(),
+                line.answer.clone().into(),
+                line.skipped,
+            )),
+            _ => None,
+        },
     };
     div()
         .py(px(4.0))
         .w_full()
         .child(
             div()
-                .h(px(34.0))
                 .w_full()
                 .flex()
-                .items_center()
-                .gap(px(8.0))
+                .flex_col()
                 .overflow_hidden()
                 .rounded(px(10.0))
                 .border_1()
@@ -9102,34 +10219,52 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                 .text_size(px(12.0))
                 .child(
                     div()
-                        .flex_none()
-                        .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(crate::theme::ink(0.09))
+                        .h(px(34.0))
+                        .w_full()
                         .flex()
                         .items_center()
-                        .justify_center()
+                        .gap(px(8.0))
+                        .overflow_hidden()
                         .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
+                            div()
+                                .flex_none()
+                                .size(px(20.0))
+                                .rounded(px(6.0))
+                                .bg(crate::theme::ink(0.09))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
+                                .child(label),
+                        )
+                        .children(value),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Question")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(theme.text.opacity(0.9))
-                        .child(value),
-                ),
+                // Several questions: one line each, aligned under the label.
+                .when(!lines.is_empty(), |card| {
+                    card.pb(px(6.0)).children(lines.iter().map(|line| {
+                        div()
+                            .h(px(22.0))
+                            .w_full()
+                            .pl(px(28.0))
+                            .flex()
+                            .items_center()
+                            .child(answer_line(
+                                line.label.clone().into(),
+                                line.answer.clone().into(),
+                                line.skipped,
+                            ))
+                    }))
+                }),
         )
         .into_any_element()
 }
@@ -9138,6 +10273,12 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
+    // A Cloud machine's own setup: the machine, then its git steps.
+    match zeron_proto::cloud_setup_step(call) {
+        Some("clone" | "branch") => return crate::icons::GIT_BRANCH,
+        Some(_) => return crate::icons::CLOUD,
+        None => {}
+    }
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
@@ -10002,6 +11143,7 @@ fn subagent_chip(
         })
         .child(
             div()
+                .debug_selector(|| id.to_string())
                 .id(id)
                 .when(rail, |el| el.ml(px(12.0)))
                 .h(px(CHIP_CARD_HEIGHT))
@@ -10089,8 +11231,21 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                 acc.push(0);
             }
         }
-        if let MessagePart::Input { resolved, .. } = part {
-            acc.push(0x10 | *resolved as u8);
+        if let MessagePart::Input {
+            resolved, answers, ..
+        } = part
+        {
+            acc.push(0x10 | *resolved as u8 | (answers.is_some() as u8) << 1);
+            // Answers land in place — on a completed entry when a dead run's
+            // question is answered — and a same-length change slips past
+            // `byte_len`: hash what was picked.
+            for answer in answers.iter().flatten() {
+                for label in &answer.labels {
+                    acc.extend_from_slice(label.as_bytes());
+                    acc.push(0);
+                }
+                acc.push(1);
+            }
         }
     }
     fnv1a(&acc)
@@ -10132,6 +11287,20 @@ impl Render for Transcript {
             }
             // Fit changes every code row from analytic to measured height (or
             // back), including virtual rows outside the current viewport.
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+            if self.own_turn.is_some() {
+                self.own_turn_kick = true;
+            }
+        }
+        let math_generation = crate::settings::math_generation(cx);
+        if self.math_generation != math_generation {
+            self.math_generation = math_generation;
+            // Formulas change size with their face, and display math becomes
+            // a code block (or back), so every row with math changes height.
+            // The render cache drops its laid-out text on its own.
             self.list.remeasure();
             if self.pinned {
                 self.wake_spring();
@@ -10321,6 +11490,7 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -10332,6 +11502,12 @@ impl Render for Transcript {
             .child(content)
             .child(rail);
         let root = root.children(self.render_image_menu(cx));
+        let loader = self
+            .loader_shown
+            .then_some(self.loading)
+            .flatten()
+            .map(|loading| self.render_loader(loading, cx));
+        let root = root.children(loader);
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10378,6 +11554,105 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn a_glided_notch_leaves_the_bottom_and_stays_where_it_lands(cx: &mut gpui::TestAppContext) {
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::smooth_scroll::smooth_scroll(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant(
+                    "reply",
+                    MessageStatus::Complete,
+                    vec![text_part("text", &"History.\n\n".repeat(120))],
+                )];
+                state.transcript_revision += 1;
+            });
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        transcript.update(cx, |this, cx| {
+            this.rail_enabled = false;
+            this.sync(cx);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        // Frames at 120Hz in real time: the glide and the bottom spring both
+        // read the clock.
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            std::thread::sleep(Duration::from_millis(8));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear();
+            });
+        };
+        for _ in 0..30 {
+            frame(cx);
+        }
+        let distance = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| this.distance_from_bottom())
+        };
+        assert!(transcript.read_with(cx, |this, _| this.pinned));
+        assert!(distance(cx) <= 1.0, "{}", distance(cx));
+
+        // A wheel the list never took (an overlay above it let it bubble)
+        // leaves the pin alone.
+        transcript.update_in(cx, |this, window, cx| {
+            this.on_scroll_wheel(
+                &gpui::ScrollWheelEvent {
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert!(this.pinned, "a wheel the list never saw broke the pin");
+            // Precise input keeps the distance test it always had.
+            this.list_took_input = true;
+            this.on_scroll_wheel(
+                &gpui::ScrollWheelEvent {
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(0.5))),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert!(
+                this.pinned && !this.input_escaped,
+                "a trackpad took the escape"
+            );
+        });
+
+        // One 3-line notch up. Its glide starts and ends with slices well
+        // under a pixel.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(200.0), px(200.0)),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+            ..Default::default()
+        });
+        // The glide lands within 200ms; the rest shows the view stays there.
+        for _ in 0..50 {
+            frame(cx);
+        }
+        assert!(
+            !transcript.read_with(cx, |this, _| this.pinned),
+            "scrolling up must release the bottom"
+        );
+        let landed = distance(cx);
+        assert!(
+            (landed - 60.0).abs() <= 1.0,
+            "a 3-line notch scrolls 60px, as it does without smoothing: {landed}"
+        );
     }
 
     #[gpui::test]
@@ -11804,6 +13079,330 @@ mod tests {
         }
     }
 
+    fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            role: MessageRole::User,
+            ..assistant(id, MessageStatus::Complete, vec![text_part("t0", text)])
+        }
+    }
+
+    fn switch_entry(from_harness: Option<&str>, to_harness: Option<&str>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "switch:1".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Switch {
+                id: "switch:1".into(),
+                from: "Claude Code".into(),
+                to: "Codex".into(),
+                from_harness: from_harness.map(Into::into),
+                to_harness: to_harness.map(Into::into),
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn provider_switch_seam_is_one_marker_row_carrying_both_providers() {
+        let rows = rows_for_entry(
+            &switch_entry(Some("claude-code"), Some("codex")),
+            false,
+            false,
+            &mut parse,
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].timestamp.is_none(), "a seam has no metadata strip");
+        match &rows[0].kind {
+            RowKind::SwitchMarker {
+                from,
+                to,
+                from_harness,
+                to_harness,
+            } => {
+                assert_eq!(from.as_ref(), "Claude Code");
+                assert_eq!(to.as_ref(), "Codex");
+                assert_eq!(*from_harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(*to_harness, Some(HarnessId::Codex));
+            }
+            _ => panic!("expected a switch marker row"),
+        }
+        // A seam written without provider ids (or by a newer peer naming a
+        // harness this build doesn't know) still renders, minus the logo.
+        for (from, to) in [(None, None), (Some("some-future-agent"), Some("codex"))] {
+            let rows = rows_for_entry(&switch_entry(from, to), false, false, &mut parse);
+            match &rows[0].kind {
+                RowKind::SwitchMarker { from_harness, .. } => assert_eq!(*from_harness, None),
+                _ => panic!("expected a switch marker row"),
+            }
+        }
+        // Changing a provider re-keys the row so a cached one is rebuilt.
+        let version = |from: Option<&str>| {
+            rows_for_entry(&switch_entry(from, Some("codex")), false, false, &mut parse)[0].version
+        };
+        assert_ne!(version(Some("claude-code")), version(Some("cursor")));
+    }
+
+    fn question_entry(
+        resolved: bool,
+        answers: Option<Vec<zeron_proto::UserInputAnswer>>,
+    ) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "m-ask".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: "r1".into(),
+                request_id: "r1".into(),
+                questions: vec![zeron_proto::UserInputQuestion {
+                    id: "q".into(),
+                    header: "Recherche".into(),
+                    question: "How deep should the research go?".into(),
+                    options: vec!["Quick".into(), "Deep dive".into()],
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                }],
+                resolved,
+                answers,
+            }],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn question_chip_carries_what_was_answered_and_rekeys_when_it_lands() {
+        let picked = |label: &str| {
+            Some(vec![zeron_proto::UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec![label.into()],
+            }])
+        };
+        let outcome = |entry: &SessionMessageEntry| {
+            let rows = rows_for_entry(entry, false, false, &mut parse);
+            match &rows[0].kind {
+                RowKind::InputChip { outcome, .. } => outcome.clone(),
+                _ => panic!("expected a question chip"),
+            }
+        };
+        assert_eq!(outcome(&question_entry(false, None)), InputOutcome::Pending);
+        assert_eq!(
+            outcome(&question_entry(true, None)),
+            InputOutcome::Unrecorded
+        );
+        assert!(matches!(
+            outcome(&question_entry(true, Some(vec![]))),
+            InputOutcome::Closed(_)
+        ));
+        match outcome(&question_entry(true, picked("Deep dive"))) {
+            InputOutcome::Answered(lines) => {
+                assert_eq!(lines[0].to_string(), "Recherche → Deep dive")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Answers land on a settled entry in place: its cached rows must
+        // rebuild — even for a same-length change.
+        let base = question_entry(true, picked("Quick"));
+        let version = |entry: &SessionMessageEntry| {
+            rows_for_entry(entry, false, false, &mut parse)[0].version
+        };
+        for changed in [
+            question_entry(true, None),
+            question_entry(true, picked("Qu1ck")),
+        ] {
+            assert_ne!(
+                entry_fingerprint(&changed, false),
+                entry_fingerprint(&base, false)
+            );
+            assert_ne!(version(&changed), version(&base));
+        }
+    }
+
+    #[test]
+    fn provider_switch_seam_sits_close_over_the_message_it_switched() {
+        let seam = rows_for_entry(
+            &switch_entry(Some("claude-code"), Some("codex")),
+            false,
+            false,
+            &mut parse,
+        );
+        let prompt = rows_for_entry(&user_entry("u1", "hi"), false, false, &mut parse);
+        assert_eq!(top_gap_for(Some(&seam[0]), &prompt[0]), USER_CAPTION_GAP);
+        assert_eq!(top_gap_for(None, &seam[0]), Theme::SPACE_LG);
+    }
+
+    #[test]
+    fn messages_the_agent_sent_read_as_messages_not_tools() {
+        let send = |id: &str, tool: &str, input: serde_json::Value| MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: tool.into(),
+                input: Some(input),
+            },
+            is_error: false,
+            resolved: false,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("k0", "ls"),
+                send(
+                    "k1",
+                    "send_message",
+                    serde_json::json!({ "chat": "Windows lane", "text": "Run it." }),
+                ),
+                send(
+                    "k2",
+                    "send_messages",
+                    serde_json::json!({ "requests": [{ "chat": "a", "text": "one" }, { "chat": "b", "text": "two" }] }),
+                ),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        // The ordinary tool keeps its fold; each message is its own row.
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
+        let RowKind::SentMessage {
+            to,
+            pending,
+            failed,
+        } = &rows[1].kind
+        else {
+            panic!("expected a sent message");
+        };
+        assert_eq!(
+            (to.as_ref(), *pending, *failed),
+            ("Windows lane", true, false)
+        );
+        assert!(matches!(&rows[3].kind, RowKind::SentMessage { to, .. } if to.as_ref() == "b"));
+        // Compact mode folds the whole turn, sends included: they show when
+        // the work fold opens.
+        let compact = rows_for_entry(&entry, false, true, &mut parse);
+        assert!(
+            compact
+                .iter()
+                .filter(|row| matches!(row.kind, RowKind::SentMessage { .. }))
+                .all(|row| row.compact_fold.as_deref() == Some("a1#work"))
+        );
+    }
+
+    #[test]
+    fn agent_messages_show_their_sender_over_the_body() {
+        let id = "cd27c5c2-0000-4000-8000-000000000000";
+        let text = format!(
+            "[Message from Zeron chat zgui prod: Windows (WING-PC) (cd27c5c2). Reply to it with the Zeron `send_message` tool, chat {id}.]\n\nWindows lane: done."
+        );
+        let rows = rows_for_entry(&user_entry("u1", &text), false, false, &mut parse);
+        let RowKind::User {
+            text: shown,
+            sender,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert_eq!(shown.as_ref(), "Windows lane: done.");
+        assert_eq!(
+            sender.as_ref(),
+            Some(&AgentSender {
+                chat_id: id.into(),
+                // Only the trailing short id goes; a title's own parens stay.
+                title: "zgui prod: Windows (WING-PC)".into(),
+            })
+        );
+        // An untitled sender is labelled by its short id alone.
+        let untitled = format!(
+            "[Message from Zeron chat cd27c5c2. Reply to it with the Zeron `send_message` tool, chat {id}.]\n\nhi"
+        );
+        let (sender, body) = agent_message_sender(&untitled).unwrap();
+        assert_eq!((sender.title.as_ref(), body), ("cd27c5c2", "hi"));
+        // A typed message that merely starts alike is left alone.
+        assert!(agent_message_sender("[Message from Zeron chat x]\n\nhi").is_none());
+    }
+
+    #[test]
+    fn prompts_written_in_markdown_render_it() {
+        let markdown = |text: &str| {
+            let rows = rows_for_entry(&user_entry("u1", text), false, false, &mut parse);
+            let RowKind::User { markdown, .. } = &rows[0].kind else {
+                panic!("expected a user row");
+            };
+            markdown.clone()
+        };
+        let tree = markdown("Keep **this**\nand `that`\n\n- one\n- two")
+            .unwrap()
+            .full;
+        assert_eq!(tree.blocks.len(), 2);
+        // Typed newlines stay line breaks.
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(runs.iter().any(|run| run.text.contains('\n')));
+        // Prose reads the same as typed, so it keeps the plain bubble.
+        assert!(markdown("just a question\n\nand another").is_none());
+        // Chips paint over the plain text's layout, so a prompt with one
+        // stays plain.
+        let link = zeron_proto::attachment_mentions::attachment_mention_link(1, Some("notes.md"));
+        assert!(markdown(&format!("**read** {link}")).is_none());
+        // An agent's message renders its body, under the sender caption.
+        let routed = "[Message from Zeron chat cd27c5c2. Reply to it with the Zeron `send_message` tool, chat cd27c5c2-0000-4000-8000-000000000000.]\n\nRun `cargo test`.";
+        assert!(markdown(routed).is_some());
+    }
+
+    #[test]
+    fn long_prompts_fold_to_their_leading_markdown() {
+        let markdown = |text: &str| {
+            let rows = rows_for_entry(&user_entry("u1", text), false, false, &mut parse);
+            let RowKind::User { markdown, .. } = &rows[0].kind else {
+                panic!("expected a user row");
+            };
+            markdown.clone().unwrap()
+        };
+        let lines = USER_COLLAPSED_LINES + USER_FOLD_OVERDRAW_LINES;
+        // A prompt that fits whole folds to itself.
+        assert!(markdown("**short**\n\n- one\n- two").folded.is_none());
+        // A long report keeps its heading and the items that fill the fold.
+        let report: String = (1..=240).map(|i| format!("{i}. **case {i}**\n")).collect();
+        let report = markdown(&format!("## Sweep\n\n{report}"));
+        let folded = report.folded.unwrap();
+        assert_eq!(folded.blocks.len(), 2);
+        let Block::List { items, .. } = &folded.blocks[1].block else {
+            panic!("expected the list");
+        };
+        assert_eq!(items.len(), lines - 1);
+        let Block::List { items: all, .. } = &report.full.blocks[1].block else {
+            panic!("expected the list");
+        };
+        // A prefix: each kept item is the item it was.
+        assert_eq!(items[..], all[..items.len()]);
+        // A long fence keeps its first lines; blocks after the fold go.
+        let fence: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        let fenced = markdown(&format!("Run:\n\n```\n{fence}```\n\nthen **this**"));
+        let folded = fenced.folded.unwrap();
+        assert_eq!(folded.blocks.len(), 2);
+        let Block::CodeBlock { code, .. } = &folded.blocks[1].block else {
+            panic!("expected the fence");
+        };
+        assert_eq!(code.lines().count(), lines - 2);
+        assert!(code.starts_with("line 1\nline 2"));
+    }
+
     #[test]
     fn generated_image_owner_candidates_and_same_length_corrections() {
         assert_eq!(
@@ -12040,6 +13639,137 @@ mod tests {
                 assert!(this.protected_attachment_keys(cx).is_empty());
                 this.refresh_protected_attachments(cx);
             });
+        });
+    }
+
+    #[gpui::test]
+    fn reply_markdown_images_draw_only_from_their_own_chat(cx: &mut gpui::TestAppContext) {
+        use crate::attachments::{
+            AttachmentKey, AttachmentSnapshot, attachment_snapshot_for, store_loaded_for,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let chat = |id: &str| zeron_proto::Chat {
+            id: id.into(),
+            device_id: "reply-host".into(),
+            title: None,
+            archived: false,
+            cwd: Some("/fixture/reply".into()),
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            harness_session_id: None,
+            harness_session_cwd: None,
+            harness_session_harness: None,
+            parent_chat_id: None,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats = vec![chat("reply-chat"), chat("reply-other")];
+            state
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(64, 48)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let shown = "/fixture/reply/shots/before.png";
+        store_loaded_for(
+            &AttachmentKey::chat_image("reply-host", "reply-chat", shown, "image/png"),
+            "before.png".into(),
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                bytes.into_inner(),
+            )),
+        );
+        let text = "![before](shots/before.png)\n\n![web](https://example.com/a.png)\n\n![later](later.png)";
+        let entry = assistant("a", MessageStatus::Complete, vec![text_part("t", text)]);
+        transcript.update(cx, |this, _| {
+            this.chat_id = Some("reply-chat".into());
+            this.rows = rows_for_entry(&entry, false, false, &mut parse);
+        });
+        struct RowsFixture(Entity<Transcript>);
+        impl Render for RowsFixture {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                if self.0.read(cx).attachment_preview.is_some() {
+                    return self.0.clone().into_any_element();
+                }
+                self.0.update(cx, |this, cx| {
+                    let rows: Vec<_> = (0..this.rows.len())
+                        .map(|ix| this.render_row(ix, window, cx))
+                        .collect();
+                    div().w(px(700.0)).children(rows).into_any_element()
+                })
+            }
+        }
+        let (fixture, cx) = cx.add_window_view(|_, _| RowsFixture(transcript.clone()));
+        cx.run_until_parked();
+        // The relative path resolved against the chat's folder, and its read
+        // (refused here: no engine) was for that chat.
+        assert!(matches!(
+            attachment_snapshot_for(&AttachmentKey::chat_image(
+                "reply-host",
+                "reply-chat",
+                "/fixture/reply/later.png",
+                "image/png",
+            )),
+            AttachmentSnapshot::Error { .. }
+        ));
+        let image = cx
+            .debug_bounds("reply-image")
+            .expect("the chat's own image is drawn");
+        cx.simulate_click(image.center(), gpui::Modifiers::default());
+        transcript.read_with(cx, |this, _| {
+            let preview = this
+                .attachment_preview
+                .as_ref()
+                .expect("the lightbox opens");
+            assert_eq!(preview.name.as_ref(), "before.png");
+        });
+        // Right-click offers Copy path / Copy image, reading the original
+        // through the same chat's jail.
+        transcript.update(cx, |this, _| this.attachment_preview = None);
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let image = cx.debug_bounds("reply-image").expect("drawn again");
+        cx.simulate_mouse_down(
+            image.center(),
+            gpui::MouseButton::Right,
+            gpui::Modifiers::default(),
+        );
+        transcript.read_with(cx, |this, _| {
+            let menu = this.image_menu.as_open().expect("the image menu opens");
+            assert_eq!(menu.path, shown);
+            assert_eq!(menu.devices, ["reply-host"]);
+            assert_eq!(
+                menu.chat_image,
+                Some(("reply-chat".to_owned(), "image/png"))
+            );
+        });
+        // The same reply in another chat doesn't reuse the first chat's read.
+        transcript.update(cx, |this, cx| {
+            this.close_image_menu(cx);
+            this.chat_id = Some("reply-other".into());
+        });
+        fixture.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("reply-image").is_none());
+        // A subagent tab draws none.
+        transcript.update(cx, |this, cx| {
+            this.chat_id = Some("reply-chat".into());
+            this.doc_override = Some("reply-doc".into());
+            assert!(this.reply_chat(cx).is_none());
         });
     }
 
@@ -12664,6 +14394,19 @@ mod tests {
     }
 
     #[test]
+    fn thought_math_keeps_its_delimiters_as_code() {
+        let lines = thought_of(r"so $x_1 + y$ holds");
+        assert_eq!(line_string(&lines[0]), r"so $x_1 + y$ holds");
+        assert!(
+            lines[0]
+                .iter()
+                .any(|r| r.style.code && !r.style.math && r.text.trim_end() == r"$x_1 + y$"),
+            "{:?}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn thought_blocks_flatten_structurally() {
         let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
         let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
@@ -12982,6 +14725,118 @@ mod tests {
         };
         assert!(!tool_group_collapses(tools));
         assert!(is_agent_call(&tools[0].call));
+    }
+
+    #[gpui::test]
+    fn compact_spawn_fold_fits_every_card(cx: &mut gpui::TestAppContext) {
+        // User report: compact mode, four subagents launched in one turn, the
+        // work fold open — the "Called 4 tools" fold cut the fourth card off,
+        // and a fold body never scrolls to reveal it.
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        struct SpawnFold {
+            transcript: Entity<Transcript>,
+            row: Row,
+        }
+        impl Render for SpawnFold {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let RowKind::ToolGroup {
+                    tools,
+                    summary,
+                    auto_open,
+                    worked_secs,
+                    compact_shell,
+                } = &self.row.kind
+                else {
+                    unreachable!()
+                };
+                let group = self.transcript.update(cx, |this, cx| {
+                    this.render_tool_group(
+                        &self.row.id,
+                        tools,
+                        summary,
+                        *auto_open,
+                        *worked_secs,
+                        *compact_shell,
+                        &Theme::dark(),
+                        cx,
+                    )
+                });
+                div()
+                    .w(px(700.0))
+                    .child(div().debug_selector(|| "spawn-fold".into()).child(group))
+            }
+        }
+        // Each card used to come up 6px short, so the clip grew with the
+        // count: check one card, the reported four, and well past it. Regular
+        // mode's always-open spawn row must keep fitting too.
+        for (compact, count) in [true, false]
+            .into_iter()
+            .flat_map(|compact| [1, 4, 5, 12].map(|count| (compact, count)))
+        {
+            let mut parts = vec![
+                reasoning_part("r0", "planning the search"),
+                text_part("t0", "Launching searches in parallel."),
+            ];
+            parts.extend((1..=count).map(|i| agent_part(&format!("s{i}"), &format!("Search {i}"))));
+            let entry = assistant("m-spawn", MessageStatus::Streaming, parts);
+            // Compact: the open work fold mounts the compact-off rows; the
+            // spawn group is one of them, wrapped in its own fold.
+            let row = rows_for_entry(&entry, false, compact, &mut parse)
+                .into_iter()
+                .find(|row| {
+                    row.compact_fold.is_some() == compact
+                        && matches!(&row.kind, RowKind::ToolGroup { tools, .. }
+                            if tools.len() == count && tools.iter().all(is_spawn_link))
+                })
+                .expect("the spawn group has a row");
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            transcript.update(cx, |this, _| this.compact_mode = compact);
+            let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+            cx.update(|cx| {
+                let opened = opened.clone();
+                cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                    if let TranscriptEvent::OpenSubagent { doc_id, .. } = event {
+                        opened.borrow_mut().push(doc_id.clone());
+                    }
+                })
+                .detach();
+            });
+            let row_id = row.id.clone();
+            let (_fixture, window) = cx.add_window_view(|_, _| SpawnFold {
+                transcript: transcript.clone(),
+                row,
+            });
+            window.update(|window, cx| window.draw(cx).clear());
+            // The fold's body is its last child, so the fold's bottom edge is
+            // where the body clips.
+            let fold = window.debug_bounds("spawn-fold").expect("the fold painted");
+            let cards: Vec<Bounds<Pixels>> = (0..count)
+                .map(|ix| {
+                    let selector: &'static str =
+                        Box::leak(format!("{row_id}#s{ix}").into_boxed_str());
+                    window
+                        .debug_bounds(selector)
+                        .unwrap_or_else(|| panic!("spawn card {ix} painted"))
+                })
+                .collect();
+            for (ix, card) in cards.iter().enumerate() {
+                assert!(
+                    card.bottom() <= fold.bottom(),
+                    "compact {compact}, {count} spawns: card {ix} ends at {:?}, but the fold clips at {:?}",
+                    card.bottom(),
+                    fold.bottom(),
+                );
+            }
+            // Visible means reachable: the last card still opens its subagent.
+            window.simulate_click(cards[count - 1].center(), gpui::Modifiers::default());
+            assert_eq!(opened.borrow().as_slice(), [format!("chat--sub--s{count}")]);
+        }
     }
 
     #[test]
@@ -13683,7 +15538,10 @@ mod tests {
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
                             last_completed_turn: None,
+                            last_turn_outcome: None,
+                            terminal_activity: None,
                             running_subagents: 0,
+                            background_tasks: Vec::new(),
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,
@@ -14852,7 +16710,7 @@ mod tests {
                     this.toggle_user_fold(
                         "prompt".into(),
                         0,
-                        USER_LINE_HEIGHT * (USER_COLLAPSED_LINES + 1) as f32,
+                        USER_LINE_HEIGHT * USER_COLLAPSED_LINES as f32,
                         full_h,
                         true,
                     );
@@ -16125,12 +17983,243 @@ mod tests {
         );
         assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
     }
+
+    /// The engine end of a test state: requests are kept, never answered,
+    /// so whatever is selected stays as unreplayed as on a slow link.
+    type SilentEngine = (
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Sender<String>,
+    );
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Remote chats "a" and "b" on omarchy, under reduced motion. Call
+    /// inside the test runtime.
+    fn remote_chats_state(
+        cx: &mut gpui::TestAppContext,
+        dir: &std::path::Path,
+    ) -> (Entity<AppState>, SilentEngine) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir, cx);
+            crate::motion::set_reduced_motion(cx, true);
+        });
+        let (out, requests) = tokio::sync::mpsc::channel::<String>(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(256);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.chats = ["a", "b"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "omarchy", "archived": false,
+                        "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            state.set_test_engine(engine);
+            state
+        });
+        (state, (requests, replies))
+    }
+
+    fn user_message(id: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::User,
+            parts: Vec::new(),
+            created_at: 0,
+            device_id: "omarchy".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    fn advance(cx: &mut gpui::TestAppContext, by: Duration) {
+        cx.executor().advance_clock(by);
+        cx.run_until_parked();
+    }
+
+    /// Reduced motion snaps animations, never waits: a quick open must not
+    /// flash the loader either way, and a slow one must still get it.
+    #[gpui::test]
+    fn transcript_loader_waits_its_delay_under_reduced_motion(cx: &mut gpui::TestAppContext) {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _engine) = remote_chats_state(cx, dir.path());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        state.update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+        cx.run_until_parked();
+        let loader = |cx: &mut gpui::TestAppContext| {
+            transcript.read_with(cx, |this, _| {
+                this.loader_shown.then_some(this.loading).flatten()
+            })
+        };
+        assert_eq!(loader(cx), None);
+        advance(cx, LOADER_DELAY - Duration::from_millis(1));
+        assert_eq!(loader(cx), None, "too quick to flash a loader");
+        advance(cx, Duration::from_millis(1));
+        assert_eq!(loader(cx), Some(crate::state::TranscriptLoading::Opening));
+        // Replayed empty: a remote copy is not known empty until synced.
+        state.update(cx, |state, cx| {
+            state.transcript_replayed = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(loader(cx), Some(crate::state::TranscriptLoading::Syncing));
+        // Content arrives: the loader leaves at once.
+        state.update(cx, |state, cx| {
+            state.transcript = vec![user_message("m1")];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(loader(cx), None);
+        assert!(transcript.read_with(cx, |this, _| this.loader_delay.is_none()));
+    }
+
+    /// The loader overlays the pane it loads, centered in it — not laid out
+    /// below the full-height list, where the pane clips it.
+    #[gpui::test]
+    fn transcript_loader_renders_centered_in_its_pane(cx: &mut gpui::TestAppContext) {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _engine) = remote_chats_state(cx, dir.path());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        state.update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+        cx.run_until_parked();
+        advance(cx, LOADER_DELAY);
+        assert!(transcript.read_with(cx, |this, _| this.loader_shown));
+        struct Pane(Entity<Transcript>);
+        impl Render for Pane {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .debug_selector(|| "transcript-pane".into())
+                    .w(px(800.0))
+                    .h(px(600.0))
+                    .child(self.0.clone())
+            }
+        }
+        let (_pane, window) = cx.add_window_view(|_, _| Pane(transcript.clone()));
+        window.update(|window, cx| window.draw(cx).clear());
+        let pane = window.debug_bounds("transcript-pane").unwrap();
+        let loader = window
+            .debug_bounds("transcript-loader")
+            .expect("the loader renders");
+        assert!(
+            loader.top() >= pane.top()
+                && loader.bottom() <= pane.bottom()
+                && loader.left() >= pane.left()
+                && loader.right() <= pane.right(),
+            "the loader lies inside its pane: {loader:?} in {pane:?}"
+        );
+        assert!(
+            f32::from(loader.center().y - pane.center().y).abs() < 1.0,
+            "the loader is centered: {loader:?} in {pane:?}"
+        );
+    }
+
+    /// Leaving a chat caches its transcript; coming back shows it at once,
+    /// so the revisit never reads as loading.
+    #[gpui::test]
+    fn cached_revisit_never_shows_the_loader(cx: &mut gpui::TestAppContext) {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _engine) = remote_chats_state(cx, dir.path());
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("a".into()), cx);
+            state.transcript = vec![user_message("m1")];
+            state.transcript_replayed = true;
+        });
+        // A slow first open of "b" shows its loader…
+        state.update(cx, |state, cx| state.select_chat(Some("b".into()), cx));
+        cx.run_until_parked();
+        advance(cx, LOADER_DELAY);
+        assert!(transcript.read_with(cx, |this, _| this.loader_shown));
+        // …and returning to "a" drops it in the same frame.
+        state.update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+        cx.run_until_parked();
+        assert!(state.read_with(cx, |state, _| !state.transcript.is_empty()));
+        assert!(transcript.read_with(cx, |this, _| !this.loader_shown && this.loading.is_none()));
+        advance(cx, Duration::from_secs(5));
+        assert!(transcript.read_with(cx, |this, _| !this.loader_shown));
+    }
+
+    /// A subagent tab reads its own doc: the selected conversation's
+    /// opening never puts a loader over it.
+    #[gpui::test]
+    fn subagent_tab_never_shows_the_conversation_loader(cx: &mut gpui::TestAppContext) {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _engine) = remote_chats_state(cx, dir.path());
+        state.update(cx, |state, cx| state.select_chat(Some("a".into()), cx));
+        let subagent =
+            cx.new(|cx| Transcript::for_doc(state.clone(), "subagent-doc".into(), true, cx));
+        let primary = cx.new(|cx| Transcript::new(state.clone(), cx));
+        cx.run_until_parked();
+        advance(cx, Duration::from_secs(1));
+        assert!(primary.read_with(cx, |this, _| this.loader_shown));
+        assert!(subagent.read_with(cx, |this, _| !this.loader_shown && this.loading.is_none()));
+    }
+
+    /// A side chat tab is a transcript over its own state: a never-synced
+    /// remote side chat gets the same loader; an unsaved one has nothing to
+    /// load.
+    #[gpui::test]
+    fn side_chat_on_a_never_synced_remote_chat_shows_the_loader(cx: &mut gpui::TestAppContext) {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, _engine) = remote_chats_state(cx, dir.path());
+        let side_chat = |id: &str| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "parentChatId": "a", "deviceId": "omarchy",
+                "archived": false, "createdAt": chrono::Utc::now(),
+            }))
+            .unwrap()
+        };
+        let side = cx.new(|cx| AppState::side_chat_state(&parent, side_chat("side"), false, cx));
+        let unsaved = cx.new(|cx| AppState::side_chat_state(&parent, side_chat("new"), true, cx));
+        let side_transcript = cx.new(|cx| Transcript::new(side.clone(), cx));
+        let unsaved_transcript = cx.new(|cx| Transcript::new(unsaved.clone(), cx));
+        cx.run_until_parked();
+        advance(cx, LOADER_DELAY);
+        assert_eq!(
+            side_transcript.read_with(cx, |this, _| this
+                .loader_shown
+                .then_some(this.loading)
+                .flatten()),
+            Some(crate::state::TranscriptLoading::Opening)
+        );
+        assert!(unsaved_transcript.read_with(cx, |this, _| !this.loader_shown));
+    }
 }
 
 #[cfg(feature = "appshots-fixture")]
 impl Transcript {
     pub fn fixture_appshots_start(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    /// Click a fold's header: a compact work fold mounts its body rows.
+    pub fn fixture_toggle_fold(&mut self, row_id: &str, cx: &mut Context<Self>) {
+        self.toggle_fold(row_id.to_owned().into(), 0.0, false, cx);
         cx.notify();
     }
 

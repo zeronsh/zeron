@@ -78,6 +78,8 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
+                access: Default::default(),
+                plan: false,
             },
         )
         .unwrap();
@@ -95,7 +97,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
     };
     core.doc_host.queue_command("audit", SessionCommandPayload::Run {
         message_id: "opening".into(),
-        request: RunRequest { mcp: None, prompt: format!("This is an automated regression test of chat steering and message queues in a disposable temporary workspace. Remember test token {secret}. Execute exactly `sh -c 'sleep {background_seconds}; printf alive > background-survivor' >/dev/null 2>&1 & printf started > started; sleep 8; printf survived > survivor` in this directory, then reply DONE. All follow-ups are additive; never cancel earlier work. Execute each request once."), harness: Some(id), model, reasoning: None, model_options: Default::default(), cwd: dir.path().to_str().unwrap().into(), sandbox: SandboxLevel::DangerFullAccess, auto_approve: true, attachments: vec![], worktree: None, resume: None }
+        request: RunRequest { mcp: None, prompt: format!("This is an automated regression test of chat steering and message queues in a disposable temporary workspace. Remember test token {secret}. Execute exactly `sh -c 'sleep {background_seconds}; printf alive > background-survivor' >/dev/null 2>&1 & printf started > started; sleep 8; printf survived > survivor` in this directory, then reply DONE. All follow-ups are additive; never cancel earlier work. Execute each request once."), harness: Some(id), model, reasoning: None, model_options: Default::default(), cwd: dir.path().to_str().unwrap().into(), sandbox: SandboxLevel::DangerFullAccess, auto_approve: true, access: Default::default(), plan: false, attachments: vec![], worktree: None, resume: None, env: Default::default() }
     }).unwrap();
     wait(
         &core,

@@ -23,6 +23,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
 use crate::motion::ReduceMotion;
 use crate::popover::{self, Popup};
+use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
 use crate::theme_library;
@@ -159,6 +160,15 @@ impl FontKind {
         }
     }
 
+    /// The row's key in the settings search.
+    fn setting(self) -> SettingId {
+        match self {
+            Self::Ui => SettingId::InterfaceFont,
+            Self::Terminal => SettingId::TerminalFont,
+            Self::Code => SettingId::CodeFont,
+        }
+    }
+
     fn description(self) -> &'static str {
         match self {
             Self::Ui => "Menus and conversations",
@@ -253,6 +263,20 @@ impl FontKind {
 /// (terminal 13, code 12.5) are rungs, so today's rendering is reachable.
 const MONO_FONT_SIZES: [f32; 10] = [10.0, 11.0, 12.0, 12.5, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0];
 
+/// "Math size" choices, in percent of the text around a formula.
+const MATH_SIZES: [u16; 6] = [90, 100, 110, 120, 135, 150];
+
+/// Ladder position of a stored math size; a hand-edited value in range but
+/// off the ladder snaps to the nearest rung.
+fn nearest_math_size_ix(size: u16) -> usize {
+    MATH_SIZES
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, rung)| rung.abs_diff(size))
+        .map(|(ix, _)| ix)
+        .unwrap_or_default()
+}
+
 fn nearest_mono_ix(size: f32) -> usize {
     MONO_FONT_SIZES
         .iter()
@@ -266,15 +290,6 @@ fn nearest_mono_ix(size: f32) -> usize {
 struct TranscriptWidthDrag;
 
 impl Render for TranscriptWidthDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
-#[derive(Clone)]
-struct VideoTrimDrag;
-
-impl Render for VideoTrimDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
@@ -335,6 +350,8 @@ pub struct AppearancePage {
     size_select: widgets::SelectState,
     terminal_size_select: widgets::SelectState,
     code_size_select: widgets::SelectState,
+    math_font_select: widgets::SelectState,
+    math_size_select: widgets::SelectState,
     font_menu_dismissed_at: Option<std::time::Instant>,
     terminal_font_menu_dismissed_at: Option<std::time::Instant>,
     code_font_menu_dismissed_at: Option<std::time::Instant>,
@@ -363,9 +380,11 @@ pub struct AppearancePage {
     video_trim_preview: Option<Arc<gpui::RenderImage>>,
     video_trim_preview_at: f64,
     video_trim_preview_generation: u64,
-    /// Filmstrip thumbnails behind the trim bar, for the video they came from.
-    video_trim_filmstrip: (Option<PathBuf>, Vec<Arc<gpui::RenderImage>>),
+    /// Filmstrip thumbnails behind the trim bar, for the video and rotation they came from.
+    video_trim_filmstrip: (Option<(PathBuf, u16)>, Vec<Arc<gpui::RenderImage>>),
     reduce_motion_select: widgets::SelectState,
+    energy_saver_select: widgets::SelectState,
+    sidebar_decor_select: widgets::SelectState,
     import_dialog: Option<ImportDialog>,
     background_adjustment_dialog: Option<BackgroundAdjustmentDialog>,
     review_entry: Option<String>,
@@ -506,6 +525,8 @@ impl AppearancePage {
             self.video_trim_grab = edge - pointer;
         }
         self.video_trim_drag = Some(which);
+        // Show the held handle and its preview before the first value lands.
+        cx.notify();
         self.drag_video_trim(which, x, window, cx);
     }
 
@@ -545,6 +566,16 @@ impl AppearancePage {
             TrimHandle::End => total,
         };
         self.request_video_trim_preview(f64::from(edge.min(total - 0.05).max(0.0)), cx);
+    }
+
+    /// Let go of a held handle. The pointer's final position wins over the last
+    /// move we saw, so a release after one short move still lands where the
+    /// handle was dropped.
+    fn release_video_trim(&mut self, x: gpui::Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(which) = self.video_trim_drag.take() {
+            self.drag_video_trim(which, x, window, cx);
+            cx.notify();
+        }
     }
 
     fn pending_background_blur(&self, cx: &gpui::App) -> f32 {
@@ -600,7 +631,9 @@ impl AppearancePage {
         self.video_trim_preview_at = quantized;
         self.video_trim_preview_generation += 1;
         let generation = self.video_trim_preview_generation;
-        let Some(path) = crate::settings::current(cx)
+        let settings = crate::settings::current(cx);
+        let rotation = crate::settings::new_thread_background_rotation_value(cx);
+        let Some(path) = settings
             .new_thread_composer_background
             .map(|background| PathBuf::from(background.path))
         else {
@@ -610,9 +643,9 @@ impl AppearancePage {
         cx.spawn(async move |this, cx| {
             let frame = cx
                 .background_executor()
-                .spawn(
-                    async move { crate::new_thread_background_video::frame_at(&path, quantized) },
-                )
+                .spawn(async move {
+                    crate::new_thread_background_video::frame_at(&path, quantized, rotation)
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.video_trim_preview_generation == generation {
@@ -638,19 +671,24 @@ impl AppearancePage {
         path: &Path,
         cx: &mut Context<Self>,
     ) -> Vec<Arc<gpui::RenderImage>> {
-        if self.video_trim_filmstrip.0.as_deref() != Some(path) {
-            self.video_trim_filmstrip = (Some(path.to_path_buf()), Vec::new());
-            let path = path.to_path_buf();
+        let rotation = crate::settings::new_thread_background_rotation_value(cx);
+        let key = (path.to_path_buf(), rotation);
+        if self.video_trim_filmstrip.0.as_ref() != Some(&key) {
+            self.video_trim_filmstrip = (Some(key.clone()), Vec::new());
+            let source = path.to_path_buf();
             cx.spawn(async move |this, cx| {
-                let source = path.clone();
                 let frames = cx
                     .background_executor()
                     .spawn(async move {
-                        crate::new_thread_background_video::filmstrip(&source, VIDEO_TRIM_THUMBS)
+                        crate::new_thread_background_video::filmstrip(
+                            &source,
+                            VIDEO_TRIM_THUMBS,
+                            rotation,
+                        )
                     })
                     .await;
                 this.update(cx, |this, cx| {
-                    if this.video_trim_filmstrip.0.as_deref() == Some(path.as_path()) {
+                    if this.video_trim_filmstrip.0.as_ref() == Some(&key) {
                         this.video_trim_filmstrip.1 = frames;
                         cx.notify();
                     }
@@ -660,6 +698,125 @@ impl AppearancePage {
             .detach();
         }
         self.video_trim_filmstrip.1.clone()
+    }
+
+    /// "Render math", "Math font" and "Math size": how Markdown sets LaTeX
+    /// formulas.
+    fn render_math_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
+        use crate::settings::{MATH_SIZE_DEFAULT, MathFont};
+        let settings = crate::settings::current(cx);
+        let (render_math, math_font, math_size) =
+            (settings.render_math, settings.math_font, settings.math_size);
+        let font_control = widgets::select("math-font", "Math font", theme, |page: &mut Self| {
+            &mut page.math_font_select
+        })
+        .options(
+            MathFont::ALL
+                .into_iter()
+                .map(|font| widgets::SelectOption::new(font.label()).detail(font.style())),
+            MathFont::ALL
+                .into_iter()
+                .position(|font| font == math_font)
+                .unwrap_or_default(),
+        )
+        .width(160.0)
+        .menu_width(220.0)
+        .on_select(|_, ix, _, cx| {
+            crate::settings::set_math_font(MathFont::ALL[ix], cx);
+            cx.notify();
+        })
+        .render(&self.math_font_select, cx);
+        let size_control = widgets::select("math-size", "Math size", theme, |page: &mut Self| {
+            &mut page.math_size_select
+        })
+        .options(
+            MATH_SIZES.into_iter().map(|size| {
+                let option = widgets::SelectOption::new(format!("{size}%"));
+                if size == MATH_SIZE_DEFAULT {
+                    option.detail("Default")
+                } else {
+                    option
+                }
+            }),
+            nearest_math_size_ix(math_size),
+        )
+        .width(160.0)
+        .on_select(|_, ix, _, cx| {
+            crate::settings::set_math_size(MATH_SIZES[ix], cx);
+            cx.notify();
+        })
+        .render(&self.math_size_select, cx);
+        [
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Render math"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "Typeset LaTeX in messages. Off shows the source as code.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(theme, render_math, "render-math")
+                        .id("render-math-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Render math")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if render_math {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_render_math(!render_math, cx);
+                            cx.notify();
+                        })),
+                )
+                .search_anchor(SettingId::RenderMath)
+                .into_any_element(),
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, "Math font"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![div().child(math_font.description()).into_any_element()],
+                        )),
+                )
+                .child(font_control)
+                .search_anchor(SettingId::MathFont)
+                .into_any_element(),
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, "Math size"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Relative to the text around it.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(size_control)
+                .search_anchor(SettingId::MathSize)
+                .into_any_element(),
+        ]
     }
 
     fn render_transcript_width(
@@ -823,6 +980,7 @@ impl AppearancePage {
                             .child("1,200 px"),
                     ),
             )
+            .search_anchor(SettingId::ConversationWidth)
             .into_any_element()
     }
 
@@ -861,6 +1019,8 @@ impl AppearancePage {
             size_select: widgets::SelectState::default(),
             terminal_size_select: widgets::SelectState::default(),
             code_size_select: widgets::SelectState::default(),
+            math_font_select: widgets::SelectState::default(),
+            math_size_select: widgets::SelectState::default(),
             font_menu_dismissed_at: None,
             terminal_font_menu_dismissed_at: None,
             code_font_menu_dismissed_at: None,
@@ -885,6 +1045,8 @@ impl AppearancePage {
             video_trim_preview_generation: 0,
             video_trim_filmstrip: (None, Vec::new()),
             reduce_motion_select: widgets::SelectState::default(),
+            energy_saver_select: widgets::SelectState::default(),
+            sidebar_decor_select: widgets::SelectState::default(),
             import_dialog: None,
             background_adjustment_dialog: None,
             review_entry: None,
@@ -1164,6 +1326,11 @@ impl AppearancePage {
         true
     }
 
+    /// Whether a dialog [`Self::dismiss_on_escape`] would close is open.
+    pub(crate) fn has_escape_surface(&self) -> bool {
+        self.import_dialog.is_some() || self.review_entry.is_some()
+    }
+
     /// Escape that reached Settings unclaimed closes the topmost dialog
     /// (import, else the mapping review) first, so it never closes Settings
     /// under it. Returns whether it did.
@@ -1417,10 +1584,26 @@ impl AppearancePage {
 
     fn reset_background_adjustment(&mut self, cx: &mut Context<Self>) {
         if let Some(dialog) = self.background_adjustment_dialog.as_mut() {
-            dialog.draft = Default::default();
+            // Reset framing only; rotation lives in the background row and is not
+            // edited by this dialog.
+            let rotation = dialog.draft.normalized().rotation;
+            dialog.draft = crate::settings::NewThreadBackgroundAdjustment {
+                rotation,
+                ..Default::default()
+            };
             dialog.drag = None;
             dialog.pinch = None;
         }
+        cx.notify();
+    }
+
+    fn rotate_new_thread_background(&mut self, clockwise: bool, cx: &mut Context<Self>) {
+        crate::settings::rotate_new_thread_background(clockwise, cx);
+        // A scrub preview and filmstrip decoded at the old angle must not linger.
+        self.video_trim_preview_at = f64::NAN;
+        self.video_trim_preview_generation += 1;
+        self.video_trim_preview = None;
+        self.video_trim_filmstrip = (None, Vec::new());
         cx.notify();
     }
 
@@ -1702,6 +1885,27 @@ fn surface_label(surface: SurfacePreference) -> &'static str {
     }
 }
 
+fn energy_saver_helper(
+    preference: crate::energy::EnergySaver,
+    active: bool,
+    status: crate::energy::PowerStatus,
+) -> &'static str {
+    use crate::energy::EnergySaver;
+    match (preference, active) {
+        (EnergySaver::Off, _) => "Full animations, glass and video quality at all times.",
+        (EnergySaver::On, _) => {
+            "Saving energy: calm animations, solid caret, opaque surfaces, lighter video wallpapers."
+        }
+        (EnergySaver::OnBattery, true) if status.low_power && !status.on_battery => {
+            "Saving energy while Low Power Mode is on."
+        }
+        (EnergySaver::OnBattery, true) => "Saving energy while on battery.",
+        (EnergySaver::OnBattery, false) => {
+            "Turns on when unplugged or in Low Power Mode: calm animations, opaque surfaces, lighter video wallpapers."
+        }
+    }
+}
+
 fn reduce_motion_helper(preference: ReduceMotion, system: bool) -> &'static str {
     match (preference, system) {
         (ReduceMotion::System, true) => {
@@ -1710,6 +1914,14 @@ fn reduce_motion_helper(preference: ReduceMotion, system: bool) -> &'static str 
         (ReduceMotion::System, false) => "Following the system, which currently allows motion.",
         (ReduceMotion::On, _) => "Animations skip straight to their final state.",
         (ReduceMotion::Off, _) => "Animations play even if the system asks for less motion.",
+    }
+}
+
+fn smooth_scrolling_helper(enabled: bool, reduced: bool) -> &'static str {
+    if enabled && reduced {
+        "Mouse wheels step instantly while motion is reduced."
+    } else {
+        "Mouse wheels glide instead of jumping. Trackpads are unaffected."
     }
 }
 
@@ -1811,7 +2023,7 @@ fn miniature_split(
         .into_any_element()
 }
 
-fn preview(
+pub(crate) fn preview(
     mode: AppearanceMode,
     themes: &ThemeSelection,
     accent: AccentSelection,
@@ -1852,12 +2064,138 @@ fn palette_preview(theme: &Theme) -> gpui::Div {
         .child(div().w_1_3().h_full().bg(theme.accent))
 }
 
+impl AppearancePage {
+    /// The sidebar's decoration theme and the open-project highlight.
+    fn render_sidebar_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let data_dir = crate::settings::data_dir(cx);
+        let mut choices: Vec<(String, String)> = vec![(
+            crate::sidebar_decor::OFF.to_owned(),
+            "Off".to_owned(),
+        )];
+        choices.extend(
+            crate::sidebar_decor::BUILT_IN
+                .iter()
+                .map(|(id, label)| ((*id).to_owned(), (*label).to_owned())),
+        );
+        if let Some(dir) = data_dir.as_deref() {
+            choices.extend(crate::sidebar_decor::custom_themes(dir));
+        }
+        let current = crate::settings::sidebar_decor(cx);
+        // A custom file that went away still shows what is saved.
+        if !choices.iter().any(|(id, _)| *id == current) {
+            choices.push((current.clone(), format!("{current} (missing)")));
+        }
+        let selected = choices
+            .iter()
+            .position(|(id, _)| *id == current)
+            .unwrap_or_default();
+        let ids: Vec<String> = choices.iter().map(|(id, _)| id.clone()).collect();
+        let decor_control =
+            widgets::select("sidebar-decor", "Sidebar theme", theme, |page: &mut Self| {
+                &mut page.sidebar_decor_select
+            })
+            .options(
+                choices
+                    .iter()
+                    .map(|(_, label)| widgets::SelectOption::new(label.clone())),
+                selected,
+            )
+            .width(150.0)
+            .on_select(move |_, ix, _, cx| {
+                if let Some(id) = ids.get(ix) {
+                    crate::settings::set_sidebar_decor(id.clone(), cx);
+                }
+                cx.notify();
+            })
+            .render(&self.sidebar_decor_select, cx);
+        let highlight = crate::settings::sidebar_active_project_highlight(cx);
+        vec![
+            widgets::card_row(theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(theme, "Sidebar theme"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "A pixel scene behind the sidebar. Add your own as JSON files in the themes folder.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .when_some(data_dir, |row, dir| {
+                            row.child(
+                                compact_action(theme, "Folder", "sidebar-decor-folder")
+                                    .tab_index(0)
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Open sidebar themes folder")
+                                    .focus_visible(|s| {
+                                        s.border_2().border_color(theme.accent).opacity(1.0)
+                                    })
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        crate::sidebar_decor::open_themes_folder(&dir);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .child(decor_control),
+                )
+                .search_anchor(SettingId::SidebarTheme)
+                .into_any_element(),
+            widgets::card_row(theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(theme, "Highlight open project"))
+                        .child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child("Tint the header of the project you're working in.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(theme, highlight, "sidebar-project-highlight")
+                        .id("sidebar-project-highlight-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Highlight open project")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if highlight {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_sidebar_active_project_highlight(!highlight, cx);
+                            cx.notify();
+                        })),
+                )
+                .search_anchor(SettingId::SidebarProjectHighlight)
+                .into_any_element(),
+        ]
+    }
+}
+
 fn compact_action(
     theme: &Theme,
     label: &str,
     id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    widgets::text_action(theme, widgets::ActionTone::Outlined, label).id(id.into())
+    widgets::text_action(theme, widgets::ActionTone::Filled, label).id(id.into())
 }
 
 fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
@@ -2028,7 +2366,7 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> impl IntoElement {
     )
 }
 
-fn accent_swatch(
+pub(crate) fn accent_swatch(
     page_theme: &Theme,
     selection: AccentSelection,
     selected: bool,
@@ -2075,6 +2413,7 @@ fn accent_swatch(
         .id(SharedString::from(format!("accent-{}", selection.label())))
         .aria_label(selection.label())
         .aria_selected(selected)
+        .tooltip(widgets::text_tooltip(selection.label()))
         .flex_none()
         .w(px(30.0))
         .h(px(34.0))
@@ -2772,7 +3111,9 @@ impl AppearancePage {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.surface_raised_hover))
+                    .tooltip(widgets::text_tooltip("Close"))
                     .tab_index(0).role(gpui::Role::Button)
+                    .aria_label("Close")
 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
 .on_click(cx.listener(|this, _, _, cx| {
                         this.import_dialog = None;
@@ -3195,6 +3536,7 @@ impl AppearancePage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Zoom out")
+                            .tooltip(widgets::text_tooltip("Zoom out"))
                             .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(dialog) = this.background_adjustment_dialog.as_ref()
@@ -3221,6 +3563,7 @@ impl AppearancePage {
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Zoom in")
+                            .tooltip(widgets::text_tooltip("Zoom in"))
                             .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(dialog) = this.background_adjustment_dialog.as_ref()
@@ -3305,6 +3648,7 @@ impl AppearancePage {
                     .tab_index(0)
                     .role(gpui::Role::Button)
                     .aria_label("Close background adjustment")
+                    .tooltip(widgets::text_tooltip("Close"))
                     .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.dismiss_background_adjustment(window, cx)
@@ -3640,6 +3984,7 @@ impl AppearancePage {
                         .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
                 )
+                .search_anchor(SettingId::ThemeLibrary)
                 .into_any_element(),
         ];
         if !imported.is_empty() {
@@ -3734,10 +4079,10 @@ impl Render for AppearancePage {
             .into_iter()
             .enumerate()
         {
-            let label = if appearance_kind.is_light() {
-                "Light theme"
+            let (label, setting) = if appearance_kind.is_light() {
+                ("Light theme", SettingId::LightTheme)
             } else {
-                "Dark theme"
+                ("Dark theme", SettingId::DarkTheme)
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
@@ -3749,6 +4094,7 @@ impl Render for AppearancePage {
                             .child(widgets::row_title(&theme, label)),
                     )
                     .child(selector)
+                    .search_anchor(setting)
                     .into_any_element(),
             );
         }
@@ -3816,6 +4162,7 @@ impl Render for AppearancePage {
                         .gap(px(8.0))
                         .children(accent_controls),
                 )
+                .search_anchor(SettingId::AccentColor)
                 .into_any_element(),
         );
         let match_wallpaper = crate::settings::current(cx).wallpaper_theme_colors;
@@ -3838,6 +4185,7 @@ impl Render for AppearancePage {
                         crate::settings::wallpaper_colors::set_enabled(!match_wallpaper, cx);
                         cx.notify();
                     })))
+                .search_anchor(SettingId::WallpaperColors)
                 .into_any_element(),
         );
         let color_rows = settings_rows;
@@ -3853,57 +4201,70 @@ impl Render for AppearancePage {
                             &theme,
                             vec![
                                 div()
-                                    .child(SharedString::from(surface_helper(
-                                        current_surface,
-                                        theme.surface_treatment,
-                                    )))
+                                    .child(SharedString::from(if crate::energy::active(cx) {
+                                        "Opaque while energy saver is on".to_string()
+                                    } else {
+                                        surface_helper(current_surface, theme.surface_treatment)
+                                    }))
                                     .into_any_element(),
                             ],
                         )),
                 )
                 .child(surface_control)
+                .search_anchor(SettingId::Glass)
                 .into_any_element(),
         );
         let background_available = current_background
             .as_ref()
             .is_some_and(|background| Path::new(&background.path).is_file());
         // The chosen image previews in the row; without one the row is text only.
-        let background_tile: Option<AnyElement> =
-            current_background
-                .as_ref()
-                .filter(|_| background_available)
-                .map(|background| {
-                    div()
-                        .flex_none()
-                        .size(px(36.0))
-                        .rounded(px(10.0))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(crate::theme::hairline(0.10))
-                        .child(
-                            // A video shows its current (held) frame.
-                            if crate::new_thread_background_video::is_video(Path::new(
-                                &background.path,
-                            )) {
-                                crate::new_thread_background_video::current_frame(
-                                    Path::new(&background.path),
-                                    false,
-                                    current_background_effect,
-                                    matches!(theme.appearance, crate::theme::Appearance::Light),
-                                    crate::settings::new_thread_background_blur_value(cx),
-                                    cx,
-                                )
-                                .map(|frame| img(frame))
-                                .unwrap_or_else(|| img(PathBuf::new()))
-                            } else {
-                                img(PathBuf::from(background.path.clone()))
-                            }
+        let background_tile: Option<AnyElement> = current_background
+            .as_ref()
+            .filter(|_| background_available)
+            .map(|background| {
+                let rotation = background.adjustment.normalized().rotation;
+                // A video keeps its held frame in the tiny tile; a rotated
+                // still goes through the prepared pipeline so the tile matches.
+                let tile_image =
+                    if crate::new_thread_background_video::is_video(Path::new(&background.path)) {
+                        crate::new_thread_background_video::current_frame(
+                            Path::new(&background.path),
+                            false,
+                            current_background_effect,
+                            matches!(theme.appearance, crate::theme::Appearance::Light),
+                            crate::settings::new_thread_background_blur_value(cx),
+                            rotation,
+                            cx,
+                        )
+                        .map(|frame| img(frame))
+                        .unwrap_or_else(|| img(PathBuf::new()))
+                    } else if rotation != 0 {
+                        crate::new_thread_background_effects::prepare(
+                            current_background_effect,
+                            &theme,
+                            Path::new(&background.path),
+                            cx,
+                        )
+                        .map(|frame| img(frame))
+                        .unwrap_or_else(|| img(PathBuf::new()))
+                    } else {
+                        img(PathBuf::from(background.path.clone()))
+                    };
+                div()
+                    .flex_none()
+                    .size(px(36.0))
+                    .rounded(px(10.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(crate::theme::hairline(0.10))
+                    .child(
+                        tile_image
                             .size(px(34.0))
                             .rounded(px(9.0))
                             .object_fit(ObjectFit::Cover),
-                        )
-                        .into_any_element()
-                });
+                    )
+                    .into_any_element()
+            });
         let background_meta = match current_background.as_ref() {
             Some(background) if background_available => vec![
                 div()
@@ -4006,6 +4367,7 @@ impl Render for AppearancePage {
                             )
                         }),
                 )
+                .search_anchor(SettingId::NewThreadBackground)
                 .into_any_element(),
         );
         let wallpaper_settings = crate::settings::current(cx);
@@ -4058,6 +4420,7 @@ impl Render for AppearancePage {
                             )
                         }),
                 )
+                .search_anchor(SettingId::WallpaperFolder)
                 .into_any_element(),
         );
         if background_available {
@@ -4103,6 +4466,75 @@ impl Render for AppearancePage {
                             )),
                     )
                     .child(effect_control)
+                    .search_anchor(SettingId::BackgroundEffect)
+                    .into_any_element(),
+            );
+            // Turn photos and videos a quarter turn, keeping the crop with
+            // the image. The source is rotated before effects, so textures stay
+            // screen-aligned instead of lying on their side.
+            let background_rotation = current_background
+                .as_ref()
+                .map(|background| background.adjustment.normalized().rotation)
+                .unwrap_or_default();
+            settings_rows.push(
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, "Background rotation"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![
+                                    div()
+                                        .child(SharedString::from(if background_rotation == 0 {
+                                            "Turn the photo or video a quarter turn.".to_string()
+                                        } else {
+                                            format!(
+                                                "Turned {background_rotation}° clockwise. Turn again to keep going."
+                                            )
+                                        }))
+                                        .into_any_element(),
+                                ],
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                compact_action(
+                                    &theme,
+                                    "Rotate left",
+                                    "new-thread-background-rotate-left",
+                                )
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rotate_new_thread_background(false, cx)
+                                })),
+                            )
+                            .child(
+                                compact_action(
+                                    &theme,
+                                    "Rotate right",
+                                    "new-thread-background-rotate-right",
+                                )
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .focus_visible(|s| {
+                                    s.border_2().border_color(theme.accent).opacity(1.0)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rotate_new_thread_background(true, cx)
+                                })),
+                            ),
+                    )
+                    .search_anchor(SettingId::BackgroundRotation)
                     .into_any_element(),
             );
             // Blur softens the artwork, for stills and video alike.
@@ -4194,6 +4626,7 @@ impl Render for AppearancePage {
                                     .child(format!("{blur_value:.0} px")),
                             ),
                     )
+                    .search_anchor(SettingId::BackgroundBlur)
                     .into_any_element(),
             );
             // A video background also drives its own playback settings.
@@ -4241,6 +4674,7 @@ impl Render for AppearancePage {
                                 )),
                         )
                         .child(video_speed_control)
+                        .search_anchor(SettingId::VideoSpeed)
                         .into_any_element(),
                 );
                 // The trim bar: a filmstrip with a draggable frame over the loop segment.
@@ -4344,6 +4778,7 @@ impl Render for AppearancePage {
                     };
                     let trim_bar = div()
                         .id("new-thread-video-trim")
+                        .debug_selector(|| "new-thread-video-trim".into())
                         .relative()
                         .w(px(TRIM_WIDTH))
                         .h(px(TRIM_HEIGHT))
@@ -4352,14 +4787,8 @@ impl Render for AppearancePage {
                             gpui::MouseButton::Left,
                             cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.press_video_trim(event.position.x, window, cx);
-                                cx.stop_propagation();
-                                window.prevent_default();
                             }),
                         )
-                        .on_drag(VideoTrimDrag, |drag, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.new(|_| drag.clone())
-                        })
                         .child(
                             gpui::canvas(
                                 move |bounds, _, _| trim_bounds.set(Some(bounds)),
@@ -4448,6 +4877,7 @@ impl Render for AppearancePage {
                             .child(
                                 div().flex_none().w(px(TRIM_WIDTH)).child(trim_bar),
                             )
+                            .search_anchor(SettingId::VideoLength)
                             .into_any_element(),
                     );
                 } else {
@@ -4467,6 +4897,7 @@ impl Render for AppearancePage {
                                         ],
                                     )),
                             )
+                            .search_anchor(SettingId::VideoLength)
                             .into_any_element(),
                     );
                 }
@@ -4494,9 +4925,53 @@ impl Render for AppearancePage {
             cx.notify();
         })
         .render(&self.reduce_motion_select, cx);
+        let current_energy_saver = crate::energy::preference(cx);
+        let energy_saver_control =
+            widgets::select("energy-saver", "Energy saver", &theme, |page: &mut Self| {
+                &mut page.energy_saver_select
+            })
+            .options(
+                crate::energy::EnergySaver::ALL
+                    .into_iter()
+                    .map(|preference| widgets::SelectOption::new(preference.label())),
+                crate::energy::EnergySaver::ALL
+                    .into_iter()
+                    .position(|preference| preference == current_energy_saver)
+                    .unwrap_or_default(),
+            )
+            .width(128.0)
+            .on_select(|_, ix, _, cx| {
+                crate::energy::set_preference(crate::energy::EnergySaver::ALL[ix], cx);
+                cx.notify();
+            })
+            .render(&self.energy_saver_select, cx);
+        let sidebar_rows = self.render_sidebar_rows(&theme, cx);
         let pause_in_background = crate::motion::pause_in_background(cx);
+        let smooth_scrolling = crate::settings::smooth_scrolling(cx);
         let motion_rows = vec![
             widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(&theme, "Energy saver"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(energy_saver_helper(
+                                        current_energy_saver,
+                                        crate::energy::active(cx),
+                                        crate::energy::status(cx),
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(energy_saver_control)
+                .search_anchor(SettingId::EnergySaver)
+                .into_any_element(),
+            widgets::card_row(&theme, false)
                 .child(
                     div()
                         .flex_1()
@@ -4515,6 +4990,7 @@ impl Render for AppearancePage {
                         )),
                 )
                 .child(reduce_motion_control)
+                .search_anchor(SettingId::ReduceMotion)
                 .into_any_element(),
             widgets::card_row(&theme, false)
                 .child(
@@ -4555,6 +5031,45 @@ impl Render for AppearancePage {
                         cx.notify();
                     })),
                 )
+                .search_anchor(SettingId::PauseAnimations)
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Smooth scrolling"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(smooth_scrolling_helper(
+                                        smooth_scrolling,
+                                        crate::motion::reduced_motion(cx),
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, smooth_scrolling, "smooth-scrolling")
+                        .id("smooth-scrolling-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Smooth scrolling")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .aria_toggled(if smooth_scrolling {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_smooth_scrolling(!smooth_scrolling, cx);
+                            cx.notify();
+                        })),
+                )
+                .search_anchor(SettingId::SmoothScrolling)
                 .into_any_element(),
         ];
         let library_rows = self.render_theme_library_rows(&theme, cx);
@@ -4630,10 +5145,13 @@ impl Render for AppearancePage {
                             .gap(px(8.0))
                             .child(picker)
                             .child(size_control),
-                    ),
+                    )
+                    .search_anchor(kind.setting()),
             );
         }
-        font_rows = font_rows.child(self.render_transcript_width(&theme, window, cx));
+        font_rows = font_rows
+            .child(self.render_transcript_width(&theme, window, cx))
+            .children(self.render_math_rows(&theme, cx));
         let mut font_section = widgets::section(&theme, "Fonts and layout", font_rows);
         for kind in FontKind::ALL {
             let (requested, effective) = (kind.requested(cx), kind.effective(cx));
@@ -4672,13 +5190,18 @@ impl Render for AppearancePage {
                     this.set_background_zoom_from_x(event.event.position.x, cx);
                 },
             ))
-            .on_drag_move(cx.listener(
-                |this, event: &gpui::DragMoveEvent<VideoTrimDrag>, window, cx| {
+            // Give up the gpui drag machinery for the trim handles: it only
+            // starts after a few pixels of movement and swallows that first move,
+            // so a short nudge could lose the pointer entirely. The held handle
+            // follows the pointer from the press instead, whatever distance it
+            // covers.
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                     if let Some(which) = this.video_trim_drag {
-                        this.drag_video_trim(which, event.event.position.x, window, cx);
+                        this.drag_video_trim(which, event.position.x, window, cx);
                     }
-                },
-            ))
+                }),
+            )
             .on_drag_move(cx.listener(
                 |this, event: &gpui::DragMoveEvent<BackgroundBlurDrag>, window, cx| {
                     this.drag_background_blur(event.event.position.x, window, cx);
@@ -4686,15 +5209,13 @@ impl Render for AppearancePage {
             ))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
                     if this.width_pressed {
                         this.width_pressed = false;
                         cx.notify();
                     }
                     this.apply_pending_width(cx);
-                    if this.video_trim_drag.take().is_some() {
-                        cx.notify();
-                    }
+                    this.release_video_trim(event.position.x, window, cx);
                     this.apply_pending_video_trim(cx);
                     this.apply_pending_blur(cx);
                     this.clear_video_trim_preview(cx);
@@ -4703,15 +5224,13 @@ impl Render for AppearancePage {
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
                     if this.width_pressed {
                         this.width_pressed = false;
                         cx.notify();
                     }
                     this.apply_pending_width(cx);
-                    if this.video_trim_drag.take().is_some() {
-                        cx.notify();
-                    }
+                    this.release_video_trim(event.position.x, window, cx);
                     this.apply_pending_video_trim(cx);
                     this.apply_pending_blur(cx);
                     this.clear_video_trim_preview(cx);
@@ -4738,7 +5257,10 @@ impl Render for AppearancePage {
                                     widgets::section(
                                         &theme,
                                         "Color scheme",
-                                        widgets::option_card_row().children(cards),
+                                        widgets::option_card_row()
+                                            .children(cards)
+                                            .search_anchor(SettingId::ColorScheme)
+                                            .block(),
                                     )
                                     .mt(px(24.0))
                                     .gap(px(12.0)),
@@ -4752,6 +5274,11 @@ impl Render for AppearancePage {
                                     &theme,
                                     "Material and background",
                                     widgets::section_card(&theme).mt_0().children(settings_rows),
+                                ))
+                                .child(widgets::section(
+                                    &theme,
+                                    "Sidebar",
+                                    widgets::section_card(&theme).mt_0().children(sidebar_rows),
                                 ))
                                 .child(widgets::section(
                                     &theme,
@@ -4777,6 +5304,7 @@ impl Render for AppearancePage {
                 )
                 .fade_overflow_y(&self.scroll.scroll),
             )
+            .child(widgets::page_reveal(&self.scroll.scroll))
             .children(scrollbar)
             .children(modal)
     }
@@ -4795,6 +5323,7 @@ mod tests {
                     focal_x: 0.25,
                     focal_y: 0.75,
                     zoom: 2.0,
+                    rotation: 0,
                 },
             }),
             ..Default::default()
@@ -5207,6 +5736,21 @@ mod tests {
     }
 
     #[test]
+    fn math_size_ladder_holds_the_default_inside_the_legal_range() {
+        use crate::settings::{MATH_SIZE_DEFAULT, MATH_SIZE_MAX, MATH_SIZE_MIN};
+        assert!(MATH_SIZES.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            MATH_SIZES
+                .iter()
+                .all(|size| (MATH_SIZE_MIN..=MATH_SIZE_MAX).contains(size))
+        );
+        assert_eq!(MATH_SIZES[nearest_math_size_ix(MATH_SIZE_DEFAULT)], 100);
+        assert_eq!(MATH_SIZES[nearest_math_size_ix(MATH_SIZE_MIN)], 90);
+        assert_eq!(MATH_SIZES[nearest_math_size_ix(MATH_SIZE_MAX)], 150);
+        assert_eq!(MATH_SIZES[nearest_math_size_ix(133)], 135);
+    }
+
+    #[test]
     fn every_size_dropdown_labels_its_whole_ladder_in_pixels() {
         for kind in FontKind::ALL {
             let labels = kind.size_labels();
@@ -5370,5 +5914,173 @@ mod tests {
             assert!(!typography::set_terminal_family(UiFontFamily::System, cx));
             assert_eq!(typography::terminal_effective(cx), UiFontFamily::GeistMono);
         });
+    }
+
+    /// A movie that ships with macOS; the test is skipped without it.
+    const TRIM_SAMPLE: &str = "/System/Library/CoreServices/ControlCenter.app/Contents/Resources/BentoGalleryIntroduction.mov";
+
+    fn video_background() -> crate::settings::UiSettings {
+        crate::settings::UiSettings {
+            new_thread_composer_background: Some(crate::settings::NewThreadComposerBackground {
+                path: TRIM_SAMPLE.into(),
+                name: "BentoGalleryIntroduction.mov".into(),
+                adjustment: crate::settings::NewThreadBackgroundAdjustment::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn video_trim_handles_commit_pointer_drags(cx: &mut gpui::TestAppContext) {
+        if !std::path::Path::new(TRIM_SAMPLE).exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(video_background(), dir.path(), cx);
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let bar = cx
+            .debug_bounds("new-thread-video-trim")
+            .expect("trim bar bounds");
+        let total = page
+            .read_with(cx, |page, _| page.video_trim_total.get())
+            .expect("video duration") as f32;
+        assert!(total > 0.0);
+
+        let span = f32::from(bar.size.width) - 2.0 * TRIM_HANDLE;
+        // The row sits at the bottom of the settings page: grab inside the part
+        // the viewport actually shows.
+        let y = bar.origin.y + px(6.0);
+        let edge_x = |fraction: f32| point(bar.origin.x + px(TRIM_HANDLE + fraction * span), y);
+        let end_handle = edge_x(1.0) + point(px(TRIM_HANDLE / 2.0), px(0.0));
+
+        // One press, one short move, one release: a nudge of a few pixels must
+        // still land, and the release position must win.
+        cx.simulate_mouse_down(
+            end_handle,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            end_handle - point(px(8.0), px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        // The handle has to track the very first move, before the release: that
+        // is what the drag preview and the selection frame follow.
+        let held = page
+            .read_with(cx, |page, cx| {
+                page.pending_trim.or_else(|| {
+                    let settings = crate::settings::current(cx);
+                    Some((
+                        settings.new_thread_video_start,
+                        settings.new_thread_video_end,
+                    ))
+                })
+            })
+            .expect("held trim");
+        assert_eq!(held.0, 0.0);
+        assert!(
+            (held.1 - total * (span - 8.0) / span).abs() < 0.06,
+            "the held handle follows the pointer, got {} of {total}",
+            held.1
+        );
+        cx.simulate_mouse_up(
+            end_handle - point(px(6.0), px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let (start, end) = cx.update(|_, cx| {
+            let settings = crate::settings::current(cx);
+            (
+                settings.new_thread_video_start,
+                settings.new_thread_video_end,
+            )
+        });
+        assert_eq!(start, 0.0, "the start handle stays put");
+        let expected = total * (span - 6.0) / span;
+        assert!(
+            (end - expected).abs() < 0.05,
+            "release at 6 px left of the end should end at {expected}, got {end} of {total}"
+        );
+        assert!(
+            page.read_with(cx, |page, _| page.video_trim_drag.is_none()),
+            "releasing clears the held handle"
+        );
+
+        // The start handle follows the pointer the same way and stops short of
+        // the end so the loop never becomes empty.
+        let start_handle = edge_x(0.0) - point(px(TRIM_HANDLE / 2.0), px(0.0));
+        cx.simulate_mouse_down(
+            start_handle,
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            edge_x(0.5),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            edge_x(0.5),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let (start, end) = cx.update(|_, cx| {
+            let settings = crate::settings::current(cx);
+            (
+                settings.new_thread_video_start,
+                settings.new_thread_video_end,
+            )
+        });
+        // Grabbing the handle's centre keeps its inner edge half a handle to
+        // the right of the pointer, so the segment starts there.
+        let expected_start = total * (span * 0.5 + TRIM_HANDLE / 2.0) / span;
+        assert!(
+            (start - expected_start).abs() < 0.1,
+            "start follows the pointer to the middle, got {start} of {total}"
+        );
+        assert!(
+            (end - expected).abs() < 0.05,
+            "trimming the start leaves the end where it was, got {end}"
+        );
+
+        // Dragging the start past the end keeps the minimum gap instead of
+        // collapsing the segment.
+        cx.simulate_mouse_down(
+            edge_x(0.5) - point(px(TRIM_HANDLE / 2.0), px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            edge_x(1.0),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            edge_x(1.0),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let (start, end) = cx.update(|_, cx| {
+            let settings = crate::settings::current(cx);
+            (
+                settings.new_thread_video_start,
+                settings.new_thread_video_end,
+            )
+        });
+        assert!(
+            end - start >= crate::settings::VIDEO_TRIM_MIN_GAP - 0.01,
+            "start {start} keeps at least the minimum gap before end {end}"
+        );
     }
 }

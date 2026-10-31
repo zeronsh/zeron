@@ -1,6 +1,6 @@
 use super::{normalize::string, rpc::Client};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::{sync::oneshot, task::JoinSet};
 use zeron_proto::{UserInputAnswer, UserInputQuestion};
 pub(super) type Input =
@@ -9,6 +9,8 @@ pub(super) type Input =
 pub(super) struct Dialogs {
     pub input: Option<Arc<Input>>,
     tasks: JoinSet<()>,
+    /// Dialog ids Pi still waits on; whoever removes an id answers it, once.
+    open: Arc<Mutex<Vec<Value>>>,
 }
 impl Dialogs {
     pub fn request(&mut self, client: Client, frame: &Value) {
@@ -47,13 +49,26 @@ impl Dialogs {
             prefill: frame["prefill"].as_str().map(str::to_owned),
             multiline: method == "editor",
         };
+        // Pi's `timeout` is in milliseconds; 0 means none, and a negative one
+        // has already expired, so the dialog is over before it is shown. One
+        // too large for a Duration is as good as none.
+        let timeout = match frame["timeout"].as_f64() {
+            Some(ms) if ms < 0.0 => {
+                let _ =
+                    client.send(json!({"type":"extension_ui_response","id":id,"cancelled":true}));
+                return;
+            }
+            Some(ms) if ms > 0.0 => std::time::Duration::try_from_secs_f64(ms / 1000.0).ok(),
+            _ => None,
+        };
         let question_id = question.id.clone();
         let answer = (input)(vec![question]);
-        let timeout = frame["timeout"].as_u64();
+        self.lock().push(id.clone());
+        let open = Arc::clone(&self.open);
         self.tasks.spawn(async move {
             let deadline = async {
                 match timeout {
-                    Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+                    Some(timeout) => tokio::time::sleep(timeout).await,
                     None => std::future::pending().await,
                 }
             };
@@ -74,11 +89,24 @@ impl Dialogs {
                 ("input" | "editor", Some(value)) => response["value"] = json!(value),
                 _ => response["cancelled"] = json!(true),
             }
-            let _ = client.send(response);
+            let mut open = open.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(index) = open.iter().position(|pending| *pending == id) {
+                open.remove(index);
+                let _ = client.send(response);
+            }
         });
     }
-    pub fn cancel(&mut self) {
+    /// Close every open dialog. The process may live on (a turn ended, an
+    /// interrupt), and an extension awaiting its dialog would wait forever,
+    /// so each is answered `cancelled` first.
+    pub fn cancel(&mut self, client: &Client) {
         self.tasks.abort_all();
+        for id in std::mem::take(&mut *self.lock()) {
+            let _ = client.send(json!({"type":"extension_ui_response","id":id,"cancelled":true}));
+        }
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Value>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -124,9 +152,113 @@ mod tests {
             &json!({"id":"stopped", "method":"input"}),
         );
         let mut sender = requests.recv().await.unwrap();
-        dialogs.cancel();
+        dialogs.cancel(&transport.client);
         tokio::time::timeout(std::time::Duration::from_secs(1), sender.closed())
             .await
             .unwrap();
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            json!({"type":"extension_ui_response", "id":"stopped", "cancelled":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_waits_and_negative_timeout_is_already_over() {
+        let (writer, peer) = tokio::io::duplex(4096);
+        let (_peer_writer, reader) = tokio::io::duplex(4096);
+        let transport = super::super::rpc::Transport::new(writer, reader);
+        let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut dialogs = Dialogs {
+            input: Some(Arc::new(move |_| {
+                let (tx, rx) = oneshot::channel();
+                bridge.send(tx).unwrap();
+                rx
+            })),
+            ..Default::default()
+        };
+        let mut lines = BufReader::new(peer).lines();
+        dialogs.request(
+            transport.client.clone(),
+            &json!({"id":"expired", "method":"confirm", "timeout":-1}),
+        );
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap(),
+            json!({"type":"extension_ui_response", "id":"expired", "cancelled":true})
+        );
+        assert!(requests.try_recv().is_err(), "an expired dialog was shown");
+        dialogs.request(
+            transport.client.clone(),
+            &json!({"id":"open", "method":"confirm", "timeout":0}),
+        );
+        let sender = requests.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "a zero timeout closed the dialog at once"
+        );
+        sender
+            .send(vec![UserInputAnswer {
+                question_id: String::new(),
+                labels: vec![],
+            }])
+            .ok();
+        // Answered (with no matching label) only once the user replied.
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["id"], "open");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_too_large_for_a_duration_waits_like_none() {
+        let (writer, peer) = tokio::io::duplex(4096);
+        let (_peer_writer, reader) = tokio::io::duplex(4096);
+        let transport = super::super::rpc::Transport::new(writer, reader);
+        let (bridge, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let mut dialogs = Dialogs {
+            input: Some(Arc::new(move |_| {
+                let (tx, rx) = oneshot::channel();
+                bridge.send(tx).unwrap();
+                rx
+            })),
+            ..Default::default()
+        };
+        let mut lines = BufReader::new(peer).lines();
+        dialogs.request(
+            transport.client.clone(),
+            &json!({"id":"huge", "method":"confirm", "timeout":1e300}),
+        );
+        let sender = requests.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), lines.next_line())
+                .await
+                .is_err(),
+            "a huge timeout closed the dialog at once"
+        );
+        sender
+            .send(vec![UserInputAnswer {
+                question_id: String::new(),
+                labels: vec![],
+            }])
+            .ok();
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["id"], "huge");
     }
 }

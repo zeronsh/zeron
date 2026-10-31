@@ -14,6 +14,8 @@ pub enum HarnessId {
     Grok,
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     Hermes,
+    /// Vercel fx, driven by its native ACP server.
+    Fx,
     /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
     Pi,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
@@ -23,8 +25,52 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Meta's Muse Code agent, driven natively over the Muse Session Protocol
+    /// (MSP: `muse` speaking JSON-RPC on stdio).
+    Muse,
     /// Test harness; never shown in production pickers.
     Mock,
+}
+
+impl HarnessId {
+    /// Every harness, in declaration order.
+    pub const ALL: [HarnessId; 12] = [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::Cursor,
+        HarnessId::Devin,
+        HarnessId::Grok,
+        HarnessId::Hermes,
+        HarnessId::Fx,
+        HarnessId::Pi,
+        HarnessId::Opencode,
+        HarnessId::Antigravity,
+        HarnessId::Muse,
+        HarnessId::Mock,
+    ];
+
+    /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude-code",
+            HarnessId::Codex => "codex",
+            HarnessId::Cursor => "cursor",
+            HarnessId::Devin => "devin",
+            HarnessId::Grok => "grok",
+            HarnessId::Hermes => "hermes",
+            HarnessId::Fx => "fx",
+            HarnessId::Pi => "pi",
+            HarnessId::Opencode => "opencode",
+            HarnessId::Antigravity => "antigravity",
+            HarnessId::Muse => "muse",
+            HarnessId::Mock => "mock",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]; `None` for a slug this build does not know.
+    pub fn from_slug(slug: &str) -> Option<HarnessId> {
+        Self::ALL.into_iter().find(|id| id.as_str() == slug)
+    }
 }
 
 /// Durable user preference for one agent's independently-installed CLI.
@@ -91,6 +137,21 @@ pub struct HarnessUpdateFailure {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    /// What failed: looking for a release, or installing one. An engine that
+    /// predates the field only ever reported failed checks.
+    #[serde(default)]
+    pub kind: HarnessUpdateFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessUpdateFailureKind {
+    /// The version probe or release lookup failed; checking again retries.
+    #[default]
+    Check,
+    /// The updater or its verification failed; the release is still known,
+    /// so the update itself can be retried.
+    Install,
 }
 
 /// One row in the device-local harness-update stream.
@@ -123,6 +184,38 @@ pub struct HarnessUpdateStatus {
     /// Provider command shown when mutation cannot be safely automated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_command: Option<String>,
+    /// The installed release is known not to work with (or isn't supported
+    /// by) this engine's zeron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<HarnessCompatibility>,
+    /// A newer release exists, but zeron won't install it: it is known not
+    /// to work. Such a release is never reported as available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_back: Option<HarnessCompatibility>,
+}
+
+/// How well a CLI release works with this zeron (see the engine's
+/// compatibility policy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessCompatibilityStatus {
+    Supported,
+    /// Outside the releases this zeron was built and tested against.
+    Unsupported,
+    /// Known not to work with this zeron.
+    Broken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCompatibility {
+    pub status: HarnessCompatibilityStatus,
+    /// The release this is about.
+    pub version: String,
+    /// One line for the user, naming the release to use instead when known.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_version: Option<String>,
 }
 
 impl HarnessUpdateStatus {
@@ -168,6 +261,52 @@ pub enum SandboxLevel {
     DangerFullAccess,
 }
 
+/// How much an agent may do before it has to ask. Each harness maps the
+/// mode onto its own approval policy and sandbox; it lists the modes it can
+/// honor (`Harness::access_modes`), and the composer offers only
+/// those. Whatever a run must still ask reaches the person as a question.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessMode {
+    /// Ask before commands and file changes.
+    Supervised,
+    /// Apply file changes without asking; ask before anything else.
+    AutoAcceptEdits,
+    /// Run commands and change files without asking. Every run before modes
+    /// existed ran this way, so it is the default.
+    #[default]
+    FullAccess,
+}
+
+impl AccessMode {
+    /// Every mode, least to most trusting (the picker's order).
+    pub const ALL: [AccessMode; 3] = [
+        AccessMode::Supervised,
+        AccessMode::AutoAcceptEdits,
+        AccessMode::FullAccess,
+    ];
+
+    pub fn is_full_access(&self) -> bool {
+        *self == AccessMode::FullAccess
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AccessMode::Supervised => "Supervised",
+            AccessMode::AutoAcceptEdits => "Auto-accept edits",
+            AccessMode::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            AccessMode::Supervised => "Ask before commands and file changes.",
+            AccessMode::AutoAcceptEdits => "Apply edits, ask before other actions.",
+            AccessMode::FullAccess => "Run commands and edits without asking.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -208,7 +347,7 @@ pub struct ModelOptionChoice {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     pub prompt: String,
@@ -227,6 +366,15 @@ pub struct RunRequest {
     pub sandbox: SandboxLevel,
     #[serde(default)]
     pub auto_approve: bool,
+    /// What the agent may do without asking (see [`AccessMode`]). Additive +
+    /// serde-defaulted: a request from a client predating modes runs with
+    /// full access, as every run did then.
+    #[serde(default, skip_serializing_if = "AccessMode::is_full_access")]
+    pub access: AccessMode,
+    /// Plan mode: the agent explores and proposes a plan instead of
+    /// changing anything. Honored by harnesses that advertise it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device
@@ -251,6 +399,57 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Host-resolved environment for the spawned agent process (credential
+    /// broker secrets on a Cloud device: `CODEX_HOME`, `GH_TOKEN`,
+    /// `ANTHROPIC_API_KEY`, …). Filled by the HOST right before the request
+    /// reaches the harness; every driver applies it to the child it spawns.
+    /// `serde(skip)` in BOTH directions: secrets must never ride the command
+    /// plane, the session doc, the run journal, or a log line — and a remote
+    /// sender can never inject environment into a host's agents.
+    #[serde(skip)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Hand-written so a `{:?}` can never print a credential: `env` shows its
+/// keys only. Destructured without `..`, so a new field fails to compile
+/// until it is listed here.
+impl std::fmt::Debug for RunRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let RunRequest {
+            prompt,
+            harness,
+            model,
+            reasoning,
+            model_options,
+            cwd,
+            sandbox,
+            auto_approve,
+            access,
+            plan,
+            resume,
+            attachments,
+            worktree,
+            mcp,
+            env,
+        } = self;
+        f.debug_struct("RunRequest")
+            .field("prompt", prompt)
+            .field("harness", harness)
+            .field("model", model)
+            .field("reasoning", reasoning)
+            .field("model_options", model_options)
+            .field("cwd", cwd)
+            .field("sandbox", sandbox)
+            .field("auto_approve", auto_approve)
+            .field("access", access)
+            .field("plan", plan)
+            .field("resume", resume)
+            .field("attachments", attachments)
+            .field("worktree", worktree)
+            .field("mcp", mcp)
+            .field("env", &env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// A stdio MCP server the harness should add to the agent's session, on top
@@ -266,6 +465,20 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl McpServer {
+    /// Set to `1` on Zeron's own server when its host turned the provider's
+    /// native subagents off (Settings → Providers) and the chat has no
+    /// parent: the agent delegates through this server's side chats instead,
+    /// and the driver launches it without its subagent tools.
+    pub const SIDE_CHATS_ONLY_ENV: &'static str = "ZERON_SIDE_CHATS_ONLY";
+
+    pub fn side_chats_only(&self) -> bool {
+        self.env
+            .get(Self::SIDE_CHATS_ONLY_ENV)
+            .is_some_and(|value| value == "1")
+    }
 }
 
 /// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
@@ -428,8 +641,17 @@ pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
 // assets base64-encoded; that message must fit the engine's 16 MiB frame
 // (tungstenite's default), with room for the script escaped as JSON.
 const _: () = assert!(
-    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
+    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024
+        < 16 * 1024 * 1024
 );
+
+/// Largest image file an agent may show with `show_image` (it rides one
+/// WebSocket message, base64-encoded, like a visual's assets).
+pub const IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+/// Longest side, in pixels, of an image the desktop decodes for a preview;
+/// `show_image` refuses larger ones rather than publish an unviewable part.
+pub const IMAGE_MAX_SIDE: u32 = 4096;
+const _: () = assert!(IMAGE_MAX_BYTES.div_ceil(3) * 4 + 64 * 1024 < 16 * 1024 * 1024);
 
 /// Whether `name` can name a visual's asset: a plain file name.
 pub fn valid_visual_asset_name(name: &str) -> bool {
@@ -589,7 +811,9 @@ pub enum AgentEvent {
     TextDelta {
         text: String,
     },
-    /// A generated raster asset. The engine materializes this path before publication.
+    /// A raster image in the reply: one a harness generated (the engine
+    /// materializes this path before publication) or one an agent showed with
+    /// Zeron's `show_image` MCP tool (already stored in uploads).
     #[serde(rename_all = "camelCase")]
     GeneratedImage {
         id: String,
@@ -638,6 +862,15 @@ pub enum AgentEvent {
         tokens: Option<u64>,
         window: Option<u64>,
     },
+    /// The subscription's usage as the provider reported it mid-run (Muse's
+    /// `usage/changed`): the engine records it on the account the run used,
+    /// for the Providers meters. Never persisted to docs.
+    #[serde(rename_all = "camelCase")]
+    PlanUsage {
+        windows: Vec<crate::AgentUsageWindow>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_label: Option<String>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -662,6 +895,12 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,
+        /// What the person answered, exactly as the run received it. Empty
+        /// when the questions closed without an answer (dismissed, or the run
+        /// stopped waiting). Absent on events written before answers were
+        /// recorded — nothing is known about them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<Vec<UserInputAnswer>>,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.
@@ -692,9 +931,12 @@ pub enum AgentEvent {
     /// the spawning tool call (`parent_tool_use_id` = the parent-feed
     /// `ToolCall::id` that launched it). Never folded into the parent chat
     /// doc — the engine routes these to the subagent's own doc; the parent
-    /// keeps only the spawn chip. Additive: old consumers that don't match
-    /// this variant drop the nested traffic, which is the pre-subagent-viz
-    /// behavior.
+    /// keeps only the spawn chip. The spawn `ToolCall` must come first: the
+    /// engine opens that doc only for an id that already names one of the
+    /// chat's spawn chips ([`ToolCall::is_subagent_spawn`]), and keeps
+    /// traffic tagged with any other id in the run journal only. Additive:
+    /// old consumers that don't match this variant drop the nested traffic,
+    /// which is the pre-subagent-viz behavior.
     #[serde(rename_all = "camelCase")]
     Subagent {
         parent_tool_use_id: String,
@@ -817,6 +1059,38 @@ mod tests {
         assert_eq!(round.worktree, req.worktree);
     }
 
+    /// Credential-broker secrets ride `RunRequest::env` from the host to the
+    /// harness only: they must never reach the wire, the session doc, or the
+    /// journal, and a sender can never inject them.
+    #[test]
+    fn run_request_env_never_serializes_or_deserializes() {
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let mut req: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(req.env.is_empty());
+        req.env
+            .insert("GH_TOKEN".into(), "ghu_secret_token_value".into());
+        req.env
+            .insert("ANTHROPIC_API_KEY".into(), "sk-ant-secret".into());
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("ghu_secret_token_value"), "{json}");
+        assert!(!json.contains("sk-ant-secret"), "{json}");
+        assert!(!json.contains("GH_TOKEN"), "{json}");
+        assert!(!json.contains("\"env\""), "{json}");
+        let round: RunRequest = serde_json::from_str(&json).unwrap();
+        assert!(round.env.is_empty());
+        // A hostile sender spelling the field out is ignored too.
+        let injected = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null,"env":{"LD_PRELOAD":"/tmp/x.so"}}"#;
+        let req: RunRequest = serde_json::from_str(injected).unwrap();
+        assert!(req.env.is_empty());
+        // Debug shows which variables were set, never their values.
+        let mut req = req;
+        req.env
+            .insert("GH_TOKEN".into(), "ghu_secret_token_value".into());
+        let printed = format!("{req:?}");
+        assert!(printed.contains("GH_TOKEN"), "{printed}");
+        assert!(!printed.contains("ghu_secret_token_value"), "{printed}");
+    }
+
     #[test]
     fn harness_id_uses_kebab_case() {
         assert_eq!(
@@ -840,8 +1114,12 @@ mod tests {
             error: None,
             can_apply: true,
             manual_command: Some("claude update".into()),
+            compatibility: None,
+            held_back: None,
         };
         let json = serde_json::to_value(&status).unwrap();
+        // Older peers neither send nor expect the compatibility fields.
+        assert!(json.get("compatibility").is_none() && json.get("heldBack").is_none());
         assert_eq!(json["harness"], "claude-code");
         assert_eq!(json["installedVersion"], "1.0.0");
         assert_eq!(json["policy"], "auto-when-idle");

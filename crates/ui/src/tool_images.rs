@@ -48,7 +48,7 @@ pub(crate) fn is_image_path(path: &str) -> bool {
 /// them freely, and merely opening one can reach another host (on Windows
 /// with the user's NTLM credentials), so they are never previewed. The
 /// engine's jail refuses them as well.
-fn is_remote_or_device_path(path: &str) -> bool {
+pub(crate) fn is_remote_or_device_path(path: &str) -> bool {
     let bytes = path.as_bytes();
     let separator = |b: Option<&u8>| matches!(b, Some(b'/' | b'\\'));
     (separator(bytes.first()) && separator(bytes.get(1)))
@@ -139,15 +139,21 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
     out.into()
 }
 
-/// Absolute path on the owning host. Relative paths join the chat's cwd in
-/// that host's separator style (the UI may run on another OS).
-pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
+/// Whether `path` is absolute on its host, whichever OS that is (`/a`, `\a`,
+/// `C:\a`, `C:/a`).
+pub(crate) fn is_host_absolute(path: &str) -> bool {
     let bytes = path.as_bytes();
-    let absolute = path.starts_with(['/', '\\'])
+    path.starts_with(['/', '\\'])
         || (bytes.len() >= 3
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'));
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+/// Absolute path on the owning host. Relative paths join the chat's cwd in
+/// that host's separator style (the UI may run on another OS).
+pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
+    let absolute = is_host_absolute(path);
     match cwd.filter(|_| !absolute) {
         Some(cwd) if cwd.contains('\\') => format!(
             "{}\\{}",

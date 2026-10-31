@@ -166,6 +166,9 @@ struct CoreState {
     context_usage: Option<ContextUsage>,
     /// Stable echo entries by message id.
     echoes: HashMap<String, Arc<Entry>>,
+    /// The Cloud setup placeholder last shown (kept so an unchanged one
+    /// keeps its `Arc` and `rev`).
+    setup_placeholder: Option<Arc<Entry>>,
     pending: Vec<PendingSend>,
     /// Delivery-grace clock per message id (retry restarts it).
     grace_started: HashMap<String, i64>,
@@ -239,6 +242,7 @@ impl SessionCore {
                 commands: Vec::new(),
                 context_usage: None,
                 echoes: HashMap::new(),
+                setup_placeholder: None,
                 pending: Vec::new(),
                 grace_started: HashMap::new(),
                 queue_actions_pending: HashSet::new(),
@@ -429,9 +433,8 @@ impl SessionCore {
         let dirty = std::mem::take(&mut *lock(&self.dirty));
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
-        let (indicator_working, working_since_ms) = client
-            .workspace
-            .snapshot()
+        let workspace = client.workspace.snapshot();
+        let (indicator_working, working_since_ms) = workspace
             .session(&self.chat_id)
             .map_or((false, None), |row| {
                 (
@@ -439,6 +442,13 @@ impl SessionCore {
                     row.working_since_ms,
                 )
             });
+        // A Cloud chat whose machine isn't up yet: it is being started (or
+        // woken) for the latest message.
+        let cloud_booting = workspace.session(&self.chat_id).is_some_and(|row| {
+            zeron_proto::is_cloud_device(&row.device_id, "")
+                && !workspace.device(&row.device_id).is_some_and(|d| d.online)
+        });
+        drop(workspace);
         let mut transcript_event = None;
         let send_before;
         let send_after;
@@ -466,10 +476,13 @@ impl SessionCore {
             let live = LiveFlags {
                 working: indicator_working || streaming,
                 working_since_ms,
+                cloud_booting,
             };
+            let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
-                || previous.hydrated != st.hydrated;
+                || previous.hydrated != st.hydrated
+                || placeholder_changed;
             if change.is_some()
                 || echoes_changed
                 || dirty.meta
@@ -834,6 +847,81 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
+    /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
+    #[allow(dead_code)]
+    cloud_booting: bool,
+}
+
+/// While a Cloud chat's machine is being started or woken for the latest
+/// message, that message gets the machine's first setup step right away —
+/// "Starting a machine" (a new chat) or "Waking the machine" — as the
+/// desktop shows it. The entry has the id the machine's own setup entry will
+/// have (`cloud_setup_entry_id`), so the real steps replace it in place; it
+/// goes as soon as anything follows the message. Returns whether it changed.
+fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
+    // Decide first (reading the transcript), then build (minting a rev).
+    let wanted = {
+        let transcript = st.tracker.entries();
+        let latest_user = st
+            .pending
+            .iter()
+            .rev()
+            .find_map(|p| st.echoes.get(&p.message_id))
+            .or_else(|| transcript.iter().rev().find(|e| e.role() == MessageRole::User));
+        latest_user.filter(|_| cloud_booting).and_then(|message| {
+            let setup_id = zeron_proto::cloud_setup_entry_id(&message.id);
+            // Nothing after the message in the doc, and no setup entry yet.
+            let answered = transcript.iter().any(|e| e.id == setup_id)
+                || transcript
+                    .iter()
+                    .position(|e| e.id == message.id)
+                    .is_some_and(|ix| ix + 1 < transcript.len());
+            let waking = transcript.iter().any(|e| e.role() == MessageRole::Assistant);
+            let name = if waking { "Waking the machine" } else { "Starting a machine" };
+            (!answered).then(|| (message.id.clone(), setup_id, name, message.message.created_at))
+        })
+    };
+    let next = wanted.map(|(message_id, setup_id, name, created_at)| {
+        if let Some(current) = &st.setup_placeholder
+            && current.id == setup_id
+            && matches!(current.message.parts.first(), Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name: n, .. }, .. }) if n == name)
+        {
+            return current.clone();
+        }
+        Arc::new(Entry {
+            id: setup_id.clone(),
+            rev: st.tracker.next_rev(),
+            message: Arc::new(SessionMessageEntry {
+                id: setup_id,
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Tool {
+                    id: zeron_proto::cloud_setup_part_id(&message_id, "machine"),
+                    call: zeron_proto::ToolCall::Unknown { name: name.into(), input: None },
+                    is_error: false,
+                    resolved: false,
+                    output: None,
+                    diff: None,
+                    output_ref: None,
+                    output_bytes: None,
+                    diff_ref: None,
+                    diff_stats: None,
+                    subagent_ref: None,
+                    subagent_status: None,
+                    subagent_tail: None,
+                }],
+                created_at: created_at + 1,
+                device_id: String::new(),
+                status: Some(MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }),
+            echo: None,
+            append: None,
+        })
+    });
+    let changed = next.as_ref().map(|e| (&e.id, e.rev)) != st.setup_placeholder.as_ref().map(|e| (&e.id, e.rev));
+    st.setup_placeholder = next;
+    changed
 }
 
 fn build_snapshot(
@@ -851,6 +939,9 @@ fn build_snapshot(
         if let Some(echo) = st.echoes.get(&pending.message_id) {
             entries.push(echo.clone());
         }
+    }
+    if let Some(placeholder) = &st.setup_placeholder {
+        entries.push(placeholder.clone());
     }
     let index: HashMap<String, usize> = entries
         .iter()
@@ -1064,11 +1155,14 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    auto_approve: false,
+                    access: config.map(|c| c.access).unwrap_or_default(),
+                    plan: config.is_some_and(|c| c.plan),
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
                     mcp: None,
+                    env: Default::default(),
                 };
                 self.core.queue_command(
                     &device_id,
@@ -1458,5 +1552,86 @@ impl SessionHandle {
         client.after_command(&self.core, true);
         client.kick_room(&self.core.chat_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod setup_placeholder_tests {
+    use super::*;
+
+    fn state_with_pending_send() -> CoreState {
+        let mut st = CoreState {
+            tracker: Tracker::new(),
+            queue: Vec::new(),
+            commands: Vec::new(),
+            context_usage: None,
+            echoes: HashMap::new(),
+            setup_placeholder: None,
+            pending: Vec::new(),
+            grace_started: HashMap::new(),
+            queue_actions_pending: HashSet::new(),
+            queue_error: None,
+            last_submitted: None,
+            transfer_progress: None,
+            hydrated: true,
+            transcript_revision: 0,
+            composer_revision: 0,
+        };
+        let pending = PendingSend {
+            message_id: "m1".into(),
+            text: "read the readme".into(),
+            visible_text: "read the readme".into(),
+            images: Vec::new(),
+            kind: PendingKind::Run,
+            sent_at_ms: 1_000,
+            state: crate::connectivity::SendState::Sending,
+        };
+        st.echoes.insert(
+            "m1".into(),
+            Arc::new(Entry {
+                id: "m1".into(),
+                rev: 1,
+                message: Arc::new(SessionMessageEntry {
+                    id: "m1".into(),
+                    role: MessageRole::User,
+                    parts: vec![MessagePart::Text { id: "t0".into(), text: pending.text.clone() }],
+                    created_at: 1_000,
+                    device_id: "phone".into(),
+                    status: Some(MessageStatus::Complete),
+                    continuation_of: None,
+                    duration_ms: None,
+                }),
+                echo: Some(LocalEcho { state: pending.state, sent_at_ms: 1_000 }),
+                append: None,
+            }),
+        );
+        st.pending.push(pending);
+        st
+    }
+
+    #[test]
+    fn a_new_cloud_chat_shows_its_machine_starting_until_the_machine_is_up() {
+        let mut st = state_with_pending_send();
+        assert!(refresh_setup_placeholder(&mut st, true));
+        let placeholder = st.setup_placeholder.clone().expect("placeholder under the message");
+        assert_eq!(placeholder.id, zeron_proto::cloud_setup_entry_id("m1"));
+        assert!(placeholder.is_streaming());
+        assert!(matches!(
+            placeholder.message.parts.first(),
+            Some(MessagePart::Tool { call: zeron_proto::ToolCall::Unknown { name, .. }, .. }) if name == "Starting a machine"
+        ));
+        // Unchanged: the same entry (row reuse), no change reported.
+        assert!(!refresh_setup_placeholder(&mut st, true));
+        assert!(Arc::ptr_eq(&placeholder, st.setup_placeholder.as_ref().unwrap()));
+        // The machine is up: the placeholder goes (its own entry takes over).
+        assert!(refresh_setup_placeholder(&mut st, false));
+        assert!(st.setup_placeholder.is_none());
+    }
+
+    #[test]
+    fn a_chat_on_a_machine_that_is_up_shows_no_placeholder() {
+        let mut st = state_with_pending_send();
+        assert!(!refresh_setup_placeholder(&mut st, false));
+        assert!(st.setup_placeholder.is_none());
     }
 }

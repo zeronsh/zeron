@@ -40,9 +40,12 @@ fn request(prompt: &str) -> RunRequest {
         cwd: String::new(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
     }
 }
 
@@ -702,4 +705,124 @@ async fn mcp_injection_reaches_shim_on_new_and_resumed_runs() {
             text: "mcp configured".into()
         }));
     }
+}
+
+/// A stop the SDK never settles (its cancel wedged) closes the turn at the
+/// deadline and retires the shim.
+#[tokio::test]
+async fn a_stop_the_shim_never_settles_closes_the_turn_at_its_deadline() {
+    use zeron_harness::TurnControl;
+    let harness = harness().with_stop_timeout(Duration::from_millis(500));
+    let (mut controls, _steer, _token) = controls();
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness
+        .run(request("scenario:stop-wedge"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async move {
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::TextDelta { .. }) {
+                turn.stop_turn();
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("the wedged stop settled and the stream ended");
+    let dones: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Done { status, .. } => Some(*status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dones, [DoneStatus::Interrupted], "{events:?}");
+}
+
+#[tokio::test]
+async fn attachments_reach_the_shim_as_image_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nfake").unwrap();
+    let image = image.display().to_string();
+    let mut req = request("scenario:images");
+    req.attachments = vec![image.clone()];
+    let (controls, steer, _token) = controls();
+    let mut stream = harness().run(req, controls).await.expect("run starts");
+    let mut texts = Vec::new();
+    let mut dones = 0;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(ev) = stream.next().await {
+            match ev.expect("stream event") {
+                AgentEvent::Done { status, error, .. } => {
+                    assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                    dones += 1;
+                    if dones == 1 {
+                        steer
+                            .send(SteerMessage {
+                                attachments: vec![image.clone()],
+                                ..SteerMessage::text("look")
+                            })
+                            .await
+                            .unwrap();
+                    } else {
+                        break;
+                    }
+                }
+                AgentEvent::TextDelta { text } => texts.push(text),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("both turns finished");
+    assert_eq!(texts, ["steer image"]);
+}
+
+/// Images over the per-image or per-message inline cap ride as path refs only.
+#[tokio::test]
+async fn oversized_attachments_are_not_inlined() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.png");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.resize(5 * 1024 * 1024, 0);
+    std::fs::write(&big, bytes).unwrap();
+    let small = dir.path().join("small.png");
+    std::fs::write(&small, b"\x89PNG\r\n\x1a\nsmall").unwrap();
+    let mut req = request("scenario:image-cap");
+    req.attachments = vec![big.display().to_string(), small.display().to_string()];
+    let (controls, _steer, _token) = controls();
+    let events = run_to_first_done(&harness(), req, controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+/// The shim learns the inline image budget and the silent-send bound.
+#[tokio::test]
+async fn the_run_frame_carries_the_send_bounds() {
+    let (controls, _steer, _token) = controls();
+    let harness = harness().with_silence_timeout(Duration::from_millis(1234));
+    let events = run_to_first_done(&harness, request("scenario:send-bounds"), controls).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
 }

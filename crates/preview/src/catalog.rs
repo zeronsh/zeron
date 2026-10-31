@@ -205,7 +205,8 @@ impl Catalog {
                 && !s.id.is_empty()
                 && ids.insert(s.id.clone())
                 && s.project_cwd.len() <= 4096
-                && s.name.len() <= 128),
+                && s.name.len() <= 128
+                && s.chat_id.as_ref().is_none_or(|chat| chat.len() <= 128)),
             "invalid peer service advertisement"
         );
         let mut state = self.0.state.lock().unwrap();
@@ -297,7 +298,7 @@ impl Catalog {
             }
         });
     }
-    /// Input has already passed cwd association and an HTTP handshake probe.
+    /// Input has already passed origin attribution and an HTTP handshake probe.
     pub fn replace_local(&self, mut observations: Vec<(PathBuf, Listener)>) -> anyhow::Result<()> {
         observations.sort_by_key(|(root, l)| {
             (
@@ -426,6 +427,7 @@ impl Catalog {
                 cwd: listener.cwd.to_string_lossy().into_owned(),
                 started_at: listener.started_at,
                 zeron_owned: listener.zeron_owned,
+                chat_id: listener.chat_id.clone(),
             };
             next.insert(id, LocalRoute { service, listener });
         }
@@ -477,6 +479,8 @@ mod tests {
             started_at: pid as u64,
             address: ([127, 0, 0, 1], port).into(),
             zeron_owned: true,
+            origin: Some("chat:chat".into()),
+            chat_id: Some("chat".into()),
         }
     }
     #[test]

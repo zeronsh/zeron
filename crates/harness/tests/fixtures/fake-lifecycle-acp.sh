@@ -18,7 +18,7 @@ for line in sys.stdin:
     elif method == "session/load":
         loaded = True
         if params["sessionId"] == "missing":
-            emit({"id":req["id"],"error":{"code":-1,"message":"session missing"}})
+            emit({"id":req["id"],"error":{"code":-32016,"message":"Session not found"}})
             continue
         assert params["sessionId"] == "pi-session"
     elif method == "session/set_config_option":

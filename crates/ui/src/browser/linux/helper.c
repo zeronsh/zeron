@@ -333,8 +333,40 @@ static Page *new_page(guint id) {
     g_signal_connect(p->web, "context-menu", G_CALLBACK(context_menu), p);
     g_signal_connect(p->web, "show-option-menu", G_CALLBACK(option_menu), p);
     gtk_widget_show_all(p->window);
+    // WebKit read the scale factor while the view had no window, when GTK falls
+    // back to the first monitor's (2 on a 1.5x Wayland output): it rendered 4x
+    // the pixels and GTK downscaled them. Re-read it from the offscreen window.
+    g_object_notify(G_OBJECT(p->web), "scale-factor");
     g_hash_table_insert(pages, GUINT_TO_POINTER(id), p);
     return p;
+}
+// Cairo's ARGB32 is BGRA in memory on little-endian hosts, GPUI's atlas order,
+// and WebKit paints an opaque background, so the surface is sent as-is.
+// Converting through GdkPixbuf took most of the helper's CPU and held large
+// pages well under 60 fps. Returns FALSE when only that path can read it (X11).
+static gboolean send_surface(Page *p) {
+    cairo_surface_t *surface = gtk_offscreen_window_get_surface(GTK_OFFSCREEN_WINDOW(p->window));
+    if (G_BYTE_ORDER != G_LITTLE_ENDIAN || !surface ||
+        cairo_surface_get_type(surface) != CAIRO_SURFACE_TYPE_IMAGE ||
+        cairo_image_surface_get_format(surface) != CAIRO_FORMAT_ARGB32)
+        return FALSE;
+    guint w = cairo_image_surface_get_width(surface), h = cairo_image_surface_get_height(surface);
+    if (cairo_image_surface_get_stride(surface) != (int)(w * 4))
+        return FALSE;
+    if (w != p->width || h != p->height) {
+        p->dirty = TRUE;
+        return TRUE;
+    }
+    cairo_surface_flush(surface);
+    float scale = p->scale;
+    guint32 scale_bits;
+    memcpy(&scale_bits, &scale, 4);
+    guint32 prefix[3] = {GUINT32_TO_LE(w), GUINT32_TO_LE(h), GUINT32_TO_LE(scale_bits)};
+    guint32 header[2] = {GUINT32_TO_LE(p->id), GUINT32_TO_LE(sizeof prefix + w * h * 4)};
+    char kind = 'F';
+    if (write_all(&kind, 1) && write_all(header, sizeof header) && write_all(prefix, sizeof prefix))
+        write_all(cairo_image_surface_get_data(surface), (size_t)w * h * 4);
+    return TRUE;
 }
 static gboolean render_frames(gpointer unused) {
     GHashTableIter it;
@@ -345,6 +377,8 @@ static gboolean render_frames(gpointer unused) {
         if (!p->visible || !p->dirty)
             continue;
         p->dirty = FALSE;
+        if (send_surface(p))
+            continue;
         GdkPixbuf *pix = gtk_offscreen_window_get_pixbuf(GTK_OFFSCREEN_WINDOW(p->window));
         if (!pix)
             continue;

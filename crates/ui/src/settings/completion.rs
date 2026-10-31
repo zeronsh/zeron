@@ -1,7 +1,12 @@
 //! Per-agent composer completion preferences inside Settings → Providers.
 
 use super::HarnessesPage;
-use crate::{settings, settings::widgets, theme::Theme};
+use crate::{
+    settings,
+    settings::search::{SearchAnchor, SettingId},
+    settings::widgets,
+    theme::Theme,
+};
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use zeron_proto::HarnessId;
 
@@ -91,6 +96,11 @@ impl HarnessesPage {
                     enabled,
                     format!("completion-switch-{harness:?}-{dollar}"),
                 ))
+                .search_anchor(if dollar {
+                    SettingId::SkillDollar
+                } else {
+                    SettingId::SkillSlash
+                })
         });
         div()
             .flex()

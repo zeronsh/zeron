@@ -60,6 +60,9 @@ struct WorkspaceFilesInner {
     repos: Repos,
     workspace: WorkspaceHost,
     device_id: String,
+    /// On a Cloud session machine, its checkout of the session's repository:
+    /// where a chat whose project was made on another device works.
+    cloud_checkout: Option<PathBuf>,
     mutation_gates: Mutex<HashMap<String, Weak<tokio::sync::RwLock<()>>>>,
     write_locks: Mutex<HashMap<WorkspaceFileKey, Weak<tokio::sync::Mutex<()>>>>,
     watches: Mutex<HashMap<String, Arc<CheckoutWatch>>>,
@@ -246,11 +249,23 @@ fn plain_folder_identity(device_id: &str, root: &Path) -> String {
 
 impl WorkspaceFiles {
     pub fn new(repos: Repos, workspace: WorkspaceHost, device_id: impl Into<String>) -> Self {
+        Self::with_cloud_checkout(repos, workspace, device_id, None)
+    }
+
+    /// [`Self::new`] on a Cloud session machine: `cloud_checkout` is its
+    /// checkout of the session's repository.
+    pub fn with_cloud_checkout(
+        repos: Repos,
+        workspace: WorkspaceHost,
+        device_id: impl Into<String>,
+        cloud_checkout: Option<PathBuf>,
+    ) -> Self {
         Self {
             inner: Arc::new(WorkspaceFilesInner {
                 repos,
                 workspace,
                 device_id: device_id.into(),
+                cloud_checkout,
                 mutation_gates: Mutex::new(HashMap::new()),
                 write_locks: Mutex::new(HashMap::new()),
                 watches: Mutex::new(HashMap::new()),
@@ -325,15 +340,20 @@ impl WorkspaceFiles {
                     .ok_or_else(|| {
                         WorkspaceFilesError::NotFound("chat workspace space not found".into())
                     })?;
-                if space.device_id != self.inner.device_id {
+                // A project made on another device is that device's folder —
+                // except on a Cloud session machine, which works in its own
+                // checkout of the project's repository.
+                let space_path = if space.device_id == self.inner.device_id {
+                    PathBuf::from(&space.path)
+                } else if let Some(checkout) = &self.inner.cloud_checkout {
+                    checkout.clone()
+                } else {
                     return Err(WorkspaceFilesError::Authorization(
                         "chat space belongs to another device".into(),
                     ));
-                }
+                };
                 let (checkout, identity) = tokio::join!(
-                    self.inner
-                        .repos
-                        .workspace_checkout(Path::new(&space.path), &cwd),
+                    self.inner.repos.workspace_checkout(&space_path, &cwd),
                     self.inner.repos.checkout_identity(&cwd),
                 );
                 let root = checkout.ok_or_else(|| {
@@ -350,12 +370,17 @@ impl WorkspaceFiles {
                     .space(space_id)
                     .map_err(|error| WorkspaceFilesError::Io(error.to_string()))?
                     .ok_or_else(|| WorkspaceFilesError::NotFound("space not found".into()))?;
-                if space.device_id != self.inner.device_id {
+                // As for a chat target: a Cloud session machine answers for a
+                // project made elsewhere from its own checkout of it.
+                let space_path = if space.device_id == self.inner.device_id {
+                    PathBuf::from(&space.path)
+                } else if let Some(checkout) = &self.inner.cloud_checkout {
+                    checkout.clone()
+                } else {
                     return Err(WorkspaceFilesError::Authorization(
                         "space belongs to another device".into(),
                     ));
-                }
-                let space_path = PathBuf::from(&space.path);
+                };
                 let requested = target
                     .checkout_path
                     .as_deref()
@@ -3613,6 +3638,89 @@ mod tests {
 mod image_tests {
     use super::*;
     use zeron_proto::{ReadWorkspaceImageRequest, WORKSPACE_IMAGE_CHUNK_BYTES, WorkspaceTarget};
+
+    /// A Cloud session machine's chat belongs to it, but its project was
+    /// made on the laptop: files resolve to the machine's own checkout, and
+    /// anywhere else such a chat is still refused.
+    #[tokio::test]
+    async fn a_cloud_session_chat_browses_its_own_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("app");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&checkout)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let host = WorkspaceHost::open(
+            Arc::new(zeron_sync::DocsStore::open(&dir.path().join("docs")).unwrap()),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "cloud-session".into(),
+                device_name: "Cloud session".into(),
+                platform: "cloud".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        host.create_space("space", "laptop", "/Users/me/app", None, true)
+            .unwrap();
+        // Hosted on the session machine, like a chat sent to Cloud.
+        host.create_chat_hosted(
+            "chat",
+            Some("space"),
+            None,
+            Some("cloud-session"),
+            None,
+            Some(checkout.to_string_lossy().into_owned()),
+            None,
+        )
+        .unwrap();
+        let repos = Repos::new(&dir.path().join("data"), "cloud-session");
+        let target = WorkspaceTarget {
+            chat_id: Some("chat".into()),
+            space_id: None,
+            checkout_path: None,
+        };
+        let refused = WorkspaceFiles::new(repos.clone(), host.clone(), "cloud-session")
+            .resolve_target(&target)
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("chat space belongs to another device"),
+            "{refused}"
+        );
+        let files = WorkspaceFiles::with_cloud_checkout(
+            repos,
+            host,
+            "cloud-session",
+            Some(checkout.clone()),
+        );
+        let resolved = files.resolve_target(&target).await.unwrap();
+        assert_eq!(resolved.root, std::fs::canonicalize(&checkout).unwrap());
+        // The files panel's git status asks by project and checkout path.
+        let by_space = WorkspaceTarget {
+            chat_id: None,
+            space_id: Some("space".into()),
+            checkout_path: Some(checkout.to_string_lossy().into_owned()),
+        };
+        assert_eq!(
+            files.resolve_target(&by_space).await.unwrap().root,
+            resolved.root
+        );
+        // A path outside the machine's checkout is still refused.
+        let outside = WorkspaceTarget {
+            checkout_path: Some(dir.path().to_string_lossy().into_owned()),
+            ..by_space
+        };
+        assert!(files.resolve_target(&outside).await.is_err());
+    }
     fn request() -> ReadWorkspaceImageRequest {
         ReadWorkspaceImageRequest {
             target: WorkspaceTarget {

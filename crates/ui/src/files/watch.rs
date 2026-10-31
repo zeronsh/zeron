@@ -6,6 +6,13 @@ use zeron_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
 use super::{FilesEvent, FilesSurface, client::WorkspaceFilesClient, model::parent_path};
 
 impl FilesSurface {
+    /// Stop following a host that won't answer (a sleeping Cloud machine);
+    /// the next `ensure_loaded` follows it again.
+    pub(crate) fn release_watch(&mut self) {
+        self.watch_task = None;
+        self.watch_error = None;
+    }
+
     pub(super) fn ensure_watch(&mut self, cx: &mut Context<Self>) {
         if self.watch_task.is_some() {
             return;
@@ -47,6 +54,7 @@ impl FilesSurface {
                             .update(cx, |surface, cx| {
                                 surface.watch_error =
                                     Some("File updates interrupted — retrying".into());
+                                surface.recheck_host(cx);
                                 cx.notify();
                             })
                             .is_err()
@@ -58,6 +66,7 @@ impl FilesSurface {
                         if this
                             .update(cx, |surface, cx| {
                                 surface.watch_error = Some(error.to_string().into());
+                                surface.recheck_host(cx);
                                 cx.notify();
                             })
                             .is_err()

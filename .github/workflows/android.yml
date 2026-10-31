@@ -1,0 +1,180 @@
+name: Android
+
+# Builds the Android APK whenever the app or its Rust core changes. Pull
+# requests get it as a workflow artifact; main also publishes it to the
+# `comet-native-releases` R2 bucket, served at
+# zeron.sh/releases/zeron-android-arm64.apk (the website's download, served
+# `no-cache` since every build replaces it), with a copy named for its version
+# and build number — so never replaced, and cacheable for good — and sha256s.
+#
+# Publishing needs the upload key, so every build installs over the last:
+#   ANDROID_KEYSTORE_BASE64    base64 of the release keystore (.jks)
+#   ANDROID_KEYSTORE_PASSWORD  ANDROID_KEY_ALIAS  ANDROID_KEY_PASSWORD
+# Without them the APK is signed with a throwaway debug key and not published.
+
+on:
+  pull_request:
+    paths:
+      - 'apps/android/**'
+      - 'crates/**'
+      - 'scripts/android/**'
+      # The app measures and draws the iOS app's fonts and icons.
+      - 'apps/ios/Zeron/Fonts/**'
+      - 'apps/ios/Zeron/Assets.xcassets/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/android.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/android/**'
+      - 'crates/**'
+      - 'scripts/android/**'
+      - 'apps/ios/Zeron/Fonts/**'
+      - 'apps/ios/Zeron/Assets.xcassets/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NDK_VERSION: 29.0.14206865
+  # Phones: arm64 only (an x86_64 core would double the download for emulators).
+  ZERON_ANDROID_ABIS: arm64-v8a
+  # Published builds (main): thin LTO, stripped — the profile iOS archives use,
+  # about 10% smaller. Pull requests take the quicker `mobile` profile (AGP
+  # still strips its debug info).
+  ZERON_ANDROID_PROFILE: ${{ github.ref == 'refs/heads/main' && 'mobile-dist' || 'mobile' }}
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    # Cold: the core for arm64 (thin LTO on main), the bindings generator, Gradle.
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+      signed: ${{ steps.signing.outputs.signed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      - name: Android SDK packages
+        run: sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0" "ndk;$NDK_VERSION"
+      - name: rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: android
+      - name: build tools (cargo-ndk, rsvg-convert)
+        run: |
+          cargo install cargo-ndk --locked
+          sudo apt-get update -q && sudo apt-get install -y -q librsvg2-bin
+
+      - id: version
+        name: version (Cargo.toml) and build number
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # Only grows: Android installs a build over another only when it's higher.
+          echo "BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "build=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+
+      - id: signing
+        name: release key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "No release key (forks and unconfigured repos): signing with a debug key; this build won't be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          keystore="$RUNNER_TEMP/zeron-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$keystore"
+          chmod 600 "$keystore"
+          {
+            echo "ZERON_ANDROID_KEYSTORE=$keystore"
+            echo "ZERON_ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ZERON_ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ZERON_ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: assemble release APK
+        working-directory: apps/android
+        run: ./gradlew :app:assembleRelease -PzeronVersionCode="$BUILD_NUMBER" --console=plain --no-configuration-cache
+
+      - name: package
+        run: |
+          mkdir -p out/android
+          apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
+          cp apps/android/app/build/outputs/apk/release/app-release.apk "$apk"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | grep -m1 "certificate SHA-256" || true
+          (cd out/android && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
+          ls -la out/android
+          rm -f "$RUNNER_TEMP/zeron-release.jks"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-apk
+          path: out/android/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.apk.outputs.signed == 'true'
+    needs: apk
+    runs-on: ubuntu-latest
+    concurrency:
+      group: android-publish
+      cancel-in-progress: false
+    env:
+      # `secrets` is not a valid context in step `if:` expressions — surface
+      # the token through job env and gate on that instead.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: b57dde68ee5964dccc025437b5478a5b
+      VERSION: ${{ needs.apk.outputs.version }}
+      BUILD_NUMBER: ${{ needs.apk.outputs.build }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-apk
+          path: out/android
+      - name: upload to R2 (zeron.sh/releases/*)
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: |
+          apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
+          (cd out/android && sha256sum -c "$(basename "$apk").sha256")
+          put() {
+            npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote \
+              --content-type "$3" --cache-control "$4"
+          }
+          type=application/vnd.android.package-archive
+          # This build under its own name (never replaced), then the stable
+          # name the website links to (revalidated, so a new build is picked
+          # up at once; the edge serves each object's own cache-control).
+          immutable="public, max-age=31536000, immutable"
+          put "$(basename "$apk")" "$apk" "$type" "$immutable"
+          put "$(basename "$apk").sha256" "$apk.sha256" text/plain "$immutable"
+          put zeron-android-arm64.apk "$apk" "$type" "no-cache"
+          sed "s/$(basename "$apk")/zeron-android-arm64.apk/" "$apk.sha256" > latest.sha256
+          put zeron-android-arm64.apk.sha256 latest.sha256 text/plain "no-cache"

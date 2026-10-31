@@ -78,7 +78,18 @@ pub(crate) struct ClientInner {
     path_online: AtomicBool,
     foreground: AtomicBool,
     synced: AtomicBool,
-    harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    pub(crate) harness_catalogs: Mutex<HashMap<String, Vec<HarnessInfo>>>,
+    /// GitHub repositories Cloud reaches, as last read (lowercased
+    /// `owner/name`): starting a Cloud session needs one, and reading it
+    /// again would hold the new chat up.
+    pub(crate) cloud_repos: Mutex<HashMap<String, crate::cloud::CloudRepoRef>>,
+    /// Terminals on other devices: direct link or relay, switching
+    /// mid-session (the desktop engine runs the same hub).
+    pub(crate) remote_terminals: zeron_term_link::remote::RemoteTerminals,
+    /// Wakes terminal streams waiting to reconnect (foreground, network back).
+    pub(crate) terminals_wake: Arc<tokio::sync::Notify>,
+    /// When the app last went to the background.
+    backgrounded_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Drop for ClientInner {
@@ -390,6 +401,7 @@ impl ClientInner {
                 .and_then(zeron_proto::version_triple)
                 .is_some_and(|v| v >= QUEUED_ATTACHMENTS_MIN),
             mid_turn_steering,
+            provider_switch: has(capability::PROVIDER_SWITCH_V1),
         }
     }
 
@@ -453,12 +465,30 @@ impl ClientInner {
     pub(crate) async fn host_rpc(
         self: &Arc<Self>,
         device_id: &str,
-        method: &'static str,
+        method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         match self.backend() {
             Backend::Demo(demo) => demo.host_rpc(device_id, method, params).await,
             Backend::Live(live) => live.relay.call(device_id, method, params).await,
+        }
+    }
+
+    /// A host stream (terminal output, a subagent's transcript): the relay's
+    /// subscription live, the demo host's channel offline.
+    pub(crate) async fn host_subscribe(
+        self: &Arc<Self>,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::host_stream::HostStream> {
+        match self.backend() {
+            Backend::Demo(demo) => demo.host_subscribe(device_id, method, params).await,
+            Backend::Live(live) => live
+                .relay
+                .subscribe(device_id, method, params)
+                .await
+                .map(crate::host_stream::HostStream::Live),
         }
     }
 
@@ -519,7 +549,7 @@ impl ClientInner {
 /// One signed-in account (or Demo mode). Cheap to clone.
 #[derive(Clone)]
 pub struct Client {
-    inner: Arc<ClientInner>,
+    pub(crate) inner: Arc<ClientInner>,
 }
 
 impl std::fmt::Debug for Client {
@@ -593,6 +623,10 @@ impl Client {
             foreground: AtomicBool::new(true),
             synced: AtomicBool::new(false),
             harness_catalogs: Mutex::new(HashMap::new()),
+            cloud_repos: Mutex::new(HashMap::new()),
+            remote_terminals: Default::default(),
+            terminals_wake: Arc::new(tokio::sync::Notify::new()),
+            backgrounded_at: Mutex::new(None),
             credentials: credentials.clone(),
             config,
         });
@@ -763,6 +797,7 @@ impl Client {
             created_at: now,
             harness_session_id: None,
             harness_session_cwd: None,
+            harness_session_harness: None,
             space_id,
             last_seen_at: None,
             room_gen: Some(2),
@@ -771,6 +806,72 @@ impl Client {
         let id = chat.id.clone();
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(id)
+    }
+
+    /// A fresh side chat under `parent_id`: same host, folder, checkout and
+    /// agent settings as its parent, an empty conversation (the desktop's
+    /// "New side chat"; agent-spawned side chats have the same shape).
+    pub fn create_side_chat(&self, parent_id: &str) -> Result<String> {
+        let parent = self
+            .inner
+            .workspace
+            .chat(parent_id)
+            .ok_or_else(|| ClientError::NotFound(parent_id.to_owned()))?;
+        // One level deep: a side chat's own side chat hangs off the root.
+        let root = parent.parent_chat_id.clone().unwrap_or_else(|| parent.id.clone());
+        let mut chat = parent;
+        chat.id = crate::new_id();
+        chat.parent_chat_id = Some(root);
+        chat.title = None;
+        chat.archived = false;
+        chat.created_at = Utc::now();
+        chat.last_message_at = None;
+        chat.last_message_preview = None;
+        chat.last_seen_at = None;
+        chat.harness_session_id = None;
+        chat.harness_session_cwd = None;
+        chat.harness_session_harness = None;
+        chat.room_gen = Some(2);
+        let id = chat.id.clone();
+        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(id)
+    }
+
+    /// Fork `source_id` through its latest completed reply into a side chat
+    /// (`ForkSideChat`, answered by the source's host, which copies the
+    /// conversation). A side chat forks as a sibling, under the same parent.
+    pub async fn fork_side_chat(&self, source_id: &str) -> Result<String> {
+        let source = self
+            .inner
+            .workspace
+            .chat(source_id)
+            .ok_or_else(|| ClientError::NotFound(source_id.to_owned()))?;
+        let parent = source.parent_chat_id.clone().unwrap_or_else(|| source.id.clone());
+        let chat_id = crate::new_id();
+        let reply = self
+            .inner
+            .host_rpc(
+                &source.device_id,
+                zeron_rpc::methods::FORK_SIDE_CHAT,
+                serde_json::json!({
+                    "chatId": chat_id,
+                    "sourceChatId": source.id,
+                    "parentChatId": parent,
+                }),
+            )
+            .await?;
+        // The host writes the fork's row; it reaches this device through
+        // registry sync on its own time. Hold the reply's copy now so the
+        // fork opens at once (the same row converges when sync lands).
+        match serde_json::from_value::<Chat>(reply) {
+            Ok(chat) => {
+                if self.inner.workspace.chat(&chat.id).is_none() {
+                    self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+                }
+                Ok(chat.id)
+            }
+            Err(_) => Ok(chat_id),
+        }
     }
 
     fn chat_write(
@@ -802,12 +903,65 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
+        // A provider change needs a host that switches: an older one would
+        // resume the chat's stored session under the new provider.
+        if let Some(chat) = self.inner.workspace.chat(chat_id)
+            && chat
+                .config
+                .as_ref()
+                .is_some_and(|current| current.harness != config.harness)
+            && !self
+                .inner
+                .host_capabilities(&chat.device_id, None)
+                .provider_switch
+        {
+            return Err(ClientError::Unsupported(
+                "This chat's computer needs a newer Zeron to switch provider.".into(),
+            ));
+        }
         self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))
     }
 
     /// Remove the chat row (the doc itself stays on the edge).
     pub fn delete_session(&self, chat_id: &str) -> Result<()> {
+        let on_cloud = self
+            .inner
+            .workspace
+            .chat(chat_id)
+            .is_some_and(|chat| zeron_proto::is_cloud_device(&chat.device_id, ""));
+        // A Cloud chat's children on Cloud go with it: its delegates (each on
+        // a machine of its own, which would otherwise outlive the parent) and
+        // its side chats (on its machine, now gone).
+        let children: Vec<String> = if on_cloud {
+            let (state, _) = self.inner.workspace.state();
+            state
+                .chats
+                .iter()
+                .filter(|chat| {
+                    chat.parent_chat_id.as_deref() == Some(chat_id)
+                        && zeron_proto::is_cloud_device(&chat.device_id, "")
+                })
+                .map(|chat| chat.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.chat_write(chat_id, |doc| doc.delete_chat(chat_id))?;
+        for child in &children {
+            if let Err(err) = self.chat_write(child, |doc| doc.delete_chat(child)) {
+                tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
+            }
+            self.forget_local_session(child);
+        }
+        if on_cloud {
+            self.delete_cloud_machines(std::iter::once(chat_id.to_owned()).chain(children).collect());
+        }
+        self.forget_local_session(chat_id);
+        Ok(())
+    }
+
+    /// Drop a deleted chat's open session and local snapshot.
+    fn forget_local_session(&self, chat_id: &str) {
         let core = lock(&self.inner.sessions).remove(chat_id);
         // A view may still hold the session: close its room now (it flushes
         // once), so nothing re-saves the snapshot deleted below.
@@ -820,7 +974,6 @@ impl Client {
         {
             tracing::debug!(error = %err, "local chat snapshot delete failed");
         }
-        Ok(())
     }
 
     /// Mid-session ref switch: retarget onto the ref's existing worktree (row
@@ -990,6 +1143,7 @@ impl Client {
             git_checked_at: None,
             checkout_id: None,
             repository_id: None,
+            github_repo: None,
             created_at: Utc::now(),
         };
         let id = space.id.clone();
@@ -1054,9 +1208,20 @@ impl Client {
 
     /// Delete a project and cascade its chats' rows.
     pub fn delete_project(&self, space_id: &str) -> Result<()> {
-        let deleted = self
-            .inner
-            .registry_write(|doc| doc.delete_space(space_id))?;
+        let mut cloud_chats = Vec::new();
+        let deleted = self.inner.registry_write(|doc| {
+            cloud_chats = doc
+                .read_chats()?
+                .into_iter()
+                .filter(|chat| {
+                    chat.space_id.as_deref() == Some(space_id)
+                        && zeron_proto::is_cloud_device(&chat.device_id, "")
+                })
+                .map(|chat| chat.id)
+                .collect();
+            doc.delete_space(space_id)
+        })?;
+        self.delete_cloud_machines(cloud_chats);
         let mut sessions = lock(&self.inner.sessions);
         for chat_id in deleted.chat_ids {
             sessions.remove(&chat_id);
@@ -1138,7 +1303,9 @@ impl Client {
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
         let list = match self.inner.backend() {
-            Backend::Demo(demo) => demo.list_harnesses(device_id).await,
+            Backend::Demo(demo) => {
+                crate::providers::with_demo_toggles(true, demo.list_harnesses(device_id).await)
+            }
             Backend::Live(live) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
                 let reply = live
@@ -1182,6 +1349,9 @@ impl Client {
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_models(harness).await,
+            Backend::Live(_) if zeron_proto::is_cloud_device(device_id, "") => {
+                self.cloud_models(harness).await
+            }
             Backend::Live(live) => {
                 let cache = catalog::DiskCatalog::new(&self.inner.config.data_dir);
                 let reply = live
@@ -1478,6 +1648,30 @@ impl Client {
                 live.kick();
                 self.kick_rooms();
             }
+            if online {
+                self.network_path_changed();
+            }
+        }
+    }
+
+    /// The OS network path changed (another interface, a new address): the
+    /// direct connections' paths are gone, so they re-pair now and the
+    /// terminals on them carry on over the relay meanwhile.
+    pub fn network_path_changed(&self) {
+        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
+            direct.network_changed();
+        }
+        self.inner.terminals_wake.notify_waiters();
+    }
+
+    /// Start pairing with the device hosting `chat_id`, so a terminal opened
+    /// on it next starts on the direct link (a terminal screen opening).
+    pub fn warm_direct(&self, chat_id: &str) {
+        if let (Some(direct), Ok(device)) = (
+            self.inner.live().and_then(|live| live.direct()),
+            self.chat_host(chat_id),
+        ) {
+            direct.warm(&device);
         }
     }
 
@@ -1486,6 +1680,14 @@ impl Client {
     /// restart PR watches.
     pub fn on_foreground(&self) {
         self.inner.foreground.store(true, Ordering::Release);
+        let away = lock(&self.inner.backgrounded_at)
+            .take()
+            .map(|at| at.elapsed())
+            .unwrap_or_default();
+        if let Some(direct) = self.inner.live().and_then(|live| live.direct()) {
+            direct.foreground(away);
+        }
+        self.inner.terminals_wake.notify_waiters();
         if let Some(live) = self.inner.live() {
             live.kick();
             live.probe_health();
@@ -1500,6 +1702,7 @@ impl Client {
     /// work and PR streams.
     pub fn on_background(&self) {
         self.inner.foreground.store(false, Ordering::Release);
+        *lock(&self.inner.backgrounded_at) = Some(std::time::Instant::now());
         if let Some(live) = self.inner.live() {
             live.relay.stop_watches();
             live.flush_registry(&self.inner);

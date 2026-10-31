@@ -30,6 +30,22 @@ Zeron bundles the SVG icon set and filename/folder associations from
 Symbols is MIT licensed. The complete upstream license and copyright notice is
 retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
+## Math fonts
+
+zatex (`crates/zatex`) bundles unmodified math fonts for rendering LaTeX
+(`bundled` feature). Each font's license and copyright notice is retained
+beside it in `crates/zatex/fonts/`: the SIL Open Font License 1.1 (`OFL-*.txt`)
+or the GUST Font License (`GUST-FONT-LICENSE.txt`, LPPL 1.3c).
+
+| Font | Version | License | Source |
+| --- | --- | --- | --- |
+| Fira Math | 0.3.4 | OFL-1.1 | https://github.com/firamath/firamath |
+| STIX Two Math | 2.13 | OFL-1.1 | https://github.com/stipub/stixfonts |
+| New Computer Modern Math (Book) | 8.1.1 | GUST Font License | https://ctan.org/pkg/newcomputermodern |
+| Libertinus Math | 7.051 | OFL-1.1 | https://github.com/alerque/libertinus |
+| TeX Gyre Pagella Math | 1.632 | GUST Font License | https://ctan.org/pkg/tex-gyre-math |
+| Euler Math | 0.75 | OFL-1.1 | https://ctan.org/pkg/euler-math |
+
 ## Bundled theme palette adaptations
 
 Zeron includes manually curated palette adaptations derived from the projects

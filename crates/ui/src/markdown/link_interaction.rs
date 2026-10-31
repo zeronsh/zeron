@@ -256,9 +256,10 @@ impl Element for LinkRanges {
                             cx,
                         );
                         let dismissed = state.dismissed.clone();
-                        let epoch = state.epoch.clone();
                         // This disclosure is not a menu: menu_at consumes every
                         // outside press, preventing other controls from receiving it.
+                        // An outside press only hides it; the links keep their
+                        // ids, so a press on one of them still clicks it.
                         let mut popup = gpui::deferred(
                             gpui::anchored()
                                 .position(rect.bottom_left())
@@ -270,7 +271,6 @@ impl Element for LinkRanges {
                                         .occlude()
                                         .on_mouse_down_out(move |_, window, _| {
                                             dismissed.set(true);
-                                            epoch.set(epoch.get().wrapping_add(1));
                                             window.refresh();
                                         })
                                         .child(card),

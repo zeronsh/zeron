@@ -115,6 +115,6 @@ wait_for "engine B ipc :$B_PORT" 60 bash -c "exec 3<>/dev/tcp/127.0.0.1/$B_PORT"
 echo "engines: A pid=$A_PID ipc=:$A_PORT  B pid=$B_PID ipc=:$B_PORT"
 
 # ── 4. Drive the cross-device flow through both IPCs ───────────────────────────
-"$DRIVER" "$A_PORT" "$B_PORT"
+"$DRIVER" "$A_PORT" "$B_PORT" "$A_DIR" "$B_DIR"
 STATUS=$?
 exit "$STATUS"

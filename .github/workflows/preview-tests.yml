@@ -29,3 +29,43 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+  # The credential vault (edge/vault) has its own package and tests; run them
+  # whenever it (or this workflow) changes.
+  vault:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: edge/vault
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: detect vault changes
+        id: changed
+        working-directory: .
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null \
+            || git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(edge/vault/|\.github/workflows/preview-tests\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/vault/package-lock.json
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm ci
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm run typecheck
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm test

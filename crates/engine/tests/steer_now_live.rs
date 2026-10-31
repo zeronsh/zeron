@@ -107,6 +107,8 @@ async fn steer_now_interrupts_a_streaming_answer() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::DangerFullAccess,
+                access: Default::default(),
+                plan: false,
             },
         )
         .unwrap();
@@ -143,9 +145,12 @@ async fn steer_now_interrupts_a_streaming_answer() {
                     cwd: cwd.clone(),
                     sandbox: SandboxLevel::DangerFullAccess,
                     auto_approve: true,
+                    access: Default::default(),
+                    plan: false,
                     attachments: vec![],
                     worktree: None,
                     resume: None,
+                    env: Default::default(),
                 },
             },
         )

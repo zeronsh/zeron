@@ -63,6 +63,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         overflow_y: None,
         scroll_x: None,
         smooth_overflow_x: false,
+        compose_vertical: false,
         grow_x: false,
         child: child.into_any_element(),
     }
@@ -82,6 +83,7 @@ pub struct EdgeFaded {
     overflow_y: Option<Box<dyn Fn(&App) -> (bool, bool)>>,
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
+    compose_vertical: bool,
     grow_x: bool,
     child: AnyElement,
 }
@@ -157,6 +159,14 @@ impl EdgeFaded {
     pub fn fade_label_overflow(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self.smooth_overflow_x = true;
+        self
+    }
+
+    /// Keep an enclosing wrapper's vertical fade instead of replacing it: a
+    /// folded bubble's bottom fade still fades with the transcript under the
+    /// titlebar and composer. See [`compose_vertical`].
+    pub fn compose_vertical(mut self) -> Self {
+        self.compose_vertical = true;
         self
     }
 
@@ -284,6 +294,10 @@ impl Element for EdgeFaded {
             && let Some(parent) = active_fade(window, cx)
         {
             fade = inherit_vertical_fade(fade, parent);
+        } else if self.compose_vertical
+            && let Some(parent) = active_fade(window, cx)
+        {
+            fade = compose_vertical(fade, parent);
         }
         if !cx.has_global::<PaintFades>() {
             cx.set_global(PaintFades::default());
@@ -295,6 +309,37 @@ impl Element for EdgeFaded {
         window.with_edge_fade(Some(fade), |window| self.child.paint(window, cx));
         cx.global::<PaintFades>().0.borrow_mut().pop();
     }
+}
+
+/// One scope for a fade nested in another's vertical fade: of each pair of
+/// active top edges the lower one, of bottom edges the higher one, each with
+/// its own band. GPUI takes the least ramp of a scope's edges, so where the
+/// two bands overlap this keeps the stronger edge rather than both.
+fn compose_vertical(fade: EdgeFade, parent: EdgeFade) -> EdgeFade {
+    let top_band = |f: &EdgeFade| f.band_top.unwrap_or(f.band);
+    let bottom_band = |f: &EdgeFade| f.band_bottom.unwrap_or(f.band);
+    let (top, top_y, band_top) = match (fade.top, parent.top) {
+        (true, true) if parent.bounds.top() <= fade.bounds.top() => {
+            (true, fade.bounds.top(), top_band(&fade))
+        }
+        (_, true) => (true, parent.bounds.top(), top_band(&parent)),
+        (on, false) => (on, fade.bounds.top(), top_band(&fade)),
+    };
+    let (bottom, bottom_y, band_bottom) = match (fade.bottom, parent.bottom) {
+        (true, true) if parent.bounds.bottom() >= fade.bounds.bottom() => {
+            (true, fade.bounds.bottom(), bottom_band(&fade))
+        }
+        (_, true) => (true, parent.bounds.bottom(), bottom_band(&parent)),
+        (on, false) => (on, fade.bounds.bottom(), bottom_band(&fade)),
+    };
+    let mut composed = fade;
+    composed.bounds.origin.y = top_y;
+    composed.bounds.size.height = (bottom_y - top_y).max(px(0.0));
+    composed.top = top;
+    composed.bottom = bottom;
+    composed.band_top = Some(band_top);
+    composed.band_bottom = Some(band_bottom);
+    composed
 }
 
 fn label_fade_outset(overflow: f32, band: f32) -> f32 {
@@ -309,6 +354,46 @@ mod tests {
     use super::*;
     use gpui::{AppContext, Context, Render, Styled, div, prelude::*};
     use std::rc::Rc;
+
+    #[test]
+    fn a_nested_bottom_fade_keeps_the_parents_edges() {
+        let fade = |top: f32, bottom: f32, band: f32, edges: (bool, bool)| EdgeFade {
+            bounds: Bounds::new(
+                gpui::point(px(0.0), px(top)),
+                gpui::size(px(400.0), px(bottom - top)),
+            ),
+            band: px(band),
+            band_top: None,
+            band_bottom: None,
+            band_left: None,
+            band_right: None,
+            top: edges.0,
+            bottom: edges.1,
+            left: false,
+            right: false,
+        };
+        // The transcript fades under the titlebar (top 0) and composer
+        // (bottom 800); a folded bubble fades its own bottom at 300.
+        let parent = fade(0.0, 800.0, 24.0, (true, true));
+        let composed = compose_vertical(fade(200.0, 300.0, 33.0, (false, true)), parent);
+        assert!(composed.top && composed.bottom);
+        assert_eq!(composed.bounds.top(), px(0.0));
+        assert_eq!(composed.bounds.bottom(), px(300.0));
+        assert_eq!(composed.band_top, Some(px(24.0)));
+        assert_eq!(composed.band_bottom, Some(px(33.0)));
+        // A bubble reaching under the composer takes the composer's edge.
+        let composed = compose_vertical(fade(700.0, 900.0, 33.0, (false, true)), parent);
+        assert_eq!(composed.bounds.bottom(), px(800.0));
+        assert_eq!(composed.band_bottom, Some(px(24.0)));
+        // A parent fading neither edge leaves the child's fade as it was.
+        let composed = compose_vertical(
+            fade(200.0, 300.0, 33.0, (false, true)),
+            fade(0.0, 800.0, 24.0, (false, false)),
+        );
+        assert!(!composed.top && composed.bottom);
+        assert_eq!(composed.bounds.top(), px(200.0));
+        assert_eq!(composed.bounds.bottom(), px(300.0));
+    }
 
     #[gpui::test]
     fn menu_fades_follow_scroll_and_disappear_when_content_fits(cx: &mut gpui::TestAppContext) {

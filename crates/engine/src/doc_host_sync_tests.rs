@@ -9,6 +9,9 @@ use zeron_sync::chat_frames::{decode, encode, frame_type};
 enum Hold {
     Checkpoint,
     Backfill,
+    /// The room accepts the socket but answers HELLO only on release: a
+    /// slow link's opening join.
+    Hello,
 }
 
 struct Relay {
@@ -99,6 +102,9 @@ async fn relay(hold: Hold) -> Relay {
                                 continue;
                             }
                             let Some(frame) = decode(&message.into_data()) else { continue };
+                            if frame.kind == frame_type::HELLO && matches!(hold, Hold::Hello) {
+                                let _ = gate.wait_for(|released| *released).await;
+                            }
                             let reply = match frame.kind {
                                 frame_type::HELLO => encode(frame_type::STATE, &serde_json::json!({
                                     "headSeq": 0, "seqFloor": 0, "checkpointSeq": 0,
@@ -255,6 +261,217 @@ async fn idle_connection_closes_while_caller_keeps_document() {
     assert_eq!(handle.writers.load(Ordering::Acquire), 1);
     drop(writer);
     assert_eq!(handle.writers.load(Ordering::Acquire), 0);
+    host.shutdown_workers().await;
+}
+
+/// What a remote chat's composer and transcript read while it opens on a
+/// slow link: its room is Connecting and, past the engine's grace, not
+/// connected — never delivery-live — until the room answers. The UI calls
+/// that syncing, and an outage only once the dial has stalled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_hello_reads_as_connecting_until_the_room_answers() {
+    use zeron_proto::ChatSyncState as S;
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Hello).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    store.initialize_chat_outbox("slow", &[]).unwrap();
+    let host = host(store, &relay);
+    let _handle = host.open("slow").unwrap();
+    let chat = |host: &DocHost| {
+        let chat = host
+            .compute_connectivity()
+            .chats
+            .into_iter()
+            .find(|chat| chat.chat_id == "slow")
+            .expect("an open chat is reported");
+        (chat.sync_state, chat.connected, chat.delivery_live)
+    };
+    until(|| relay.joins.load(Ordering::SeqCst) == 1).await;
+    assert_eq!(
+        chat(&host),
+        (S::Connecting, true, false),
+        "inside the grace"
+    );
+    tokio::time::sleep(DEGRADE_GRACE + Duration::from_millis(500)).await;
+    assert_eq!(chat(&host), (S::Connecting, false, false));
+    relay.release.send_replace(true);
+    until(|| chat(&host).2).await;
+    assert_eq!(chat(&host), (S::Synced, true, true));
+    host.shutdown_workers().await;
+}
+
+/// A room holding `head` remote rows whose checkpoint covers the first
+/// `checkpoint_seq`. Records `(connection, after)` for every ROWS_REQ.
+struct RowsRelay {
+    url: String,
+    requests: Arc<Mutex<Vec<(usize, u64)>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RowsRelay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn rows_relay(head: u64, checkpoint_seq: u64) -> RowsRelay {
+    let remote = loro::LoroDoc::new();
+    let text = remote.get_text("log");
+    let mut rows = Vec::new();
+    let mut checkpoint = (Vec::new(), Vec::new());
+    for seq in 1..=head {
+        let before = remote.oplog_vv();
+        text.insert(text.len_unicode(), &format!("{seq};")).unwrap();
+        remote.commit();
+        rows.push(remote.export(loro::ExportMode::updates(&before)).unwrap());
+        if seq == checkpoint_seq {
+            checkpoint = (
+                remote.export(loro::ExportMode::Snapshot).unwrap(),
+                remote.oplog_vv().encode(),
+            );
+        }
+    }
+    let log = Arc::new(Mutex::new(rows));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn(async move {
+        let mut peers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let (checkpoint, frontier) = checkpoint.clone();
+                    let log = log.clone();
+                    let recorded = recorded.clone();
+                    let connections = connections.clone();
+                    peers.spawn(async move {
+                        let mut buffer = [0; 8192];
+                        let (headers, length) = loop {
+                            let n = stream.peek(&mut buffer).await.unwrap_or(0);
+                            if n == 0 { return }
+                            if let Some(end) = buffer[..n].windows(4).position(|v| v == b"\r\n\r\n") {
+                                break (String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase(), end + 4);
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        };
+                        if !headers.contains("upgrade: websocket") {
+                            stream.read_exact(&mut buffer[..length]).await.unwrap();
+                            let response = if headers.lines().next().unwrap().contains("/checkpoint") {
+                                let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", checkpoint.len()).into_bytes();
+                                response.extend_from_slice(&checkpoint);
+                                response
+                            } else {
+                                // Rows travel over the socket only, so every read is recorded.
+                                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+                            };
+                            let _ = stream.write_all(&response).await;
+                            return;
+                        }
+                        let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                        let connection = connections.fetch_add(1, Ordering::SeqCst);
+                        while let Some(Ok(message)) = ws.next().await {
+                            if let tokio_tungstenite::tungstenite::Message::Text(text) = &message {
+                                if text == "ping" { let _ = ws.send("pong".into()).await; }
+                                continue;
+                            }
+                            let Some(frame) = decode(&message.into_data()) else { continue };
+                            let head = lock(&log).len() as u64;
+                            let replies = match frame.kind {
+                                frame_type::HELLO => vec![encode(frame_type::STATE, &serde_json::json!({
+                                    "headSeq": head, "seqFloor": 0, "checkpointSeq": checkpoint_seq,
+                                    "checkpointSize": checkpoint.len(), "rowCount": head - checkpoint_seq, "rowBytes": 0,
+                                }), &frontier)],
+                                frame_type::ROWS_REQ => {
+                                    let after = frame.header["after"].as_u64().unwrap();
+                                    lock(&recorded).push((connection, after));
+                                    let log = lock(&log);
+                                    let mut frames: Vec<_> = (after + 1..=head).map(|seq| encode(frame_type::ROW,
+                                        &serde_json::json!({"seq": seq, "device": "remote", "batchId": format!("row-{seq}")}),
+                                        &log[seq as usize - 1])).collect();
+                                    frames.push(encode(frame_type::ROWS_DONE, &serde_json::json!({"headSeq": head}), &[]));
+                                    frames
+                                }
+                                frame_type::PUSH => {
+                                    let mut log = lock(&log);
+                                    log.push(frame.payload.clone());
+                                    vec![encode(frame_type::ACK, &serde_json::json!({"batchId": frame.header["batchId"], "seq": log.len(), "dup": false}), &[])]
+                                }
+                                frame_type::PROBE => vec![encode(frame_type::PROBE_OK, &serde_json::json!({"headSeq": head}), &[])],
+                                _ => continue,
+                            };
+                            for reply in replies {
+                                if ws.send(reply.into()).await.is_err() { return }
+                            }
+                        }
+                    });
+                }
+                _ = peers.join_next(), if !peers.is_empty() => {}
+            }
+        }
+    });
+    RowsRelay {
+        url,
+        requests,
+        task,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejoin_after_idle_retirement_resumes_from_its_cursor() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    // A cold reader's first open stamps an unverified born snapshot, so the
+    // first join repairs; every later join must trust the cursor it wrote.
+    // A rewind to the checkpoint redownloads rows 3..=5 (on a whale chat,
+    // most of its log) on every revisit.
+    let relay = rows_relay(5, 2).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+    store.initialize_chat_outbox("remote", &[]).unwrap();
+    let host = DocHost::new(
+        store.clone(),
+        DocHostConfig {
+            device_id: "host".into(),
+            default_harness: HarnessId::Mock,
+            edge: Some(EdgeConfig::with_static_token(&relay.url, "test")),
+        },
+    );
+    let first_request = |connection| {
+        lock(&relay.requests)
+            .iter()
+            .find(|(c, _)| *c == connection)
+            .map(|(_, after)| *after)
+    };
+    let handle = host.open("remote").unwrap();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    until(|| {
+        store.snapshot_cursor("remote").unwrap() == 5
+            && store.snapshot_cursor_verified("remote").unwrap()
+    })
+    .await;
+    assert_eq!(
+        first_request(0),
+        Some(2),
+        "cold join fetches the checkpoint"
+    );
+    handle
+        .last_access
+        .store(now_ms() - SYNC_IDLE_MS - 1, Ordering::Release);
+    until(|| !handle.sync_started.load(Ordering::Acquire)).await;
+
+    host.open("remote").unwrap();
+    until(|| first_request(1).is_some()).await;
+    assert_eq!(
+        first_request(1),
+        Some(5),
+        "rejoin rewound to the checkpoint"
+    );
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    assert_eq!(store.snapshot_cursor("remote").unwrap(), 5);
+    assert_eq!(handle.doc.doc().get_text("log").to_string(), "1;2;3;4;5;");
     host.shutdown_workers().await;
 }
 

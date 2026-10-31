@@ -35,6 +35,30 @@ pub(crate) struct ControlResponseFrame {
 pub(crate) struct ControlResponseBody {
     #[serde(default)]
     pub request_id: String,
+    /// `success` or `error`.
+    #[serde(default)]
+    pub subtype: String,
+    /// Why an `error` response failed (a string on every CLI seen so far).
+    #[serde(default)]
+    pub error: Option<Value>,
+}
+
+impl ControlResponseBody {
+    /// The failure text of an `error` response; `None` for a success.
+    pub fn error_message(&self) -> Option<String> {
+        if self.subtype != "error" {
+            return None;
+        }
+        Some(match &self.error {
+            Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+            Some(other @ Value::Object(_)) => other
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| other.to_string()),
+            _ => "the request failed".to_owned(),
+        })
+    }
 }
 
 /// `{"type":"command_lifecycle","command_uuid":…,"state":…}` — emitted for
@@ -78,10 +102,37 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    /// `task_started`: the task's one-line name, `/<skill>` for a forked
+    /// skill (live-verified 2.1.310).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `task_started`: the subagent's opening prompt, a forked skill's body.
+    /// A `Value`: a shape we don't expect must not cost the frame.
+    #[serde(default)]
+    pub prompt: Option<Value>,
     /// `background_tasks_changed`: every background task the session holds
     /// now (agents and shells) — the authoritative set, not a delta.
     #[serde(default)]
     pub tasks: Option<Vec<Value>>,
+    /// `api_retry`: which retry this is, of how many, and the wait before it.
+    #[serde(default)]
+    pub attempt: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<u64>,
+    #[serde(default)]
+    pub retry_delay_ms: Option<f64>,
+    /// `api_retry`: the HTTP status and a terse error kind (`rate_limit`, …).
+    #[serde(default)]
+    pub error_status: Option<u64>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    /// `compact_boundary`: `{trigger, pre_tokens, post_tokens}`.
+    #[serde(default)]
+    pub compact_metadata: Option<Value>,
+    /// `init` and `status`: the permission mode the CLI is in now. A `status`
+    /// follows every change, ours or its own (leaving plan mode).
+    #[serde(default, rename = "permissionMode")]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +203,9 @@ pub(crate) struct ContentBlock {
     pub kind: String,
     #[serde(default)]
     pub text: String,
+    /// A `thinking` block's (summarized) text.
+    #[serde(default)]
+    pub thinking: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -214,6 +268,33 @@ pub(crate) struct ResultFrame {
     pub usage: UsageBody,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Set on API failures the CLI still files under `subtype: "success"`
+    /// (an invalid key, an overloaded or rate-limited API): the turn did no
+    /// real work.
+    #[serde(default)]
+    pub is_error: bool,
+    /// Why the turn ended (`completed`, `aborted_streaming`, `api_error`,
+    /// `prompt_too_long`, …).
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
+    #[serde(default)]
+    pub api_error_status: Option<u64>,
+    /// Not a CLI field: the line said it was a result but could not be read
+    /// (see [`parse_frame`]).
+    #[serde(skip)]
+    pub unreadable: bool,
+}
+
+impl ResultFrame {
+    /// Stands in for a `result` line that would not parse. Dropping it would
+    /// leave the turn open forever: the CLI's result is the only turn end.
+    fn unreadable(line: &str) -> Self {
+        Self {
+            is_error: line.contains("\"is_error\":true"),
+            unreadable: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -239,13 +320,93 @@ pub(crate) struct ControlRequestBody {
     pub subtype: String,
     #[serde(default)]
     pub tool_name: String,
+    /// `can_use_tool`: the tool's name as shown to people (an MCP tool's
+    /// own), and what the model says the call is for.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub input: Value,
 }
 
 /// Parse one stdout JSONL line. `Err` = not JSON; unknown types = `Other`.
+///
+/// Two repairs before giving up on a line. Node's `JSON.stringify` writes a
+/// string cut through a surrogate pair as a lone `\uD83D` escape, which
+/// serde_json rejects: those become U+FFFD. An explicit `null` where a field
+/// is normally present fails its typed parse: nulls read as absent. A
+/// `result` line that still won't parse becomes an unreadable result rather
+/// than an error, so the turn it ends still ends.
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
-    let value: Value = serde_json::from_str(line)?;
+    let error = match parse_value(line).and_then(typed_frame) {
+        Ok(frame) => return Ok(frame),
+        Err(error) => error,
+    };
+    if let Ok(mut value) = parse_value(line) {
+        strip_nulls(&mut value);
+        if let Ok(frame) = typed_frame(value) {
+            return Ok(frame);
+        }
+    }
+    if top_level_type(line) == Some("result") {
+        return Ok(Frame::Result(ResultFrame::unreadable(line)));
+    }
+    Err(error)
+}
+
+/// The `type` of a JSON object line, read at its top level alone however
+/// torn the rest is: a `"type":"result"` nested in some other frame (a
+/// tool's output, a message's content) must not end the turn.
+fn top_level_type(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.checked_sub(1)?,
+            b'"' => {
+                let start = i + 1;
+                let end = string_end(bytes, start)?;
+                i = end + 1;
+                if depth == 1
+                    && &line[start..end] == "type"
+                    && let Some(value) = line[i..].trim_start().strip_prefix(':')
+                {
+                    let value = value.trim_start().strip_prefix('"')?;
+                    return Some(&value[..string_end(value.as_bytes(), 0)?]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Index of the quote closing a JSON string whose contents start at `start`.
+fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn parse_value(line: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(line).or_else(|error| match repair_lone_surrogates(line) {
+        Some(repaired) => serde_json::from_str(&repaired),
+        None => Err(error),
+    })
+}
+
+fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     let frame = match kind {
         "system" => Frame::System(serde_json::from_value(value)?),
@@ -260,6 +421,61 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
         _ => Frame::Other,
     };
     Ok(frame)
+}
+
+/// Drop every `null` object entry, so it reads as the absent field it means.
+fn strip_nulls(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            map.values_mut().for_each(strip_nulls);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_nulls),
+        _ => {}
+    }
+}
+
+/// `line` with every unpaired `\uD800`–`\uDFFF` escape replaced by
+/// `\uFFFD`; `None` when there are none. Backslashes only occur inside JSON
+/// strings, so escapes can be walked without tracking string boundaries.
+fn repair_lone_surrogates(line: &str) -> Option<String> {
+    fn unit(bytes: &[u8], at: usize) -> Option<u16> {
+        if bytes.get(at..at + 2)? != b"\\u" {
+            return None;
+        }
+        let hex = std::str::from_utf8(bytes.get(at + 2..at + 6)?).ok()?;
+        u16::from_str_radix(hex, 16).ok()
+    }
+    let high = |u: u16| (0xD800..0xDC00).contains(&u);
+    let low = |u: u16| (0xDC00..0xE000).contains(&u);
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let (mut at, mut copied) = (0, 0);
+    while at < bytes.len() {
+        if bytes[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        let Some(u) = unit(bytes, at) else {
+            // Any other escape: skip the escaped character with it.
+            at += 2;
+            continue;
+        };
+        if high(u) && unit(bytes, at + 6).is_some_and(low) {
+            at += 12;
+            continue;
+        }
+        if high(u) || low(u) {
+            out.push_str(&line[copied..at]);
+            out.push_str("\\uFFFD");
+            copied = at + 6;
+        }
+        at += 6;
+    }
+    (copied > 0).then(|| {
+        out.push_str(&line[copied..]);
+        out
+    })
 }
 
 /// A stdin user turn: `{"type":"user","message":{...},"parent_tool_use_id":null}`.
@@ -399,6 +615,18 @@ pub(crate) fn apply_flag_settings_line(request_id: &str, settings: Value) -> Str
     .to_string()
 }
 
+/// Switch the live process's permission mode. `bypassPermissions` only
+/// works on a process launched with one of the skip-permissions flags
+/// (verified live against 2.1.311).
+pub(crate) fn set_permission_mode_line(request_id: &str, mode: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "set_permission_mode", "mode": mode },
+    })
+    .to_string()
+}
+
 /// Stop the in-flight turn only. `cancel_queued` drops steers the CLI has
 /// queued but not yet consumed: a stopped turn never continues into them.
 pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
@@ -406,6 +634,17 @@ pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
         "type": "control_request",
         "request_id": request_id,
         "request": { "subtype": "interrupt", "cancel_queued": true },
+    })
+    .to_string()
+}
+
+/// Stop one background task (`stop_task`): the CLI kills it, then reports
+/// it `stopped` and the roster without it.
+pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "stop_task", "task_id": task_id },
     })
     .to_string()
 }
@@ -423,9 +662,38 @@ pub(crate) fn control_response_line(request_id: &str, response: Value) -> String
     .to_string()
 }
 
+/// Error reply to a CLI control request we cannot serve. The CLI waits for
+/// an answer to every request it sends; silence would stall it.
+pub(crate) fn control_error_line(request_id: &str, error: &str) -> String {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "error",
+            "request_id": request_id,
+            "error": error,
+        },
+    })
+    .to_string()
+}
+
 /// `can_use_tool` allow payload with the (possibly updated) tool input.
 pub(crate) fn allow_response(updated_input: Value) -> Value {
     json!({ "behavior": "allow", "updatedInput": updated_input })
+}
+
+/// `can_use_tool` allow for `ExitPlanMode` that leaves plan mode for `mode`.
+/// Without it the CLI drops to `default` (verified live against 2.1.311).
+pub(crate) fn exit_plan_response(updated_input: Value, mode: &str) -> Value {
+    json!({
+        "behavior": "allow",
+        "updatedInput": updated_input,
+        "updatedPermissions": [{ "type": "setMode", "mode": mode, "destination": "session" }],
+    })
+}
+
+/// `can_use_tool` deny payload: the model reads `message` as the result.
+pub(crate) fn deny_response(message: &str) -> Value {
+    json!({ "behavior": "deny", "message": message })
 }
 
 /// Client→CLI interrupt control request.
@@ -468,6 +736,91 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+    }
+
+    #[test]
+    fn lone_surrogate_escapes_are_repaired() {
+        // A text delta cut through an emoji's surrogate pair.
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"a\ud83d b \ude00 \\ud83d 😀"}}}"#;
+        assert!(serde_json::from_str::<Value>(line).is_err());
+        match parse_frame(line).expect("repaired") {
+            Frame::StreamEvent(f) => {
+                // Lone halves become U+FFFD; an escaped backslash and a real
+                // pair are left alone.
+                assert_eq!(f.event.delta.text, "a\u{FFFD} b \u{FFFD} \\ud83d 😀");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        assert_eq!(repair_lone_surrogates(r#"{"a":"😀"}"#), None);
+    }
+
+    #[test]
+    fn explicit_nulls_read_as_absent_fields() {
+        let result = r#"{"type":"result","subtype":"success","usage":null,"modelUsage":null,"errors":null,"result":"ok","session_id":"s"}"#;
+        match parse_frame(result).expect("parses") {
+            Frame::Result(f) => {
+                assert_eq!(f.result.as_deref(), Some("ok"));
+                assert!(!f.unreadable);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        let init = r#"{"type":"system","subtype":"init","model":null,"cwd":null,"tools":null,"session_id":"s1"}"#;
+        match parse_frame(init).expect("parses") {
+            Frame::System(f) => assert_eq!(f.session_id, "s1"),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_result_still_ends_the_turn() {
+        // A wrong-typed field fails the typed parse; a torn line fails JSON.
+        for line in [
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":"many"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"tor"#,
+        ] {
+            match parse_frame(line).expect("result frame") {
+                Frame::Result(f) => {
+                    assert!(f.unreadable);
+                    assert_eq!(f.is_error, line.contains("is_error"));
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        // Anything else torn stays an error.
+        assert!(parse_frame(r#"{"type":"assistant","message":"#).is_err());
+        // Only the line's own type counts: a result nested in another frame
+        // is no result, while a result whose type comes later still is.
+        for line in [
+            r#"{"type":"user","message":{"content":[{"type":"result","text":"tor"#,
+            r#"{"type":"system","subtype":"init","session_id":5,"x":{"type":"result"}}"#,
+            r#"{"type":"assistant","message":"say \"type\":\"result\" {","#,
+        ] {
+            assert!(parse_frame(line).is_err(), "{line}");
+        }
+        assert!(matches!(
+            parse_frame(r#"{"subtype":"success","note":"{\"type\":1}","type":"result","res"#),
+            Ok(Frame::Result(f)) if f.unreadable
+        ));
+    }
+
+    #[test]
+    fn control_response_errors_are_read() {
+        let line = r#"{"type":"control_response","response":{"subtype":"error","request_id":"zeron_model_1","error":"Unknown model"}}"#;
+        match parse_frame(line).expect("parses") {
+            Frame::ControlResponse(f) => {
+                assert_eq!(f.response.request_id, "zeron_model_1");
+                assert_eq!(f.response.error_message().as_deref(), Some("Unknown model"));
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        let ok = r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{}}}"#;
+        match parse_frame(ok).expect("parses") {
+            Frame::ControlResponse(f) => assert_eq!(f.response.error_message(), None),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        let reply: Value = serde_json::from_str(&control_error_line("r1", "nope")).unwrap();
+        assert_eq!(reply["response"]["subtype"], "error");
+        assert_eq!(reply["response"]["request_id"], "r1");
     }
 
     #[test]

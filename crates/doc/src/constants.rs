@@ -19,8 +19,10 @@ pub const DO_FLUSH_MS: u64 = 5_000;
 pub const DOC_LRU_BYTE_BUDGET: usize = 80 * 1024 * 1024;
 /// Number of trailing messages materialized into the tail sidecar.
 pub const TAIL_MESSAGE_COUNT: usize = 64;
-/// Terminal output batching cadence (ms).
-pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 12;
+/// Minimum spacing between terminal output batches (ms). Output after a quiet
+/// spell (an echoed keystroke) is sent at once; only a continuous stream is
+/// paced, so a flood can't outrun the viewer's frames.
+pub const TERMINAL_OUTPUT_BATCH_MS: u64 = 4;
 /// Default TTL for durable commands.
 pub const COMMAND_DEFAULT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// Current session doc schema version (`meta.schemaVersion`).

@@ -511,12 +511,20 @@ fn dir_writable(dir: &Path) -> bool {
     }
 }
 
+/// Where this process was installed from, resolved once: an update moves
+/// the running image aside (Windows renames it to `zeron.exe.old`), and a
+/// long-running engine must still recognise the installation it belongs to.
 pub fn detect_install() -> InstallKind {
-    let Ok(exe) = std::env::current_exe() else {
-        return InstallKind::Unmanaged;
-    };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    detect_install_from(&exe, home.as_deref())
+    static INSTALL: std::sync::OnceLock<InstallKind> = std::sync::OnceLock::new();
+    INSTALL
+        .get_or_init(|| {
+            let Ok(exe) = std::env::current_exe() else {
+                return InstallKind::Unmanaged;
+            };
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            detect_install_from(&exe, home.as_deref())
+        })
+        .clone()
 }
 
 fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
@@ -568,6 +576,8 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
         InstallKind::MacApp { bundle } => bundle_short_version(
             &std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?,
         )?,
+        #[cfg(windows)]
+        InstallKind::WindowsPortable { directory } => windows::installed_version(directory)?,
         _ => return None,
     };
     parse_version(&version).map(|_| version)
@@ -763,10 +773,41 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     }
 }
 
+type ManagedRestart = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
+
+static MANAGED_RESTART: std::sync::OnceLock<ManagedRestart> = std::sync::OnceLock::new();
+
+/// This process is the desktop app's background engine, which no service
+/// manager supervises: `restart` relaunches it (the replacement waits for
+/// this one to let go of the data directory) and stops this one. With it set,
+/// [`Updater::restart_when_superseded`] restarts into a newer installed
+/// version once nothing is running, exactly as for an installed service.
+pub fn set_managed_restart(restart: impl Fn() -> anyhow::Result<()> + Send + Sync + 'static) {
+    let _ = MANAGED_RESTART.set(Box::new(restart));
+}
+
+type ManagedRestartReady = Box<dyn Fn() -> bool + Send + Sync>;
+static MANAGED_RESTART_READY: std::sync::OnceLock<ManagedRestartReady> = std::sync::OnceLock::new();
+
+/// When the background engine may restart into a newer installed version,
+/// on top of nothing running (e.g. only while the app that starts it runs).
+/// Checked on every pass, so a restart it holds back happens on a later one.
+pub fn set_managed_restart_ready(ready: impl Fn() -> bool + Send + Sync + 'static) {
+    let _ = MANAGED_RESTART_READY.set(Box::new(ready));
+}
+
+fn managed_restart_ready() -> bool {
+    MANAGED_RESTART_READY.get().is_none_or(|ready| ready())
+}
+
 /// Whether this process is the engine service [`restart_service`] manages:
-/// systemd places it in the `zeron.service` cgroup; launchd names the job in
+/// the desktop app's background engine ([`set_managed_restart`]); systemd
+/// places a service in the `zeron.service` cgroup; launchd names the job in
 /// `XPC_SERVICE_NAME`.
 pub fn running_as_installed_service() -> bool {
+    if MANAGED_RESTART.get().is_some() {
+        return true;
+    }
     if cfg!(target_os = "macos") {
         std::env::var("XPC_SERVICE_NAME").is_ok_and(|label| label == "sh.zeron.app")
     } else if cfg!(target_os = "linux") {
@@ -789,6 +830,9 @@ fn in_zeron_service_cgroup(cgroups: &str) -> bool {
 /// picks up the new binary. Only queues the restart: the caller may be the
 /// service itself, which must stay responsive to the stop signal that follows.
 pub fn restart_service() -> anyhow::Result<()> {
+    if let Some(restart) = MANAGED_RESTART.get() {
+        return restart();
+    }
     require_managed_update_platform()?;
     if cfg!(target_os = "macos") {
         let output = std::process::Command::new("id").arg("-u").output()?;
@@ -1367,7 +1411,12 @@ impl SupersededRestart {
         let Some(installed) = installed_version(&detect_install()) else {
             return;
         };
-        self.poll_installed(&installed, current_version(), quiescent, restart_service);
+        self.poll_installed(
+            &installed,
+            current_version(),
+            || quiescent() && managed_restart_ready(),
+            restart_service,
+        );
     }
 
     fn poll_installed(
@@ -1386,7 +1435,7 @@ impl SupersededRestart {
                 tracing::info!(
                     installed,
                     running,
-                    "newer version installed; restart deferred: sessions or terminals active"
+                    "newer version installed; restart deferred: sessions or terminals active, or waiting for the app"
                 );
             }
             return;

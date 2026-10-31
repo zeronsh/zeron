@@ -20,13 +20,15 @@ use serde::{Deserialize, Serialize};
 
 mod client;
 pub mod device_room;
+pub mod ipc_auth;
 mod server;
+mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ws};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
-    decode_device_frame, device_room_ws_url, encode_device_frame,
+    decode_device_frame, device_room_ws_url, encode_device_frame, is_liveness_probe,
 };
 pub use server::{serve_connection, serve_ws_listener};
 
@@ -49,6 +51,14 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Whether agents' commits on this device credit Zeron
+    /// (`{enabled, cloud}`; set with `{enabled}`).
+    pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
+    pub const SET_COMMIT_CREDIT: &str = "SetCommitCredit";
+    /// Which providers on this device run without their own subagents
+    /// (`{switchable, off}`; set with `{harness, enabled}`).
+    pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
+    pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -71,6 +81,10 @@ pub mod methods {
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";
+    /// `{viewportId, focused}`: an app window gained or lost focus (desktop
+    /// banners hold back while one is focused). Focused viewports repeat it;
+    /// a report goes stale after 45 s.
+    pub const SET_VIEWPORT_FOCUS: &str = "SetViewportFocus";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
@@ -132,6 +146,10 @@ pub mod methods {
     /// Headed IPC owners do not implement this method: closing another app's
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
+    /// Headless IPC only: stop starting work ahead of a Cloud sleep (the
+    /// edge runs `zeron quiesce` before stopping the machine). Replies
+    /// `{"quiesced":true}` or `{"quiesced":false,"busy":"<why>"}`.
+    pub const QUIESCE_FOR_SLEEP: &str = "QuiesceForSleep";
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
@@ -192,6 +210,10 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
+    // A chat's background processes (`Session::background_tasks`) live in
+    // its host's runtime: `{chatId, taskId}`, relay-forwardable.
+    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
@@ -222,6 +244,10 @@ pub mod methods {
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
+    /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
+    /// callback the requesting device caught on its own loopback (a phone
+    /// signing a computer's agent in). Answers `{status, location?}`.
+    pub const RELAY_AGENT_LOGIN_CALLBACK: &str = "RelayAgentLoginCallback";
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
@@ -229,9 +255,15 @@ pub mod methods {
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
+    /// One chunk of an image an agent's reply names in Markdown
+    /// (`![alt](path)`), read only from inside that chat's working folder.
+    pub const READ_CHAT_IMAGE_CHUNK: &str = "ReadChatImageChunk";
     /// Store an agent's HTML page and show it inline in that chat's live
     /// turn (`show_visual`). Local only: the calling agent runs on this device.
     pub const PUBLISH_VISUAL: &str = "PublishVisual";
+    /// Store an image file an agent shows and fold it into that chat's live
+    /// turn as an image part (`show_image`). Local only, like `PublishVisual`.
+    pub const PUBLISH_IMAGE: &str = "PublishImage";
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
@@ -249,6 +281,95 @@ pub mod methods {
     pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
     pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
     pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
+    // Cloud (docs/design/cloud-device.md). IPC-only: the engine calls the
+    // edge's CloudAccount DO with the user's bearer; never routed by
+    // targetDeviceId.
+    /// The account: `{}` → `CloudStatus`.
+    pub const CLOUD_STATUS: &str = "CloudStatus";
+    /// Turn Cloud on (instant: mints the logical Cloud device; sandboxes are
+    /// per session). `{}` → `CloudStatus`.
+    pub const CLOUD_ENABLE: &str = "CloudEnable";
+    /// Turn Cloud off: deletes every session sandbox (final usage captured
+    /// first), revokes their vault enrollments, and removes the logical
+    /// device. `{}` → `CloudStatus` (`Deleting`, then `Off`).
+    pub const CLOUD_DELETE: &str = "CloudDelete";
+    /// `{}` → `CloudSessions`.
+    pub const CLOUD_SESSIONS: &str = "CloudSessions";
+    /// `{chatId}` → `CloudSession`. Wake/sleep one session's sandbox; sending
+    /// to a sleeping session wakes it on its own (the host nudge).
+    pub const CLOUD_SESSION_WAKE: &str = "CloudSessionWake";
+    pub const CLOUD_SESSION_SLEEP: &str = "CloudSessionSleep";
+    /// `{chatId}` → `CloudSession` (`Deleting`). Deletes the sandbox and
+    /// anything uncommitted in it; the transcript stays.
+    pub const CLOUD_SESSION_DELETE: &str = "CloudSessionDelete";
+    /// The signed-in user's Cloud credits — balance, and use per UTC day
+    /// (reconciled against the sandbox provider's own meter):
+    /// `{from?: "YYYY-MM-DD", to?: "YYYY-MM-DD"}` (default: the last 30 days)
+    /// → `CloudUsage`.
+    pub const CLOUD_USAGE: &str = "CloudUsage";
+    /// The signed-in user's plan and credits, and what can be bought:
+    /// `{}` → `BillingStatus`.
+    pub const BILLING_STATUS: &str = "BillingStatus";
+    /// A Stripe Checkout page: `{kind: "subscription", plan}` or
+    /// `{kind: "credits", packs}` → `BillingLink`.
+    pub const BILLING_CHECKOUT: &str = "BillingCheckout";
+    /// The Stripe Billing Portal (change plan, payment method, invoices,
+    /// cancel): `{}` → `BillingLink`.
+    pub const BILLING_PORTAL: &str = "BillingPortal";
+    // Credential vault (IPC-only; the edge forwards to the vault Worker).
+    /// `{}` → `VaultStatus`.
+    pub const VAULT_STATUS: &str = "VaultStatus";
+    /// Sign in to Codex on THIS device (`codex login` into a throwaway
+    /// CODEX_HOME, shredded afterwards) and upload the result to the vault;
+    /// the device's own Codex login and account slots are untouched.
+    ///
+    /// Returns as soon as the sign-in page is known, in the same shape as
+    /// `StartAgentLogin`: `{authorizedDevices}` →
+    /// `AgentLoginStart {loginId, url, mode: "browser", callbackPort?}`.
+    /// The caller opens `url` in the browser, then drives the flow with the
+    /// existing account-login methods on this same engine (NO
+    /// `targetDeviceId`): `PollAgentLogin {loginId}` → `AgentLoginPoll`
+    /// (`pending` — may carry a late `url`; `done` once the vault holds the
+    /// credential; `error` + `message`, e.g. the vault's refusal) and
+    /// `CancelAgentLogin {loginId}`. After `done`, refresh with `VaultStatus`.
+    /// The flow gives up after 15 minutes. Fails up front (no browser) when
+    /// the account can't use Cloud.
+    pub const VAULT_CONNECT_CODEX: &str = "VaultConnectCodex";
+    /// Sign in to Claude on THIS device through Claude's own OAuth flow
+    /// (PKCE, loopback callback) in capture-only mode — the `claudeAiOauth`
+    /// tokens go straight to the vault, never into this device's live Claude
+    /// login, Keychain or an account slot, so the vault stays the only
+    /// refresher: `{authorizedDevices}` → `AgentLoginStart`, driven exactly
+    /// like `VaultConnectCodex` (`PollAgentLogin` / `CancelAgentLogin`). When
+    /// no loopback port can be bound the start comes back with
+    /// `mode: "paste-code"`: finish it with `CompleteAgentLogin {loginId,
+    /// code}` (its reply is this device's unchanged `AgentAccountsSnapshot`;
+    /// the upload has happened once it returns), then `VaultStatus`.
+    pub const VAULT_CONNECT_CLAUDE: &str = "VaultConnectClaude";
+    /// `{provider: "anthropic-key"|"openai-key", key, authorizedDevices}` →
+    /// `VaultStatus`.
+    pub const VAULT_PUT_API_KEY: &str = "VaultPutApiKey";
+    /// `{provider, authorizedDevices}` → `VaultStatus`.
+    pub const VAULT_AUTHORIZE: &str = "VaultAuthorize";
+    /// `{provider}` → `VaultStatus`.
+    pub const VAULT_DISCONNECT: &str = "VaultDisconnect";
+    /// `{deviceId}` → `VaultStatus`.
+    pub const VAULT_REVOKE_DEVICE: &str = "VaultRevokeDevice";
+    /// `{authorizedDevices}` → `GithubDeviceFlow`.
+    pub const GITHUB_CONNECT_START: &str = "GithubConnectStart";
+    /// `{flowId}` → `GithubConnectProgress`.
+    pub const GITHUB_CONNECT_POLL: &str = "GithubConnectPoll";
+    /// Repositories the account's vault-held GitHub connection can see,
+    /// newest push first: `{query?}` → `{repos: GithubRepo[]}`. Answered via
+    /// the edge (the vault calls GitHub; the token never leaves it), so any
+    /// signed-in device can list them; a Cloud session device answers with
+    /// its own grant. Fails with a `github_not_connected:`-prefixed message
+    /// when GitHub isn't connected.
+    pub const LIST_GITHUB_REPOS: &str = "ListGithubRepos";
+    /// `{repo, defaultBranch?}` → `RepoRef[]`: the branches a Cloud session
+    /// of `repo` (`owner/name`) can start from, through the user's GitHub
+    /// connection (the vault calls GitHub), the default first.
+    pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
 }
 
 /// Stable capability error codes transported without provider stderr.
@@ -600,13 +721,26 @@ mod tests {
         assert_eq!(frame.ok, None);
     }
 
-    #[tokio::test]
-    async fn websocket_round_trip() {
+    /// Serve `TestService` on an ephemeral port behind `token`.
+    async fn serve_test(token: &str) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        tokio::spawn(serve_ws_listener(
+            listener,
+            Arc::new(TestService),
+            token.to_string(),
+        ));
+        port
+    }
 
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+    #[tokio::test]
+    async fn websocket_round_trip() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
         let echoed = client
             .call("Echo", serde_json::json!("hello"))
             .await
@@ -622,32 +756,176 @@ mod tests {
         assert_eq!(items.recv().await, None);
     }
 
+    /// A reply past tungstenite's default 16 MiB frame cap (a long chat's
+    /// transcript watch) must arrive, not drop the connection.
     #[tokio::test]
-    async fn handshake_with_origin_header_is_rejected() {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    async fn websocket_carries_messages_past_the_default_frame_cap() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+        // Multi-byte chars so fragment boundaries land mid-codepoint.
+        let big = "é".repeat(9_500_000);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_ws_listener(listener, Arc::new(TestService)));
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!(big)).await.unwrap();
+        assert_eq!(echoed.as_str().map(str::len), Some(big.len()));
+        assert_eq!(client.close_reason(), None);
 
-        // A browser page opening ws://127.0.0.1:{port} always sends Origin;
-        // the server must refuse the handshake before serving any RPC.
+        // A peer still on tungstenite's default limits (an older app build)
+        // reassembles the fragmented reply too.
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
         let mut req = format!("ws://127.0.0.1:{port}")
             .into_client_request()
             .unwrap();
         req.headers_mut()
-            .insert("origin", "https://evil.example".parse().unwrap());
-        let result = tokio_tungstenite::connect_async(req).await;
-        assert!(
-            result.is_err(),
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut legacy, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+        let request = serde_json::to_string(&ClientFrame {
+            id: 1,
+            method: Some("Echo".into()),
+            params: serde_json::json!(big),
+            cancel: false,
+        })
+        .unwrap();
+        // It sends one unfragmented frame past 16 MiB: the raised cap takes it.
+        assert!(request.len() > 16 << 20);
+        legacy.send(Message::Text(request)).await.unwrap();
+        let reply = loop {
+            match legacy.next().await.unwrap().unwrap() {
+                Message::Text(text) => break text,
+                _ => continue,
+            }
+        };
+        let frame: ServerFrame = serde_json::from_str(&reply).unwrap();
+        assert_eq!(
+            frame.ok.and_then(|v| v.as_str().map(str::len)),
+            Some(big.len())
+        );
+    }
+
+    /// Raw handshake status for a dial with the given headers (`None` = served).
+    async fn handshake_status(port: u16, headers: &[(&str, &str)]) -> Option<u16> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = format!("ws://127.0.0.1:{port}")
+            .into_client_request()
+            .unwrap();
+        for (name, value) in headers {
+            req.headers_mut().insert(
+                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                    .unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        match tokio_tungstenite::connect_async(req).await {
+            Ok(_) => None,
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Some(response.status().as_u16())
+            }
+            Err(other) => panic!("unexpected handshake failure: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_with_origin_header_is_rejected() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+        let bearer = format!("Bearer {token}");
+
+        // A browser page opening ws://127.0.0.1:{port} always sends Origin;
+        // the server must refuse the handshake before serving any RPC — even
+        // when the bearer is right.
+        assert_eq!(
+            handshake_status(
+                port,
+                &[
+                    ("origin", "https://evil.example"),
+                    ("authorization", &bearer)
+                ]
+            )
+            .await,
+            Some(403),
             "handshake carrying an Origin header must be rejected"
         );
 
         // A native viewport (no Origin) still connects and can call RPC — the
         // reject must not be a blanket denial.
-        let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+        let client = connect_ws(&format!("ws://127.0.0.1:{port}"), Some(&token))
+            .await
+            .unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn handshake_requires_the_engine_bearer() {
+        let token = ipc_auth::generate_token().unwrap();
+        let port = serve_test(&token).await;
+
+        // Any local process can reach the port; without the token it gets 401.
+        assert_eq!(handshake_status(port, &[]).await, Some(401));
+        let wrong = format!("Bearer {}", ipc_auth::generate_token().unwrap());
+        assert_eq!(
+            handshake_status(port, &[("authorization", &wrong)]).await,
+            Some(401)
+        );
+        assert_eq!(
+            handshake_status(port, &[("authorization", &token)]).await,
+            Some(401),
+            "the Bearer scheme is required"
+        );
+        let url = format!("ws://127.0.0.1:{port}");
+        assert!(connect_ws(&url, None).await.is_err());
+        let error = match connect_ws(&url, Some("not-the-token")).await {
+            Ok(_) => panic!("a wrong token must not be served"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("401"), "{error}");
+
+        // The right token is served.
+        let right = format!("Bearer {token}");
+        assert_eq!(
+            handshake_status(port, &[("authorization", &right)]).await,
+            None
+        );
+        let client = connect_ws(&url, Some(&token)).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(7)).await.unwrap(),
+            serde_json::json!(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_ipc_reads_the_published_token_at_dial_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // Engine start #1.
+        let first = ipc_auth::issue_token(dir.path()).unwrap();
+        let first_port = serve_test(&first).await;
+        let client = connect_ipc(first_port, Some(dir.path())).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(1)).await.unwrap(),
+            serde_json::json!(1)
+        );
+
+        // Engine restart: a new token replaces the file. The next dial picks
+        // it up without any client-side configuration.
+        let second = ipc_auth::issue_token(dir.path()).unwrap();
+        let second_port = serve_test(&second).await;
+        let client = connect_ipc(second_port, Some(dir.path())).await.unwrap();
+        assert_eq!(
+            client.call("Echo", serde_json::json!(2)).await.unwrap(),
+            serde_json::json!(2)
+        );
+
+        // A client holding only the stale file is refused with a clear reason.
+        let stale = tempfile::tempdir().unwrap();
+        ipc_auth::write_token(&ipc_auth::token_path(stale.path()), &first).unwrap();
+        let error = match connect_ipc(second_port, Some(stale.path())).await {
+            Ok(_) => panic!("a rotated token must not be served"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("rejected"), "{error}");
     }
 
     #[tokio::test]

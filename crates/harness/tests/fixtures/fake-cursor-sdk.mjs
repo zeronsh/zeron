@@ -37,18 +37,37 @@ const checkpoint={schemaVersion:1,rootBlobId:'retained-conversation-history'};
 function instance(store) {
   return {
     agentId:'agent-fixture',model:{id:'composer-2.5'},close(){},
-    async send(prompt,{onDelta,model}) {
+    async send(message,{onDelta,model,local}) {
+      const prompt=typeof message==='string'?message:message.text;
       store.logPrompt(prompt);
+      // A send that never comes back, with no update ever.
+      if(prompt==='silent-send') return new Promise(()=>{});
+      // Silent past the bound, then the send comes back and streams anyway.
+      if(prompt==='silent-late') return new Promise((resolve)=>setTimeout(()=>{
+        onDelta({update:{type:'text-delta',text:'late'}});
+        resolve({runId:'run-late',cancel:async()=>{},wait:()=>new Promise(()=>{})});
+      },600));
       if(model) store.logModel(prompt,model.id);
       const doc=await store.agents.get({});
       if(doc.activeRunId) throw new Error('Agent already has active run');
+      // A persisted run left active by a dead process; `force` expires it.
+      if(prompt==='stale-active'&&!local?.force) throw new Error('Agent agent-fixture already has active run');
       const runId='run-'+Date.now();
       const run={runId,agentId:doc.agentId,status:'running',latestCheckpointRef:checkpoint};
       await store.runs.update({run});
       await store.agents.update({agent:{...doc,status:'running',activeRunId:runId}});
       if(isUncheckpointed(prompt))throw new Error('cancelled before checkpoint');
       if(prompt==='send-error') throw new Error('transport failed during send');
-      onDelta({update:{type:'text-delta',text:doc.latestCheckpoint.rootBlobId}});
+      if(!['result-only','silent'].includes(prompt)) onDelta({update:{type:'text-delta',text:doc.latestCheckpoint.rootBlobId}});
+      if(prompt==='image') onDelta({update:{type:'text-delta',text:' images:'+message.images.map(i=>i.mimeType+'/'+i.data).join(',')}});
+      if(['transport-dump','transport-quoted'].includes(prompt)) {
+        onDelta({update:{type:'tool-call-started',callId:'t1',toolCall:{type:'shell'}}});
+        onDelta({update:{type:'tool-call-completed',callId:'t1',toolCall:{type:'shell'}}});
+        if(prompt==='transport-quoted') onDelta({update:{type:'text-delta',text:'The backend said:\n'}});
+        onDelta({update:{type:'text-delta',text:'Error: ConnectError: [unavailable] upstream'}});
+        onDelta({update:{type:'token-delta',tokens:3}});
+        onDelta({update:{type:'text-delta',text:' connect error\n    at fetch (agent.js:1:1)\n'}});
+      }
       let resolve;
       const pending=new Promise(r=>resolve=r);
       const finish=async(status)=>{
@@ -104,7 +123,15 @@ function instance(store) {
             return pending;
           }
           if(prompt==='auth-error')return {status:'error',error:{message:'ERROR_NOT_LOGGED_IN'}};
-          if(['hang','hung-cancel','native-steer','native-revert','native-tool','native-concurrent','native-mixed'].includes(prompt))return pending;
+          if(prompt==='harmless-rejections') {
+            const spawnFailure=Object.assign(new Error('spawn /bin/zsh ENOENT'),{syscall:'spawn /bin/zsh',code:'ENOENT',spawnargs:['-c','source ~/.zshrc; dump_zsh_state']});
+            class WriteIterableClosedError extends Error { name='WriteIterableClosedError'; }
+            void Promise.reject(spawnFailure);
+            void Promise.reject(new WriteIterableClosedError('closed'));
+            await new Promise(r=>setTimeout(r,50));
+          }
+          if(prompt==='result-only'){await finish('finished');return {status:'finished',result:'settled reply'};}
+          if(['hang','silent','hung-cancel','native-steer','native-revert','native-tool','native-concurrent','native-mixed'].includes(prompt))return pending;
           await finish('finished');return {status:'finished'};
         },
       };
@@ -118,12 +145,14 @@ function startupLimit() {
   state.attempts++;
   fs.writeFileSync(file, JSON.stringify(state));
   if (state.attempts <= state.failures) throw new Error(state.message);
+  return state.delayMs;
 }
 export const Agent={
   messages:{list:async(_id,{store,limit,offset,cwd,runtime})=>{if(runtime!=='local'||cwd!==(await store.agents.get({})).cwd)throw new Error('history must use the owning workspace');return store.userMessages().slice(offset,offset+limit).map((text,i)=>({type:'user',message:i%3===0?{agentConversationTurn:{user_message:{text}}}:i%3===1?{agentConversationTurn:{userMessage:{text}}}:{turn:{case:'agentConversationTurn',value:{userMessage:{text}}}}}));}},
   async create({local, mcpServers}) {
     if (mcpServers) fs.writeFileSync(new URL("../../../mcp-options.json", import.meta.url), JSON.stringify({mcpServers, settingSources: local.settingSources}));
-    startupLimit();
+    const delay = startupLimit();
+    if (delay) await new Promise(r => setTimeout(r, delay));
     await local.store.agents.create({agent:{agentId:'agent-fixture',cwd:local.cwd,status:'idle',activeRunId:null,latestCheckpoint:checkpoint,sdkMetadata:{mustKeep:true}}});
     return instance(local.store);
   },

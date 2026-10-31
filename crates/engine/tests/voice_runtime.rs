@@ -84,7 +84,7 @@ async fn remote_failed_prepare_after_rotation_preserves_thread_for_retry() {
         )
         .unwrap();
     core.workspace
-        .set_chat_harness_session(&previous, "remembered-thread", "");
+        .set_chat_harness_session(&previous, "remembered-thread", "", Some(HarnessId::Codex));
     // The engine's `ROTATE_AFTER`.
     const ROTATE_AFTER: usize = 1000;
     let doc = core.doc_host.open(&previous).unwrap();
@@ -121,7 +121,7 @@ async fn remote_failed_prepare_after_rotation_preserves_thread_for_retry() {
         "cleanup must keep the predecessor"
     );
     assert_eq!(
-        core.workspace.chat_harness_session(&previous).unwrap().0,
+        core.workspace.chat_harness_session(&previous).unwrap().session_id,
         "remembered-thread"
     );
     assert_eq!(doc.doc().read_entries().unwrap().len(), ROTATE_AFTER);

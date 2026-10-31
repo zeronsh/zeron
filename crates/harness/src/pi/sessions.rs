@@ -85,7 +85,7 @@ impl Store {
         let mut record = json_file(&self.key(id));
         if record.is_object() {
             record["emptyState"] = state.clone();
-            record["cwd"] = json!(cwd.canonicalize()?);
+            record["cwd"] = json!(canonical(cwd)?);
             self.write(id, &record)?;
         }
         Ok(())
@@ -101,7 +101,7 @@ impl Store {
                 // Deleted history, custom extension entries, and uncertain crashed
                 // prompts must never become a fresh conversation silently.
                 if state.is_null()
-                    || record["cwd"] != json!(cwd.canonicalize()?)
+                    || record["cwd"] != json!(canonical(cwd)?)
                     || !file.is_some_and(|p| {
                         p.is_absolute()
                             && p.metadata()
@@ -153,7 +153,7 @@ impl Store {
         }
         for file in candidates {
             if matches_id(&file, id) {
-                return Ok(file.canonicalize()?);
+                return Ok(canonical(&file)?);
             }
         }
         for root in roots {
@@ -181,7 +181,7 @@ impl Store {
                         && path.extension().is_some_and(|e| e == "jsonl")
                         && matches_id(&path, id)
                     {
-                        return Ok(path.canonicalize()?);
+                        return Ok(canonical(&path)?);
                     }
                 }
             }
@@ -190,6 +190,23 @@ impl Store {
             "native session file for {id} was not found"
         )))
     }
+}
+/// `canonicalize`, minus the `\\?\` verbatim prefix it adds on Windows: the
+/// path goes to Pi as `--session`, and Node handles the verbatim form
+/// unreliably; a record compared against a plain spelling never matches it.
+fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    Ok(if cfg!(windows) { plain(path) } else { path })
+}
+/// The plain drive or UNC form of a verbatim path.
+fn plain(path: PathBuf) -> PathBuf {
+    if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        return match rest.strip_prefix(r"UNC\") {
+            Some(share) => PathBuf::from(format!(r"\\{share}")),
+            None => PathBuf::from(rest),
+        };
+    }
+    path
 }
 fn json_file(path: &Path) -> Value {
     std::fs::read(path)
@@ -214,6 +231,21 @@ fn matches_id(path: &Path, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verbatim_paths_lose_their_prefix() {
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\C:\Users\me\s.jsonl")),
+            PathBuf::from(r"C:\Users\me\s.jsonl")
+        );
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\host\share\s.jsonl")),
+            PathBuf::from(r"\\host\share\s.jsonl")
+        );
+        assert_eq!(
+            plain(PathBuf::from("/home/me/s.jsonl")),
+            PathBuf::from("/home/me/s.jsonl")
+        );
+    }
     #[test]
     fn only_proven_empty_local_sessions_can_be_recreated_and_submission_revokes_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -287,8 +319,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session with spaces.jsonl");
         std::fs::write(&path, "{\"type\":\"session\",\"id\":\"old-id\"}\n").unwrap();
-        // Windows expands short names and adds a verbatim prefix on canonicalization.
-        let expected = path.canonicalize().unwrap();
+        // Windows expands short names on canonicalization; the resolved path
+        // is its plain form, without the verbatim prefix (see `canonical`).
+        let expected = canonical(&path).unwrap();
         let mut store = Store::new(Some(dir.path().join("index")), None);
         store.agent = dir.path().join("agent");
         store.legacy = dir.path().join("legacy.json");

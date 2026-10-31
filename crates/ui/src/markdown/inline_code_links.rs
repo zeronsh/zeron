@@ -195,7 +195,7 @@ fn link_block(
                 align: align.clone(),
             })
         }
-        Block::CodeBlock { .. } | Block::Rule => None,
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => None,
     }
 }
 
@@ -284,7 +284,7 @@ fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
             .iter()
             .flatten()
             .for_each(|child| code_spans(child, out)),
-        Block::CodeBlock { .. } | Block::Rule => {}
+        Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
     }
 }
 
@@ -428,7 +428,7 @@ mod tests {
                         .flatten()
                         .for_each(|cell| out.extend(cell.clone()));
                 }
-                Block::CodeBlock { .. } | Block::Rule => {}
+                Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
             }
         }
         for top in &tree.blocks {

@@ -156,9 +156,12 @@ fn request(prompt: &str) -> RunRequest {
         cwd: "/tmp".into(),
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         resume: None,
         attachments: vec![],
         worktree: None,
+        env: Default::default(),
     }
 }
 fn rich_text(label: &str) -> (String, String) {

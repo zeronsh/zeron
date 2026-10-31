@@ -5,22 +5,40 @@
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
 //! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
 //! imageGeneration additionally follows the 0.154.0 schema (savedPath only).
-//! Revalidate the method/notification surface when bumping past it.
+//! Revalidate the method/notification surface when bumping past it. A CLI
+//! older than [`MIN_CODEX_VERSION`] is refused up front.
 //!
-//! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`) then
-//!   the `initialized` notification; unknown notification methods tolerated.
-//! - `thread/start` (or `thread/resume` with a fresh-start fallback) →
-//!   `SessionStarted`; `turn/start` carries the prompt, model, effort,
-//!   `sandboxPolicy`, and approval policy.
+//! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`,
+//!   opting out of the high-volume notifications nothing consumes) then the
+//!   `initialized` notification; unknown notification methods tolerated.
+//! - `thread/start` (or `thread/resume`, unarchiving an archived thread; only
+//!   a conversation that is gone falls back to a fresh thread, with a visible
+//!   notice) → `SessionStarted`; `turn/start` carries the prompt, model,
+//!   effort, `sandboxPolicy`, approval policy and (plan mode) the
+//!   `collaborationMode`.
 //! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
 //!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
 //!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//! - Approvals + sandbox: yolo mode. The wire policy is always `"never"` and
-//!   the sandbox is forced to `danger-full-access` — parity with the Claude
-//!   adapter's auto-approve-everything (unattended runs). Stray
-//!   `item/commandExecution/requestApproval` +
-//!   `item/fileChange/requestApproval` still round-trip through
-//!   [`RunControls::request_input`] as a synthesized yes/no question.
+//!   An `error` Codex will retry is progress, not an error; a final one is
+//!   reported once, by the turn's Done.
+//! - Approvals + sandbox follow the run's [`AccessMode`], on every
+//!   `turn/start` (so a change applies from the next turn in place): full
+//!   access is `"never"` + `danger-full-access`, as every run was before
+//!   modes; auto-accept edits is `"untrusted"` + `workspace-write` (every
+//!   command but codex's known-safe reads is asked, even inside the
+//!   sandbox; file changes are accepted); supervised is `"untrusted"` +
+//!   `read-only`. A title run stays `"never"`
+//!   + `read-only`. `item/commandExecution/requestApproval`,
+//!   `item/fileChange/requestApproval` and `item/permissions/requestApproval`
+//!   the mode does not cover round-trip through
+//!   [`RunControls::request_input`] as a yes/no question (a refusal
+//!   declines); auto-accept edits accepts file changes outright. MCP
+//!   elicitations (sent whatever the policy) are asked when they are a flat
+//!   form and declined otherwise.
+//! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
+//!   (across a resume too), so once a thread has planned every turn names
+//!   its mode. The proposed plan arrives as its own `plan` item, rendered
+//!   as reply text.
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
@@ -45,12 +63,14 @@
 //!   unresponsive; the stream always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod elicitation;
 mod normalize;
+pub mod npm_repair;
 pub mod realtime;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,21 +78,21 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
-    RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputAnswer,
+    UserInputQuestion,
 };
 
-use crate::jsonrpc::{Incoming, RpcClient};
+use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
-    route_child_notification, turn_error_message, turn_id, usage_event,
+    route_child_notification, settle_turn_error, turn_error_message, turn_id, usage_event,
 };
 
 /// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own
@@ -110,6 +130,24 @@ fn plain_executable(path: PathBuf) -> PathBuf {
     path
 }
 
+/// `thread/start` / `thread/resume` config keys that, set to false, take the
+/// agent tools away (title runs, side-chats-only runs). The app-server merges
+/// that `config` into its `-c` overrides (openai/codex rust-v0.153.4,
+/// codex-rs/app-server/src/config_manager.rs `load_with_cli_overrides`), and
+/// "Setting `agents.enabled=false` disables agent tools"
+/// (docs/research/codex-subagents.md). An enabled `features.multi_agent_v2`
+/// takes precedence over `agents.enabled` (codex-rs/core/config.schema.json).
+const AGENT_TOOLS: [&str; 3] = [
+    "features.multi_agent",
+    "features.multi_agent_v2",
+    "agents.enabled",
+];
+
+/// [`AGENT_TOOLS`] as config overrides that switch them off.
+fn agent_tools_off() -> [(String, Value); 3] {
+    AGENT_TOOLS.map(|key| (key.to_owned(), Value::Bool(false)))
+}
+
 /// Dotted `thread/start` config overrides that add an injected MCP server
 /// to the user's `mcp_servers` table.
 fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
@@ -123,6 +161,10 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         // `wait_for_turn` / long computer actions run for minutes.
         (key("startup_timeout_sec"), json!(30)),
         (key("tool_timeout_sec"), json!(660)),
+        // Our injected server's tools are Zeron's own: approve them in every
+        // access mode, so Codex neither rejects a call under `never` nor
+        // asks about one under the others.
+        (key("default_tools_approval_mode"), "approve".into()),
     ]
 }
 
@@ -220,11 +262,7 @@ impl CodexHarness {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
-            } else {
-                HarnessError::Io(e)
-            }
+            crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             shutdown_child(&mut child, self.kill_grace).await;
@@ -255,6 +293,7 @@ impl CodexHarness {
             Ok::<Value, HarnessError>(skills)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        client.close_stdin_for_teardown();
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -276,11 +315,7 @@ impl CodexHarness {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
-            } else {
-                HarnessError::Io(e)
-            }
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             shutdown_child(&mut child, self.kill_grace).await;
@@ -352,6 +387,7 @@ impl CodexHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        client.close_stdin_for_teardown();
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -368,6 +404,46 @@ fn service_tier(request: &RunRequest) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|t| *t != "default")
         .map(str::to_owned)
+}
+
+/// What a request may do without asking: `auto_approve` still means full
+/// access.
+fn run_access(request: &RunRequest) -> AccessMode {
+    if request.auto_approve {
+        AccessMode::FullAccess
+    } else {
+        request.access
+    }
+}
+
+/// The approval policy and sandbox a run's thread and turns get. Full access
+/// is codex's `--dangerously-bypass-approvals-and-sandbox`, as every run was
+/// before modes; auto-accept edits writes the workspace and, like
+/// supervised, asks before anything but codex's known-safe reads (under
+/// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
+/// A title run never asks and never writes, whatever its chat's mode.
+fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
+    match access {
+        _ if title_only => ("never", SandboxLevel::ReadOnly),
+        AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
+        AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
+        AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
+    }
+}
+
+/// `turn/start`'s `collaborationMode` (`plan` or `default`). Its settings
+/// take precedence over the turn's model and effort, so they repeat them;
+/// a null `developer_instructions` keeps the mode's built-in ones (0.164.0
+/// schema).
+fn collaboration_mode(plan: bool, model: &str, effort: Option<&str>) -> Value {
+    json!({
+        "mode": if plan { "plan" } else { "default" },
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": null,
+        },
+    })
 }
 
 fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
@@ -634,22 +710,32 @@ impl Harness for CodexHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
-    /// What the app-server launch and its turns read: the sandbox is forced
-    /// to full access, and `serviceTier` is the only model option used.
+    /// Supervised asks before what codex does not know to be safe, and
+    /// auto-accept edits before stepping outside the workspace sandbox.
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    /// Codex's own `plan` collaboration mode.
+    fn supports_plan(&self) -> bool {
+        true
+    }
+    /// What the app-server launch and its turns read: the sandbox follows
+    /// the access mode, and `serviceTier` is the only model option used.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
-            && live.auto_approve == next.auto_approve
+            && run_access(live) == run_access(next)
+            && live.plan == next.plan
     }
-    /// `turn/start` carries model, effort and service tier, and each sticks
-    /// for later turns — so a change applies from the next turn without a
-    /// new app-server. Clearing one back to the default cannot be expressed
-    /// that way (an omitted parameter keeps the previous value).
+    /// `turn/start` carries model, effort, service tier, approval policy,
+    /// sandbox and collaboration mode, and each sticks for later turns — so
+    /// a change applies from the next turn without a new app-server.
+    /// Clearing a model, effort or tier back to the default cannot be
+    /// expressed that way (an omitted parameter keeps the previous value).
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
-            && live.auto_approve == next.auto_approve
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -737,7 +823,10 @@ impl Harness for CodexHarness {
         request.attachments.clear();
         request.mcp = None;
         request.model_options.clear();
+        // Its policy never asks; anything that still would is the person's.
         request.auto_approve = false;
+        request.access = AccessMode::Supervised;
+        request.plan = false;
         self.run_with_mode(request, controls, true, false).await
     }
 }
@@ -772,57 +861,25 @@ impl CodexHarness {
                 .canonicalize()
                 .map_err(HarnessError::Io)?,
         );
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
-        request.sandbox = if title_only {
-            zeron_proto::SandboxLevel::ReadOnly
-        } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
-        };
-        let mut cmd = Command::new(&exe);
-        cmd.arg("app-server");
-        crate::compose_child_path(&mut cmd, &exe);
-        if !request.cwd.is_empty() {
-            cmd.current_dir(&request.cwd);
+        // Cached per binary; a fixed test executable is never version-probed.
+        if self.executable.is_none() {
+            let probe = exe.clone();
+            let version =
+                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
+                    .await
+                    .ok()
+                    .flatten();
+            check_codex_version(version.as_ref())?;
         }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
-            } else {
-                HarnessError::Io(e)
-            }
-        })?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("codex child has no stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| HarnessError::Protocol("codex child has no stdout".into()))?;
-        let stderr_tail = crate::StderrTail::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::codex", "stderr: {line}");
-                    tail.push(&line);
-                }
-            });
-        }
-
-        let (client, incoming) = RpcClient::new(stdin, stdout);
+        // The sandbox is the access mode's (see [`permissions`]), never the
+        // request's own level.
+        request.sandbox = permissions(run_access(&request), title_only).1;
+        let AppServer {
+            child,
+            client,
+            incoming,
+            stderr_tail,
+        } = spawn_app_server(&exe, &request)?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
@@ -843,6 +900,222 @@ impl CodexHarness {
             rx.recv().await.map(|ev| (ev, rx))
         })
         .boxed())
+    }
+}
+
+/// One `codex app-server` process and its wire.
+struct AppServer {
+    child: Child,
+    client: RpcClient,
+    incoming: mpsc::Receiver<Incoming>,
+    stderr_tail: crate::StderrTail,
+}
+
+fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, HarnessError> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("app-server");
+    crate::compose_child_path(&mut cmd, exe);
+    // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
+    // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
+    crate::apply_run_env(&mut cmd, &request.env);
+    if !request.cwd.is_empty() {
+        cmd.current_dir(&request.cwd);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| {
+        let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
+        crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| HarnessError::Protocol("codex child has no stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| HarnessError::Protocol("codex child has no stdout".into()))?;
+    let stderr_tail = crate::StderrTail::default();
+    if let Some(stderr) = child.stderr.take() {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut lines = crate::lossy_lines::lossy_lines(stderr);
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "zeron_harness::codex", "stderr: {line}");
+                tail.push(&line);
+            }
+            // The tail is complete: a crash report need not wait it out.
+            tail.close();
+        });
+    }
+    let (client, incoming) = RpcClient::new(stdin, stdout);
+    Ok(AppServer {
+        child,
+        client,
+        incoming,
+        stderr_tail,
+    })
+}
+
+/// Waits before relaunching an app-server that died before answering
+/// `initialize`: a just-started machine can lose the first launch (a CLI
+/// still finishing its install, a cold disk), and nothing has run yet.
+const STARTUP_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+];
+
+/// High-volume notifications nothing here consumes: the turn's running diff
+/// and every patch's output stream. Opting out at `initialize` spares the
+/// wire (and the reader) from parsing them only to drop them. Command output
+/// is kept: a command that outlives its turn shows its tail.
+const OPTED_OUT_NOTIFICATIONS: &[&str] = &["turn/diff/updated", "item/fileChange/outputDelta"];
+
+/// The oldest Codex CLI whose app-server speaks the wire this driver maps:
+/// nested `error` notifications, `turn/steer`, child-thread routing (the
+/// live captures under `tests/fixtures/codex` start at 0.146.1). An older
+/// CLI fails confusingly mid-run instead of saying it needs an update.
+const MIN_CODEX_VERSION: semver::Version = semver::Version::new(0, 146, 0);
+
+/// `Err` when `version` is known and older than [`MIN_CODEX_VERSION`]; an
+/// unknown version (a wrapper, a dev build) is given the benefit of the doubt.
+/// A pre-release counts as its release: `0.146.0-alpha.2` already speaks the
+/// wire, though semver orders it before `0.146.0`.
+fn check_codex_version(version: Option<&semver::Version>) -> Result<(), HarnessError> {
+    let release = version.map(|v| semver::Version::new(v.major, v.minor, v.patch));
+    match (version, release) {
+        (Some(version), Some(release)) if release < MIN_CODEX_VERSION => {
+            Err(HarnessError::Protocol(format!(
+                "Codex CLI {version} is too old; update it to {MIN_CODEX_VERSION} or newer \
+                 (npm install -g @openai/codex@latest)"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn initialize_params(opt_out: bool) -> Value {
+    let mut capabilities = json!({ "experimentalApi": true });
+    if opt_out {
+        capabilities["optOutNotificationMethods"] = json!(OPTED_OUT_NOTIFICATIONS);
+    }
+    json!({
+        "clientInfo": {
+            "name": "zeron-native",
+            "title": "Zeron",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "capabilities": capabilities,
+    })
+}
+
+/// A setup request's failure as display text. When the app-server died
+/// under it, "exited before responding" says nothing: report its exit
+/// status and last stderr lines instead.
+async fn setup_failure(
+    error: HarnessError,
+    client: &RpcClient,
+    child: &mut Child,
+    stderr_tail: &crate::StderrTail,
+) -> String {
+    // Only a lost answer: a refusal that arrived before the exit says more.
+    if !client.is_closed() || !transport_lost(&error) {
+        return error.to_string();
+    }
+    crash_report(child, stderr_tail).await
+}
+
+/// The exited app-server's status and last stderr lines, once its stderr
+/// has drained and it has been reaped (each briefly waited for).
+async fn crash_report(child: &mut Child, stderr_tail: &crate::StderrTail) -> String {
+    stderr_tail.wait_closed().await;
+    let status = match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        _ => child.try_wait().ok().flatten(),
+    };
+    crate::crash_message("codex app-server", status, stderr_tail)
+}
+
+/// Why a `thread/resume` failure means the conversation is gone for good,
+/// in words for the restore notice: no rollout on this machine, one Codex
+/// can't read (empty, not UTF-8, unparseable — live, 0.164.0: "failed to
+/// read thread: thread-store internal error: …"), a thread id Codex never
+/// issued. A fresh thread is the only way forward then. `None` for anything
+/// else — a dead process, a config error — which would fail a fresh start
+/// too, or lose history needlessly. A bare "not found" is no such sign: an
+/// I/O error ("entity not found"), a missing environment variable or helper
+/// binary say it too.
+fn resume_unrecoverable(error: &HarnessError) -> Option<&'static str> {
+    let HarnessError::Protocol(message) = error else {
+        return None;
+    };
+    if transport_lost(error) {
+        return None;
+    }
+    let message = message.to_ascii_lowercase();
+    let says = |needles: &[&str]| needles.iter().any(|needle| message.contains(needle));
+    if says(&[
+        "no rollout",
+        "thread not found",
+        "session not found",
+        "conversation not found",
+    ]) {
+        Some("it isn't saved on this device")
+    } else if says(&["failed to read thread", "rollout at"]) {
+        // Only a history that is empty or unreadable as data is gone. One
+        // the OS would not hand over (permissions, a lock, a busy disk) is
+        // still there for the next message.
+        if says(&[
+            "os error",
+            "permission denied",
+            "locked",
+            "busy",
+            "too many open files",
+            "timed out",
+        ]) {
+            None
+        } else if message.contains("is empty") {
+            Some("its saved history is empty")
+        } else if says(&[
+            "valid utf-8",
+            "failed to parse",
+            "parse error",
+            "expected value",
+            "eof while parsing",
+            "invalid json",
+        ]) {
+            Some("its saved history couldn't be read")
+        } else {
+            None
+        }
+    } else if says(&["invalid session id", "invalid thread id"]) {
+        Some("Codex doesn't recognize its id")
+    } else {
+        None
+    }
+}
+
+/// `thread/resume`, unarchiving the thread first when Codex reports it
+/// archived (the CLI's own archive command, or another client's).
+async fn resume_thread(client: &RpcClient, params: Value) -> Result<Value, HarnessError> {
+    match client.request("thread/resume", params.clone()).await {
+        Err(HarnessError::Protocol(message)) if message.contains("is archived") => {
+            tracing::info!(
+                target: "zeron_harness::codex",
+                "thread/resume: thread archived; unarchiving it"
+            );
+            client
+                .request(
+                    "thread/unarchive",
+                    json!({ "threadId": params["threadId"] }),
+                )
+                .await?;
+            client.request("thread/resume", params).await
+        }
+        other => other,
     }
 }
 
@@ -1046,6 +1319,15 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
     Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
 }
 
+/// What `thread/start` / `thread/resume` reports the thread runs with: the
+/// model and effort a collaboration mode falls back to when the request
+/// names none, and whether a resumed thread is still in plan mode.
+struct ThreadMode {
+    model: String,
+    effort: Option<String>,
+    plan: bool,
+}
+
 /// The per-run event loop: one task multiplexing app-server messages, the
 /// steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
@@ -1054,14 +1336,14 @@ async fn run_session(session: Session) {
         title_only,
         idle,
         mut child,
-        client,
+        mut client,
         mut incoming,
         event_tx,
         controls,
         request,
         interrupt_grace,
         kill_grace,
-        stderr_tail,
+        mut stderr_tail,
     } = session;
     let RunControls {
         realtime,
@@ -1074,14 +1356,12 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // The access mode's approval policy and sandbox (see [`permissions`]).
+    // A mode that asks routes its approvals to the person explicitly: a
+    // configured `approvals_reviewer` could otherwise hand them to an AI
+    // reviewer instead.
+    let (approval_policy, sandbox) = permissions(run_access(&request), title_only);
+    let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
     let start_tier = service_tier(&request);
 
     let start_params = {
@@ -1093,24 +1373,23 @@ async fn run_session(session: Session) {
                 crate::TITLE_INSTRUCTIONS.into(),
             );
             p.insert("ephemeral".into(), true.into());
-            p.insert(
-                "config".into(),
-                json!({
-                    "project_doc_max_bytes": 0,
-                    "web_search": "disabled",
-                    "features.shell_tool": false,
-                    "features.apply_patch_freeform": false,
-                    "features.multi_agent": false,
-                    "features.apps": false,
-                    "features.multi_agent_v2": false,
-                    "agents.enabled": false,
-                    "features.browser_use": false,
-                    "features.computer_use": false,
-                    "features.js_repl": false,
-                    "features.image_generation": false,
-                    "features.memories": false
-                }),
-            );
+            let mut config = json!({
+                "project_doc_max_bytes": 0,
+                "web_search": "disabled",
+                "features.shell_tool": false,
+                "features.apply_patch_freeform": false,
+                "features.apps": false,
+                "features.browser_use": false,
+                "features.computer_use": false,
+                "features.js_repl": false,
+                "features.image_generation": false,
+                "features.memories": false
+            });
+            config
+                .as_object_mut()
+                .expect("title config overrides are an object")
+                .extend(agent_tools_off());
+            p.insert("config".into(), config);
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
         if let Some(mcp) = request.mcp.as_ref().filter(|_| !title_only) {
@@ -1123,9 +1402,18 @@ async fn run_session(session: Session) {
                 .as_object_mut()
                 .expect("thread/start config overrides are an object");
             overrides.extend(codex_mcp_overrides(mcp));
+            // Delegation goes through that server's side chats only. The
+            // engine doesn't ask this of Codex yet: see
+            // `crate::switches_native_subagents`.
+            if mcp.side_chats_only() {
+                overrides.extend(agent_tools_off());
+            }
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandbox".into(), sandbox_mode(request.sandbox).into());
+        p.insert("sandbox".into(), sandbox_mode(sandbox).into());
+        if asks_person(&request) {
+            p.insert("approvalsReviewer".into(), "user".into());
+        }
         if let Some(model) = &request.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
@@ -1135,23 +1423,119 @@ async fn run_session(session: Session) {
         p
     };
 
-    // ---- handshake + thread + first turn (interruptible) ------------------
-    let setup = async {
-        client
-            .request(
-                "initialize",
-                json!({
-                    "clientInfo": {
-                        "name": "zeron-native",
-                        "title": "Zeron",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "capabilities": { "experimentalApi": true },
-                }),
+    // ---- handshake (interruptible; relaunches a process that died first) ---
+    let mut attempt = 0;
+    let mut opt_out = true;
+    loop {
+        let handshake = client.request("initialize", initialize_params(opt_out));
+        let failed = tokio::select! {
+            res = handshake => match res {
+                Ok(_) => break,
+                Err(e) => e,
+            },
+            _ = interrupt.cancelled() => {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }))
+                    .await;
+                client.close_stdin_for_teardown();
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
+        };
+        // Only a process that is gone gets another launch: an answer that
+        // refuses (bad config, unsupported version) would refuse again.
+        let exited = client.is_closed();
+        // An app-server that predates notification opt-outs may reject the
+        // capability outright; the opt-out is an optimization, so ask again
+        // without it.
+        if !exited && std::mem::take(&mut opt_out) {
+            tracing::debug!(
+                target: "zeron_harness::codex",
+                "initialize refused ({failed}); retrying without notification opt-outs"
+            );
+            continue;
+        }
+        if exited && attempt < STARTUP_RETRY_DELAYS.len() {
+            let status = child.try_wait().ok().flatten();
+            tracing::warn!(
+                target: "zeron_harness::codex",
+                attempt = attempt + 1,
+                error = %crate::crash_message("codex app-server", status, &stderr_tail),
+                "app-server died before initialize; relaunching"
+            );
+            client.close_stdin_for_teardown();
+            shutdown_child(&mut child, kill_grace).await;
+            tokio::select! {
+                _ = tokio::time::sleep(STARTUP_RETRY_DELAYS[attempt]) => {}
+                _ = interrupt.cancelled() => {
+                    let _ = event_tx
+                        .send(Ok(AgentEvent::Done {
+                            status: DoneStatus::Interrupted,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        }))
+                        .await;
+                    return;
+                }
+            }
+            attempt += 1;
+            match spawn_app_server(&executable, &request) {
+                Ok(next) => {
+                    child = next.child;
+                    client = next.client;
+                    incoming = next.incoming;
+                    stderr_tail = next.stderr_tail;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(Ok(AgentEvent::Done {
+                            status: DoneStatus::Errored,
+                            result: None,
+                            error: Some(e.to_string()),
+                            session_id: None,
+                        }))
+                        .await;
+                    return;
+                }
+            }
+        }
+        // Out of launches: say why, with what the process printed.
+        let error = if exited {
+            stderr_tail.wait_closed().await;
+            format!(
+                "initialize: {}",
+                crate::crash_message(
+                    "codex app-server",
+                    child.try_wait().ok().flatten(),
+                    &stderr_tail
+                )
             )
-            .await?;
-        client.notify("initialized", None);
+        } else {
+            failed.to_string()
+        };
+        let _ = event_tx
+            .send(Ok(AgentEvent::Done {
+                status: DoneStatus::Errored,
+                result: None,
+                error: Some(error),
+                session_id: None,
+            }))
+            .await;
+        client.close_stdin_for_teardown();
+        shutdown_child(&mut child, kill_grace).await;
+        return;
+    }
+    client.notify("initialized", None);
 
+    // ---- thread + first turn (interruptible) ------------------------------
+    let setup = async {
         if realtime.is_some() {
             // Codex's first account/read announces the initial auth snapshot
             // via account/updated. Load it before attaching the voice router,
@@ -1179,24 +1563,37 @@ async fn run_session(session: Session) {
                 }
             }
         }
+        let mut restore_notice = None;
         let thread = if let Some(resume) = &request.resume {
             let mut p = start_params.clone();
             p.insert("threadId".into(), Value::String(resume.clone()));
-            match client.request("thread/resume", Value::Object(p)).await {
+            match resume_thread(&client, Value::Object(p))
+                .await
+                .map_err(|e| (resume_unrecoverable(&e), e))
+            {
                 Ok(thread) => thread,
-                // A missing/foreign rollout falls back to a fresh thread.
-                Err(e) => {
+                // A missing/unreadable/foreign rollout falls back to a fresh
+                // thread — visibly: the reply will not know the earlier
+                // conversation. The log keeps Codex's own words.
+                Err((Some(reason), e)) => {
                     if command_request(&request.prompt, resume)?.is_some() {
                         return Err(e);
                     }
-                    tracing::debug!(
+                    tracing::warn!(
                         target: "zeron_harness::codex",
                         "thread/resume failed (starting fresh): {e}"
                     );
+                    restore_notice = Some(format!(
+                        "Couldn't restore the earlier Codex conversation ({reason}), so this \
+                         reply starts a new one without its context."
+                    ));
                     client
                         .request("thread/start", Value::Object(start_params.clone()))
                         .await?
                 }
+                // A dead process or a refusal a fresh thread would hit too:
+                // fail the run rather than silently dropping its history.
+                Err((None, e)) => return Err(e),
             }
         } else {
             client
@@ -1210,20 +1607,27 @@ async fn run_session(session: Session) {
             cwd: thread["cwd"].as_str().unwrap_or(&request.cwd).to_owned(),
             model_provider: thread["modelProvider"].as_str().map(str::to_owned),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context))
+        let thread_mode = ThreadMode {
+            model: thread["model"].as_str().unwrap_or_default().to_owned(),
+            effort: thread["reasoningEffort"].as_str().map(str::to_owned),
+            plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
+        };
+        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice, thread_mode))
     };
-    let (thread_id, mut children, voice_context) = tokio::select! {
+    let (thread_id, mut children, voice_context, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
+                let error = setup_failure(e, &client, &mut child, &stderr_tail).await;
                 let _ = event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(e.to_string()),
+                        error: Some(error),
                         session_id: None,
                     }))
                     .await;
+                client.close_stdin_for_teardown();
                 shutdown_child(&mut child, kill_grace).await;
                 return;
             }
@@ -1237,21 +1641,31 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
+            client.close_stdin_for_teardown();
             shutdown_child(&mut child, kill_grace).await;
             return;
         }
     };
 
-    // Model, effort and service tier ride every `turn/start` (each sticks
-    // for later turns): a steer's in-place `config` takes effect from the
-    // next turn the runtime starts.
+    // Model, effort, service tier, access and plan ride every `turn/start`
+    // (each sticks for later turns): a steer's in-place `config` takes
+    // effect from the next turn the runtime starts.
     let mut live = request.clone();
-    let turn_params = |live: &RunRequest, text: &str| -> Value {
+    // Plan mode sticks to the thread, across a resume too (live, 0.164.0).
+    // Once this runtime has asked for it, or the resumed thread is in it,
+    // every turn names its mode so that leaving plan is explicit; a thread
+    // that never planned is sent none, as before modes.
+    let mut names_mode = thread_mode.plan;
+    let mut turn_params = |live: &RunRequest, text: &str| -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(thread_id.clone()));
         p.insert("input".into(), prompt_input(text));
+        let (approval_policy, sandbox) = permissions(run_access(live), title_only);
         p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandboxPolicy".into(), sandbox_policy_value(live.sandbox));
+        p.insert("sandboxPolicy".into(), sandbox_policy_value(sandbox));
+        if asks_person(live) {
+            p.insert("approvalsReviewer".into(), "user".into());
+        }
         // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
         // when asked for — without this codex "thinks" in silence for minutes:
         // nothing renders and the UI's 45s staleness gate flips Working off
@@ -1265,6 +1679,22 @@ async fn run_session(session: Session) {
         }
         if let Some(tier) = service_tier(live) {
             p.insert("serviceTier".into(), Value::String(tier));
+        }
+        names_mode |= live.plan;
+        if names_mode {
+            let model = live.model.as_deref().unwrap_or(&thread_mode.model);
+            let effort = to_effort(live.reasoning).or(thread_mode.effort.as_deref());
+            if model.is_empty() {
+                tracing::warn!(
+                    target: "zeron_harness::codex",
+                    "no model to name the collaboration mode with; leaving it unchanged"
+                );
+            } else {
+                p.insert(
+                    "collaborationMode".into(),
+                    collaboration_mode(live.plan, model, effort),
+                );
+            }
         }
         Value::Object(p)
     };
@@ -1283,6 +1713,14 @@ async fn run_session(session: Session) {
     )
     .await
     {
+        client.close_stdin_for_teardown();
+        shutdown_child(&mut child, kill_grace).await;
+        return;
+    }
+    if let Some(message) = restore_notice
+        && !send(&event_tx, AgentEvent::Error { message }).await
+    {
+        client.close_stdin_for_teardown();
         shutdown_child(&mut child, kill_grace).await;
         return;
     }
@@ -1301,14 +1739,16 @@ async fn run_session(session: Session) {
         match start_turn(&client, turn_params(&live, &request.prompt)).await {
             Ok(id) => router.adopt_started(id),
             Err(e) => {
+                let error = setup_failure(e, &client, &mut child, &stderr_tail).await;
                 let _ = event_tx
                     .send(Ok(AgentEvent::Done {
                         status: DoneStatus::Errored,
                         result: None,
-                        error: Some(e.to_string()),
+                        error: Some(error),
                         session_id: Some(thread_id.clone()),
                     }))
                     .await;
+                client.close_stdin_for_teardown();
                 shutdown_child(&mut child, kill_grace).await;
                 return;
             }
@@ -1322,6 +1762,19 @@ async fn run_session(session: Session) {
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
+    // The turn's last final `error` notification, reported by its end (see
+    // [`settle_turn_error`]): never as an error part AND the Done's error.
+    let mut held_error: Option<String> = None;
+    // The account's rate-limit windows (`account/rateLimits/updated`), for
+    // a limit error's reset time.
+    let mut rate_limits: Option<Value> = None;
+    // Server→client requests answered from their own task (approvals and
+    // questions waiting on a person), bounded.
+    let request_slots = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_SERVER_REQUESTS));
+    // An interrupted turn's background-terminal query in flight: the turn
+    // and the process ids Codex still runs (`None`: it could not say).
+    let mut prune_query: Option<tokio::sync::oneshot::Receiver<(String, Option<HashSet<String>>)>> =
+        None;
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     // Each carries the configuration it was sent with, adopted when its own
@@ -1341,11 +1794,14 @@ async fn run_session(session: Session) {
     // watcher): its `item/completed` arrives when the process exits, turns
     // later (live, 0.159.3). The host's idle reaper must not retire the
     // app-server — and the process with it — while it runs.
-    let mut open_commands: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut open_commands: HashMap<String, OpenCommand> = HashMap::new();
     // An interrupted turn's foreground command is killed WITHOUT an
     // `item/completed`: once its process has had a moment to go, drop the
     // turn's commands whose process is gone (background ones live on).
     let mut prune_at: Option<(tokio::time::Instant, String)> = None;
+    // The turn being pruned: its commands are not listed as background
+    // processes until the prune says which of them still run.
+    let mut pruning: Option<String> = None;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1363,7 +1819,7 @@ async fn run_session(session: Session) {
     // The runtime's process tree when its teardown began (see
     // [`crate::shutdown_agent`]).
     #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut torn_down: Vec<i32> = Vec::new();
+    let mut torn_down: Vec<crate::process::Tracked> = Vec::new();
 
     'main: loop {
         tokio::select! {
@@ -1416,6 +1872,18 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // Kept for commands still open: one that outlives its
+                    // turn shows its tail (`TurnControl::background_output`).
+                    "item/commandExecution/outputDelta" => {
+                        if let (Some(id), Some(delta)) = (
+                            params.get("itemId").and_then(Value::as_str),
+                            params.get("delta").and_then(Value::as_str),
+                        ) && open_commands.contains_key(id)
+                        {
+                            turn.append_background_output(id, delta);
+                        }
+                    }
+
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
                         if let Some(text) = delta_text(&params)
@@ -1446,13 +1914,22 @@ async fn run_session(session: Session) {
                         if matches!(item_type(item), "commandExecution" | "command_execution") {
                             let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
                             let changed = if phase == Phase::Started {
-                                let pid = item.get("processId").and_then(Value::as_str).map(str::to_owned);
-                                open_commands.insert(id.to_owned(), (pid, router.active.clone())).is_none()
+                                let command = OpenCommand {
+                                    process: item.get("processId").and_then(Value::as_str).map(str::to_owned),
+                                    turn: router.active.clone(),
+                                    command: shown_command(
+                                        item.get("command").and_then(Value::as_str).unwrap_or_default(),
+                                    ),
+                                    since: chrono::Utc::now(),
+                                };
+                                open_commands.insert(id.to_owned(), command).is_none()
                             } else {
+                                turn.clear_background_output(id);
                                 open_commands.remove(id).is_some()
                             };
                             if changed {
                                 turn.set_background(open_commands.len());
+                                publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                             }
                         }
                         if matches!(item_type(item), "userMessage" | "user_message")
@@ -1474,12 +1951,21 @@ async fn run_session(session: Session) {
                         }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
-                                "exitedReviewMode" => item.get("review").and_then(Value::as_str),
-                                "contextCompaction" => Some("Context compacted."),
+                                "exitedReviewMode" => {
+                                    item.get("review").and_then(Value::as_str).map(str::to_owned)
+                                }
+                                "contextCompaction" => Some("Context compacted.".to_owned()),
+                                // Plan mode's proposed plan: Codex lifts it
+                                // out of the agent message into its own item
+                                // (the completed one is authoritative, its
+                                // `item/plan/delta`s may not add up to it).
+                                "plan" => item.get("text").and_then(Value::as_str)
+                                    .filter(|text| !text.trim().is_empty())
+                                    .map(|text| format!("{}\n\n", text.trim_end())),
                                 _ => None,
                             };
                             if let Some(text) = output
-                                && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
+                                && !send(&event_tx, AgentEvent::TextDelta { text }).await
                             { break 'main; }
                         }
                         if matches!(item_type(item), "agentMessage" | "agent_message") {
@@ -1563,6 +2049,14 @@ async fn run_session(session: Session) {
                         }
                         router.note_completed(&id);
                         stop_when_announced = false;
+                        // Its commands still open are background work now.
+                        let interrupted_turn = interrupted
+                            || stopping
+                            || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted");
+                        if interrupted_turn {
+                            pruning = Some(id.clone());
+                        }
+                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                         // Accepted steers whose item never surfaced still
                         // joined this turn: confirm them before its end.
                         while accepted_steers.pop_front().is_some() {
@@ -1582,24 +2076,28 @@ async fn run_session(session: Session) {
                         {
                             break 'main;
                         }
-                        let error = turn_error_message(&params).or_else(|| {
-                            (params
-                                .pointer("/turn/status")
-                                .and_then(Value::as_str)
-                                == Some("failed"))
-                            .then(|| "Codex turn failed".to_owned())
-                        });
+                        let (error, notice) =
+                            settle_turn_error(&params, held_error.take(), rate_limits.as_ref());
                         let status = if interrupted || stopping {
                             DoneStatus::Interrupted
                         } else if error.is_some() {
                             DoneStatus::Errored
+                        } else if params.pointer("/turn/status").and_then(Value::as_str)
+                            == Some("interrupted")
+                        {
+                            // Interrupted by someone else (another client of the
+                            // thread, Codex itself): still not a finished answer.
+                            DoneStatus::Interrupted
                         } else {
                             DoneStatus::Completed
                         };
-                        if status == DoneStatus::Interrupted
-                            || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted")
-                        {
+                        if status == DoneStatus::Interrupted {
                             prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
+                        }
+                        if let Some(message) = notice.filter(|_| status == DoneStatus::Completed)
+                            && !send(&event_tx, AgentEvent::Error { message }).await
+                        {
+                            break 'main;
                         }
                         stopping = false;
                         done_current = true;
@@ -1655,6 +2153,7 @@ async fn run_session(session: Session) {
                         router.note_completed(&id);
                         stop_when_announced = false;
                         accepted_steers.clear();
+                        let held = held_error.take();
                         if let Some(usage) = pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
@@ -1686,7 +2185,8 @@ async fn run_session(session: Session) {
                                 },
                                 result: None,
                                 error: Some(
-                                    turn_error_message(&params)
+                                    turn_error_message(&params, rate_limits.as_ref())
+                                        .or(held)
                                         .unwrap_or_else(|| "Codex turn failed".into()),
                                 ),
                                 session_id: Some(thread_id.clone()),
@@ -1705,8 +2205,11 @@ async fn run_session(session: Session) {
                         router.note_completed(&id);
                         stop_when_announced = false;
                         accepted_steers.clear();
+                        held_error = None;
                         done_current = true;
                         prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
+                        pruning = Some(id.clone());
+                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                         if std::mem::take(&mut stopping) && !interrupted {
                             if !send(&event_tx, AgentEvent::Done {
                                 status: DoneStatus::Interrupted,
@@ -1735,17 +2238,26 @@ async fn run_session(session: Session) {
                     }
 
                     "error" => {
-                        // 0.146.x nests it (`params.error.message`); older
-                        // builds were flat (`params.message`) — accept both.
-                        let message = params
-                            .pointer("/error/message")
-                            .and_then(Value::as_str)
-                            .or_else(|| params.get("message").and_then(Value::as_str))
-                            .unwrap_or("Codex error")
-                            .to_owned();
-                        if !send(&event_tx, AgentEvent::Error { message }).await {
+                        let notice = normalize::error_notice(&params, rate_limits.as_ref());
+                        if notice.will_retry {
+                            // "Reconnecting… 2/5": Codex is on it. Not an
+                            // outcome, so not a permanent error in the
+                            // transcript (nor a sign-in prompt).
+                            tracing::info!(
+                                target: "zeron_harness::codex",
+                                "codex retrying: {}", notice.message
+                            );
+                        } else if !done_current {
+                            // The turn's end reports it (turn/completed
+                            // usually repeats it as `turn.error`).
+                            held_error = Some(notice.message);
+                        } else if !send(&event_tx, AgentEvent::Error { message: notice.message }).await {
                             break 'main;
                         }
+                    }
+
+                    "account/rateLimits/updated" => {
+                        normalize::merge_rate_limits(&mut rate_limits, &params);
                     }
 
                     // thread/status, mcpServer startup, account noise, … —
@@ -1760,8 +2272,9 @@ async fn run_session(session: Session) {
                         id,
                         &method,
                         &params,
-                        request.auto_approve,
+                        run_access(&live),
                         &request_input,
+                        &request_slots,
                     );
                 }
 
@@ -1874,6 +2387,31 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // The person stopped one background command: Codex terminates
+            // its exec session, and the command's `item/completed` (or the
+            // prune, if none comes) takes it off the list.
+            item = turn.background_stop_requested(), if !interrupted => {
+                if let Some(open) = open_commands.get(&item) {
+                    let Some(process) = open.process.clone() else {
+                        tracing::debug!(target: "zeron_harness::codex", item = %item, "no process id to terminate");
+                        continue 'main;
+                    };
+                    let client = client.clone();
+                    let thread = thread_id.clone();
+                    tokio::spawn(async move {
+                        let params = json!({ "threadId": thread, "processId": process });
+                        if let Err(e) = client.request("thread/backgroundTerminals/terminate", params).await {
+                            tracing::debug!(target: "zeron_harness::codex", "terminate failed: {e}");
+                        }
+                    });
+                    if prune_at.is_none() && prune_query.is_none()
+                        && let Some(started_in) = open.turn.clone()
+                    {
+                        prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, started_in));
+                    }
+                }
+            },
+
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
@@ -1917,11 +2455,40 @@ async fn run_session(session: Session) {
                 prune_at.as_ref().map_or_else(tokio::time::Instant::now, |(at, _)| *at)
             ), if prune_at.is_some() => {
                 let (_, stopped) = prune_at.take().expect("guarded by if");
-                open_commands.retain(|_, (pid, started_in)| {
-                    started_in.as_deref() != Some(stopped.as_str())
-                        || pid.as_deref().is_some_and(process_alive)
+                // Ask from a task: the answer may take a moment, and the turn
+                // stream keeps flowing meanwhile.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let client = client.clone();
+                let thread = thread_id.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send((stopped, background_terminals(&client, &thread).await));
                 });
-                turn.set_background(open_commands.len());
+                prune_query = Some(rx);
+            },
+
+            answer = async { prune_query.as_mut().expect("guarded by if").await }, if prune_query.is_some() => {
+                prune_query = None;
+                if let Ok((stopped, live)) = answer {
+                    open_commands.retain(|item, open| {
+                        let keep = open.turn.as_deref() != Some(stopped.as_str())
+                            || match &live {
+                                Some(live) => {
+                                    live.contains(item.as_str())
+                                        || open.process.as_deref().is_some_and(|pid| live.contains(pid))
+                                }
+                                None => open.process.as_deref().is_some_and(process_alive),
+                            };
+                        if !keep {
+                            turn.clear_background_output(item);
+                        }
+                        keep
+                    });
+                    turn.set_background(open_commands.len());
+                    if pruning.as_deref() == Some(stopped.as_str()) {
+                        pruning = None;
+                    }
+                    publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
+                }
             },
 
             _ = event_tx.closed() => break 'main,
@@ -1943,23 +2510,26 @@ async fn run_session(session: Session) {
         } else if !interrupted && !done_current {
             // A child KILLED mid-turn (OS memory pressure, `killall codex`)
             // must not read as a silent success — codex.ts's signal-death
-            // handling, reduced to the turn-in-flight case.
-            let status = child.try_wait().ok().flatten();
+            // handling, reduced to the turn-in-flight case. A final error
+            // the turn already reported (and its end never came to carry)
+            // leads: it is usually why the turn went nowhere.
+            let crash = crash_report(&mut child, &stderr_tail).await;
+            let error = match held_error.take() {
+                Some(held) => format!("{held}\n\n{crash}"),
+                None => crash,
+            };
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
                     result: None,
-                    error: Some(crate::crash_message(
-                        "codex app-server",
-                        status,
-                        &stderr_tail,
-                    )),
+                    error: Some(error),
                     session_id: Some(thread_id.clone()),
                 }))
                 .await;
         }
     }
 
+    client.close_stdin_for_teardown();
     crate::shutdown_agent(&mut child, torn_down, kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
@@ -1970,7 +2540,121 @@ async fn run_session(session: Session) {
 /// still running counts as background work.
 const COMMAND_EXIT_GRACE: Duration = Duration::from_secs(3);
 
-/// Whether a process the app-server reported is still running.
+/// A command the parent thread started that has not reported finished.
+struct OpenCommand {
+    /// Codex's exec-session id (`processId`): what
+    /// `thread/backgroundTerminals/*` address. Not an OS pid.
+    process: Option<String>,
+    /// The turn that started it.
+    turn: Option<String>,
+    command: String,
+    since: chrono::DateTime<chrono::Utc>,
+}
+
+/// Publish the open commands whose turn is over — the background processes —
+/// oldest first. `pruning`: an interrupted turn whose killed commands have
+/// not been told apart from the ones still running yet.
+fn publish_background(
+    turn: &crate::TurnControl,
+    open: &HashMap<String, OpenCommand>,
+    active: Option<&str>,
+    pruning: Option<&str>,
+) {
+    let mut listed: Vec<_> = open
+        .iter()
+        .filter(|(_, c)| {
+            c.turn
+                .as_deref()
+                .is_none_or(|t| Some(t) != active && Some(t) != pruning)
+        })
+        .map(|(id, c)| zeron_proto::BackgroundTask {
+            id: id.clone(),
+            command: c.command.clone(),
+            description: None,
+            started_at: c.since,
+        })
+        .collect();
+    listed.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    turn.set_background_processes(listed);
+}
+
+/// A command as the person would have typed it: Codex runs each one through
+/// the login shell (`/usr/bin/zsh -lc '…'`), which says nothing.
+fn shown_command(command: &str) -> String {
+    let command = command.trim();
+    let Some((shell, rest)) = command
+        .split_once(" -lc ")
+        .or_else(|| command.split_once(" -c "))
+    else {
+        return command.to_owned();
+    };
+    let shell = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+    if !matches!(shell, "bash" | "zsh" | "sh" | "fish" | "dash") {
+        return command.to_owned();
+    }
+    let rest = rest.trim();
+    match rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        Some(inner) => inner.replace("'\\''", "'"),
+        None => rest
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(rest)
+            .to_owned(),
+    }
+}
+
+/// Server→client requests answered from their own task at once. A flood
+/// beyond this (a misbehaving MCP server) is refused instead of growing
+/// without bound.
+const MAX_PENDING_SERVER_REQUESTS: usize = 32;
+
+/// The `processId`s and item ids of the commands Codex still runs for
+/// `thread` (`thread/backgroundTerminals/list`, paged). The authority on a
+/// command item's `processId`, which names Codex's own exec session rather
+/// than promising an OS pid. `None` when the app-server can't answer (an
+/// older build without the method).
+async fn background_terminals(client: &RpcClient, thread: &str) -> Option<HashSet<String>> {
+    let mut live = HashSet::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..100 {
+        let mut params = json!({ "threadId": thread });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = cursor.clone().into();
+        }
+        let page = match tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("thread/backgroundTerminals/list", params),
+        )
+        .await
+        {
+            Ok(Ok(page)) => page,
+            Ok(Err(e)) => {
+                tracing::debug!(target: "zeron_harness::codex", "background terminals unavailable: {e}");
+                return None;
+            }
+            Err(_) => return None,
+        };
+        for terminal in page["data"].as_array().into_iter().flatten() {
+            for key in ["processId", "itemId"] {
+                if let Some(id) = terminal[key].as_str().filter(|id| !id.is_empty()) {
+                    live.insert(id.to_owned());
+                }
+            }
+        }
+        match page["nextCursor"].as_str().filter(|next| !next.is_empty()) {
+            Some(next) if cursor.as_deref() != Some(next) => cursor = Some(next.to_owned()),
+            _ => return Some(live),
+        }
+    }
+    Some(live)
+}
+
+/// Fallback for an app-server that can't list its terminals: whether the
+/// command's reported process id names a running OS process.
 fn process_alive(pid: &str) -> bool {
     #[cfg(unix)]
     {
@@ -1978,9 +2662,33 @@ fn process_alive(pid: &str) -> bool {
         pid.parse::<i32>()
             .is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Unknown: count it gone, which leaves the idle reaper as it was.
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            return false;
+        };
+        if pid == 0 {
+            return false;
+        }
+        // SAFETY: a query-only handle, closed before returning; a vanished
+        // pid yields a null handle.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let alive = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            CloseHandle(handle);
+            alive
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = pid;
         false
     }
@@ -2052,19 +2760,44 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
-/// Serve one server→client request. Approval requests round-trip through
-/// `request_input` as a synthesized yes/no question (in a subtask so the
-/// message loop keeps flowing); with `auto_approve` they're accepted outright
-/// (belt to the wire-level `approvalPolicy: "never"`). Anything else is
-/// rejected as unsupported so the server never wedges awaiting a reply.
+/// What an approval request asks to do, for
+/// [`crate::approval::allowed_without_asking`].
+fn approval_action(method: &str) -> crate::approval::Action {
+    if method == "item/fileChange/requestApproval" {
+        crate::approval::Action::Edit
+    } else {
+        crate::approval::Action::Other
+    }
+}
+
+/// Serve one server→client request. An approval the run's `access` covers
+/// is accepted outright (full access: belt to the wire-level `"never"`;
+/// auto-accept edits: file changes); any other round-trips through
+/// `request_input` as a yes/no question (in a subtask so the message loop
+/// keeps flowing), a refusal declining. MCP elicitations are asked or
+/// declined. Anything else is rejected as unsupported so the server never
+/// wedges awaiting a reply. At most [`MAX_PENDING_SERVER_REQUESTS`] wait on
+/// a person at once; the rest are refused as overloaded.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
-    auto_approve: bool,
+    access: AccessMode,
     request_input: &Arc<RequestInputFn>,
+    slots: &Arc<tokio::sync::Semaphore>,
 ) {
+    let slot = || {
+        let permit = Arc::clone(slots).try_acquire_owned().ok();
+        if permit.is_none() {
+            tracing::warn!(
+                target: "zeron_harness::codex",
+                "too many pending server requests; refusing {method}"
+            );
+            client.respond_error(&id, -32000, "client overloaded: too many pending requests");
+        }
+        permit
+    };
     // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
     // question, never auto-approvable — route it to the input bridge and
     // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
@@ -2074,9 +2807,11 @@ fn handle_server_request(
             client.respond(&id, json!({ "answers": {} }));
             return;
         }
+        let Some(permit) = slot() else { return };
         let client = client.clone();
         let request_input = Arc::clone(request_input);
         tokio::spawn(async move {
+            let _permit = permit;
             let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
             let answers = (request_input)(asked).await.unwrap_or_default();
             let mut by_id = serde_json::Map::new();
@@ -2092,27 +2827,65 @@ fn handle_server_request(
         });
         return;
     }
-    let is_approval = matches!(
-        method,
-        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-    );
-    if !is_approval {
-        tracing::debug!(
-            target: "zeron_harness::codex",
-            "unhandled server request: {method}"
-        );
-        client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+    // MCP servers elicit regardless of the approval policy. A form the input
+    // bridge can ask is asked; anything else is declined — a reply the
+    // server handles, where an error failed its tool call.
+    if method == "mcpServer/elicitation/request" {
+        let Some(form) = elicitation::form(params) else {
+            let mode = params["mode"].as_str().unwrap_or_default();
+            tracing::info!(
+                target: "zeron_harness::codex",
+                mode, "declining an MCP elicitation Zeron can't ask"
+            );
+            client.respond(&id, elicitation::decline());
+            return;
+        };
+        let Some(permit) = slot() else { return };
+        let client = client.clone();
+        let request_input = Arc::clone(request_input);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let answers = (request_input)(form.questions.clone())
+                .await
+                .unwrap_or_default();
+            client.respond(&id, form.response(&answers));
+        });
         return;
     }
-    if auto_approve {
-        client.respond(&id, json!({ "decision": "accept" }));
+    // Each approval's own accept / decline reply.
+    let reply: fn(&Value, bool) -> Value = match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            |_, accept| json!({ "decision": if accept { "accept" } else { "decline" } })
+        }
+        // Granting means granting what was asked, for this turn; an empty
+        // grant is the refusal.
+        "item/permissions/requestApproval" => |params, accept| {
+            json!({
+                "permissions": if accept { params["permissions"].clone() } else { json!({}) },
+                "scope": "turn",
+            })
+        },
+        _ => {
+            tracing::debug!(
+                target: "zeron_harness::codex",
+                "unhandled server request: {method}"
+            );
+            client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+            return;
+        }
+    };
+    if crate::approval::allowed_without_asking(access, approval_action(method)) {
+        client.respond(&id, reply(params, true));
         return;
     }
 
+    let Some(permit) = slot() else { return };
     let question = approval_question(method, params);
+    let params = params.clone();
     let client = client.clone();
     let request_input = Arc::clone(request_input);
     tokio::spawn(async move {
+        let _permit = permit;
         // The engine's input bridge owns the `InputRequested`/`InputResolved`
         // lifecycle (it mints the request id the resolver is parked under);
         // emitting our own copy here doubled the doc's input part with an id
@@ -2123,13 +2896,8 @@ fn handle_server_request(
         let answers = (request_input)(vec![question.clone()])
             .await
             .unwrap_or_default();
-        let accept = answers.iter().any(|a| {
-            a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
-        });
-        client.respond(
-            &id,
-            json!({ "decision": if accept { "accept" } else { "decline" } }),
-        );
+        let accept = crate::approval::approved(&question, &answers);
+        client.respond(&id, reply(&params, accept));
     });
 }
 
@@ -2193,9 +2961,11 @@ fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
         .collect()
 }
 
-/// Synthesize the yes/no question an approval request surfaces to the user.
+/// Synthesize the yes/no question an approval request surfaces to the user
+/// (the shared [`crate::approval`] wording; permissions spell out what
+/// they grant).
 fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
-    let (header, question) = if method.contains("commandExecution") {
+    if method.contains("commandExecution") {
         let command = match params.get("command") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -2205,13 +2975,46 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
                 .join(" "),
             _ => String::new(),
         };
-        (
-            "Approve command".to_owned(),
-            if command.is_empty() {
-                "Codex wants to run a command. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to run `{command}`. Allow it?")
-            },
+        crate::approval::command("Codex", &command)
+    } else if method.contains("permissions") {
+        let permissions = &params["permissions"];
+        let mut asks = Vec::new();
+        if permissions.pointer("/network/enabled") == Some(&Value::Bool(true)) {
+            asks.push("network access".to_owned());
+        }
+        let fs = &permissions["fileSystem"];
+        for (key, access) in [("write", "write"), ("read", "read")] {
+            let paths: Vec<&str> = fs[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !paths.is_empty() {
+                asks.push(format!("{access} access to {}", paths.join(", ")));
+            }
+        }
+        for entry in fs["entries"].as_array().into_iter().flatten() {
+            if let (Some(access), Some(path)) = (
+                entry["access"].as_str().filter(|a| *a != "deny"),
+                entry.pointer("/path/path").and_then(Value::as_str),
+            ) {
+                asks.push(format!("{access} access to {path}"));
+            }
+        }
+        let what = if asks.is_empty() {
+            "additional permissions".to_owned()
+        } else {
+            asks.join("; ")
+        };
+        let why = params["reason"]
+            .as_str()
+            .filter(|r| !r.is_empty())
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
+        crate::approval::question(
+            "Approve permissions",
+            format!("Codex wants {what}{why}. Allow it?"),
         )
     } else {
         let paths: Vec<&str> = params
@@ -2222,23 +3025,7 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
             .iter()
             .filter_map(|c| c.get("path").and_then(Value::as_str))
             .collect();
-        (
-            "Approve file change".to_owned(),
-            if paths.is_empty() {
-                "Codex wants to modify files. Allow it?".to_owned()
-            } else {
-                format!("Codex wants to modify {}. Allow it?", paths.join(", "))
-            },
-        )
-    };
-    UserInputQuestion {
-        id: new_message_id(),
-        header,
-        question,
-        options: vec!["Yes".into(), "No".into()],
-        prefill: None,
-        multiline: false,
-        multi_select: false,
+        crate::approval::edit("Codex", &paths)
     }
 }
 
@@ -2247,6 +3034,24 @@ use crate::{Signal, send_signal, shutdown_child};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shown_commands_drop_the_login_shell() {
+        assert_eq!(
+            shown_command("/usr/bin/zsh -lc 'npm run dev'"),
+            "npm run dev"
+        );
+        assert_eq!(
+            shown_command("/bin/bash -lc 'echo '\\''hi'\\'' && sleep 5'"),
+            "echo 'hi' && sleep 5"
+        );
+        assert_eq!(shown_command("bash -c \"cargo watch\""), "cargo watch");
+        assert_eq!(shown_command("echo beta"), "echo beta");
+        assert_eq!(
+            shown_command("python -c 'print(1)'"),
+            "python -c 'print(1)'"
+        );
+    }
     use serde_json::json;
 
     #[test]
@@ -2267,6 +3072,116 @@ mod tests {
         assert!(!legacy_model_page(&json!({"data":[]})));
     }
 
+    fn run_request(access: AccessMode, plan: bool) -> RunRequest {
+        RunRequest {
+            mcp: None,
+            prompt: String::new(),
+            harness: None,
+            model: Some("gpt-5.6-sol".into()),
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/repo".into(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            access,
+            plan,
+            attachments: Vec::new(),
+            worktree: None,
+            resume: None,
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn each_access_mode_has_its_own_policy_and_sandbox() {
+        let wire = |access, title_only| {
+            let (policy, sandbox) = permissions(access, title_only);
+            (policy, sandbox_mode(sandbox), sandbox_policy_value(sandbox))
+        };
+        assert_eq!(
+            wire(AccessMode::FullAccess, false),
+            ("never", "danger-full-access", json!({"type": "dangerFullAccess"}))
+        );
+        assert_eq!(
+            wire(AccessMode::AutoAcceptEdits, false),
+            (
+                "untrusted",
+                "workspace-write",
+                json!({"type": "workspaceWrite", "networkAccess": true})
+            )
+        );
+        assert_eq!(
+            wire(AccessMode::Supervised, false),
+            ("untrusted", "read-only", json!({"type": "readOnly"}))
+        );
+        for access in AccessMode::ALL {
+            assert_eq!(
+                wire(access, true),
+                ("never", "read-only", json!({"type": "readOnly"}))
+            );
+        }
+        // `auto_approve` still means full access, whatever the mode says.
+        let mut request = run_request(AccessMode::Supervised, false);
+        assert_eq!(run_access(&request), AccessMode::Supervised);
+        request.auto_approve = true;
+        assert_eq!(run_access(&request), AccessMode::FullAccess);
+    }
+
+    #[test]
+    fn auto_accept_edits_accepts_file_changes_and_asks_the_rest() {
+        use crate::approval::allowed_without_asking;
+        let methods = [
+            "item/fileChange/requestApproval",
+            "item/commandExecution/requestApproval",
+            "item/permissions/requestApproval",
+        ];
+        let allowed = |access| {
+            methods.map(|method| allowed_without_asking(access, approval_action(method)))
+        };
+        assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
+        assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
+        assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
+    }
+
+    #[test]
+    fn access_and_plan_changes_apply_in_place() {
+        let harness = CodexHarness::new();
+        let live = run_request(AccessMode::FullAccess, false);
+        for next in [
+            run_request(AccessMode::Supervised, false),
+            run_request(AccessMode::AutoAcceptEdits, false),
+            run_request(AccessMode::FullAccess, true),
+        ] {
+            assert!(!harness.same_runtime(&live, &next), "{next:?}");
+            assert!(harness.reconfigures_in_place(&live, &next), "{next:?}");
+        }
+        // A request that auto-approves is the same full-access runtime.
+        let mut auto = run_request(AccessMode::Supervised, false);
+        auto.auto_approve = true;
+        assert!(harness.same_runtime(&live, &auto));
+        let mut moved = run_request(AccessMode::Supervised, false);
+        moved.cwd = "/elsewhere".into();
+        assert!(!harness.reconfigures_in_place(&live, &moved));
+        assert_eq!(harness.access_modes(), &AccessMode::ALL);
+        assert!(harness.supports_plan());
+    }
+
+    #[test]
+    fn collaboration_modes_repeat_the_turn_model_and_effort() {
+        assert_eq!(
+            collaboration_mode(true, "gpt-5.6-sol", Some("high")),
+            json!({"mode": "plan", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": "high", "developer_instructions": null,
+            }})
+        );
+        assert_eq!(
+            collaboration_mode(false, "gpt-5.6-sol", None),
+            json!({"mode": "default", "settings": {
+                "model": "gpt-5.6-sol", "reasoning_effort": null, "developer_instructions": null,
+            }})
+        );
+    }
+
     #[test]
     fn approval_questions_are_yes_no() {
         let q = approval_question(
@@ -2274,7 +3189,7 @@ mod tests {
             &json!({"itemId": "c1", "command": "rm -rf /tmp/x"}),
         );
         assert_eq!(q.header, "Approve command");
-        assert!(q.question.contains("rm -rf /tmp/x"));
+        assert_eq!(q.question, "Codex wants to run `rm -rf /tmp/x`. Allow it?");
         assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
         assert!(!q.multi_select);
 
@@ -2291,6 +3206,106 @@ mod tests {
             &json!({"command": ["git", "push", "--force"]}),
         );
         assert!(q.question.contains("git push --force"));
+
+        let q = approval_question(
+            "item/permissions/requestApproval",
+            &json!({"reason": "install deps", "permissions": {
+                "network": {"enabled": true},
+                "fileSystem": {"write": ["/repo/.cache"], "entries": [
+                    {"access": "read", "path": {"type": "path", "path": "/etc/hosts"}},
+                    {"access": "deny", "path": {"type": "path", "path": "/secret"}}
+                ]}
+            }}),
+        );
+        assert_eq!(q.header, "Approve permissions");
+        assert_eq!(
+            q.question,
+            "Codex wants network access; write access to /repo/.cache; read access to /etc/hosts (install deps). Allow it?"
+        );
+    }
+
+    #[test]
+    fn only_a_known_old_cli_is_turned_away() {
+        assert!(check_codex_version(None).is_ok());
+        assert!(check_codex_version(Some(&semver::Version::new(0, 164, 0))).is_ok());
+        assert!(check_codex_version(Some(&MIN_CODEX_VERSION)).is_ok());
+        // A pre-release of the minimum is that release, not an older one.
+        let alpha = semver::Version::parse("0.146.0-alpha.2").unwrap();
+        assert!(check_codex_version(Some(&alpha)).is_ok());
+        let old_alpha = semver::Version::parse("0.145.0-alpha.9").unwrap();
+        assert!(check_codex_version(Some(&old_alpha)).is_err());
+        let err = check_codex_version(Some(&semver::Version::new(0, 120, 3)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Codex CLI 0.120.3 is too old") && err.contains("0.146.0"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn only_a_missing_conversation_starts_fresh() {
+        let protocol = |m: &str| HarnessError::Protocol(m.into());
+        // Live 0.164.0 wordings, as the RPC client renders them.
+        for (gone, reason) in [
+            (
+                "thread/resume: no rollout found for thread id 019a0000-0000-7000-8000-000000000000 (code -32600)",
+                "it isn't saved on this device",
+            ),
+            (
+                "thread/resume: thread not found: abc",
+                "it isn't saved on this device",
+            ),
+            (
+                "thread/resume: failed to read thread: thread-store internal error: failed to read session metadata /h/sessions/2026/10/23/rollout-x.jsonl: rollout at /h/sessions/2026/10/23/rollout-x.jsonl is empty (code -32603)",
+                "its saved history is empty",
+            ),
+            (
+                "thread/resume: failed to read thread: thread-store internal error: failed to read session metadata /h/sessions/2026/10/23/rollout-x.jsonl: stream did not contain valid UTF-8 (code -32603)",
+                "its saved history couldn't be read",
+            ),
+            (
+                "thread/resume: invalid session id: invalid character: expected an optional prefix of `urn:uuid:` (code -32600)",
+                "Codex doesn't recognize its id",
+            ),
+        ] {
+            assert_eq!(
+                resume_unrecoverable(&protocol(gone)),
+                Some(reason),
+                "{gone}"
+            );
+        }
+        for keep in [
+            "thread/resume: app-server exited before responding",
+            "thread/resume: app-server stdin closed",
+            "thread/resume: failed to load configuration",
+            "thread/resume: session x is archived. Run `codex unarchive x` to unarchive it first.",
+            // "not found" alone is about something other than the thread.
+            "thread/resume: failed to open /repo/AGENTS.md: entity not found (code -32603)",
+            "thread/resume: environment variable not found: MY_PROVIDER_KEY (code -32603)",
+            "thread/resume: model provider `corp` not found (code -32600)",
+            // A rollout the OS would not hand over still exists.
+            "thread/resume: failed to read thread: thread-store internal error: failed to read session metadata /h/sessions/2026/10/23/rollout-x.jsonl: Permission denied (os error 13) (code -32603)",
+            "thread/resume: failed to read thread: thread-store internal error: rollout at /h/sessions/2026/10/23/rollout-x.jsonl is locked (code -32603)",
+            "thread/resume: failed to read thread: thread-store internal error: Too many open files (os error 24) (code -32603)",
+            "thread/resume: failed to read thread: thread-store internal error: something new (code -32603)",
+        ] {
+            assert_eq!(resume_unrecoverable(&protocol(keep)), None, "{keep}");
+        }
+        assert!(transport_lost(&protocol(
+            "thread/start: app-server exited before responding"
+        )));
+        // A failed write names its cause after the wire's own words.
+        assert!(transport_lost(&protocol(
+            "thread/resume: app-server stdin closed (Broken pipe (os error 32))"
+        )));
+        assert_eq!(
+            resume_unrecoverable(&protocol(
+                "thread/resume: app-server stdin closed (Broken pipe (os error 32))"
+            )),
+            None
+        );
+        assert!(!transport_lost(&protocol("thread/start: bad request")));
     }
 
     #[test]
@@ -2378,6 +3393,10 @@ mod mcp_injection_tests {
         assert_eq!(
             overrides["mcp_servers.zeron.env"],
             json!({ "ZERON_CHAT_ID": "chat-1" })
+        );
+        assert_eq!(
+            overrides["mcp_servers.zeron.default_tools_approval_mode"],
+            "approve"
         );
     }
 }

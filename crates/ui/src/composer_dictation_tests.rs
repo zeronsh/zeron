@@ -634,6 +634,7 @@ fn dictation_question_takeover_stops_capture_without_losing_draft(cx: &mut TestA
                 id: "input".into(),
                 request_id: "request".into(),
                 resolved: false,
+                answers: None,
                 questions: vec![UserInputQuestion {
                     id: "q".into(),
                     header: "Choose".into(),

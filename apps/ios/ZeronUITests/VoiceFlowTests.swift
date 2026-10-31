@@ -14,7 +14,7 @@ final class VoiceFlowTests: XCTestCase {
         return app
     }
 
-    /// Stage → transcript → back: the live strip in the bottom bar reopens the stage.
+    /// Stage → transcript → back: the bottom bar's live voice button reopens the stage.
     func testLiveStripReopensTheStageAfterTheTranscript() {
         let app = launch(["-voice-stage"])
         let stage = app.otherElements["voice-stage"]
@@ -29,7 +29,7 @@ final class VoiceFlowTests: XCTestCase {
         XCTAssertTrue(stage.waitForExistence(timeout: 5), "the live strip opens the call stage")
     }
 
-    /// Minimizing the stage and tapping the strip brings it back.
+    /// Minimizing the stage and tapping the live voice button brings it back.
     func testLiveStripReopensAMinimizedStage() {
         let app = launch(["-voice-stage"])
         let stage = app.otherElements["voice-stage"]

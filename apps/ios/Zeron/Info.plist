@@ -62,6 +62,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Take photos to attach to messages.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Terminals connect straight to your computer on the same network, so typing shows up without a round trip through the cloud.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

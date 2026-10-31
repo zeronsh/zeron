@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northwind · <!--PAGE--></title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root { --bg:#0b0d12; --panel:#12151d; --line:#232837; --text:#e7e9ee; --muted:#8b93a7; --accent:#7aa2ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.55 "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  a { color: inherit; }
+  header.site-nav { position: sticky; top:0; display:flex; align-items:center; gap:28px; padding:14px 40px; background: rgba(11,13,18,.85); backdrop-filter: blur(8px); border-bottom:1px solid var(--line); }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:600; }
+  .brand img { width:22px; height:22px; }
+  nav a { color: var(--muted); text-decoration:none; margin-right:18px; }
+  nav a:hover { color: var(--text); }
+  .nav-cta { margin-left:auto; }
+  .btn { display:inline-flex; align-items:center; gap:8px; padding:9px 16px; border-radius:8px; border:1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor:pointer; }
+  .btn-primary { background: var(--accent); border-color: transparent; color:#0b0d12; font-weight:600; }
+  main { max-width: 1040px; margin: 0 auto; padding: 56px 40px 96px; }
+  .hero h1 { font-size: 44px; line-height:1.1; margin: 0 0 14px; letter-spacing:-.02em; }
+  .hero p.lede { color: var(--muted); max-width: 560px; margin:0 0 28px; font-size:17px; }
+  .toggle { display:inline-flex; padding:3px; border:1px solid var(--line); border-radius:999px; margin: 36px 0 22px; }
+  .toggle button { border:0; background:none; color: var(--muted); padding:6px 14px; border-radius:999px; font: inherit; cursor:pointer; }
+  .toggle button[aria-pressed="true"] { background: var(--panel); color: var(--text); }
+  .pricing-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; }
+  .plan-card { padding: 22px; border:1px solid var(--line); border-radius:14px; background: var(--panel); }
+  .plan-card.featured { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .plan-card h3 { margin:0 0 4px; font-size:16px; }
+  .price { font-size: 34px; font-weight:650; margin: 10px 0 2px; }
+  .price small { font-size:14px; color: var(--muted); font-weight:400; }
+  .plan-card ul { padding-left:18px; color: var(--muted); margin: 14px 0 20px; }
+  .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; background: rgba(122,162,255,.15); color: var(--accent); margin-left:6px; }
+  section { margin-top: 64px; }
+  h2 { font-size: 22px; margin:0 0 16px; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+  th { color: var(--muted); font-weight:500; font-size:13px; }
+  form.signup { display:grid; grid-template-columns: 1fr 1fr auto; gap:10px; align-items:end; }
+  label { display:block; font-size:12px; color: var(--muted); margin-bottom:6px; }
+  input, select { width:100%; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  footer { margin-top: 80px; color: var(--muted); font-size:13px; display:flex; gap:18px; }
+</style>
+</head>
+<body>
+<header class="site-nav">
+  <div class="brand"><img src="/favicon.svg" alt="Northwind logo">Northwind</div>
+  <nav aria-label="Primary"><a href="/">Overview</a><a href="/next">Changelog</a><a href="https://example.com/docs" target="_blank">Docs</a></nav>
+  <a class="btn nav-cta" href="#signup">Sign in</a>
+</header>
+<main>
+  <div class="hero">
+    <h1>Ship faster with fewer <!--PAGE--> surprises.</h1>
+    <p class="lede">Northwind keeps your deploys, previews and incident notes in one place, so the whole team sees the same thing at the same time.</p>
+    <button class="btn btn-primary" data-testid="hero-cta">Start free trial</button>
+    <button class="btn">Book a demo</button>
+  </div>
+
+  <div class="toggle" role="group" aria-label="Billing period">
+    <button aria-pressed="true">Monthly</button><button aria-pressed="false">Yearly <span class="badge">−20%</span></button>
+  </div>
+
+  <div class="pricing-grid">
+    <article class="plan-card">
+      <h3>Starter</h3><div class="price">$0 <small>/ month</small></div>
+      <ul><li>3 projects</li><li>Preview deploys</li><li>Community support</li></ul>
+      <button class="btn">Choose Starter</button>
+    </article>
+    <article class="plan-card featured" id="plan-team">
+      <h3>Team <span class="badge">Popular</span></h3><div class="price">$24 <small>/ seat / month</small></div>
+      <ul><li>Unlimited projects</li><li>Incident timelines</li><li>SSO and audit log</li></ul>
+      <button class="btn btn-primary" data-testid="choose-team">Choose Team</button>
+    </article>
+    <article class="plan-card">
+      <h3>Enterprise</h3><div class="price">Custom</div>
+      <ul><li>Dedicated region</li><li>99.99% SLA</li><li>Security review</li></ul>
+      <button class="btn">Contact sales</button>
+    </article>
+  </div>
+
+  <section>
+    <h2>Compare plans</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Starter</th><th>Team</th><th>Enterprise</th></tr></thead>
+      <tbody>
+        <tr><td>Preview deploys</td><td>✓</td><td>✓</td><td>✓</td></tr>
+        <tr><td>Incident timelines</td><td>—</td><td>✓</td><td>✓</td></tr>
+        <tr><td>Audit log retention</td><td>—</td><td>90 days</td><td>Unlimited</td></tr>
+        <tr><td>Support</td><td>Community</td><td>Email</td><td>Dedicated</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="signup">
+    <h2>Create your workspace</h2>
+    <form class="signup" onsubmit="return false">
+      <div><label for="email">Work email</label><input id="email" type="email" placeholder="you@company.com" autocomplete="email"></div>
+      <div><label for="size">Team size</label><select id="size"><option>1–10</option><option>11–50</option><option>51+</option></select></div>
+      <button class="btn btn-primary" type="submit">Create workspace</button>
+    </form>
+  </section>
+
+  <footer><span>© 2026 Northwind</span><a href="/next">Changelog</a><a href="#">Privacy</a><a href="#">Status</a></footer>
+</main>
+</body>
+</html>

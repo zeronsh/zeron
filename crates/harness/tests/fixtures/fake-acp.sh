@@ -43,6 +43,22 @@ if has "$line" '"method":"session/load"'; then
     has "$line" '"method":"session/new"' || exit 1
     emit "{\"id\":$(rid "$line"),\"result\":{\"sessionId\":\"s-fresh\"}}"
     SID="s-fresh"
+  elif has "$line" '"sessionId":"load-hang"' || has "$line" '"sessionId":"load-busy"' ||
+    has "$line" '"sessionId":"load-exit"'; then
+    # A restore that never answers, is refused for a reason other than a
+    # missing session, or loses the agent: none may fork to a fresh session.
+    # Should a session/new arrive anyway, answer it so the fork shows.
+    if has "$line" '"sessionId":"load-busy"'; then
+      emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32603,\"message\":\"session store is locked\"}}"
+    elif has "$line" '"sessionId":"load-exit"'; then
+      exit 3
+    fi
+    while read -r line; do
+      if has "$line" '"method":"session/new"'; then
+        emit "{\"id\":$(rid "$line"),\"result\":{\"sessionId\":\"s-forked\"}}"
+      fi
+    done
+    exit 0
   else
     if [ "$MODEL_API" -eq 1 ]; then
       SID="existing-grok-session"

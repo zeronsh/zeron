@@ -411,6 +411,89 @@ impl Shell {
         cx.notify();
     }
 
+    /// The explorer of a Cloud chat whose machine is asleep (or waking).
+    fn render_machine_asleep(
+        &mut self,
+        session: String,
+        state: zeron_proto::CloudState,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use zeron_proto::CloudState;
+        let waking = matches!(state, CloudState::Provisioning | CloudState::Starting);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.0))
+            .px(px(28.0))
+            .child(
+                icon(icons::CLOUD)
+                    .size(px(20.0))
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+            .child(
+                div()
+                    .text_center()
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(if waking {
+                        "Waking up the Cloud agent…"
+                    } else {
+                        "Cloud agent is asleep"
+                    }),
+            )
+            .child(
+                div()
+                    .text_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(if waking {
+                        "Its files show as soon as it's up."
+                    } else {
+                        "Wake it to browse its files. Sending a message wakes it too."
+                    }),
+            )
+            .child(if waking {
+                div()
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .child(crate::loaders::ring_spinner(
+                        "files-cloud-waking",
+                        14.0,
+                        theme.text_muted,
+                    ))
+                    .into_any_element()
+            } else {
+                div()
+                    .id("files-cloud-wake")
+                    .h(px(28.0))
+                    .px(px(12.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::wash(0.04))
+                    .hover(|style| style.bg(crate::theme::wash(0.09)))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.5))
+                    .text_color(theme.text)
+                    .child("Wake up")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let session = session.clone();
+                        this.state
+                            .update(cx, |state, cx| state.wake_cloud_session(session, cx));
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_files_panel(
         &mut self,
         window: &Window,
@@ -435,14 +518,34 @@ impl Shell {
         }
         let theme = Theme::of(cx).clone();
         let content = self.files.get(&self.panel_key(cx)).cloned();
+        // A Cloud chat whose machine is asleep: say so, with Wake, instead of
+        // dialing a machine that won't answer and showing its errors.
+        let machine_down = self.state.read(cx).chat_machine_down(&self.active_chat);
         if let Some(files) = &content {
-            files.update(cx, |files, cx| {
-                files.ensure_loaded(cx);
-                if visible {
-                    files.ensure_git_status(cx);
-                }
-            });
+            if machine_down.is_some() {
+                self.files_machine_down.insert(self.active_chat.clone());
+                files.update(cx, |files, _| {
+                    files.release_git_status();
+                    files.release_watch();
+                });
+            } else {
+                let woke = self.files_machine_down.remove(&self.active_chat);
+                files.update(cx, |files, cx| {
+                    // Back up: list again what failed while it slept.
+                    if woke {
+                        files.retry_root(cx);
+                    }
+                    files.ensure_loaded(cx);
+                    if visible {
+                        files.ensure_git_status(cx);
+                    }
+                });
+            }
         }
+        let content: Option<AnyElement> = match machine_down {
+            Some((session, state)) => Some(self.render_machine_asleep(session, state, &theme, cx)),
+            None => content.map(IntoElement::into_any_element),
+        };
         self.sync_explorer_selection(cx);
         let content_width = self.files_content_width(cx);
         // The explorer is the right pane's rightmost column: its left hairline

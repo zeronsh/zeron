@@ -51,9 +51,12 @@ async fn main() -> anyhow::Result<()> {
         cwd: workspace.path().to_string_lossy().into_owned(),
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: vec![],
         worktree: None,
         resume: None,
+        env: Default::default(),
     };
     let controls = RunControls {
         realtime: None,

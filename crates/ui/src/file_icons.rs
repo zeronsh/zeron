@@ -326,6 +326,8 @@ fn language_asset(language: Option<LanguageId>) -> Option<&'static str> {
         LanguageId::Php => "php",
         LanguageId::Sql => "sql",
         LanguageId::Lua => "lua",
+        // Not a language id in the upstream manifest; `.luau` has its icon.
+        LanguageId::Luau => return definition_asset("luau"),
         LanguageId::Dockerfile => "dockerfile",
         LanguageId::Nix => "nix",
         LanguageId::Make => "makefile",

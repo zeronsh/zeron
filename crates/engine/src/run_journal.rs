@@ -5,7 +5,9 @@
 //! journal is the durable replay source for live streams (`Subscribe` = replay then tail
 //! the broadcast hub) and the crash-recovery gauge: a journal whose LAST event is not
 //! `Done` belongs to a run that died mid-stream — boot recovery stamps its doc entry
-//! `aborted` and closes the journal with a synthetic `Done`.
+//! `aborted` and closes the journal with a synthetic `Done`. A turn the engine's own
+//! shutdown cut off closes normally, so a `{chat_id}.shutdown` marker beside the
+//! journal flags it for the same pick-up on the next boot.
 //!
 //! Bounded-window compaction is deferred (whole file kept for now, per M2 scope); a torn
 //! trailing line from a crash mid-write is tolerated everywhere.
@@ -72,22 +74,93 @@ impl RunJournal {
         self.dir.join(format!("{}.resume", sanitize_id(chat_id)))
     }
 
-    /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
-    /// persisted beside the journal so a run that CRASHES THE ENGINE cannot
-    /// revive itself in an infinite boot loop.
-    pub fn resume_attempts(&self, chat_id: &str) -> u32 {
-        std::fs::read_to_string(self.attempts_path(chat_id))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
+    fn shutdown_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.shutdown", sanitize_id(chat_id)))
     }
 
-    pub fn note_resume_attempt(&self, chat_id: &str) -> u32 {
-        let next = self.resume_attempts(chat_id) + 1;
-        if let Err(err) = std::fs::write(self.attempts_path(chat_id), next.to_string()) {
+    fn stop_path(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.stopped", sanitize_id(chat_id)))
+    }
+
+    /// Auto-resume revival budget (zeron `resumeAttempt`/`MAX_AUTO_RESUME`):
+    /// persisted beside the journal so a run that CRASHES THE ENGINE cannot
+    /// revive itself in an infinite boot loop. Stored as `{count} {last_ms}`;
+    /// a ledger whose last revival is older than `since_ms` has expired (a
+    /// chain from days ago must not refuse today's crash). A bare count (the
+    /// older format) never expires.
+    pub fn resume_attempts(&self, chat_id: &str, since_ms: i64) -> u32 {
+        let Ok(raw) = std::fs::read_to_string(self.attempts_path(chat_id)) else {
+            return 0;
+        };
+        let mut fields = raw.split_whitespace();
+        let count = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        match fields.next().and_then(|s| s.parse::<i64>().ok()) {
+            Some(last) if last < since_ms => 0,
+            _ => count,
+        }
+    }
+
+    /// Record one revival at `at_ms`, counting on from the unexpired ledger
+    /// (`since_ms` as in [`Self::resume_attempts`]); returns the new count.
+    pub fn note_resume_attempt(&self, chat_id: &str, at_ms: i64, since_ms: i64) -> u32 {
+        let next = self.resume_attempts(chat_id, since_ms) + 1;
+        if let Err(err) = std::fs::write(self.attempts_path(chat_id), format!("{next} {at_ms}")) {
             tracing::warn!(chat = %chat_id, error = %err, "resume-attempt ledger write failed");
         }
         next
+    }
+
+    /// Mark a chat whose turn the engine's own shutdown cut off (at `at_ms`):
+    /// its journal closes with an ordinary `Done{interrupted}`, so this marker
+    /// is what tells the next boot the turn was not the user's to end.
+    pub fn note_shutdown_interrupt(&self, chat_id: &str, at_ms: i64) {
+        if let Err(err) = std::fs::write(self.shutdown_path(chat_id), at_ms.to_string()) {
+            tracing::warn!(chat = %chat_id, error = %err, "shutdown marker write failed");
+        }
+    }
+
+    /// Chats marked by [`Self::note_shutdown_interrupt`], with when.
+    pub fn shutdown_interrupts(&self) -> Result<Vec<(String, i64)>, JournalError> {
+        let mut marked = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("shutdown") {
+                continue;
+            }
+            let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let at = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            marked.push((chat_id.to_string(), at));
+        }
+        marked.sort();
+        Ok(marked)
+    }
+
+    pub fn clear_shutdown_interrupt(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.shutdown_path(chat_id));
+    }
+
+    /// Mark a chat whose turn the user stopped. Its journal closes only once
+    /// the stopped run settles (seconds later, for a harness slow to let
+    /// go): an engine that dies in between leaves a journal that reads as a
+    /// crash, and this marker keeps the next boot from reviving the turn.
+    pub fn note_user_stop(&self, chat_id: &str) {
+        if let Err(err) = std::fs::write(self.stop_path(chat_id), b"") {
+            tracing::warn!(chat = %chat_id, error = %err, "stop marker write failed");
+        }
+    }
+
+    /// Whether [`Self::note_user_stop`] marked the chat's last turn.
+    pub fn user_stopped(&self, chat_id: &str) -> bool {
+        self.stop_path(chat_id).exists()
+    }
+
+    pub fn clear_user_stop(&self, chat_id: &str) {
+        let _ = std::fs::remove_file(self.stop_path(chat_id));
     }
 
     /// A cleanly completed turn resets the budget — only consecutive
@@ -468,6 +541,44 @@ mod tests {
         // Closing the stale journal with a Done clears the flag.
         journal.append("dead", &done()).unwrap();
         assert!(journal.stale_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resume_ledger_counts_on_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        assert_eq!(journal.resume_attempts("chat-1", 0), 0);
+        assert_eq!(journal.note_resume_attempt("chat-1", 1_000, 0), 1);
+        assert_eq!(journal.note_resume_attempt("chat-1", 2_000, 0), 2);
+        assert_eq!(journal.resume_attempts("chat-1", 2_000), 2);
+        // The last revival is older than the window: the chain has expired.
+        assert_eq!(journal.resume_attempts("chat-1", 2_001), 0);
+        assert_eq!(journal.note_resume_attempt("chat-1", 9_000, 5_000), 1);
+        journal.clear_resume_attempts("chat-1");
+        assert_eq!(journal.resume_attempts("chat-1", 0), 0);
+        // The older bare-count format still counts, and never expires.
+        std::fs::write(dir.path().join("chat-2.resume"), "3").unwrap();
+        assert_eq!(journal.resume_attempts("chat-2", i64::MAX), 3);
+    }
+
+    #[test]
+    fn shutdown_markers_list_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("chat-b", &done()).unwrap();
+        journal.note_shutdown_interrupt("chat-b", 42);
+        journal.note_shutdown_interrupt("chat-a", 7);
+        assert_eq!(
+            journal.shutdown_interrupts().unwrap(),
+            vec![("chat-a".to_string(), 7), ("chat-b".to_string(), 42)]
+        );
+        // A marker never makes a closed journal stale.
+        assert!(journal.stale_sessions().unwrap().is_empty());
+        journal.clear_shutdown_interrupt("chat-a");
+        assert_eq!(
+            journal.shutdown_interrupts().unwrap(),
+            vec![("chat-b".to_string(), 42)]
+        );
     }
 
     #[test]

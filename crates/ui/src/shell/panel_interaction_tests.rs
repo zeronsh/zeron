@@ -526,3 +526,45 @@ fn side_chat_rename_scrolls_to_its_row_in_a_docked_card(cx: &mut TestAppContext)
 fn side_chat_rename_scrolls_to_its_row_in_a_floating_card_without_motion(cx: &mut TestAppContext) {
     check_side_chat_rename_scroll(cx, 1000.0, true);
 }
+
+#[gpui::test]
+fn the_session_card_lands_with_a_chat_switch_and_eases_on_its_toggle(cx: &mut TestAppContext) {
+    let (_dir, shell, cx) = setup(cx);
+    change(&shell, cx, |s, _, _| {
+        s.settings.session_info_hidden = false;
+        // b's surface host leaves its transcript no room for the card.
+        s.panels.update("b", |p| p.changes_open = true);
+    });
+    settled(&shell, cx);
+    let card = cx
+        .debug_bounds("session-info")
+        .expect("a's wide column shows the card");
+    // Where the card's reveal is easing to, if it eases at all.
+    let easing_to = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, _| s.session_info_tween.map(|tween| tween.to))
+    };
+
+    // The panels snap to b's; the card must not fade out over b's transcript.
+    change(&shell, cx, |s, _, cx| select(s, Some("b"), cx));
+    draw(&shell, cx, 0);
+    assert!(cx.debug_bounds("session-info").is_none());
+    assert_eq!(easing_to(cx), None);
+
+    // Back on a, it is at rest from the first frame.
+    change(&shell, cx, |s, _, cx| select(s, Some("a"), cx));
+    draw(&shell, cx, 0);
+    let landed = cx
+        .debug_bounds("session-info")
+        .expect("a shows its card from the first frame");
+    near(f32::from(landed.left()), f32::from(card.left()));
+    assert_eq!(easing_to(cx), None);
+
+    // Its own toggle still eases it out, then back in.
+    for (reveal, shown) in [(0.0, false), (1.0, true)] {
+        change(&shell, cx, |s, _, cx| s.toggle_session_info(cx));
+        draw(&shell, cx, 0);
+        assert_eq!(easing_to(cx), Some(reveal));
+        settled(&shell, cx);
+        assert_eq!(cx.debug_bounds("session-info").is_some(), shown);
+    }
+}

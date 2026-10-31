@@ -61,9 +61,12 @@ async fn main() {
         cwd,
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        env: Default::default(),
     };
     let mut stream = OpencodeHarness::new()
         .run(request, controls)

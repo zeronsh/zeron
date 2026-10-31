@@ -154,8 +154,9 @@ impl Normalizer {
                     });
                 }
             }
+            // A throwing extension handler is the extension's failure, not
+            // the turn's: the model run goes on, so it is shown, not fatal.
             "extension_error" => {
-                self.error = Some(string(frame, "error").into());
                 events.push(AgentEvent::Error {
                     message: format!("Pi extension: {}", string(frame, "error")),
                 });
@@ -225,6 +226,15 @@ mod tests {
         assert!(matches!(&events[0], AgentEvent::TextDelta {text} if text == "lo"));
         assert_eq!(n.status(), DoneStatus::Errored);
         n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[]}}));
+        assert_eq!(n.status(), DoneStatus::Completed);
+    }
+    #[test]
+    fn extension_errors_show_without_failing_the_turn() {
+        let mut n = Normalizer::default();
+        let events = n.map(&json!({"type":"extension_error","extensionPath":"/x.ts","event":"tool_call","error":"boom"}));
+        assert!(
+            matches!(&events[0], AgentEvent::Error {message} if message == "Pi extension: boom")
+        );
         assert_eq!(n.status(), DoneStatus::Completed);
     }
     #[test]

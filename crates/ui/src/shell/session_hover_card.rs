@@ -174,8 +174,50 @@ impl Shell {
 
     /// The card for `chat_id`'s row, mounted from the row itself: it floats
     /// from the row's right edge above everything else, clear of the
-    /// sidebar's clip.
+    /// sidebar's clip. It rides gpui's tooltip layer, not a deferred draw:
+    /// once the in-app browser enables zui's scene overlay, a frame with any
+    /// deferred draw routes the window's clicks to that overlay. A press that
+    /// put the card away hid the overlay before AppKit delivered its release,
+    /// so the row never saw the click. Tooltips float above native content
+    /// too, but let the pointer through.
     pub(super) fn render_session_hover_card(
+        &self,
+        chat_id: &str,
+        time_ago: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = self.session_card_view.clone();
+        view.update(cx, |view, _| {
+            view.chat_id = chat_id.to_owned();
+            view.time_ago = time_ago;
+        });
+        let shell = cx.weak_entity();
+        let chat_id = chat_id.to_owned();
+        gpui::canvas(
+            move |bounds, window, _| {
+                window.set_tooltip(gpui::AnyTooltip {
+                    view: view.into(),
+                    // gpui hangs a tooltip 1px below-right of this point.
+                    mouse_position: bounds.origin - gpui::point(px(1.0), px(1.0)),
+                    // A cached sidebar frame replays this request, which
+                    // must not outlive the card.
+                    check_visible_and_update: std::rc::Rc::new(move |_, _, cx| {
+                        shell.upgrade().is_some_and(|shell| {
+                            shell.read(cx).session_hover_card.shown() == Some(chat_id.as_str())
+                        })
+                    }),
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_full()
+        .into_any_element()
+    }
+
+    /// The card's face for `chat_id`, drawn by [`SessionCardView`].
+    fn render_session_card(
         &self,
         chat_id: &str,
         time_ago: SharedString,
@@ -357,7 +399,7 @@ impl Shell {
                 card,
             ));
         // Drifts in from the row's side, like a submenu leaving its trigger.
-        let card = if self.reduced_motion {
+        Some(if self.reduced_motion {
             card.into_any_element()
         } else {
             card.with_animation(
@@ -366,23 +408,48 @@ impl Shell {
                 |el, t| el.relative().opacity(t).left(px(-4.0 * (1.0 - t))),
             )
             .into_any_element()
-        };
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .left_full()
-                .child(
-                    gpui::deferred(
-                        gpui::anchored()
-                            .anchor(gpui::Anchor::TopLeft)
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(div().pl(px(CARD_GAP)).mt(px(-4.0)).child(card)),
-                    )
-                    .with_priority(1),
-                )
-                .into_any_element(),
-        )
+        })
+    }
+}
+
+/// The tooltip view behind every row's card, rendered from the shell on
+/// each frame the card shows. It is one long-lived view because its entity
+/// keys the card's element state: a fresh one per sidebar render would
+/// restart the entrance animation.
+pub(super) struct SessionCardView {
+    shell: gpui::WeakEntity<Shell>,
+    chat_id: String,
+    time_ago: SharedString,
+}
+
+impl SessionCardView {
+    pub(super) fn new(shell: gpui::WeakEntity<Shell>) -> Self {
+        Self {
+            shell,
+            chat_id: String::new(),
+            time_ago: SharedString::default(),
+        }
+    }
+}
+
+impl Render for SessionCardView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = self
+            .shell
+            .update(cx, |shell, cx| {
+                shell.render_session_card(&self.chat_id, self.time_ago.clone(), cx)
+            })
+            .ok()
+            .flatten();
+        // gpui flips a tooltip that would overflow to its anchor's far side.
+        // A zero-size root leaves placement to `anchored`, which snaps the
+        // card inside the window instead.
+        div().size_0().children(card.map(|card| {
+            gpui::anchored()
+                .anchor(gpui::Anchor::TopLeft)
+                .snap_to_window_with_margin(px(8.0))
+                .child(div().pl(px(CARD_GAP)).mt(px(-4.0)).child(card))
+        }))
     }
 }
 
@@ -447,6 +514,8 @@ mod tests {
     struct RowHost {
         shell: Entity<Shell>,
         palette: bool,
+        /// Room above the row.
+        top: Pixels,
         _observation: Subscription,
         _dir: tempfile::TempDir,
     }
@@ -454,7 +523,7 @@ mod tests {
     impl Render for RowHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let palette = self.palette;
-            self.shell.update(cx, |shell, cx| {
+            let row = self.shell.update(cx, |shell, cx| {
                 div().w(px(280.0)).h(px(200.0)).child(shell.render_chat_row(
                     "hover-test".into(),
                     "Hover test".into(),
@@ -482,7 +551,8 @@ mod tests {
                     &Theme::default(),
                     cx,
                 ))
-            })
+            });
+            div().pt(self.top).child(row)
         }
     }
 
@@ -490,6 +560,15 @@ mod tests {
         cx: &mut TestAppContext,
         compact: bool,
         palette: bool,
+    ) -> (Entity<Shell>, &mut VisualTestContext) {
+        row_setup_at(cx, compact, palette, px(0.0))
+    }
+
+    fn row_setup_at(
+        cx: &mut TestAppContext,
+        compact: bool,
+        palette: bool,
+        top: Pixels,
     ) -> (Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         init_test(cx, dir.path(), compact);
@@ -499,6 +578,7 @@ mod tests {
             RowHost {
                 shell,
                 palette,
+                top,
                 _observation: observation,
                 _dir: dir,
             }
@@ -582,6 +662,71 @@ mod tests {
         wait_for_card(cx);
         assert!(cx.debug_bounds("session-hover-card-hover-test").is_some());
         assert!(cx.debug_bounds("change-request-tooltip").is_none());
+    }
+
+    #[gpui::test]
+    fn the_card_rides_the_tooltip_layer_in_both_layouts(cx: &mut TestAppContext) {
+        // As a deferred draw the card made zui's scene overlay take the
+        // window's clicks (see `render_session_hover_card`). The tooltip
+        // layer holds one tooltip at a time, so the archive pill's own
+        // tooltip stands in for the card while the pointer rests on it.
+        for compact in [false, true] {
+            let (shell, cx) = row_setup(cx, compact, false);
+            let row = cx.debug_bounds("chat-hover-test").unwrap().center();
+            cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
+            redraw(cx);
+            wait_for_card(cx);
+            assert!(cx.debug_bounds("session-hover-card-hover-test").is_some());
+
+            let corner = if compact {
+                "chat-time-hover-test"
+            } else {
+                "chat-hover-test-corner"
+            };
+            let pill = cx.debug_bounds(corner).unwrap().center();
+            cx.simulate_mouse_move(pill, None, gpui::Modifiers::default());
+            cx.executor().advance_clock(Duration::from_millis(600));
+            redraw(cx);
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.session_hover_card.shown(), Some("hover-test"))
+            });
+            assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
+
+            cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
+            redraw(cx);
+            assert!(cx.debug_bounds("session-hover-card-hover-test").is_some());
+        }
+    }
+
+    #[gpui::test]
+    fn the_card_hangs_off_the_row_and_slides_into_a_short_window(cx: &mut TestAppContext) {
+        // A window per height, sized before the pointer arrives: the test
+        // window drops the pointer on a resize without telling the row.
+        let mut card_in = |height: Pixels| {
+            let (_, cx) = row_setup_at(cx, false, false, px(300.0));
+            cx.simulate_resize(gpui::size(px(1000.0), height));
+            redraw(cx);
+            let row = cx.debug_bounds("chat-hover-test").unwrap();
+            cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+            redraw(cx);
+            wait_for_card(cx);
+            (
+                row,
+                cx.debug_bounds("session-hover-card-hover-test").unwrap(),
+            )
+        };
+        let (row, card) = card_in(px(800.0));
+        assert_eq!(
+            card.origin,
+            gpui::point(row.right() + px(CARD_GAP), row.top() - px(4.0))
+        );
+        // Too short to hang down from the row: the card slides up inside the
+        // window's margin, still level with its row, where gpui would flip a
+        // plain tooltip above it.
+        let height = row.top() + card.size.height / 2.0;
+        let (row, card) = card_in(height);
+        assert!(card.bottom() <= height - px(8.0), "{card:?} in {height:?}");
+        assert!(card.bottom() > row.top(), "{card:?} beside {row:?}");
     }
 
     fn shell_setup(

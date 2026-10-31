@@ -166,3 +166,81 @@ impl Job {
         Ok(())
     }
 }
+
+const MACHINE_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+/// The persisted PATH a new login session would get (machine entries, then
+/// the user's), read now rather than inherited at our start: a Node or CLI
+/// installed while zeron runs updates the registry, not our environment.
+/// `%VAR%` references resolve against our environment first, then the
+/// persisted user and machine variables (nvm-windows' `%NVM_SYMLINK%` is
+/// defined by the same install that adds it to PATH).
+pub(crate) fn registry_path() -> Option<std::ffi::OsString> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let machine = read_registry_string(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, "Path");
+    let user = read_registry_string(HKEY_CURRENT_USER, "Environment", "Path");
+    let lookup = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .or_else(|| read_registry_string(HKEY_CURRENT_USER, "Environment", name))
+            .or_else(|| read_registry_string(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, name))
+    };
+    let entries: Vec<String> = [machine, user]
+        .into_iter()
+        .flatten()
+        .flat_map(|path| {
+            path.split(';')
+                .map(|entry| crate::executable::expand_windows_vars(entry.trim(), &lookup))
+                .collect::<Vec<_>>()
+        })
+        // An entry naming a variable nobody defines is not a directory.
+        .filter(|entry| !entry.is_empty() && !entry.contains('%'))
+        .collect();
+    (!entries.is_empty()).then(|| entries.join(";").into())
+}
+
+/// A REG_SZ / REG_EXPAND_SZ value, unexpanded.
+fn read_registry_string(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    subkey: &str,
+    name: &str,
+) -> Option<String> {
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+    };
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (subkey, name) = (wide(subkey), wide(name));
+    // RRF_RT_REG_EXPAND_SZ is only valid together with RRF_NOEXPAND.
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let mut buffer: Vec<u16> = vec![0; 1024];
+    for _ in 0..4 {
+        let mut bytes = (buffer.len() * 2) as u32;
+        // SAFETY: the key/value names are NUL-terminated and `bytes` is the
+        // buffer's true size; the call writes at most that many bytes.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        match status {
+            ERROR_SUCCESS => {
+                buffer.truncate(bytes as usize / 2);
+                while buffer.last() == Some(&0) {
+                    buffer.pop();
+                }
+                return Some(String::from_utf16_lossy(&buffer));
+            }
+            // A concurrent writer can grow the value between calls.
+            ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2) + 1, 0),
+            _ => return None,
+        }
+    }
+    None
+}

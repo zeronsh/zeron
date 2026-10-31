@@ -63,6 +63,9 @@ icon_assets![
     (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.
     (GLOBE, "globe"),
+    (CURSOR_SQUARE, "cursor-square"),
+    // The pointer alone: an annotation chip's glyph inside its well.
+    (CURSOR, "cursor"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
@@ -97,6 +100,7 @@ icon_assets![
     (PULL_REQUEST, "pull-request"),
     (WORKTREE, "worktree"),
     (PLUS, "plus"),
+    (MINUS, "minus"),
     (ARROW_LEFT, "arrow-left"),
     (ARROW_RIGHT, "arrow-right"),
     (ALT_ARROW_DOWN, "alt-arrow-down"),
@@ -227,9 +231,19 @@ icon_assets![
     (DEVIN_MARK, "devin-mark"),
     (GROK_MARK, "grok-mark"),
     (HERMES_MARK, "hermes-mark"),
+    (FX_MARK, "fx-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
+    // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
+    // GitHub connection.
+    (GITHUB_MARK, "github-mark"),
+    // Settings → Billing (drawn to the Solar linear set's 1.5 stroke).
+    (WALLET, "wallet"),
+    // The sidebar's Usage button (three bars, Solar linear stroke).
+    (CHART_BARS, "chart-bars"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Muse Code's mark (Meta's infinity), tinted its brand blue at call sites.
+    (MUSE_MARK, "muse-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
@@ -255,6 +269,11 @@ impl AssetSource for Assets {
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
     gpui::rgb(0xD97757).into()
+}
+
+/// The Muse Code mark's brand blue (`#0081FB`), kept like Claude's orange.
+pub fn muse_brand() -> Hsla {
+    gpui::rgb(0x0081FB).into()
 }
 
 /// An icon element for an embedded asset path. Size and colour are set by the

@@ -5,7 +5,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
     UserInputQuestion,
 };
 
@@ -23,6 +23,12 @@ fn fanout_count(prompt: &str) -> Option<usize> {
     }
     let count = rest.trim().parse().unwrap_or(40);
     Some(count.clamp(1, 200))
+}
+
+/// The message a `/error <message>` prompt fails the run with.
+fn scripted_error(prompt: &str) -> Option<&str> {
+    let message = prompt.trim().strip_prefix("/error ")?.trim();
+    (!message.is_empty()).then_some(message)
 }
 
 fn fanout_id(i: usize) -> String {
@@ -150,6 +156,12 @@ fn question_script() -> Vec<UserInputQuestion> {
     ]
 }
 
+const MOCK_PLAN: &str = "Here's the plan. Nothing has changed yet.\n\n\
+1. Add `AccessMode` to the run request and the chat's config.\n\
+2. Map each mode onto the agent's approval policy and sandbox.\n\
+3. Ask the person for anything the mode does not cover.\n\n\
+Turn plan mode off to start.";
+
 #[async_trait]
 impl Harness for MockHarness {
     fn id(&self) -> HarnessId {
@@ -166,6 +178,12 @@ impl Harness for MockHarness {
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
+    }
+    fn access_modes(&self) -> &[AccessMode] {
+        &AccessMode::ALL
+    }
+    fn supports_plan(&self) -> bool {
+        true
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![
@@ -268,11 +286,91 @@ impl Harness for MockHarness {
             return Ok(stream.boxed());
         }
 
+        // Plan mode proposes and changes nothing; a mode short of full access
+        // asks before the script's command, the way a real agent's approval
+        // reaches the person.
+        if request.plan || !request.access.is_full_access() {
+            let request_input = controls.request_input;
+            let plan = request.plan;
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            tokio::spawn(async move {
+                let pause = delay.max(std::time::Duration::from_millis(50));
+                let send = |text: &str| {
+                    let _ = tx.send(AgentEvent::TextDelta { text: text.into() });
+                };
+                if plan {
+                    tokio::time::sleep(pause).await;
+                    send(MOCK_PLAN);
+                } else {
+                    send("I'll run the test suite first.\n\n");
+                    tokio::time::sleep(pause).await;
+                    let question = crate::approval::command("Mock", "cargo test --workspace");
+                    let answers = request_input(vec![question.clone()]).await.unwrap_or_default();
+                    if crate::approval::approved(&question, &answers) {
+                        let _ = tx.send(AgentEvent::ToolCall {
+                            id: "mock-approved-tool".into(),
+                            call: zeron_proto::ToolCall::Exec {
+                                command: "cargo test --workspace".into(),
+                            },
+                        });
+                        tokio::time::sleep(pause).await;
+                        let _ = tx.send(AgentEvent::ToolResult {
+                            id: "mock-approved-tool".into(),
+                            is_error: false,
+                            output: Some("test result: ok. 128 passed; 0 failed".into()),
+                            diff: None,
+                        });
+                        send("All 128 tests pass.");
+                    } else {
+                        send("Understood, I won't run it.");
+                    }
+                }
+                let _ = tx.send(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                });
+            });
+            let stream = futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (Ok(event), rx))
+            });
+            return Ok(stream.boxed());
+        }
+
+        // Dev/testing knob: `ZERON_MOCK_BACKGROUND=1` starts three background
+        // processes that outlive the turn — the only data-side way to fill the
+        // background tray. The runtime parks like a real agent's: the
+        // processes print output, a host stop ends one, later messages are
+        // answered in place, and a teardown takes them all.
+        if std::env::var("ZERON_MOCK_BACKGROUND")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+        {
+            return Ok(background_run(controls, delay));
+        }
+
         // Dev/testing knob: a `/fanout N` prompt spawns N subagents at once,
         // then settles them one by one, oldest first (every seventh fails) —
         // the only data-side way to fill the session card's subagent lane,
         // scroll it, and watch it drain into its finished fold. They settle
         // `ZERON_MOCK_DELAY_MS` apart, 2.5s by default.
+        // `/error <message>`: the run fails with that message (error cards
+        // for any provider failure, without a real provider).
+        if let Some(message) = scripted_error(&request.prompt) {
+            let events = vec![
+                Ok(AgentEvent::Error {
+                    message: message.to_string(),
+                }),
+                Ok(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            ];
+            return Ok(futures::stream::iter(events).boxed());
+        }
         if let Some(count) = fanout_count(&request.prompt) {
             let settle = if delay_ms == 0 {
                 std::time::Duration::from_millis(2500)
@@ -796,9 +894,185 @@ impl Harness for MockHarness {
     }
 }
 
+/// The background mode's processes: id, command, description, how long ago
+/// it started, and the lines it prints in turn.
+const BACKGROUND_PROCESSES: [(&str, &str, &str, i64, &[&str]); 3] = [
+    (
+        "mock-bg-dev",
+        "pnpm --filter web dev --port 5173",
+        "Start the web dev server",
+        754,
+        &[
+            "  VITE v6.2.1  ready in 412 ms",
+            "  \u{279c}  Local:   http://localhost:5173/",
+            "  \u{279c}  Network: use --host to expose",
+            "12:41:07 [vite] hmr update /src/routes/settings.tsx",
+            "12:41:19 [vite] hmr update /src/components/Composer.tsx, /src/styles/composer.css",
+            "12:41:32 [vite] page reload src/main.tsx",
+        ],
+    ),
+    (
+        "mock-bg-watch",
+        "cargo watch -x 'test -p zeron-doc'",
+        "Re-run the doc tests on change",
+        187,
+        &[
+            "[Running 'cargo test -p zeron-doc']",
+            "   Compiling zeron-doc v0.2.129 (/work/crates/doc)",
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.81s",
+            "     Running unittests src/lib.rs (target/debug/deps/zeron_doc-3f1c)",
+            "test result: ok. 412 passed; 0 failed; 0 ignored; finished in 1.92s",
+            "[Finished running. Exit status: 0]",
+        ],
+    ),
+    (
+        "mock-bg-logs",
+        "tail -f logs/api.log | grep --line-buffered -E 'WARN|ERROR'",
+        "Watch the API log for errors",
+        41,
+        &[
+            "WARN  sync::relay  reconnecting to device room (attempt 2)",
+            "WARN  sync::relay  device room rejoined after 1.4s",
+            "ERROR api::uploads  chunk 7 of 12 timed out; retrying",
+        ],
+    ),
+];
+
+/// `ZERON_MOCK_BACKGROUND`: one turn that starts [`BACKGROUND_PROCESSES`],
+/// then a parked runtime that keeps them running (each prints its script
+/// once, a line per tick).
+fn background_run(
+    controls: RunControls,
+    delay: std::time::Duration,
+) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
+    let RunControls {
+        mut steering,
+        interrupt,
+        turn,
+        ..
+    } = controls;
+    let pause = delay.max(std::time::Duration::from_millis(120));
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    tokio::spawn(async move {
+        let done = || AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        };
+        let _ = tx.send(AgentEvent::TextDelta {
+            text:
+                "I'll keep the dev server, the doc tests and the API log running while we work.\n\n"
+                    .into(),
+        });
+        let now = chrono::Utc::now();
+        let mut listed = Vec::new();
+        for (id, command, description, ago, lines) in BACKGROUND_PROCESSES {
+            tokio::time::sleep(pause).await;
+            let _ = tx.send(AgentEvent::ToolCall {
+                id: format!("{id}-call"),
+                call: zeron_proto::ToolCall::Exec {
+                    command: command.into(),
+                },
+            });
+            let _ = tx.send(AgentEvent::ToolResult {
+                id: format!("{id}-call"),
+                is_error: false,
+                output: Some(format!("Command running in background with ID: {id}")),
+                diff: None,
+            });
+            listed.push(zeron_proto::BackgroundTask {
+                id: id.into(),
+                command: command.into(),
+                description: Some(description.into()),
+                started_at: now - chrono::Duration::seconds(ago),
+            });
+            for line in &lines[..lines.len() / 2] {
+                turn.append_background_output(id, &format!("{line}\n"));
+            }
+            turn.set_background_processes(listed.clone());
+            turn.set_background(listed.len());
+        }
+        tokio::time::sleep(pause).await;
+        let _ = tx.send(AgentEvent::TextDelta {
+            text: "All three are up. Ask me to stop any of them, or stop them from the tray."
+                .into(),
+        });
+        let _ = tx.send(done());
+
+        // Parked: the processes print, stop when asked, and the runtime
+        // answers whatever comes next.
+        let mut printed: Vec<usize> = BACKGROUND_PROCESSES
+            .iter()
+            .map(|(.., lines)| lines.len() / 2)
+            .collect();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(1600));
+        loop {
+            tokio::select! {
+                _ = interrupt.cancelled() => break,
+                id = turn.background_stop_requested() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    listed.retain(|task| task.id != id);
+                    turn.set_background_processes(listed.clone());
+                    turn.set_background(listed.len());
+                }
+                _ = tick.tick() => {
+                    for (ix, (id, .., lines)) in BACKGROUND_PROCESSES.iter().enumerate() {
+                        if listed.iter().any(|task| task.id == *id) && printed[ix] < lines.len() {
+                            let line = lines[printed[ix]];
+                            printed[ix] += 1;
+                            turn.append_background_output(id, &format!("{line}\n"));
+                        }
+                    }
+                }
+                message = steering.recv() => {
+                    let Some(_) = message else { break };
+                    let _ = tx.send(AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
+                    });
+                    tokio::time::sleep(pause).await;
+                    let running = listed.len();
+                    let _ = tx.send(AgentEvent::TextDelta {
+                        text: format!(
+                            "Noted. {running} background process{} still running.",
+                            if running == 1 { " is" } else { "es are" }
+                        ),
+                    });
+                    let _ = tx.send(done());
+                }
+            }
+        }
+        turn.set_background_processes(Vec::new());
+        turn.set_background(0);
+        if interrupt.is_cancelled() {
+            let _ = tx.send(AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                result: None,
+                error: None,
+                session_id: None,
+            });
+        }
+    });
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (Ok(event), rx))
+    })
+    .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_prompt_names_the_failure() {
+        assert_eq!(
+            scripted_error("/error Not logged in"),
+            Some("Not logged in")
+        );
+        assert_eq!(scripted_error("/error  "), None);
+        assert_eq!(scripted_error("/errors"), None);
+    }
 
     #[test]
     fn fanout_reads_its_count_from_the_prompt() {

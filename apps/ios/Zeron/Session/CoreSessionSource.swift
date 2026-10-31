@@ -14,6 +14,20 @@ final class CoreSessionSource: SessionSource {
     private var hostDevice = "" {
         didSet { if hostDevice != oldValue { connectVisuals() } }
     }
+    /// Between turns, on a host that switches providers, the model menu
+    /// offers the other providers too.
+    private var canSwitchProvider = false
+    private var hostSwitchesProviders = false
+    private var turnRunning = false
+    /// The host's providers, read ahead: a menu whose top level waits on the
+    /// host doesn't open until it answers.
+    private var hostHarnesses: [HarnessInfo] = []
+    private var harnessesDevice = ""
+    /// What a chat with no model of its own runs: its host's default (the
+    /// catalog's first model), by "device|harness". Seeded from the built-in
+    /// list so the chip never shows a bare provider name, then the host's.
+    private var defaultModels: [String: ModelPickerRow] = [:]
+    private var defaultModelsLoading: Set<String> = []
     private weak var engine: TranscriptView?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
@@ -43,6 +57,11 @@ final class CoreSessionSource: SessionSource {
         handle.setViewAttached(attached: false)
     }
 
+    var isUnused: Bool {
+        let t = handle.transcriptStatus()
+        return t.entryCount == 0 && t.pendingCount == 0 && handle.composer().queue.isEmpty
+    }
+
     func reattach() {
         handle.setViewAttached(attached: true)
     }
@@ -51,15 +70,39 @@ final class CoreSessionSource: SessionSource {
         let c = handle.composer()
         let row = app?.row(chatId)
         hostDevice = c.host.deviceId
+        hostSwitchesProviders = c.host.capabilities.providerSwitch
+        turnRunning = c.live.turnRunning
+        // Not mid-turn, and not while a message is still on its way (its
+        // turn is about to start on the current provider).
+        let sendPending = c.sendState == .sending || c.sendState == .queued
+        canSwitchProvider = hostSwitchesProviders && !turnRunning && !sendPending
+        if canSwitchProvider, harnessesDevice != hostDevice {
+            let device = hostDevice
+            harnessesDevice = device
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let list = await self.client.listHarnesses(deviceId: device)
+                guard self.hostDevice == device else { return }
+                // Nothing back (offline, slow): ask again on the next refresh.
+                guard !list.isEmpty else {
+                    self.harnessesDevice = ""
+                    return
+                }
+                self.hostHarnesses = list
+                self.onChange?()
+            }
+        }
         var next = SessionChrome()
         next.title = c.title
         let project = row?.project?.name ?? "No project"
-        next.subtitle = c.host.name.map { "\(project) @ \($0)" } ?? project
+        // A Cloud chat's machine is "Cloud", not its own device name.
+        let hostName = row?.isCloud == true ? row?.deviceName : c.host.name
+        next.subtitle = hostName.map { "\(project) @ \($0)" } ?? project
         next.running = c.live.turnRunning
         next.canSteer = c.host.capabilities.midTurnSteering ?? false
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
-        if let model = row?.modelLabel ?? row?.harnessLabel {
+        if let model = row?.modelLabel ?? row.flatMap({ defaultModel(for: $0)?.label }) ?? row?.harnessLabel {
             chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
         }
         if let r = row?.reasoning, !r.isEmpty {
@@ -88,7 +131,11 @@ final class CoreSessionSource: SessionSource {
         } else if c.sendState == .failed {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
-            next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
+            // A Cloud chat's message waits for its machine to start or wake —
+            // the transcript's setup step says so, as on the desktop.
+            if row?.isCloud != true {
+                next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
+            }
         } else if c.sendState == .sending {
             next.banner = .sending
         } else if app?.connectivity?.state == .offline {
@@ -124,6 +171,7 @@ final class CoreSessionSource: SessionSource {
         do {
             if mode == .interrupt, chrome.running { try handle.interrupt() }
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
+            app?.forgetFreshSideChat(chatId)
             app?.noteDeliveryActivity()
             sendFailure = nil
             return true
@@ -214,17 +262,8 @@ final class CoreSessionSource: SessionSource {
         let harness = row.harness ?? "claude-code"
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: [UIDeferredMenuElement { [weak self] done in
-                guard let self else { return done([]) }
-                Task { @MainActor in
-                    let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: harness)) ?? fallbackModels(harness: harness)
-                    done(models.map { m in
-                        UIAction(title: m.label, subtitle: m.description, state: m.id == row.model ? .on : .off) { [weak self] _ in
-                            self?.setConfig { $0.model = m.id }
-                        }
-                    })
-                }
-            }])
+            // The picker sheet takes the tap (see `modelPicker`).
+            return nil
         case "effort":
             return UIMenu(title: "Reasoning effort", children: [UIDeferredMenuElement { [weak self] done in
                 guard let self else { return done([]) }
@@ -247,6 +286,96 @@ final class CoreSessionSource: SessionSource {
         default:
             return nil
         }
+    }
+
+    func modelPicker() -> UIViewController? {
+        guard let row = app?.row(chatId) else { return nil }
+        let harness = row.harness ?? "claude-code"
+        let rows: (String) async -> [ModelPickerRow] = { [weak self] id in
+            guard let self else { return [] }
+            let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: id)) ?? fallbackModels(harness: id)
+            return models.map { ModelPickerRow(id: $0.id, label: $0.label, detail: $0.description) }
+        }
+        var tabs = [ModelPickerTab(harness: harness, label: row.harnessLabel ?? HarnessNames.label(harness)) { await rows(harness) }]
+        if canSwitchProvider {
+            tabs += providers(cloud: row.isCloud).filter { $0.id != harness }.map { h in
+                ModelPickerTab(harness: h.id, label: h.label, footer: "Your next message continues this chat with \(h.label).") { await rows(h.id) }
+            }
+        }
+        #if DEBUG
+        // Screenshots: `-all-providers` offers every agent there is.
+        if ProcessInfo.processInfo.arguments.contains("-all-providers") {
+            tabs = [tabs[0]] + ["claude-code", "codex", "opencode", "cursor", "devin", "grok", "hermes", "fx", "pi", "antigravity", "muse"]
+                .filter { $0 != harness }
+                .map { id in ModelPickerTab(harness: id, label: HarnessNames.label(id)) { await rows(id) } }
+        }
+        #endif
+        let note: String? = canSwitchProvider ? nil
+            : turnRunning ? "You can switch provider when this turn ends."
+            : hostSwitchesProviders ? nil
+            : "This computer needs a newer Zeron to switch provider."
+        let host = row.isCloud ? (name: "Cloud", symbol: "cloud") : (name: app?.deviceName(hostDevice) ?? "This computer", symbol: "desktopcomputer")
+        // No model of its own: it runs the default, so that's the one ticked.
+        let current = row.model ?? defaultModel(for: row)?.id
+        return ModelPickerViewController.sheet(tabs: tabs, harness: harness, model: current, host: host, note: note) { [weak self] pickedHarness, model in
+            guard let self else { return }
+            // Re-checked at the pick: a turn may have started since the
+            // sheet opened with other providers' tabs.
+            if pickedHarness != (self.app?.row(self.chatId)?.harness ?? harness), !self.canSwitchProvider { return }
+            self.setConfig {
+                if pickedHarness != $0.harness {
+                    $0.harness = pickedHarness
+                    // The old provider's effort and options don't carry over.
+                    $0.reasoning = nil
+                    $0.modelOptions = [:]
+                }
+                $0.model = model.id
+            }
+        }
+    }
+
+    /// The chat's provider, where it runs: Cloud's account for a Cloud chat,
+    /// else the computer hosting it.
+    func signInTarget() -> AgentAccountsViewController.Target? {
+        guard let row = app?.row(chatId) else { return nil }
+        let harness = row.harness ?? "claude-code"
+        if row.isCloud {
+            return CloudStore.agents.first { $0.harness == harness }.map { .cloud($0) }
+        }
+        guard !hostDevice.isEmpty, let app else { return nil }
+        return .device(id: hostDevice, name: app.deviceName(hostDevice), harness: harness, label: row.harnessLabel ?? HarnessNames.label(harness))
+    }
+
+    /// The model a chat without one runs: the host's default for its
+    /// provider. The built-in list answers at once; the host's (or Cloud's)
+    /// own list replaces it when it arrives.
+    private func defaultModel(for row: SessionRow) -> ModelPickerRow? {
+        let harness = row.harness ?? "claude-code"
+        let key = "\(hostDevice)|\(harness)"
+        if defaultModels[key] == nil, let first = fallbackModels(harness: harness).first {
+            defaultModels[key] = ModelPickerRow(id: first.id, label: first.label, detail: first.description)
+        }
+        if !hostDevice.isEmpty, defaultModelsLoading.insert(key).inserted {
+            let device = hostDevice
+            Task { @MainActor [weak self] in
+                guard let self, let first = await self.client.listModels(deviceId: device, harness: harness).first else { return }
+                let row = ModelPickerRow(id: first.id, label: first.label, detail: first.description)
+                guard self.defaultModels[key] != row else { return }
+                self.defaultModels[key] = row
+                self.refresh()
+            }
+        }
+        return defaultModels[key]
+    }
+
+    /// The providers a chat on this host can move to: Cloud runs Claude
+    /// Code and Codex; a computer, the agents it offers.
+    private func providers(cloud: Bool) -> [HarnessInfo] {
+        // A computer offers what it reports; until it has, only the current
+        // provider (a built-in guess could offer one it doesn't have).
+        cloud
+            ? fallbackHarnesses().filter { AppModel.cloudHarnesses.contains($0.id) }
+            : hostHarnesses.filter(\.offered)
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {

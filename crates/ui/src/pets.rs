@@ -802,6 +802,9 @@ pub struct PetWindow {
     greeting: bool,
     track: Track,
     started: Instant,
+    /// The frame clock is running. It stops on still frames (reduced motion,
+    /// energy saver, a held pose); render restarts it once motion is back.
+    ticking: bool,
     _tick: Task<()>,
     _drag: Task<()>,
     _refresh: Task<()>,
@@ -864,6 +867,7 @@ impl PetWindow {
             greeting,
             track: first,
             started: Instant::now(),
+            ticking: false,
             _tick: Task::ready(()),
             _drag: Task::ready(()),
             _refresh: refresh,
@@ -903,18 +907,26 @@ impl PetWindow {
     fn play(&mut self, track: Track, cx: &mut Context<Self>) {
         self.track = track;
         self.started = Instant::now();
+        self.tick(cx);
+        cx.notify();
+    }
+
+    /// Run the frame clock from the current position of the track.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.ticking = true;
         self._tick = cx.spawn(async move |this, cx| {
             loop {
                 let Ok(Some(delay)) = this.update(cx, |this, cx| {
                     cx.notify();
-                    this.frame(cx).and_then(|tick| tick.delay)
+                    let delay = this.frame(cx).and_then(|tick| tick.delay);
+                    this.ticking = delay.is_some();
+                    delay
                 }) else {
                     return;
                 };
                 cx.background_executor().timer(delay).await;
             }
         });
-        cx.notify();
     }
 
     fn set_pointer(&mut self, pointer: Pointer, cx: &mut Context<Self>) {
@@ -990,11 +1002,16 @@ impl PetWindow {
 }
 
 impl Render for PetWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tick = self.frame(cx);
+        // Motion came back (energy saver or reduced motion ended): the clock
+        // stopped on a still frame and nothing else would restart it.
+        if !self.ticking && tick.is_some_and(|tick| tick.delay.is_some()) {
+            self.ticking = true;
+            cx.defer_in(window, |this, _, cx| this.tick(cx));
+        }
         let theme = Theme::of(cx);
-        let frame = self
-            .frame(cx)
-            .and_then(|tick| self.sprites.as_ref()?.get(&tick.sprite).cloned());
+        let frame = tick.and_then(|tick| self.sprites.as_ref()?.get(&tick.sprite).cloned());
         let grabbing = matches!(self.pointer, Pointer::Grab(_));
         let pet = div()
             .id("pet")

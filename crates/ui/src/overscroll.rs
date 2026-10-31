@@ -20,7 +20,11 @@
 //! streams that follow no touch (precise mouse wheels, synthetic input) are
 //! not momentum and never bounce. A touch that never scrolls arrives as
 //! `Started` then a zero `Moved` (NSEventPhaseCancelled is unmapped) and is
-//! treated as a cancel.
+//! treated as a cancel. A touch cancelled after it scrolled looks the same as
+//! one resting still, so a touch that goes quiet for [`TOUCH_TIMEOUT`] is let
+//! go: otherwise the band would think it held forever, and every later wheel
+//! event — momentum, a plain mouse wheel — would stretch it further, past
+//! where scrolling back could unwind it.
 //!
 //! Trackpad only (`ScrollDelta::Pixels`), vertical only, macOS only (other
 //! platforms don't deliver reliable touch phases), and off under reduced
@@ -47,6 +51,11 @@ const BOUNCE_MAX_FRACTION: f32 = 0.12;
 const BOUNCE_MAX_PX: f32 = 80.0;
 /// A phase-less stream after this much silence is a new fling.
 const FLING_GAP: Duration = Duration::from_millis(120);
+/// A touch silent this long has ended, whether or not `Ended` arrived.
+const TOUCH_TIMEOUT: Duration = Duration::from_millis(300);
+/// Finger travel past an end stops counting beyond this many viewports, so
+/// scrolling back never has more than that to unwind.
+const MAX_STRETCH_VIEWPORTS: f32 = 1.5;
 
 const ENABLED: bool = cfg!(any(target_os = "macos", test));
 
@@ -184,12 +193,20 @@ impl Band {
             .last_event
             .replace(now)
             .map(|last| now.saturating_duration_since(last));
+        if self.touching && gap.is_some_and(|gap| gap > TOUCH_TIMEOUT) {
+            // The touch ended without saying so (a cancel arrives as a plain
+            // move): whatever follows is not that finger.
+            self.release(now);
+        }
         match phase {
             TouchPhase::Started => {
                 self.touching = true;
                 self.touch_moved = false;
                 self.momentum = false;
                 self.fling_bounced = false;
+                // A stretch left by a touch that never ended is not this
+                // touch's: it continues from where the content shows.
+                self.stretch = 0.0;
                 return false;
             }
             TouchPhase::Cancelled => {
@@ -244,17 +261,22 @@ impl Band {
                 self.offset = 0.0;
                 return false;
             };
-            self.stretch = next;
-            self.offset = rubber_band(next, self.viewport);
+            self.stretch = self.capped(next);
+            self.offset = rubber_band(self.stretch, self.viewport);
             return inward;
         }
         // The container takes the room it has; the rest stretches the band.
         let past = dy.abs() - room.toward(dy);
         if past > 0.0 {
-            self.stretch = past.copysign(dy);
+            self.stretch = self.capped(past.copysign(dy));
             self.offset = rubber_band(self.stretch, self.viewport);
         }
         false
+    }
+
+    fn capped(&self, stretch: f32) -> f32 {
+        let max = self.viewport.max(1.0) * MAX_STRETCH_VIEWPORTS;
+        stretch.clamp(-max, max)
     }
 
     fn fling(&mut self, dy: f32, room: Room, gap: Option<Duration>, now: Instant) -> bool {
@@ -325,6 +347,17 @@ impl Band {
 
     /// Advance the return spring; true while it still needs frames.
     fn tick(&mut self, now: Instant) -> bool {
+        if self.touching && self.offset != 0.0 {
+            let quiet = self
+                .last_event
+                .is_none_or(|last| now.saturating_duration_since(last) > TOUCH_TIMEOUT);
+            if !quiet {
+                // Frames keep coming so a touch that silently ended is
+                // noticed and the band returns.
+                return true;
+            }
+            self.release(now);
+        }
         let Some(spring) = self.spring else {
             return false;
         };
@@ -433,7 +466,7 @@ impl Element for Overscroll {
             let view = window.current_view();
             let source = self.source.clone();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-                if phase != DispatchPhase::Capture || cx.has_active_drag() {
+                if phase != DispatchPhase::Capture {
                     return;
                 }
                 let ScrollDelta::Pixels(delta) = event.delta else {
@@ -442,7 +475,9 @@ impl Element for Overscroll {
                 let mut band = band.borrow_mut();
                 let before = (band.offset, band.spring.is_some());
                 let now = Instant::now();
-                let consumed = if hitbox.should_handle_scroll(window) {
+                // A drag maps the pointer through unshifted bounds, so it never
+                // stretches the band; the gesture's start and end still count.
+                let consumed = if !cx.has_active_drag() && hitbox.should_handle_scroll(window) {
                     let delta = point(f32::from(delta.x), f32::from(delta.y));
                     band.wheel(event.touch_phase, delta, source.room(), now)
                 } else if event.touch_phase != TouchPhase::Moved {
@@ -528,6 +563,85 @@ mod tests {
         assert_eq!(band.offset, 0.0);
         // At rest again, inward travel scrolls the container normally.
         assert!(!band.wheel(TouchPhase::Moved, dy(-20.0), AT_TOP, now));
+        assert_eq!(band.offset, 0.0);
+    }
+
+    #[test]
+    fn a_touch_that_never_ends_is_let_go() {
+        // NSEventPhaseCancelled arrives as a plain move: a stretched touch
+        // that is cancelled never reports Ended.
+        let mut now = Instant::now();
+        let mut band = band();
+        band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
+        band.wheel(TouchPhase::Moved, dy(80.0), AT_TOP, now);
+        band.wheel(TouchPhase::Moved, dy(0.0), AT_TOP, now);
+        let stretched = band.offset;
+        assert!(stretched > 0.0);
+        // While it might still be held, frames keep coming.
+        now += Duration::from_millis(100);
+        assert!(band.tick(now));
+        assert_eq!(band.offset, stretched);
+        // Quiet past the timeout: the band returns on its own.
+        now += TOUCH_TIMEOUT;
+        assert!(band.tick(now));
+        assert!(!band.touching);
+        while band.tick(now) {
+            now += Duration::from_millis(16);
+        }
+        assert_eq!(band.offset, 0.0);
+        // Later wheel input is not that touch: it can't stretch the band.
+        for _ in 0..50 {
+            now += Duration::from_millis(16);
+            assert!(!band.wheel(TouchPhase::Moved, dy(40.0), AT_TOP, now));
+        }
+        assert!(band.stretch == 0.0 && band.spring.is_none() && band.offset == 0.0);
+    }
+
+    #[test]
+    fn wheel_input_after_a_silent_end_never_stretches_the_band() {
+        let mut now = Instant::now();
+        let mut band = band();
+        band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
+        band.wheel(TouchPhase::Moved, dy(60.0), AT_TOP, now);
+        // No frame ran (the view was idle): the next event, after the pause,
+        // releases the old touch before it is read.
+        now += TOUCH_TIMEOUT + Duration::from_millis(1);
+        assert!(!band.wheel(TouchPhase::Moved, dy(60.0), AT_TOP, now));
+        assert!(!band.touching);
+        assert_eq!(band.stretch, 0.0);
+        assert!(band.spring.is_some(), "the band springs back");
+    }
+
+    #[test]
+    fn a_new_touch_unwinds_from_what_shows_not_a_stale_stretch() {
+        let now = Instant::now();
+        let mut band = band();
+        band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
+        band.wheel(TouchPhase::Moved, dy(300.0), AT_TOP, now);
+        let shown = band.offset;
+        // A new touch begins right away, before any timeout.
+        band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
+        assert_eq!(band.stretch, 0.0);
+        // Inward travel equal to what the shown band stands for collapses it.
+        let unwind = rubber_band_inverse(shown, band.viewport);
+        assert!(band.wheel(TouchPhase::Moved, dy(-(unwind - 1.0)), AT_TOP, now));
+        assert!(!band.wheel(TouchPhase::Moved, dy(-2.0), AT_TOP, now));
+        assert_eq!(band.offset, 0.0);
+    }
+
+    #[test]
+    fn stretch_is_capped_so_scrolling_back_always_unwinds() {
+        let now = Instant::now();
+        let mut band = band();
+        band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
+        for _ in 0..500 {
+            band.wheel(TouchPhase::Moved, dy(100.0), AT_TOP, now);
+        }
+        let max = band.viewport * MAX_STRETCH_VIEWPORTS;
+        assert_eq!(band.stretch, max);
+        // One viewport-and-a-half of travel back collapses it entirely.
+        assert!(band.wheel(TouchPhase::Moved, dy(-(max - 1.0)), AT_TOP, now));
+        assert!(!band.wheel(TouchPhase::Moved, dy(-2.0), AT_TOP, now));
         assert_eq!(band.offset, 0.0);
     }
 

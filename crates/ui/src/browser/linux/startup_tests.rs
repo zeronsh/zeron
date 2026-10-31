@@ -256,7 +256,7 @@ fn concurrent_profiles_can_extract_the_helper_into_a_cold_cache() {
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    extract_helper(root.path()).unwrap()
+                    extract_helper(root.path(), "webkit", GTK_HELPER).unwrap()
                 })
             })
             .collect();

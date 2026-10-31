@@ -48,9 +48,12 @@ async fn main() -> anyhow::Result<()> {
         cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
         sandbox: SandboxLevel::ReadOnly,
         auto_approve: true,
+        access: Default::default(),
+        plan: false,
         attachments: Vec::new(),
         worktree: None,
         resume: None,
+        env: Default::default(),
     };
     println!("Running real Devin ACP with {model}");
     let mut stream = harness.run(request, controls).await?;

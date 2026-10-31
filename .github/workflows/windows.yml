@@ -73,6 +73,11 @@ jobs:
       - uses: ./.github/actions/windows-ci-setup
       - name: Native harness security and integration tests
         run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
+      # The driver suites whose fixtures run without a POSIX shell: an in-test
+      # HTTP/SSE server (OpenCode), node (the Cursor shim) and a Rust peer
+      # (Pi). The shell- and python-fixture suites are unix-only.
+      - name: Portable harness integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --test opencode --test cursor_shim --test pi_rpc
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests

@@ -3,10 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
@@ -136,12 +135,20 @@ async fn handle_request(
 }
 
 /// Accept WebSocket connections forever, serving each with `service`.
-pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>) {
+///
+/// Every handshake must present `Authorization: Bearer {token}` — the
+/// per-start secret the engine published at `{data_dir}/ipc-token`
+/// ([`crate::ipc_auth`]). Loopback alone is not an identity: any local
+/// process (another OS user, a sandboxed app, a container sharing the host
+/// network) can open this port, and the engine behind it can start agents and
+/// broker vault grants.
+pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcService>, token: String) {
+    let token: Arc<str> = token.into();
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone()));
+                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -151,18 +158,23 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
     }
 }
 
-async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
-    // Native viewports dial this socket with a bare `connect_async` and send
-    // no `Origin` header. A browser always attaches `Origin` to a WebSocket
-    // handshake and cannot forge or suppress it from script, and WebSockets
-    // are exempt from the Same-Origin Policy — so only rejecting any handshake
-    // that carries `Origin` keeps a page the user happens to visit from
-    // reaching this local socket. Keep this check.
+async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token: Arc<str>) {
+    // Two independent gates, both required:
+    //
+    // 1. Origin. Native viewports dial this socket without an `Origin`
+    //    header. A browser always attaches `Origin` to a WebSocket handshake
+    //    and cannot forge or suppress it from script, and WebSockets are
+    //    exempt from the Same-Origin Policy — so only rejecting any handshake
+    //    that carries `Origin` keeps a page the user happens to visit from
+    //    reaching this local socket. Keep this check.
+    // 2. Bearer. Any local process can still dial without `Origin`; only one
+    //    that can read the owner-only `{data_dir}/ipc-token` knows the token.
+    //    Compared in constant time; the presented value is never logged.
     //
     // The large `Err` (ErrorResponse) is the shape tungstenite's Callback
     // trait requires; it can't be boxed away here.
     #[allow(clippy::result_large_err)]
-    let reject_cross_origin = |req: &HandshakeRequest, resp: HandshakeResponse| {
+    let authorize = |req: &HandshakeRequest, resp: HandshakeResponse| {
         if let Some(origin) = req.headers().get("origin") {
             tracing::warn!(
                 origin = %String::from_utf8_lossy(origin.as_bytes()),
@@ -172,44 +184,46 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
         }
+        let presented = req
+            .headers()
+            .get(tokio_tungstenite::tungstenite::http::header::AUTHORIZATION)
+            .map(|value| value.as_bytes());
+        if !crate::ipc_auth::bearer_matches(&token, presented) {
+            tracing::warn!(
+                presented = presented.is_some(),
+                "rpc: rejecting IPC handshake without the engine's bearer token"
+            );
+            let mut err = ErrorResponse::new(Some(
+                "missing or wrong IPC token (see {data_dir}/ipc-token)".to_string(),
+            ));
+            *err.status_mut() = StatusCode::UNAUTHORIZED;
+            return Err(err);
+        }
         Ok(resp)
     };
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, reject_cross_origin).await {
+    // Keystrokes and their echoes are tiny frames: Nagle would hold each one
+    // behind the peer's delayed ACK of the previous.
+    let _ = stream.set_nodelay(true);
+    let ws = match tokio_tungstenite::accept_hdr_async_with_config(
+        stream,
+        authorize,
+        Some(crate::ws::config()),
+    )
+    .await
+    {
         Ok(ws) => ws,
         Err(err) => {
             tracing::warn!(error = %err, "rpc: websocket handshake failed");
             return;
         }
     };
-    let (mut sink, mut ws_stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let (out_tx, out_rx) = mpsc::channel::<String>(256);
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
 
     // Pump: socket <-> string channels. Ends when either side closes.
     let pump = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                frame = out_rx.recv() => match frame {
-                    Some(text) => {
-                        if sink.send(WsMessage::Text(text)).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => {
-                        let _ = sink.send(WsMessage::Close(None)).await;
-                        break;
-                    }
-                },
-                message = ws_stream.next() => match message {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        if in_tx.send(text).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(_)) => {} // ping/pong/binary — ignored
-                },
-            }
+        if let Some(reason) = crate::ws::pump(ws, out_rx, in_tx).await {
+            tracing::warn!(%reason, "rpc: lost a viewport connection");
         }
     });
 

@@ -1,6 +1,84 @@
 import SafariServices
 import UIKit
 
+/// How transcripts show LaTeX math, local to this phone: rendered (in one of
+/// the core's bundled math faces) or as its TeX source.
+enum MathSettings {
+    static let didChange = Notification.Name("ZeronMathSettingsChanged")
+
+    /// Off shows `$…$` as an inline code chip and `$$…$$` as a code block.
+    static var render: Bool {
+        get { UserDefaults.standard.object(forKey: "mathRender") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathRender")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    /// Stored by `key`; anything unknown reads as Fira Math.
+    static var face: MathFace {
+        get {
+            let stored = UserDefaults.standard.string(forKey: "mathFont")
+            return allFaces.first { key($0) == stored } ?? .fira
+        }
+        set {
+            UserDefaults.standard.set(key(newValue), forKey: "mathFont")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allFaces: [MathFace] = [.fira, .stixTwo, .computerModern, .libertinus, .pagella, .euler]
+
+    private static func key(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "fira"
+        case .stixTwo: "stixTwo"
+        case .computerModern: "computerModern"
+        case .libertinus: "libertinus"
+        case .pagella: "pagella"
+        case .euler: "euler"
+        }
+    }
+
+    /// Formula size as a percent of the text around it (the desktop's
+    /// options; Rust clamps to 75–200).
+    static var size: Int {
+        get { UserDefaults.standard.object(forKey: "mathSize") as? Int ?? 100 }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "mathSize")
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
+    static let allSizes = [90, 100, 110, 120, 135, 150]
+
+    static func label(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "Fira Math"
+        case .stixTwo: "STIX Two"
+        case .computerModern: "Computer Modern"
+        case .libertinus: "Libertinus"
+        case .pagella: "Palatino"
+        case .euler: "Euler"
+        }
+    }
+
+    static func detail(_ f: MathFace) -> String {
+        switch f {
+        case .fira: "A sans that sits beside the interface font."
+        case .stixTwo: "A serif with the Times-like TeX look."
+        case .computerModern: "The classic LaTeX look."
+        case .libertinus: "A warm book serif."
+        case .pagella: "TeX Gyre Pagella, a Palatino serif."
+        case .euler: "Zapf's upright, hand-drawn math."
+        }
+    }
+
+    static func apply(to engine: TranscriptView) {
+        engine.setMath(enabled: render, face: face, sizePercent: UInt16(clamping: size))
+    }
+}
+
 /// Virtualized transcript host. Rust owns geometry: each `LayoutFrame` gives
 /// exact row offsets, so this view only (1) asks which rows intersect the
 /// viewport, (2) positions reusable `RowView`s there, and (3) keeps the user's
@@ -16,9 +94,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// its painted state survives row reconfigures.
     private var visuals: [String: VisualView] = [:]
     private var memoryObserver: NSObjectProtocol?
+    private var mathObserver: NSObjectProtocol?
 
     deinit {
         if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+        if let mathObserver { NotificationCenter.default.removeObserver(mathObserver) }
     }
     private var cacheOrder: [ModelKey] = []
     private var knownKeys = Set<UInt64>()
@@ -39,6 +119,12 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     /// Following the tail: new content keeps the bottom in view.
     private(set) var following = true
     var onFollowChange: ((Bool) -> Void)?
+    /// A row's button was tapped (`sign-in` on an error card).
+    var onAction: ((String) -> Void)?
+    /// A subagent card was tapped (doc id, title, still running).
+    var onSubagent: ((String, String, Bool) -> Void)?
+    /// An agent message's sender caption was tapped (the sending chat's id).
+    var onOpenChat: ((String) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
     /// An attachment's picture, for an image chip opened full size.
@@ -156,7 +242,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         guard ownTurn != nil, let frame = current else { return }
         let height = contentHeight(for: frame)
         if abs(contentSize.height - height) > 0.5 {
-            contentSize = CGSize(width: bounds.width, height: height)
+            contentSize = CGSize(width: layoutWidth, height: height)
             if following, !isTracking { startSpring() }
         }
     }
@@ -199,19 +285,37 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
             self?.pool.forEach { $0.removeFromSuperview() }
             self?.pool.removeAll()
         }
+        // Rebuilt rows get new versions, so stale models just stop matching.
+        MathSettings.apply(to: engine)
+        mathObserver = NotificationCenter.default.addObserver(forName: MathSettings.didChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            MathSettings.apply(to: self.engine)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     // MARK: Viewport
 
+    /// The width between the side insets. They needn't match (landscape,
+    /// the iPhone Duo's camera edge); the adjusted inset already shifts the
+    /// content past the leading one, so rows span only what's left.
+    private var layoutWidth: CGFloat {
+        max(0, bounds.width - adjustedContentInset.left - adjustedContentInset.right)
+    }
+
+    override func adjustedContentInsetDidChange() {
+        super.adjustedContentInsetDidChange()
+        setNeedsLayout()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         let scale = UIFontMetrics(forTextStyle: .body).scaledValue(for: 17) / 17
-        if bounds.width != viewportWidth || scale != textScale {
-            viewportWidth = bounds.width
+        if layoutWidth != viewportWidth || scale != textScale {
+            viewportWidth = layoutWidth
             textScale = scale
-            engine.setViewport(width: Float(bounds.width), textScale: Float(scale))
+            engine.setViewport(width: Float(layoutWidth), textScale: Float(scale))
         }
         layoutRows()
         refreshRunway()
@@ -316,14 +420,22 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         }
         let animation = rowAnimation(old: old, new: frame)
         let height = contentHeight(for: frame)
-        if contentSize.height != height || contentSize.width != bounds.width {
-            contentSize = CGSize(width: bounds.width, height: height)
+        if contentSize.height != height || contentSize.width != layoutWidth {
+            contentSize = CGSize(width: layoutWidth, height: height)
         }
         if first {
             for i in 0..<frame.rowCount() { if let p = frame.placement(index: i) { knownKeys.insert(p.key) } }
             contentOffset.y = maxOffsetY
         } else if following {
-            if !isTracking { startSpring() }
+            // A reflow for a new width (rotation, iPhone Duo folding) lands
+            // on the tail at once; the follow spring visibly glided there
+            // under the system's fold animation.
+            if let old, old.width() != frame.width() {
+                stopSpring()
+                contentOffset.y = maxOffsetY
+            } else if !isTracking {
+                startSpring()
+            }
         } else if let anchor, let i = frame.indexOf(key: anchor.key), let p = frame.placement(index: i) {
             let target = CGFloat(p.y) + anchor.delta
             if abs(target - contentOffset.y) > 0.5 {
@@ -392,7 +504,7 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
                     UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { view.alpha = 1 }
                 }
             }
-            let rect = CGRect(x: 0, y: CGFloat(p.y), width: bounds.width, height: CGFloat(p.height))
+            let rect = CGRect(x: 0, y: CGFloat(p.y), width: layoutWidth, height: CGFloat(p.height))
             if view.frame != rect {
                 // Existing rows tween with the animation; new ones just land.
                 if animation != nil, !view.frame.isEmpty, !stale || view.key == p.key {
@@ -574,6 +686,14 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
         engine.toggleDetail(row: view.key, detail: detail, open: open)
     }
 
+    func rowView(_ view: RowView, perform action: String) {
+        onAction?(action)
+    }
+
+    func rowView(_ view: RowView, openSubagent docId: String, title: String, running: Bool) {
+        onSubagent?(docId, title, running)
+    }
+
     func rowView(_ view: RowView, open url: URL) {
         guard let vc = findViewController() else { return }
         // An image chip opens its upload full size, as its thumbnail did.
@@ -585,6 +705,14 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
                 guard let image = await self?.imageFetcher?(reference), let view, let vc else { return }
                 vc.present(ImageViewer(image: image, source: view), animated: true)
             }
+            return
+        }
+        // A sender caption opens the chat that sent the message.
+        if url.scheme == "zeron-chat" {
+            guard let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            else { return }
+            onOpenChat?(id)
             return
         }
         if url.scheme == "http" || url.scheme == "https" {

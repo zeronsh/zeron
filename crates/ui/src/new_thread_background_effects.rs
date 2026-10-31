@@ -403,17 +403,22 @@ impl BackgroundLuminance {
 }
 
 type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
-type Cache = Vec<(PathBuf, Source)>;
+type Cache = Vec<(PathBuf, u16, Source)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
+fn decode_source(bytes: &[u8], rotation: u16) -> Option<Arc<BackgroundLuminance>> {
     Some(source_from_image(
         &crate::new_thread_background_image::decode(bytes).ok()?,
+        rotation,
     ))
 }
 
-fn source_from_image(image: &image::DynamicImage) -> Arc<BackgroundLuminance> {
-    from_rgba(image.thumbnail(2048, 2048).to_rgba8())
+fn source_from_image(image: &image::DynamicImage, rotation: u16) -> Arc<BackgroundLuminance> {
+    let proxy = crate::new_thread_background_image::rotate(
+        image.thumbnail(2048, 2048).to_rgba8(),
+        rotation,
+    );
+    from_rgba(proxy)
 }
 
 /// Build effect source pixels from an RGBA frame.
@@ -431,18 +436,37 @@ fn from_rgba(proxy: image::RgbaImage) -> Arc<BackgroundLuminance> {
 
 /// Apply a raster effect to one BGRA video frame, returning BGRA pixels
 /// ready for `RenderImage`. `None` is identity.
+/// Whether [`render_frame_effect`] would return the frame unchanged, so a
+/// caller can skip the call (and its full-frame copy) entirely.
+pub(super) fn frame_effect_is_identity(
+    effect: NewThreadBackgroundEffect,
+    blur: f32,
+    rotation: u16,
+) -> bool {
+    matches!(effect, NewThreadBackgroundEffect::None)
+        && (blur_key(blur) as f32) < 1.0
+        && crate::settings::normalize_rotation(rotation) == 0
+}
+
 pub(super) fn render_frame_effect(
     frame: &image::RgbaImage,
     effect: NewThreadBackgroundEffect,
     light: bool,
     blur: f32,
+    rotation: u16,
 ) -> image::RgbaImage {
+    // Rotate first so the effect texture (scanlines, glyphs, halftone dots)
+    // stays screen-aligned instead of turning on its side with the artwork.
+    // Each step allocates only when it changes pixels: a video frame is
+    // megabytes and this runs for every frame.
+    let rotated = (crate::settings::normalize_rotation(rotation) != 0)
+        .then(|| crate::new_thread_background_image::rotate(frame.clone(), rotation));
     let sigma = blur_key(blur) as f32;
     // Blur is per channel, so it runs on the BGRA frame as decoded.
-    let softened = if sigma >= 1.0 {
-        blur_image(frame, sigma)
-    } else {
-        frame.clone()
+    let softened = match (sigma >= 1.0, rotated) {
+        (true, rotated) => blur_image(rotated.as_ref().unwrap_or(frame), sigma),
+        (false, Some(rotated)) => rotated,
+        (false, None) => frame.clone(),
     };
     if matches!(effect, NewThreadBackgroundEffect::None) {
         return softened;
@@ -466,8 +490,9 @@ impl PreloadedArtwork {
         effect: NewThreadBackgroundEffect,
         light: bool,
         blur: f32,
+        rotation: u16,
     ) -> Self {
-        let source = source_from_image(image);
+        let source = source_from_image(image, rotation);
         let light = light
             && !matches!(
                 effect,
@@ -487,30 +512,43 @@ impl PreloadedArtwork {
         crate::settings::wallpaper_colors::extract(self.0.colors.iter().step_by(stride).copied())
     }
 
-    pub fn install(self, path: &Path) {
+    pub fn install(self, path: &Path, rotation: u16) {
         let mut cache = CACHE.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
-        cache.retain(|(key, _)| key != path);
-        cache.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
+        cache.retain(|(key, cached_rotation, _)| {
+            !(key == path && *cached_rotation == crate::settings::normalize_rotation(rotation))
+        });
+        cache.push((
+            path.to_path_buf(),
+            crate::settings::normalize_rotation(rotation),
+            Arc::new(Mutex::new(Some(self.0))),
+        ));
         if cache.len() > 4 {
             cache.remove(0);
         }
     }
 }
 
-fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<BackgroundLuminance>> {
+fn background_luminance(
+    path: &Path,
+    rotation: u16,
+    cx: &mut gpui::App,
+) -> Option<Arc<BackgroundLuminance>> {
+    let rotation = crate::settings::normalize_rotation(rotation);
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
     if let Some(source) = cache
         .lock()
         .ok()?
         .iter()
-        .find_map(|(key, source)| (key == path).then(|| source.clone()))
+        .find_map(|(key, cached_rotation, source)| {
+            (key == path && *cached_rotation == rotation).then(|| source.clone())
+        })
     {
         return source.lock().ok()?.clone();
     }
     let pending = Arc::new(Mutex::new(None));
     {
         let mut cache = cache.lock().ok()?;
-        cache.push((path.to_path_buf(), pending.clone()));
+        cache.push((path.to_path_buf(), rotation, pending.clone()));
         if cache.len() > 4 {
             cache.remove(0);
         }
@@ -521,7 +559,7 @@ fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<Backgroun
             .background_executor()
             .spawn(async move {
                 let bytes = std::fs::read(path).ok()?;
-                decode_source(&bytes)
+                decode_source(&bytes, rotation)
             })
             .await;
         cx.update(|cx| {
@@ -545,13 +583,15 @@ pub(super) fn prepare(
     // raster effect applied per frame off the UI thread.
     let light = matches!(theme.appearance, crate::theme::Appearance::Light);
     let blur = crate::settings::new_thread_background_blur_value(cx);
+    let rotation = crate::settings::new_thread_background_rotation_value(cx);
     if crate::new_thread_background_video::is_video(path) {
-        let animate = !crate::motion::reduced_motion(cx);
+        let animate = !crate::motion::video_held(cx);
         return crate::new_thread_background_video::current_frame(
-            path, animate, effect, light, blur, cx,
+            path, animate, effect, light, blur, rotation, cx,
         );
     }
-    background_luminance(path, cx).and_then(|source| source.raster_image(effect, light, blur, cx))
+    background_luminance(path, rotation, cx)
+        .and_then(|source| source.raster_image(effect, light, blur, cx))
 }
 fn dither_color([r, g, b, a]: [u8; 4], threshold: u8) -> [u8; 4] {
     let peak = r.max(g).max(b) as f32;
@@ -623,6 +663,7 @@ mod tests {
             focal_x: 0.2,
             focal_y: 0.8,
             zoom: 2.0,
+            rotation: 0,
         };
         let centered = NewThreadBackgroundAdjustment::default();
         let mut ready = Readiness::default();
@@ -650,6 +691,30 @@ mod tests {
         assert!(removed.current.is_none());
         assert!(removed.previous.is_some());
         assert_eq!(removed.previous_adjustment, cropped);
+    }
+
+    #[test]
+    fn source_rotation_swaps_dimensions_before_effects() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            4,
+            2,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let rotated = source_from_image(&image, 90);
+        let flush = source_from_image(&image, 180);
+        let base = source_from_image(&image, 0);
+        assert_eq!((rotated.width, rotated.height), (base.height, base.width));
+        assert_eq!((flush.width, flush.height), (base.width, base.height));
+    }
+
+    #[test]
+    fn video_frames_rotate_before_the_effect() {
+        // Two BGRA pixels side by side become a vertical pair after a clockwise turn.
+        let frame = image::RgbaImage::from_raw(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        let rotated = render_frame_effect(&frame, NewThreadBackgroundEffect::None, false, 0.0, 90);
+        assert_eq!(rotated.dimensions(), (1, 2));
+        assert_eq!(rotated.get_pixel(0, 0).0, [1, 2, 3, 255]);
+        assert_eq!(rotated.get_pixel(0, 1).0, [4, 5, 6, 255]);
     }
 
     #[test]
@@ -693,9 +758,9 @@ mod tests {
         image::RgbaImage::from_pixel(32, 24, image::Rgba([173, 89, 231, 180]))
             .save(&path)
             .unwrap();
-        cx.update(|cx| assert!(background_luminance(&path, cx).is_none()));
+        cx.update(|cx| assert!(background_luminance(&path, 0, cx).is_none()));
         cx.run_until_parked();
-        let source = cx.update(|cx| background_luminance(&path, cx).unwrap());
+        let source = cx.update(|cx| background_luminance(&path, 0, cx).unwrap());
         cx.update(|cx| {
             assert!(
                 source
@@ -705,7 +770,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|cx| {
-            let warm = background_luminance(&path, cx).unwrap();
+            let warm = background_luminance(&path, 0, cx).unwrap();
             assert!(Arc::ptr_eq(&source, &warm));
             let image = warm
                 .raster_image(NewThreadBackgroundEffect::None, false, 0.0, cx)

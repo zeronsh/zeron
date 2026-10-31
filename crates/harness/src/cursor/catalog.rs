@@ -3,11 +3,15 @@ pub(crate) use crate::catalog::Catalog;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The SDK's saved login (`Cursor.auth.login`'s default store).
+pub(crate) fn sdk_auth_file() -> std::path::PathBuf {
+    crate::executable::home_or_current_dir().join(".cursor/sdk/auth.json")
+}
+
 /// Hash (never log) the SDK's auth inputs. Contents, not mtime, detect atomic
 /// account swaps. Expiry crossing also invalidates the prior account's cache.
 pub(crate) fn credential_context() -> Result<[u8; 32], HarnessError> {
-    let path = crate::executable::home_or_current_dir().join(".cursor/sdk/auth.json");
-    let bytes = match std::fs::read(path) {
+    let bytes = match std::fs::read(sdk_auth_file()) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e.into()),

@@ -68,7 +68,12 @@ impl DocHost {
 }
 
 async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
+    /// Out of Cloud credits (402): the edge won't start or wake the
+    /// machine until credits are added. The message stays queued and the
+    /// wake is retried this rarely, so adding credits delivers it.
+    const AWAITING_CREDITS: std::time::Duration = std::time::Duration::from_secs(60);
     let mut backoff = std::time::Duration::from_millis(500);
+    let mut awaiting_credits = false;
     loop {
         let Some(inner) = weak.upgrade() else { return };
         let host = DocHost { inner };
@@ -114,13 +119,23 @@ async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
         }
         .await;
         let accepted = match sent {
-            Ok(response) if response.status().is_success() => true,
+            Ok(response) if response.status().is_success() => {
+                awaiting_credits = false;
+                true
+            }
             // Another owner's device (403) or a chat id its room refuses
             // (400): no retry can change that, so the wake is settled.
             // Unclaimed (404: not connected yet) and 5xx retry.
             Ok(response) if matches!(response.status().as_u16(), 400 | 403) => {
                 tracing::warn!(%chat, device = %target, status = response.status().as_u16(), "remote host wake refused; not retrying");
                 true
+            }
+            Ok(response) if response.status().as_u16() == 402 => {
+                if !awaiting_credits {
+                    tracing::warn!(%chat, device = %target, "Cloud wake refused: out of credits; retrying once credits are added");
+                }
+                awaiting_credits = true;
+                false
             }
             Ok(response) => {
                 tracing::debug!(%chat, device = %target, status = response.status().as_u16(), "remote host wake retrying");
@@ -158,7 +173,11 @@ async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
             _ = wake.recv() => {},
             _ = online.recv() => {},
         }
-        backoff = (backoff * 2).min(std::time::Duration::from_secs(16));
+        backoff = if awaiting_credits {
+            AWAITING_CREDITS
+        } else {
+            (backoff * 2).min(std::time::Duration::from_secs(16))
+        };
     }
 }
 
