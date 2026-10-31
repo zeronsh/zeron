@@ -423,6 +423,24 @@ impl FsWatchHub {
                     RenameMode::From | RenameMode::Both | RenameMode::Any
                 ))
         );
+        // Stat outside the routes lock, once per path rather than once per
+        // tree: this runs on notify's reader thread, and a checkout or build
+        // creates thousands of entries at a time.
+        let new_dirs: Vec<&PathBuf> = if matches!(
+            event.kind,
+            notify::EventKind::Create(_) | notify::EventKind::Modify(ModifyKind::Name(_))
+        ) {
+            event
+                .paths
+                .iter()
+                .filter(|path| {
+                    std::fs::symlink_metadata(path)
+                        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut changed = false;
         {
             let routes = lock(&self.routes);
@@ -433,13 +451,7 @@ impl FsWatchHub {
                     || ignore_changed
                     || event.paths.iter().any(|path| {
                         path.starts_with(&reg.path)
-                            && ((matches!(
-                                event.kind,
-                                notify::EventKind::Create(_)
-                                    | notify::EventKind::Modify(ModifyKind::Name(_))
-                            ) && std::fs::symlink_metadata(path)
-                                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()))
-                                || (removed && dirs.contains(path)))
+                            && (new_dirs.contains(&path) || (removed && dirs.contains(path)))
                     });
                 if topology {
                     if event.need_rescan() {
@@ -629,6 +641,7 @@ impl FsWatchHub {
         let mut bridge_tried = false;
         let mut touched = false;
         let mut attached_new = false;
+        let mut limit_hit = false;
         // A failed install may uncover paths it would have covered — iterate
         // until a pass adds no new failures (bounded: `failed` only grows).
         loop {
@@ -682,6 +695,7 @@ impl FsWatchHub {
                     }
                     Err(err) => {
                         tracing::debug!(path = %path.display(), error = %err, "fs-watch: watch failed");
+                        limit_hit |= matches!(err.kind, notify::ErrorKind::MaxFilesWatch);
                         os.failed.insert(path);
                         new_failure = true;
                     }
@@ -690,6 +704,13 @@ impl FsWatchHub {
             if !new_failure {
                 break;
             }
+        }
+        if limit_hit {
+            tracing::warn!(
+                failed = os.failed.len(),
+                "fs-watch: inotify watch limit reached (fs.inotify.max_user_watches); \
+                 affected trees are not live and fall back to their repair ticks"
+            );
         }
         if touched {
             self.stats.passes.fetch_add(1, Ordering::Relaxed);
