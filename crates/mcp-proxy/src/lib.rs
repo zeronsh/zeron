@@ -42,6 +42,9 @@ pub fn run_config(mut config: Config) -> io::Result<()> {
             Ok(key) => {
                 let outcome = discovery::discovery(&config.data_dir, &key);
                 config.launch_identity = Some(key);
+                if let Ok(Some(class)) = &outcome {
+                    let _ = discovery::record_run_discovery(&config, *class);
+                }
                 match outcome {
                     Ok(Some(discovery::Discovery::Channel | discovery::Discovery::Failed))
                     | Err(_) => true,
@@ -52,6 +55,13 @@ pub fn run_config(mut config: Config) -> io::Result<()> {
         }
     };
     if eager {
+        // This exec bypasses the proxy loop. Preserve a run-local hold for
+        // channels and uncertain legacy fallbacks before handing off stdio.
+        if let Some(dir) = &config.run_dir {
+            let _ = std::fs::create_dir_all(dir).and_then(|()| {
+                cache::atomic_write(&dir.join("channel-live"), b"channel-or-unknown")
+            });
+        }
         #[cfg(unix)]
         return exec_real(&config);
         #[cfg(not(unix))]

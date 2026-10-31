@@ -13689,6 +13689,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
+ "zeron-mcp-proxy",
  "zeron-notify",
  "zeron-preview",
  "zeron-proto",

@@ -106,6 +106,84 @@ fn declares_channel(v: &serde_json::Value) -> bool {
     }
 }
 
+/// A missing capture or omitted capabilities cannot prove absence of channels.
+/// This also checks eager/absolute/remote rows that never pass through the shim.
+pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path) -> bool {
+    let load = || {
+        let inputs = FingerprintInputs::for_run(
+            (!request.cwd.is_empty()).then(|| Path::new(&request.cwd)),
+            &request.env,
+        )
+        .ok()?;
+        let key = inputs.key(exe).ok()?;
+        if let Some(run) = request.env.get("ZERON_RUN_ID") {
+            // Bind to the configuration this runtime actually launched with.
+            // A later capture after a config edit cannot clear an old runtime's
+            // channel protection (the CLI may still own the old servers).
+            let dir = data_dir.join("run/mcp").join(run);
+            std::fs::create_dir_all(&dir).ok()?;
+            let path = dir.join("hibernate-capture");
+            let digest = key.digest();
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(digest.as_bytes()).ok()?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if std::fs::read_to_string(&path).ok()? != digest {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+        SnapshotStore::new(data_dir).load(&key)
+    };
+    load().is_some_and(|snapshot| {
+        snapshot.servers.iter().all(|row| {
+            let caps = row.extra.get("capabilities");
+            let channel_meta_clear = row.extra.get("channelCapabilities").is_none_or(|v| {
+                v.as_object().is_some_and(|m| m.is_empty())
+                    || v.as_array().is_some_and(|a| a.is_empty())
+            });
+            if !channel_meta_clear || caps.is_some_and(declares_channel) {
+                return false;
+            }
+            // Proxy discovery covers the shim path on Claude versions whose
+            // mcp_status omits capabilities. Unknown eager/absolute/remote rows
+            // keep the runtime awake.
+            let proxy = request
+                .mcp_plan
+                .as_ref()
+                .filter(|_| row.transport.as_deref() == Some("stdio"))
+                .and_then(|plan| {
+                    zeron_mcp_proxy::discovery::run_discovery(Path::new(&plan.run_dir), &row.name)
+                        .ok()
+                        .flatten()
+                });
+            match proxy {
+                Some(
+                    zeron_mcp_proxy::discovery::Discovery::Channel
+                    | zeron_mcp_proxy::discovery::Discovery::Failed,
+                ) => false,
+                Some(zeron_mcp_proxy::discovery::Discovery::NonChannel) => true,
+                None => caps.is_some_and(|caps| {
+                    zeron_mcp_proxy::cache::channel_capability(
+                        &serde_json::json!({"capabilities":caps}),
+                    ) == Some(false)
+                }),
+            }
+        })
+    })
+}
+
 /// No shim on unsupported platforms, a disabled plan, or any freshness/setup error.
 /// Small-helper absence in source/old packages keeps the normal eager launch.
 #[cfg(target_os = "linux")]
@@ -381,6 +459,114 @@ mod tests {
             servers(&snapshot, &plan, std::ffi::OsStr::new("/usr/bin"))[0].mode,
             "eager"
         );
+    }
+    #[test]
+    fn hibernation_requires_fresh_explicit_non_channel_capabilities_for_every_row() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("claude");
+        std::fs::write(&exe, "fake-cli").unwrap();
+        let config = root.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let mut request: RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt":"", "cwd":root.path(), "sandbox":"workspace-write"
+        }))
+        .unwrap();
+        request.env.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            config.to_string_lossy().into_owned(),
+        );
+        request
+            .env
+            .insert("HOME".into(), root.path().to_string_lossy().into_owned());
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        let key = FingerprintInputs::for_run(Some(root.path()), &request.env)
+            .unwrap()
+            .key(&exe)
+            .unwrap();
+        let store = SnapshotStore::new(root.path());
+        store
+            .save(&ClaudeMcpSnapshot::new(key.clone(), vec![]))
+            .unwrap();
+        assert!(hibernation_safe(&exe, &request, root.path()));
+        for (caps, expected) in [
+            (serde_json::json!({"tools":{}}), true),
+            (
+                serde_json::json!({"experimental":{"fake/channel":{}}}),
+                false,
+            ),
+            (serde_json::json!({"experimental":null}), false),
+            (serde_json::Value::Null, false),
+        ] {
+            let mut row: super::super::mcp_capture::ClaudeMcpServer =
+                serde_json::from_value(serde_json::json!({
+                    "name":"fake-channel", "status":"connected", "transport":"stdio",
+                    "config":{"command":"/absolute/eager-server","args":[]}
+                }))
+                .unwrap();
+            row.extra.insert("capabilities".into(), caps);
+            store
+                .save(&ClaudeMcpSnapshot::new(key.clone(), vec![row]))
+                .unwrap();
+            assert_eq!(hibernation_safe(&exe, &request, root.path()), expected);
+        }
+        let row = serde_json::from_value(serde_json::json!({
+            "name":"shimmed", "status":"connected", "transport":"stdio",
+            "config":{"command":"node","args":["server.js"]}
+        }))
+        .unwrap();
+        store
+            .save(&ClaudeMcpSnapshot::new(key.clone(), vec![row]))
+            .unwrap();
+        let run = root.path().join("run/mcp/current");
+        request.mcp_plan = Some(McpPlan {
+            run_dir: run.to_string_lossy().into_owned(),
+            ..McpPlan::default()
+        });
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        let mut proxy = zeron_mcp_proxy::Config::parse(
+            ["--server", "shimmed", "--", "node", "server.js"].map(str::to_owned),
+            root.path().into(),
+        )
+        .unwrap();
+        proxy.run_dir = Some(run);
+        zeron_mcp_proxy::discovery::record_run_discovery(
+            &proxy,
+            zeron_mcp_proxy::discovery::Discovery::NonChannel,
+        )
+        .unwrap();
+        assert!(hibernation_safe(&exe, &request, root.path()));
+        zeron_mcp_proxy::discovery::record_run_discovery(
+            &proxy,
+            zeron_mcp_proxy::discovery::Discovery::Channel,
+        )
+        .unwrap();
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        // A fresh capture for edited config must not reclassify an old runtime.
+        request
+            .env
+            .insert("ZERON_RUN_ID".into(), "bound-runtime".into());
+        store
+            .save(&ClaudeMcpSnapshot::new(key.clone(), vec![]))
+            .unwrap();
+        assert!(hibernation_safe(&exe, &request, root.path()));
+        // Changing a fingerprinted config invalidates even a channel-free capture.
+        store.save(&ClaudeMcpSnapshot::new(key, vec![])).unwrap();
+        std::fs::write(
+            config.join("settings.json"),
+            r#"{"enableAllProjectMcpServers":true}"#,
+        )
+        .unwrap();
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        let edited = FingerprintInputs::for_run(Some(root.path()), &request.env)
+            .unwrap()
+            .key(&exe)
+            .unwrap();
+        store.save(&ClaudeMcpSnapshot::new(edited, vec![])).unwrap();
+        assert!(!hibernation_safe(&exe, &request, root.path()));
+        request
+            .env
+            .insert("ZERON_RUN_ID".into(), "new-runtime".into());
+        assert!(hibernation_safe(&exe, &request, root.path()));
     }
     #[test]
     fn plan_changes_require_relaunch_but_run_directory_does_not() {

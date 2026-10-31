@@ -10,6 +10,8 @@ pub enum Mode {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub server: String,
+    /// Policy provenance for lifecycle telemetry; never part of cache identity.
+    pub server_class: Option<&'static str>,
     pub mode: Mode,
     pub idle: Duration,
     pub identity_env: Vec<String>,
@@ -49,6 +51,7 @@ impl Config {
     pub fn parse(args: impl IntoIterator<Item = String>, data_dir: PathBuf) -> io::Result<Self> {
         let mut c = Self {
             server: String::new(),
+            server_class: None,
             mode: Mode::Lazy,
             idle: Duration::from_secs(600),
             identity_env: Vec::new(),

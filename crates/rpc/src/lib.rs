@@ -53,6 +53,8 @@ pub mod methods {
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     /// Lazy MCP preferences and the discovered-server list (empty until
     /// snapshots exist). Set replaces the prefs object.
+    pub const HIBERNATE_CHAT: &str = "HibernateChat";
+    pub const HIBERNATE_IDLE: &str = "HibernateIdle";
     pub const GET_MCP_SETTINGS: &str = "GetMcpSettings";
     pub const SET_MCP_SETTINGS: &str = "SetMcpSettings";
     /// Whether agents' commits on this device credit Zeron

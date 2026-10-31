@@ -232,6 +232,12 @@ pub trait Harness: Send + Sync {
     fn executable_path(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Hibernation requires affirmative evidence that this launch has no channel
+    /// servers. Drivers without complete capability discovery stay awake.
+    fn hibernation_safe(&self, _request: &RunRequest, _data_dir: &std::path::Path) -> bool {
+        self.id() == HarnessId::Mock
+    }
+
     /// Whether every turn shape — user-prompted AND agent-initiated
     /// (background-subagent wakes) — ends with a deterministic `Done` from
     /// the agent's own wire. Native drivers reading the CLI's terminal frame

@@ -2198,6 +2198,8 @@ fn forwardable(method: &str) -> bool {
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
             // Background processes run in the chat host's runtime.
+            | methods::HIBERNATE_CHAT
+            | methods::HIBERNATE_IDLE
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
             // Checkout diffs are produced on the device holding the checkout.
@@ -3100,6 +3102,15 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "removed": removed }))
             }
+            methods::HIBERNATE_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                RpcReply::value(
+                    &serde_json::json!({ "hibernating": self.sessions.hibernate(&p.chat_id) }),
+                )
+            }
+            methods::HIBERNATE_IDLE => RpcReply::value(
+                &serde_json::json!({ "hibernating": self.sessions.hibernate_idle() }),
+            ),
             methods::STOP_BACKGROUND_TASK => {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
