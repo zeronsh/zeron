@@ -2380,39 +2380,22 @@ impl Inner {
             .map(str::to_owned)
     }
 
-    /// Run end. Automatic hands the lease to the most recently active other
-    /// non-worker still in `runs` (a parked runtime can inherit; this does
-    /// not kill it). The locks are dropped before the workspace is read.
-    fn release_channel_lease(&self, chat_id: &str) {
-        let successor = self.channel_lease_successor(chat_id);
-        let setting = self.registry.mcp_prefs().channel_owner;
-        lock(&self.channel_leases).release(chat_id, &setting, successor.as_deref());
-    }
-
-    fn channel_lease_successor(&self, ended: &str) -> Option<String> {
-        let candidates: Vec<String> = {
-            let runs = lock(&self.runs);
-            runs.keys()
-                .filter(|id| id.as_str() != ended)
-                .cloned()
-                .collect()
-        };
-        let ranked = {
-            let statuses = lock(&self.statuses);
-            candidates
-                .into_iter()
-                .map(|id| {
-                    let updated = statuses
-                        .get(&id)
-                        .map(|session| session.updated_at)
-                        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
-                    (id, updated)
-                })
-                .collect::<Vec<_>>()
-        };
-        let rows = ranked
-            .into_iter()
-            .map(|(id, updated)| (id.clone(), updated, self.chat_is_worker(&id)))
+    /// Select a successor while the caller holds the runs lock. This keeps
+    /// the selected run from ending or being replaced before the handoff.
+    fn channel_lease_successor(
+        &self,
+        runs: &HashMap<String, RunHandle>,
+        ended: &str,
+    ) -> Option<String> {
+        let statuses = lock(&self.statuses);
+        let rows = runs.keys()
+            .filter(|id| id.as_str() != ended)
+            .map(|id| {
+                let updated = statuses.get(id)
+                    .map(|session| session.updated_at)
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
+                (id.clone(), updated, self.chat_is_worker(id))
+            })
             .collect();
         rank_channel_successor(rows)
     }
@@ -2790,17 +2773,12 @@ impl Inner {
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
-        let removed = {
-            let mut runs = lock(&self.runs);
-            if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
-                runs.remove(chat_id);
-                true
-            } else {
-                false
-            }
-        };
-        if removed {
-            self.release_channel_lease(chat_id);
+        let mut runs = lock(&self.runs);
+        if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
+            runs.remove(chat_id);
+            let successor = self.channel_lease_successor(&runs, chat_id);
+            let setting = self.registry.mcp_prefs().channel_owner;
+            lock(&self.channel_leases).release(chat_id, &setting, successor.as_deref());
         }
     }
 }
@@ -5698,7 +5676,7 @@ mod tests {
         assert!(!plan.worker);
         assert!(plan.drop_channels);
 
-        inner.release_channel_lease("main");
+        lock(&inner.channel_leases).release("main", &crate::channel_leases::ChannelOwnerSetting::Automatic, None);
         assert!(
             inner
                 .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
