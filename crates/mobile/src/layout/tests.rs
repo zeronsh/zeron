@@ -619,6 +619,56 @@ fn user_attachments_render_as_images_not_trailer_text() {
 }
 
 #[test]
+fn user_urls_render_as_tappable_links() {
+    // A pasted URL in a sent prompt opens like one in an agent reply, beside
+    // a chip and with its trailing punctuation left as text.
+    let mut w = worker(390.0);
+    let text = "Check https://github.com/x/y/pull/7, then [mod.rs](zeron-file:src/mod.rs) and http://localhost:3000/a".to_owned();
+    w.input = debug_input(
+        vec![DebugEntry {
+            id: "u".into(),
+            user: true,
+            text,
+            streaming: false,
+        }],
+        false,
+    );
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(
+        d.text.contains(
+            "Check https://github.com/x/y/pull/7, then mod.rs and http://localhost:3000/a"
+        ),
+        "{}",
+        d.text
+    );
+    // One hit per painted fragment; a wrapped URL has several.
+    let mut links: Vec<&str> = d.links.iter().map(|l| l.url.as_str()).collect();
+    links.dedup();
+    assert_eq!(
+        links,
+        ["https://github.com/x/y/pull/7", "http://localhost:3000/a"]
+    );
+    assert!(d.runs.iter().any(|r| r.color == display::ColorRole::Link));
+
+    // Plain prompts keep the single body-colored run.
+    let mut w = worker(390.0);
+    w.input = debug_input(
+        vec![DebugEntry {
+            id: "u".into(),
+            user: true,
+            text: "no links here".into(),
+            streaming: false,
+        }],
+        false,
+    );
+    let frame = w.pass();
+    let d = frame.display(0).unwrap();
+    assert!(d.links.is_empty());
+    assert!(d.runs.iter().all(|r| r.color != display::ColorRole::Link));
+}
+
+#[test]
 fn synced_file_attachments_render_as_chips_and_name_pills() {
     // A desktop send mixing an image and ZIPs (one still a queued-upload ref),
     // with composer chips in the prompt. Chipped attachments show as their
