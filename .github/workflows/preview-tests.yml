@@ -1,10 +1,10 @@
 name: Preview networking
 on:
   pull_request:
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
+    paths: ['crates/preview/**', 'crates/proto/**', 'crates/doc/tests/fixtures/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
   push:
     branches: [main]
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
+    paths: ['crates/preview/**', 'crates/proto/**', 'crates/doc/tests/fixtures/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
 permissions:
   contents: read
 concurrency:
