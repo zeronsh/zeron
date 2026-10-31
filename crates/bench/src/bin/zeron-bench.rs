@@ -65,6 +65,12 @@ enum FixtureCommand {
         seed: u64,
         #[arg(long)]
         from_real_profile: bool,
+        /// Source revision of the supplied engine, when known.
+        #[arg(long)]
+        fixture_revision: Option<String>,
+        /// Replay cadence for T fixtures (default: opus).
+        #[arg(long)]
+        cadence: Option<String>,
     },
     VerifyReal {
         path: PathBuf,
@@ -132,13 +138,22 @@ async fn async_main(command: Command) -> Result<()> {
                 engine,
                 seed,
                 from_real_profile,
+                fixture_revision,
+                cadence,
             } => {
                 let path = if name == "P-real" && from_real_profile {
                     zeron_bench::fixture::real::snapshot()?
                 } else {
                     anyhow::ensure!(!from_real_profile, "--from-real-profile requires P-real");
                     let engine = engine.context("--engine is required for synthetic profiles")?;
-                    zeron_bench::fixture::profile::generate(&name, &engine, seed).await?
+                    zeron_bench::fixture::profile::generate(
+                        &name,
+                        &engine,
+                        seed,
+                        fixture_revision.as_deref(),
+                        cadence.as_deref(),
+                    )
+                    .await?
                 };
                 println!("{}", path.display());
                 Ok(())
@@ -158,8 +173,16 @@ async fn async_main(command: Command) -> Result<()> {
                 let script = zeron_bench::fixture::scripts::convert(&source, &cadence)?;
                 let root = zeron_bench::fixture::safe_root()?;
                 let dir = zeron_bench::fixture::fixture_dir(&root, &["fixtures", "private"])?;
+                use std::io::Write;
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
                 let path = dir.join(format!("converted-{}.zbr.jsonl", zeron_bench::mono_now()));
-                std::fs::write(&path, script)?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                file.write_all(script.as_bytes())?;
                 println!("{}", path.display());
                 Ok(())
             }

@@ -1,6 +1,7 @@
 pub mod multi;
 pub mod profile;
 pub mod real;
+mod repo;
 pub mod scripts;
 pub mod text;
 
@@ -42,4 +43,14 @@ pub fn fixture_dir(
         }
     }
     Ok(path)
+}
+
+pub(crate) fn assistant_text(view: &crate::transcript::ChatView) -> String {
+    view.entries
+        .iter()
+        .filter(|e| e["role"] == "assistant")
+        .flat_map(|e| e["parts"].as_array().into_iter().flatten())
+        .filter(|p| p["kind"] == "text")
+        .filter_map(|p| p["text"].as_str())
+        .collect()
 }

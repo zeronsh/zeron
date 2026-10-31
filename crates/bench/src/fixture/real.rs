@@ -16,6 +16,7 @@ use std::{
 };
 
 pub fn snapshot() -> Result<PathBuf> {
+    let started = std::time::Instant::now();
     let root = super::safe_root()?;
     let entry = unsafe { libc::getpwuid(libc::getuid()) };
     ensure!(!entry.is_null(), "cannot resolve user home");
@@ -41,6 +42,10 @@ pub fn snapshot() -> Result<PathBuf> {
         output.display()
     );
     fs::remove_dir(mount)?;
+    let manifest_path = output.join("manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    manifest["generation_ms"] = serde_json::json!(started.elapsed().as_millis());
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     Ok(output)
 }
 
@@ -79,8 +84,11 @@ fn live_owned(path: &str) -> bool {
         || path.is_empty()
 }
 fn excluded(name: &str) -> bool {
-    if name.to_ascii_lowercase().contains("api-key")
-        || name.to_ascii_lowercase().contains("api_key")
+    let lower = name.to_ascii_lowercase();
+    if ["api-key", "api_key", "credential", "secret", "token"]
+        .iter()
+        .any(|part| lower.contains(part))
+        || lower == ".env"
     {
         return true;
     }
@@ -150,7 +158,10 @@ pub fn copy_mounted(source: &Path, output: &Path) -> Result<()> {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let manifest = serde_json::json!({"name":"P-real","source_mount_read_only":true,"before_listing":"mtime-before.json","after_listing":"mtime-after.json","non_live_owned_mtime_changes":changed,"excluded":["session.json","ipc-token","device-id","engine.lock","agent-accounts","browser",".credentials.json"]});
+    let mut hashes = BTreeMap::new();
+    super::profile::hash_tree(output, &data, &mut hashes)?;
+    let (journal_bytes, sqlite_bytes) = super::profile::data_sizes(&data)?;
+    let manifest = serde_json::json!({"files":hashes,"journal_bytes":journal_bytes,"sqlite_bytes":sqlite_bytes,"name":"P-real","source_mount_read_only":true,"before_listing":"mtime-before.json","after_listing":"mtime-after.json","non_live_owned_mtime_changes":changed,"excluded":["session.json","ipc-token","device-id","engine.lock","agent-accounts","browser",".credentials.json","names containing api-key, api_key, credential, secret or token",".env"]});
     fs::write(
         output.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -177,13 +188,22 @@ fn copy_tree(base: &Path, dir: &Path, output: &Path) -> Result<()> {
             copy_tree(base, &path, output)?;
         } else if meta.is_file() {
             if name.ends_with(".sqlite3") || name.ends_with(".sqlite") || name.ends_with(".db") {
-                let wal = PathBuf::from(format!("{}-wal", path.display()));
+                let mut wal_name = path.as_os_str().to_os_string();
+                wal_name.push("-wal");
+                let wal = PathBuf::from(wal_name);
                 let has_wal = wal.exists();
-                let uri = if has_wal {
-                    format!("file:{}?mode=ro", path.display())
-                } else {
-                    format!("file:{}?mode=ro&immutable=1", path.display())
-                };
+                let mut encoded = String::from("file:");
+                for byte in path.as_os_str().as_bytes() {
+                    if byte.is_ascii_alphanumeric() || b"/-._~".contains(byte) {
+                        encoded.push(*byte as char);
+                    } else {
+                        encoded.push_str(&format!("%{byte:02X}"));
+                    }
+                }
+                let uri = format!(
+                    "{encoded}?mode=ro{}",
+                    if has_wal { "" } else { "&immutable=1" }
+                );
                 let src = Connection::open_with_flags(
                     &uri,
                     OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -274,6 +294,23 @@ pub async fn verify(path: &Path, engine: &Path) -> Result<usize> {
         profiles.len()
     );
     let mut trial = crate::Trial::create(&root, "real-verify")?;
+    // A copied live journal can contain interrupted turns. Never start any
+    // installed provider while checking that the snapshot boots.
+    trial.replay_bin = PathBuf::from("/usr/bin/false");
+    for key in [
+        "CODEX_EXECUTABLE",
+        "PI_EXECUTABLE",
+        "MUSE_EXECUTABLE",
+        "OPENCODE_EXECUTABLE",
+        "CURSOR_SDK_SHIM_EXECUTABLE",
+        "GROK_EXECUTABLE",
+        "DEVIN_EXECUTABLE",
+        "FX_EXECUTABLE",
+        "HERMES_EXECUTABLE",
+        "ANTIGRAVITY_ACP_EXECUTABLE",
+    ] {
+        trial.extra.push((key.into(), "/usr/bin/false".into()));
+    }
     trial
         .extra
         .push(("ZERON_ORG_ID".into(), profiles[0].0.clone()));
