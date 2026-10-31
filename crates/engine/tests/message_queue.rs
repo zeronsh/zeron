@@ -931,8 +931,15 @@ async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
         "the pending command to drain after the host change",
     )
     .await;
-    assert_eq!(status(&handle), Some(zeron_doc::SessionCommandStatus::Applied));
-    wait_for(|| !prompts.lock().unwrap().is_empty(), "host-flip prompt to execute").await;
+    assert_eq!(
+        status(&handle),
+        Some(zeron_doc::SessionCommandStatus::Applied)
+    );
+    wait_for(
+        || !prompts.lock().unwrap().is_empty(),
+        "host-flip prompt to execute",
+    )
+    .await;
     assert_eq!(*prompts.lock().unwrap(), vec!["host-flip prompt"]);
     let _ = harness.finish.send(());
     core.shutdown().await;

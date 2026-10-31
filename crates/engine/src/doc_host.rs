@@ -919,21 +919,23 @@ impl ChatDocHandle {
     }
 
     fn publish_queue(&self) {
-        match self.doc.read_queue() {
-            Ok(items) => {
-                self.queue_tx.send_if_modified(|slot| {
-                    if *slot == items {
-                        false
-                    } else {
-                        *slot = items;
-                        true
-                    }
-                });
+        self.publish_queue_with(|| self.doc.read_queue());
+    }
+
+    fn publish_queue_with(&self, read: impl FnOnce() -> Result<Vec<QueuedMessage>, DocError>) {
+        // Serialize the read with the send. A publisher paused after its read
+        // must not overwrite a drain's newer snapshot when it resumes.
+        self.queue_tx.send_if_modified(|slot| match read() {
+            Ok(items) if *slot != items => {
+                *slot = items;
+                true
             }
+            Ok(_) => false,
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "queue read failed");
+                false
             }
-        }
+        });
     }
 
     fn touch(&self) {
@@ -7335,6 +7337,49 @@ mod change_mask_tests {
         host.shutdown_workers().await;
     }
 
+    #[tokio::test]
+    async fn a_slow_queue_publisher_cannot_overwrite_a_newer_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("queue-publish-order").unwrap();
+        host.shutdown_workers().await;
+        handle
+            .doc
+            .push_queued(&zeron_doc::QueuedMessage::new("q1", "text", "host"))
+            .unwrap();
+        let queue = handle.watch_queue();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.publish_queue_with(|| {
+                    let rows = handle.doc.read_queue();
+                    read_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    rows
+                })
+            })
+        };
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.doc.take_queue_head().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let drain_publish = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.publish_queue();
+                done_tx.send(()).unwrap();
+            })
+        };
+        // If publication is serialized, the second publisher waits behind
+        // the first. Otherwise let it finish before releasing the old read.
+        let _ = done_rx.recv_timeout(Duration::from_millis(50));
+        release_tx.send(()).unwrap();
+        slow.join().unwrap();
+        drain_publish.join().unwrap();
+        assert_eq!(*queue.borrow(), handle.doc.read_queue().unwrap());
+    }
+
     /// Plan D3 test (a): a stream of commits that never touches the ledger
     /// reads it zero times after the first pass.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7458,15 +7503,23 @@ mod change_mask_tests {
             Arc::new(crate::HarnessRegistry::new()),
         );
         handle.doc.queue_command(&steer("prompt")).unwrap();
-        handle.doc.queue_command(&command("stop", SessionCommandPayload::Interrupt {})).unwrap();
+        handle
+            .doc
+            .queue_command(&command("stop", SessionCommandPayload::Interrupt {}))
+            .unwrap();
         let started = tokio::time::Instant::now();
         let waiter = {
             let (host, handle) = (host.clone(), handle.clone());
-            tokio::spawn(async move { host.await_earlier_prompts(&sessions, &handle, "stop").await })
+            tokio::spawn(
+                async move { host.await_earlier_prompts(&sessions, &handle, "stop").await },
+            )
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!waiter.is_finished());
-        handle.doc.set_command_status("prompt", SessionCommandStatus::Cancelled, None).unwrap();
+        handle
+            .doc
+            .set_command_status("prompt", SessionCommandStatus::Cancelled, None)
+            .unwrap();
         waiter.await.unwrap();
         assert!(started.elapsed() < WAIT_RECHECK);
         host.shutdown_workers().await;
