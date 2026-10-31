@@ -351,6 +351,7 @@ async fn exercise_projectless(mode: Mode) {
                         worktree: None,
                         resume: None,
                         env: Default::default(),
+                        mcp_plan: None,
                     },
                     message_id: message_id.into(),
                 },

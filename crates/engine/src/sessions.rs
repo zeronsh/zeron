@@ -279,6 +279,8 @@ struct Inner {
     doc_host: Mutex<Option<DocHost>>,
     /// chat_id → live run.
     runs: Mutex<HashMap<String, RunHandle>>,
+    /// One owner per channel-capable MCP server. Granted at the MCP stamp.
+    channel_leases: Mutex<crate::channel_leases::ChannelLeases>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
@@ -349,6 +351,7 @@ impl SessionsEngine {
                 registry,
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
+                channel_leases: Mutex::new(crate::channel_leases::ChannelLeases::default()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
@@ -368,6 +371,12 @@ impl SessionsEngine {
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
         self.inner.voice.clone()
+    }
+
+    /// The settings RPC changed who may hold a channel lease.
+    pub(crate) fn apply_channel_owner(&self) {
+        let setting = self.inner.registry.mcp_prefs().channel_owner;
+        lock(&self.inner.channel_leases).apply_setting(&setting);
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -1830,6 +1839,7 @@ impl SessionsEngine {
                     resume: None,
                     worktree: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -2143,6 +2153,7 @@ impl Inner {
                     terminal_activity: None,
                     running_subagents: 0,
                     background_tasks: Vec::new(),
+                    runtime: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2278,6 +2289,132 @@ impl Inner {
 
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
+    }
+
+    /// A side chat, a chat an agent spawned, or a row claimed before its
+    /// parent was recorded. No workspace (a bare test) is not a worker.
+    /// Unknown parent counts as a worker so a poller is not granted until
+    /// the row shows a main chat.
+    fn chat_is_worker(&self, chat_id: &str) -> bool {
+        let Some(ws) = self.workspace() else {
+            return false;
+        };
+        if ws.parent_unknown(chat_id) {
+            return true;
+        }
+        ws.chat(chat_id)
+            .ok()
+            .flatten()
+            .is_some_and(|chat| chat.parent_chat_id.is_some())
+    }
+
+    /// Stamp the lazy-MCP plan for the process this run is about to start.
+    /// `ZERON_MCP_LAZY=0`, or `mcp.lazy` off, clears any plan already on the
+    /// request and grants no channel lease. Called from `drive_run` only:
+    /// dispatch's `same_runtime` check still sees the unstamped request a
+    /// client sent, so a later harness unit must treat a missing incoming
+    /// plan as unchanged or stamp before that check. Title runs never get
+    /// here; they call the harness directly.
+    fn stamp_mcp_plan(
+        &self,
+        request: &mut RunRequest,
+        chat_id: &str,
+        run_id: &str,
+        harness_id: HarnessId,
+    ) {
+        self.apply_mcp_plan(
+            request,
+            chat_id,
+            run_id,
+            harness_id,
+            std::env::var("ZERON_MCP_LAZY").ok().as_deref(),
+        );
+    }
+
+    fn apply_mcp_plan(
+        &self,
+        request: &mut RunRequest,
+        chat_id: &str,
+        run_id: &str,
+        harness_id: HarnessId,
+        lazy_env: Option<&str>,
+    ) {
+        let prefs = self.registry.mcp_prefs();
+        if !prefs.lazy || crate::registry::HarnessRegistry::env_forces_mcp_legacy(lazy_env) {
+            request.mcp_plan = None;
+            return;
+        }
+        let worker = self.chat_is_worker(chat_id);
+        let drop_channels = {
+            let mut leases = lock(&self.channel_leases);
+            leases.drop_channels_for_launch(
+                crate::channel_leases::LAUNCH_LEASE,
+                chat_id,
+                worker,
+                &prefs.channel_owner,
+            )
+        };
+        let proxy_command = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .unwrap_or_else(|| "zeron".into());
+        let run_dir = self
+            .registry
+            .data_dir()
+            .map(|dir| dir.join("run").join("mcp").join(run_id))
+            .unwrap_or_else(|| std::path::PathBuf::from("run").join("mcp").join(run_id));
+        request.mcp_plan = Some(zeron_proto::McpPlan {
+            proxy_command,
+            run_dir: run_dir.to_string_lossy().into_owned(),
+            idle_minutes: prefs.idle_minutes,
+            default_mode: zeron_proto::McpMode::Lazy,
+            modes: self.registry.server_modes(harness_id, worker),
+            drop_channels,
+            worker,
+        });
+    }
+
+    fn channel_lease_holder(&self, identity: &str) -> Option<String> {
+        lock(&self.channel_leases)
+            .holder(identity)
+            .map(str::to_owned)
+    }
+
+    /// Run end. Automatic hands the lease to the most recently active other
+    /// non-worker still in `runs` (a parked runtime can inherit; this does
+    /// not kill it). The locks are dropped before the workspace is read.
+    fn release_channel_lease(&self, chat_id: &str) {
+        let successor = self.channel_lease_successor(chat_id);
+        let setting = self.registry.mcp_prefs().channel_owner;
+        lock(&self.channel_leases).release(chat_id, &setting, successor.as_deref());
+    }
+
+    fn channel_lease_successor(&self, ended: &str) -> Option<String> {
+        let candidates: Vec<String> = {
+            let runs = lock(&self.runs);
+            runs.keys()
+                .filter(|id| id.as_str() != ended)
+                .cloned()
+                .collect()
+        };
+        let ranked = {
+            let statuses = lock(&self.statuses);
+            candidates
+                .into_iter()
+                .map(|id| {
+                    let updated = statuses
+                        .get(&id)
+                        .map(|session| session.updated_at)
+                        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
+                    (id, updated)
+                })
+                .collect::<Vec<_>>()
+        };
+        let rows = ranked
+            .into_iter()
+            .map(|(id, updated)| (id.clone(), updated, self.chat_is_worker(&id)))
+            .collect();
+        rank_channel_successor(rows)
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
@@ -2653,11 +2790,29 @@ impl Inner {
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
-        let mut runs = lock(&self.runs);
-        if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
-            runs.remove(chat_id);
+        let removed = {
+            let mut runs = lock(&self.runs);
+            if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
+                runs.remove(chat_id);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.release_channel_lease(chat_id);
         }
     }
+}
+
+/// Newest non-worker. Equal timestamps break toward the greater chat id so
+/// the choice does not depend on map order.
+fn rank_channel_successor(
+    mut rows: Vec<(String, chrono::DateTime<chrono::Utc>, bool)>,
+) -> Option<String> {
+    rows.retain(|(_, _, worker)| !*worker);
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    rows.into_iter().next().map(|(id, _, _)| id)
 }
 
 // ── run task ────────────────────────────────────────────────────────────────
@@ -3523,6 +3678,7 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
     }
+    inner.stamp_mcp_plan(&mut request, &chat_id, &run_id, harness_id);
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -5413,7 +5569,163 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             env: Default::default(),
+            mcp_plan: None,
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_policy_stamps_plan_for_a_main_chat_and_a_worker() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_chat(
+                "main",
+                None,
+                Some(&core.device_id),
+                None,
+                Some("/work".into()),
+            )
+            .unwrap();
+        core.workspace
+            .create_chat_with_parent(
+                "side",
+                None,
+                Some(&core.device_id),
+                None,
+                Some("/work".into()),
+                Some("main".into()),
+            )
+            .unwrap();
+        core.workspace.claim_chat("early", None).unwrap();
+
+        let mut prefs = core.registry.mcp_prefs();
+        prefs.servers.insert(
+            "codex:playwright".into(),
+            zeron_proto::McpServerChoice::Eager,
+        );
+        prefs.servers.insert(
+            "codex:notes".into(),
+            zeron_proto::McpServerChoice::MainOnly,
+        );
+        core.registry.set_mcp_prefs(prefs);
+
+        let inner = &core.sessions.inner;
+        assert!(!inner.chat_is_worker("main"));
+        assert!(inner.chat_is_worker("side"));
+        assert!(inner.chat_is_worker("early"));
+        assert!(!inner.chat_is_worker("missing"));
+
+        let mut request = request();
+        request.mcp_plan = Some(zeron_proto::McpPlan::default());
+        inner.apply_mcp_plan(
+            &mut request,
+            "main",
+            "run-legacy",
+            HarnessId::Codex,
+            Some("0"),
+        );
+        assert!(request.mcp_plan.is_none());
+        assert!(
+            inner
+                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
+                .is_none()
+        );
+
+        let mut prefs = core.registry.mcp_prefs();
+        prefs.lazy = false;
+        core.registry.set_mcp_prefs(prefs);
+        inner.apply_mcp_plan(&mut request, "main", "run-off", HarnessId::Codex, None);
+        assert!(request.mcp_plan.is_none());
+
+        let mut prefs = core.registry.mcp_prefs();
+        prefs.lazy = true;
+        core.registry.set_mcp_prefs(prefs);
+        inner.apply_mcp_plan(
+            &mut request,
+            "main",
+            "run-1",
+            HarnessId::Codex,
+            Some("1"),
+        );
+        let plan = request.mcp_plan.clone().unwrap();
+        assert!(!plan.worker);
+        assert!(!plan.drop_channels);
+        assert_eq!(plan.idle_minutes, 10);
+        assert_eq!(plan.default_mode, zeron_proto::McpMode::Lazy);
+        assert_eq!(
+            plan.modes.get("playwright"),
+            Some(&zeron_proto::McpMode::Eager)
+        );
+        assert!(plan.modes.get("notes").is_none());
+        assert!(!plan.proxy_command.is_empty());
+        assert!(
+            plan.run_dir.ends_with("run/mcp/run-1"),
+            "{}",
+            plan.run_dir
+        );
+        assert_eq!(
+            inner
+                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
+                .as_deref(),
+            Some("main")
+        );
+
+        inner.apply_mcp_plan(&mut request, "side", "run-2", HarnessId::Codex, None);
+        let plan = request.mcp_plan.clone().unwrap();
+        assert!(plan.worker);
+        assert!(plan.drop_channels);
+        assert_eq!(plan.modes.get("notes"), Some(&zeron_proto::McpMode::Off));
+        assert_eq!(
+            plan.modes.get("playwright"),
+            Some(&zeron_proto::McpMode::Eager)
+        );
+        assert_eq!(
+            inner
+                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
+                .as_deref(),
+            Some("main")
+        );
+
+        inner.apply_mcp_plan(&mut request, "second", "run-3", HarnessId::Codex, None);
+        let plan = request.mcp_plan.unwrap();
+        assert!(!plan.worker);
+        assert!(plan.drop_channels);
+
+        inner.release_channel_lease("main");
+        assert!(
+            inner
+                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
+                .is_none()
+        );
+
+        let epoch = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+        let later = epoch + chrono::Duration::seconds(5);
+        assert_eq!(
+            rank_channel_successor(vec![
+                ("old".into(), epoch, false),
+                ("worker".into(), later, true),
+                ("new".into(), later, false),
+            ])
+            .as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            rank_channel_successor(vec![
+                ("b".into(), epoch, false),
+                ("a".into(), epoch, false),
+            ])
+            .as_deref(),
+            Some("b")
+        );
+
+        core.sessions.shutdown().await;
     }
 
     struct IdleStartupFixture {

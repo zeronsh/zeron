@@ -3084,6 +3084,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            mcp_plan: None,
         }
     }
 

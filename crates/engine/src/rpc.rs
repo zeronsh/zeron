@@ -2134,6 +2134,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_MCP_SETTINGS
+            | methods::SET_MCP_SETTINGS
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
@@ -2629,6 +2631,13 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_MCP_SETTINGS => RpcReply::value(&self.registry.mcp_settings()),
+            methods::SET_MCP_SETTINGS => {
+                let prefs: crate::registry::McpPrefs = parse_params(params)?;
+                self.registry.set_mcp_prefs(prefs);
+                self.sessions.apply_channel_owner();
+                RpcReply::value(&self.registry.mcp_settings())
+            }
             methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {
                 Some(credit) => RpcReply::value(&credit.status()),
                 None => Err(RpcError::Failed(
@@ -4824,6 +4833,70 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mcp_policy_settings_round_trip_over_the_memory_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let settings: crate::registry::McpSettings = client
+            .call_as(methods::GET_MCP_SETTINGS, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(settings.prefs.lazy);
+        assert_eq!(settings.prefs.idle_minutes, 10);
+        assert_eq!(settings.prefs.session_idle_minutes, 10);
+        assert!(settings.prefs.prewarm);
+        assert!(settings.servers.is_empty());
+        assert_eq!(
+            settings.prefs.channel_owner,
+            crate::registry::ChannelOwnerSetting::Automatic
+        );
+
+        let saved: crate::registry::McpSettings = client
+            .call_as(methods::SET_MCP_SETTINGS, serde_json::json!({ "lazy": false }))
+            .await
+            .unwrap();
+        assert!(!saved.prefs.lazy);
+        assert_eq!(saved.prefs.idle_minutes, 10);
+        assert_eq!(saved.prefs.session_idle_minutes, 10);
+        assert!(saved.prefs.prewarm);
+        assert_eq!(saved.prefs.channel_owner, crate::registry::ChannelOwnerSetting::Automatic);
+
+        let mut next = saved.prefs.clone();
+        next.lazy = true;
+        next.idle_minutes = 4;
+        next.session_idle_minutes = 0;
+        next.prewarm = false;
+        next.channel_owner = crate::registry::ChannelOwnerSetting::Off;
+        next.servers.insert(
+            "codex:playwright".into(),
+            zeron_proto::McpServerChoice::Lazy,
+        );
+        let saved: crate::registry::McpSettings = client
+            .call_as(methods::SET_MCP_SETTINGS, serde_json::to_value(&next).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(saved.prefs, next);
+        let again: crate::registry::McpSettings = client
+            .call_as(methods::GET_MCP_SETTINGS, serde_json::json!(null))
+            .await
+            .unwrap();
+        assert_eq!(again.prefs, next);
+
+        let info: EngineInfo = client
+            .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(info.capabilities.iter().any(|cap| cap == "mcp-lazy-v1"));
+        core.sessions.shutdown().await;
+    }
 
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {

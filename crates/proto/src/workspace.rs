@@ -35,6 +35,9 @@ pub mod capabilities {
     /// rows and answers `StopBackgroundTask` / `ReadBackgroundTaskOutput`
     /// (forwarding them, for a chat another device hosts).
     pub const BACKGROUND_TASKS_V1: &str = "background-tasks-v1";
+    /// Lazy MCP settings (`GetMcpSettings` / `SetMcpSettings`) and the
+    /// host-stamped [`crate::McpPlan`].
+    pub const MCP_LAZY_V1: &str = "mcp-lazy-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -49,6 +52,7 @@ pub mod capabilities {
         PROVIDER_SWITCH_V1,
         BACKGROUND_TASKS_V1,
         crate::voice::remote::CAPABILITY,
+        MCP_LAZY_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -133,7 +137,8 @@ mod tests {
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
                     "background-tasks-v1",
-                    "voice-client-media-v1"
+                    "voice-client-media-v1",
+                    "mcp-lazy-v1"
                 ],
             })
         );

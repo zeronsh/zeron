@@ -512,6 +512,12 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("terminalActivity")?,
         }
+        match session.runtime {
+            Some(runtime) => {
+                row.insert("runtime", LoroValue::from(serde_json::to_value(runtime)?))?;
+            }
+            None => row.delete("runtime")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -817,6 +823,8 @@ pub(crate) struct RawSession {
     running_subagents: u32,
     #[serde(default)]
     background_tasks: Vec<zeron_proto::BackgroundTask>,
+    #[serde(default)]
+    runtime: Option<zeron_proto::RuntimeState>,
 }
 
 impl From<RawSession> for Session {
@@ -832,6 +840,7 @@ impl From<RawSession> for Session {
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
+            runtime: raw.runtime,
         }
     }
 }
@@ -947,6 +956,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            runtime: None,
         }
     }
 

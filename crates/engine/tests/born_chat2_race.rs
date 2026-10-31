@@ -167,6 +167,7 @@ async fn transcript_survives_open_racing_create_chat() {
                         worktree: None,
                         resume: None,
                         env: Default::default(),
+                        mcp_plan: None,
                     },
                     message_id: "msg-race-1".into(),
                 },

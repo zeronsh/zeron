@@ -127,6 +127,7 @@ async fn two_clients_converge_and_stream_live_updates() {
             status: SessionStatus::Working,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            runtime: None,
         })
         .unwrap();
     }
@@ -444,6 +445,7 @@ async fn churn_stays_bounded_no_history_growth() {
                 },
                 started_at: Some(ts(i)),
                 updated_at: ts(i + 1),
+                runtime: None,
             })
             .unwrap();
         }

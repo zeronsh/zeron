@@ -51,6 +51,10 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// Lazy MCP preferences and the discovered-server list (empty until
+    /// snapshots exist). Set replaces the prefs object.
+    pub const GET_MCP_SETTINGS: &str = "GetMcpSettings";
+    pub const SET_MCP_SETTINGS: &str = "SetMcpSettings";
     /// Whether agents' commits on this device credit Zeron
     /// (`{enabled, cloud}`; set with `{enabled}`).
     pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";

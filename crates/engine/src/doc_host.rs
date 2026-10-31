@@ -6129,6 +6129,7 @@ impl DocHost {
             resume: None,
             worktree: None,
             env: Default::default(),
+            mcp_plan: None,
         })
     }
 

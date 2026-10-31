@@ -396,6 +396,7 @@ mod gate_tests {
             terminal_activity: None,
             running_subagents: running,
             background_tasks: Vec::new(),
+            runtime: None,
         }
     }
 

@@ -5601,6 +5601,7 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
+            runtime: None,
         }
     }
 
@@ -5872,6 +5873,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            runtime: None,
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -5907,6 +5909,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            runtime: None,
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);

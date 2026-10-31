@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
         access: Default::default(), plan: false,
         attachments: vec![], worktree: None, resume: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     let mut stream = CursorHarness::new()
         .run(

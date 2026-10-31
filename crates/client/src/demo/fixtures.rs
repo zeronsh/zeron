@@ -477,6 +477,7 @@ pub(crate) fn seed(
                 status,
                 started_at: Some(ms(now - 95_000)),
                 updated_at: Utc::now(),
+                runtime: None,
             })?;
         }
         if let (Some((number, state, title)), Some(source)) = (demo.pr, &source_context) {

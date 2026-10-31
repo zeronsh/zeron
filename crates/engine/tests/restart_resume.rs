@@ -52,6 +52,7 @@ fn run_request(prompt: &str, cwd: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     }
 }
 
@@ -1247,6 +1248,7 @@ async fn real_claude_remembers_codeword_across_engine_restart() {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     let assemble_real = || {
         EngineCore::assemble(

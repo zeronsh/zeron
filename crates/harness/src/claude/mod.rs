@@ -2217,6 +2217,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            mcp_plan: None,
         };
         let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
         let value = cmd
@@ -2250,6 +2251,7 @@ mod access_tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            mcp_plan: None,
         }
     }
 

@@ -1163,6 +1163,7 @@ impl SessionHandle {
                     worktree: request.worktree.clone(),
                     mcp: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 };
                 self.core.queue_command(
                     &device_id,

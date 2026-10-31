@@ -1564,6 +1564,7 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 };
                 self.zeron
                     .queue_command(
@@ -2193,6 +2194,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            runtime: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
