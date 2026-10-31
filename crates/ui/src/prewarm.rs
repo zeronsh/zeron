@@ -232,7 +232,10 @@ mod tests {
                     .collect();
                 state.selected_chat = Some("c1".into());
             });
-            Composer::new(state, cx)
+            let mut composer = Composer::new(state, cx);
+            // Focus comes only when a test gives it.
+            composer.focus_pending = false;
+            composer
         });
         let state = composer.read_with(cx, |composer, _| composer.state.clone());
         (
@@ -250,8 +253,12 @@ mod tests {
 
     impl Rig {
         fn focus(&self, cx: &mut gpui::VisualTestContext) {
-            self.composer.update_in(cx, |composer, window, cx| {
+            // Leave first, so the focus that follows is a change.
+            cx.update(|window, cx| {
                 window.blur();
+                window.draw(cx).clear();
+            });
+            self.composer.update_in(cx, |composer, window, cx| {
                 let focus = composer.input.focus_handle(cx);
                 window.focus(&focus, cx);
             });
@@ -332,7 +339,6 @@ mod tests {
         let (rig, cx) = rig(cx, None);
         let _guard = rig.runtime.enter();
         // A draft restored by opening the chat is not a reach for it.
-        cx.update(|window, _| window.blur());
         rig.composer.update(cx, |composer, cx| {
             composer
                 .input
