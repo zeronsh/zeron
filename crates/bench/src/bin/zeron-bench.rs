@@ -41,6 +41,8 @@ enum Command {
         #[arg(long)]
         zb_root: Option<PathBuf>,
     },
+    /// Create a credential-free synthetic Claude MCP fixture.
+    McpSetup,
     /// Generate fixtures.
     Fixture {
         #[command(subcommand)]
@@ -247,6 +249,12 @@ async fn async_main(command: Command) -> Result<()> {
             hold,
             zb_root,
         } => launch_hold(engine, hold, zb_root).await,
+        Command::McpSetup => {
+            let root = zeron_bench::fixture::safe_root()?;
+            let path = zeron_bench::fixture::claude_home::setup(&root)?;
+            println!("{}", path.display());
+            Ok(())
+        }
         Command::Fixture { command } => match command {
             FixtureCommand::SnapshotWorker { source, output } => {
                 zeron_bench::fixture::real::copy_mounted(&source, &output)

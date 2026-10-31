@@ -1,3 +1,4 @@
+pub mod claude_home;
 pub mod multi;
 pub mod profile;
 pub mod real;
