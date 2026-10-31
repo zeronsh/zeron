@@ -614,6 +614,29 @@ pub use zeron_proto::view::{
     parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
+/// What a chat's live helper chats (direct children; delegation is one level
+/// deep) are doing, for [`inbox_status`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HelperActivity {
+    pub awaiting_input: bool,
+    pub working: bool,
+}
+
+/// The inbox sidebar's status, first match wins: a helper asking the user pulls the parent into the
+/// Inbox; only the chat's own failure flags it; running subagents or a
+/// working helper keep it Working; else its own status.
+pub fn inbox_status(own: ChatIndicator, running_subagents: u32, helpers: HelperActivity) -> ChatIndicator {
+    if own == ChatIndicator::AwaitingInput || helpers.awaiting_input {
+        ChatIndicator::AwaitingInput
+    } else if own == ChatIndicator::Errored {
+        ChatIndicator::Errored
+    } else if own == ChatIndicator::Working || running_subagents > 0 || helpers.working {
+        ChatIndicator::Working
+    } else {
+        own
+    }
+}
+
 /// What a session row shows that ticks with the clock rather than with its
 /// content: the staleness-checked indicator and running-subagent count. A
 /// change in either must repaint even when the row itself is untouched.
@@ -3195,6 +3218,81 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
+    /// What every parent's live helper chats (side chats, MCP children:
+    /// `parent_chat_id`, never archived ones) are doing, keyed by parent id.
+    /// Built once per pass so the inbox sidebar never scans all chats per row.
+    pub fn helper_activity(&self, now: DateTime<Utc>) -> HashMap<&str, HelperActivity> {
+        let mut helpers: HashMap<&str, HelperActivity> = HashMap::new();
+        for chat in self.chats.iter().filter(|chat| !chat.archived) {
+            let Some(parent) = chat.parent_chat_id.as_deref() else {
+                continue;
+            };
+            self.fold_helper(helpers.entry(parent).or_default(), chat, now);
+        }
+        helpers
+    }
+
+    /// Folds one helper chat into its parent's [`HelperActivity`]: asking,
+    /// or working, including subagents that outlive the helper's own turn.
+    fn fold_helper(&self, entry: &mut HelperActivity, helper: &Chat, now: DateTime<Utc>) {
+        match self.display_status_for(helper, now) {
+            ChatIndicator::AwaitingInput => entry.awaiting_input = true,
+            ChatIndicator::Working => entry.working = true,
+            _ => {}
+        }
+        if self.running_subagents_for(&helper.id, now) > 0 {
+            entry.working = true;
+        }
+    }
+
+    /// The inbox sidebar's status for `chat`: its own display status folded
+    /// with its helpers' (t3code's rule: busy if it or its helpers are busy
+    /// and it doesn't need the user). `helpers` is [`Self::helper_activity`].
+    pub fn inbox_status_with(
+        &self,
+        chat: &Chat,
+        own: ChatIndicator,
+        helpers: &HashMap<&str, HelperActivity>,
+        now: DateTime<Utc>,
+    ) -> ChatIndicator {
+        inbox_status(
+            own,
+            self.running_subagents_for(&chat.id, now),
+            helpers.get(chat.id.as_str()).copied().unwrap_or_default(),
+        )
+    }
+
+    /// [`Self::inbox_status_with`] for one chat, when there is no pass to
+    /// share a helper map with.
+    pub fn inbox_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
+        let mut helpers = HelperActivity::default();
+        for child in self.chats.iter().filter(|child| {
+            !child.archived && child.parent_chat_id.as_deref() == Some(chat.id.as_str())
+        }) {
+            self.fold_helper(&mut helpers, child, now);
+        }
+        inbox_status(
+            self.display_status_for(chat, now),
+            self.running_subagents_for(&chat.id, now),
+            helpers,
+        )
+    }
+
+    /// [`Self::sidebar_chats`] with each status replaced by its inbox status
+    /// ([`Self::inbox_status_with`]): what the inbox sidebar places, orders
+    /// and dots by.
+    pub fn inbox_sidebar_chats(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+    ) -> Vec<(ChatIndicator, &Chat)> {
+        let helpers = self.helper_activity(now);
+        self.sidebar_chats(now, space_filter)
+            .into_iter()
+            .map(|(own, chat)| (self.inbox_status_with(chat, own, &helpers, now), chat))
+            .collect()
+    }
+
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
     /// on any device — idle included — in pure recency order (status drives
     /// the dot, never the position; see [`sort_active`]).
@@ -3334,7 +3432,8 @@ impl AppState {
     /// stale ([`SESSION_STALE_MS`]), a remote device leaving its online window
     /// (offline glyphs, unreachable hosts, Queued badges), a pending send's
     /// grace expiring into "Not delivered", or a syncing chat's caption
-    /// showing or its room stalling. Each deadline is the first instant
+    /// showing or its room stalling, or a snoozed session waking. Each
+    /// deadline is the first instant
     /// the predicate reads differently. Relative-time labels are excluded:
     /// they advance on the views' minute heartbeat. Pure.
     pub fn next_clock_transition(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -3406,7 +3505,10 @@ impl AppState {
                     .then(|| clock.began + chrono::TimeDelta::milliseconds(SYNC_STALLED_AFTER_MS));
                 std::iter::once(shown).chain(stalled)
             });
-        stale.chain(offline).chain(grace).chain(syncing)
+        // A snoozed session wakes back into the inbox sidebar's Inbox at
+        // exactly its stored time (`Chat::snoozed_at` is false from then on).
+        let wakes = self.chats.iter().filter_map(|chat| chat.snoozed_until);
+        stale.chain(offline).chain(grace).chain(syncing).chain(wakes)
     }
 
     /// Notify this entity at every clock-driven transition, so each state
@@ -5563,6 +5665,8 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            snoozed_until: None,
+            archived_at: None,
         }
     }
 
@@ -7541,6 +7645,119 @@ mod tests {
         assert_eq!(visible, ["b"]);
     }
 
+    /// A parent `p` with helper `h` (`parent_chat_id`); `sessions` are
+    /// `(chat_id, status, running_subagents)`.
+    fn helper_state(
+        helper_archived: bool,
+        sessions: &[(&str, SessionStatus, u32)],
+        now: DateTime<Utc>,
+    ) -> AppState {
+        let mut state = AppState::new();
+        let mut helper = chat("h", 1, None);
+        helper.parent_chat_id = Some("p".into());
+        helper.archived = helper_archived;
+        state.apply_chats(vec![chat("p", 0, None), helper]);
+        state.sessions = sessions
+            .iter()
+            .map(|(id, status, running)| Session {
+                running_subagents: *running,
+                ..session(id, *status, 0, now)
+            })
+            .collect();
+        state
+    }
+
+    fn inbox_of(state: &AppState, now: DateTime<Utc>) -> ChatIndicator {
+        let parent = state.chats.iter().find(|c| c.id == "p").unwrap();
+        let single = state.inbox_status_for(parent, now);
+        // The per-pass map agrees with the one-off derivation.
+        let helpers = state.helper_activity(now);
+        let own = state.display_status_for(parent, now);
+        assert_eq!(state.inbox_status_with(parent, own, &helpers, now), single);
+        single
+    }
+
+    #[test]
+    fn inbox_status_counts_running_subagents_as_working() {
+        let now = Utc::now();
+        let state = helper_state(false, &[("p", SessionStatus::Idle, 2)], now);
+        assert_eq!(inbox_of(&state, now), ChatIndicator::Working);
+        let idle = helper_state(false, &[("p", SessionStatus::Idle, 0)], now);
+        assert_ne!(inbox_of(&idle, now), ChatIndicator::Working);
+    }
+
+    #[test]
+    fn inbox_status_counts_a_working_side_chat() {
+        let now = Utc::now();
+        let state = helper_state(
+            false,
+            &[("p", SessionStatus::Idle, 0), ("h", SessionStatus::Working, 0)],
+            now,
+        );
+        assert_eq!(inbox_of(&state, now), ChatIndicator::Working);
+        // The helper itself stays out of the sidebar.
+        assert!(state.inbox_sidebar_chats(now, None).iter().all(|(_, c)| c.id == "p"));
+        assert_eq!(state.inbox_sidebar_chats(now, None)[0].0, ChatIndicator::Working);
+    }
+
+    #[test]
+    fn inbox_status_counts_a_side_chats_running_subagents() {
+        let now = Utc::now();
+        // The helper's own turn ended; its background subagent still runs.
+        let state = helper_state(
+            false,
+            &[("p", SessionStatus::Idle, 0), ("h", SessionStatus::Idle, 1)],
+            now,
+        );
+        assert_eq!(inbox_of(&state, now), ChatIndicator::Working);
+    }
+
+    #[test]
+    fn inbox_status_lifts_a_helper_asking_the_user() {
+        let now = Utc::now();
+        let state = helper_state(
+            false,
+            &[("p", SessionStatus::Working, 0), ("h", SessionStatus::AwaitingInput, 0)],
+            now,
+        );
+        assert_eq!(inbox_of(&state, now), ChatIndicator::AwaitingInput);
+    }
+
+    #[test]
+    fn inbox_status_ignores_a_failed_or_archived_helper() {
+        let now = Utc::now();
+        let failed = helper_state(
+            false,
+            &[("p", SessionStatus::Idle, 0), ("h", SessionStatus::Errored, 0)],
+            now,
+        );
+        assert_ne!(inbox_of(&failed, now), ChatIndicator::Errored);
+        let archived = helper_state(
+            true,
+            &[("p", SessionStatus::Idle, 0), ("h", SessionStatus::AwaitingInput, 0)],
+            now,
+        );
+        assert_eq!(inbox_of(&archived, now), ChatIndicator::Idle);
+    }
+
+    #[test]
+    fn inbox_status_precedence() {
+        let busy = HelperActivity {
+            awaiting_input: false,
+            working: true,
+        };
+        let asking = HelperActivity {
+            awaiting_input: true,
+            working: false,
+        };
+        let none = HelperActivity::default();
+        assert_eq!(inbox_status(ChatIndicator::Errored, 3, busy), ChatIndicator::Errored);
+        assert_eq!(inbox_status(ChatIndicator::Errored, 0, asking), ChatIndicator::AwaitingInput);
+        assert_eq!(inbox_status(ChatIndicator::Completed, 1, none), ChatIndicator::Working);
+        assert_eq!(inbox_status(ChatIndicator::Completed, 0, none), ChatIndicator::Completed);
+        assert_eq!(inbox_status(ChatIndicator::AwaitingInput, 0, busy), ChatIndicator::AwaitingInput);
+    }
+
     #[test]
     fn visible_chats_hide_spawned_children() {
         let now = Utc::now();
@@ -8171,6 +8388,19 @@ mod tests {
             !s.device_version_at_least("d1", (0, 2, 12)),
             "unstamped version conservatively fails the gate"
         );
+    }
+
+    #[test]
+    fn a_future_snooze_is_a_clock_transition() {
+        let mut state = AppState::default();
+        let mut snoozed = chat("snoozed", 0, None);
+        let wake = snoozed.created_at + TimeDelta::hours(3);
+        snoozed.snoozed_until = Some(wake);
+        let mut woken = chat("woken", 0, None);
+        woken.snoozed_until = Some(woken.created_at - TimeDelta::minutes(1));
+        state.chats = vec![snoozed.clone(), woken];
+        assert_eq!(state.next_clock_transition(snoozed.created_at), Some(wake));
+        assert_eq!(state.next_clock_transition(wake), None);
     }
 
     #[test]

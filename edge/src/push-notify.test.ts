@@ -74,6 +74,15 @@ describe("chatForNotification", () => {
     expect(chatForNotification(chat({ parentChatId: "p" }))).toBeNull();
     expect(chatForNotification(chat({ archived: true }))).toBeNull();
   });
+  it("a snoozed chat skips done but still asks and fails", () => {
+    const snoozed = chat({ title: "Later", snoozedUntil: NOW + 60_000 });
+    expect(chatForNotification(snoozed, "done", NOW)).toBeNull();
+    expect(chatForNotification(snoozed, "input", NOW)).toEqual({ title: "Later" });
+    expect(chatForNotification(snoozed, "failed", NOW)).toEqual({ title: "Later" });
+    // Past wake time (and a cleared snooze) notify as usual.
+    expect(chatForNotification(snoozed, "done", NOW + 60_000)).toEqual({ title: "Later" });
+    expect(chatForNotification(chat({ title: "Later", snoozedUntil: null }), "done", NOW)).toEqual({ title: "Later" });
+  });
 });
 
 describe("prefs and payload", () => {

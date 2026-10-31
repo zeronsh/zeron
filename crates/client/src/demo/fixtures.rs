@@ -462,6 +462,8 @@ pub(crate) fn seed(
             space_id: demo.space.map(str::to_owned),
             last_seen_at: Some(ms(if demo.seen { last } else { last - MIN })),
             room_gen: Some(2),
+            snoozed_until: None,
+            archived_at: None,
             parent_chat_id: demo.parent.map(str::to_owned),
         };
         doc.upsert_chat(&chat)?;

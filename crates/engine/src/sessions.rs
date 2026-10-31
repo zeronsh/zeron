@@ -2054,7 +2054,9 @@ impl Inner {
         self.set_status_with_completion(chat_id, status, fresh_start, None, None);
     }
 
-    /// Publish how many subagents of `chat_id` are streaming. A change is
+    /// Publish how many subagents of `chat_id` are running: the larger of its
+    /// streaming sinks and the driver's background-agent count (one subagent
+    /// usually shows in both, so they are not added). A change is
     /// mirrored like any status transition (it doubles as a heartbeat); an
     /// unchanged count is a no-op, and a chat without a status row has
     /// nothing to badge yet.
@@ -4053,6 +4055,16 @@ async fn drive_run(
                     inner.set_background_tasks(&chat_id, tasks);
                     continue;
                 }
+                // The driver's own count of background agents moved (Muse's
+                // subagents and workflows, Claude's background agents): it
+                // reaches the row with no stream event of its own.
+                _ = turn.background_agents_changed() => {
+                    inner.set_running_subagents(
+                        &chat_id,
+                        subagents.len().max(turn.background_agents()),
+                    );
+                    continue;
+                }
                 // A hang-up restarts the idle window, however long the call.
                 _ = resume_state.voice_active.ended.notified() => {
                     if idle_since.is_some() {
@@ -4373,7 +4385,10 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(
+                        &chat_id,
+                        subagents.len().max(turn.background_agents()),
+                    );
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
@@ -4431,7 +4446,10 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
-                    inner.set_running_subagents(&chat_id, subagents.len());
+                    inner.set_running_subagents(
+                        &chat_id,
+                        subagents.len().max(turn.background_agents()),
+                    );
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
                     // blob (`blob/{chatId}/{subDocId}`) so viewers of
@@ -5712,6 +5730,8 @@ mod tests {
     /// and decides when the stream ends.
     struct FeedHarness {
         feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+        /// The run's turn control, for tests that report background work.
+        turn: Mutex<Option<TurnControl>>,
     }
 
     #[async_trait::async_trait]
@@ -5737,11 +5757,12 @@ mod tests {
         async fn run(
             &self,
             _request: RunRequest,
-            _controls: RunControls,
+            controls: RunControls,
         ) -> Result<
             futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
             zeron_harness::HarnessError,
         > {
+            *self.turn.lock().unwrap() = Some(controls.turn.clone());
             let mut feed = self
                 .feed
                 .lock()
@@ -5763,6 +5784,7 @@ mod tests {
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(FeedHarness {
             feed: Mutex::new(Some(rx)),
+            turn: Mutex::new(None),
         }));
         let dir = tempfile::tempdir().unwrap();
         let core =
@@ -5836,6 +5858,7 @@ mod tests {
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(FeedHarness {
             feed: Mutex::new(Some(rx)),
+            turn: Mutex::new(None),
         }));
         let dir = tempfile::tempdir().unwrap();
         let core =
@@ -5927,6 +5950,99 @@ mod tests {
             "the badge counts what the lanes card lists"
         );
         feed.send(done(DoneStatus::Completed)).unwrap();
+        core.sessions.shutdown().await;
+    }
+
+    /// Background agents a driver reports outside any stream (Muse's
+    /// subagents, Claude's background agents) reach the row after the turn
+    /// ended, combined with streaming sinks without double counting.
+    #[tokio::test]
+    async fn running_subagents_follow_the_drivers_background_agents() {
+        use super::*;
+        let (feed, rx) = mpsc::unbounded_channel();
+        let harness = Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+            turn: Mutex::new(None),
+        });
+        let registry = HarnessRegistry::new();
+        registry.register(harness.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-background-agents";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let row = || {
+            core.sessions
+                .session_status(chat)
+                .map(|s| (s.status, s.running_subagents))
+        };
+        async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !ok() {
+                assert!(tokio::time::Instant::now() < deadline, "{what}");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        feed.send(started()).unwrap();
+        feed.send(AgentEvent::ToolCall {
+            id: "tool-1".into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "Agent: scout".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        until("the turn parks", || row() == Some((SessionStatus::Idle, 0))).await;
+        let turn = harness.turn.lock().unwrap().clone().expect("run started");
+
+        // No event: the driver's count alone moves the row.
+        turn.set_background_agents(2);
+        until("the driver's count reaches the row", || {
+            row() == Some((SessionStatus::Idle, 2))
+        })
+        .await;
+
+        // A subagent streaming under its chip is one the driver already
+        // counts: the row shows the larger count, not the sum.
+        feed.send(AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(text("scouting")),
+        })
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(row(), Some((SessionStatus::Idle, 2)));
+        turn.set_background_agents(0);
+        until("the sink alone still counts", || {
+            row() == Some((SessionStatus::Idle, 1))
+        })
+        .await;
+
+        feed.send(AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(done(DoneStatus::Completed)),
+        })
+        .unwrap();
+        until("the last one finishing drops the count", || {
+            row() == Some((SessionStatus::Idle, 0))
+        })
+        .await;
+
+        // The run's end clears everything.
+        turn.set_background_agents(1);
+        until("a new background agent counts", || {
+            row() == Some((SessionStatus::Idle, 1))
+        })
+        .await;
+        drop(feed);
+        until("the run's end drops the count", || {
+            row().is_some_and(|(_, running)| running == 0)
+        })
+        .await;
         core.sessions.shutdown().await;
     }
 

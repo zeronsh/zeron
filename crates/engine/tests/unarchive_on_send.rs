@@ -1,6 +1,7 @@
 //! Sending a message to an archived chat revives it: `queue_command` flips the
 //! workspace row's `archived` flag back off for message-bearing commands (Run,
-//! Steer) — and only those; an Interrupt leaves the archive state alone.
+//! Steer) — and only those; an Interrupt leaves the archive state alone. The
+//! same send ends an inbox snooze.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,6 +129,15 @@ fn archived(core: &EngineCore) -> bool {
         .archived
 }
 
+fn snoozed(core: &EngineCore) -> bool {
+    core.workspace
+        .chat(CHAT)
+        .expect("read chat row")
+        .expect("chat row exists")
+        .snoozed_until
+        .is_some()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sending_a_message_unarchives_the_chat() {
     let tmp = tempfile::tempdir().unwrap();
@@ -184,6 +194,21 @@ async fn sending_a_message_unarchives_the_chat() {
         archived(&core),
         "an interrupt is not a message and must not unarchive"
     );
+
+    // A snooze ends the same way: not on an interrupt, only on a send.
+    core.workspace
+        .set_chat_snoozed(CHAT, Some(chrono::Utc::now() + chrono::Duration::hours(1)))
+        .expect("snooze chat");
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt");
+    assert!(snoozed(&core), "an interrupt must not end a snooze");
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-ua-2"))
+        .expect("queue run command");
+    assert!(!snoozed(&core), "sending a message must end the snooze");
+    assert!(!archived(&core));
+    wait_for(|| complete_assistant_count(&core) == 2, "second turn").await;
 
     core.shutdown().await;
 }

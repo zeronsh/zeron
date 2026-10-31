@@ -754,6 +754,14 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
+    /// Inbox snooze until `until` (epoch ms); absent clears it. Engines
+    /// without [`zeron_proto::capabilities::CHAT_SNOOZE_V1`] reject the op.
+    #[serde(rename_all = "camelCase")]
+    SetChatSnoozed {
+        chat_id: String,
+        #[serde(default)]
+        until: Option<i64>,
+    },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1886,6 +1894,14 @@ impl EngineRpc {
             MutateParams::SetChatArchived { chat_id, archived } => self
                 .workspace
                 .set_chat_archived(&chat_id, archived)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::SetChatSnoozed { chat_id, until } => self
+                .workspace
+                .set_chat_snoozed(
+                    &chat_id,
+                    until.and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis),
+                )
                 .map_err(failed)
                 .map(drop),
             MutateParams::ChangeSidebarPin { change } => {
@@ -5322,6 +5338,25 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    #[test]
+    fn set_chat_snoozed_accepts_a_time_or_a_clear() {
+        let p: MutateParams = parse_params(serde_json::json!({
+            "op": "setChatSnoozed", "chatId": "chat-a", "until": 1_700_000_000_000_i64,
+        }))
+        .expect("snooze params");
+        assert!(matches!(
+            p,
+            MutateParams::SetChatSnoozed { chat_id, until: Some(1_700_000_000_000) } if chat_id == "chat-a"
+        ));
+        for clear in [
+            serde_json::json!({"op": "setChatSnoozed", "chatId": "chat-a", "until": null}),
+            serde_json::json!({"op": "setChatSnoozed", "chatId": "chat-a"}),
+        ] {
+            let p: MutateParams = parse_params(clear).expect("clear params");
+            assert!(matches!(p, MutateParams::SetChatSnoozed { until: None, .. }));
+        }
     }
 
     #[test]

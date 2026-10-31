@@ -59,11 +59,18 @@ export const notificationFor = (before: Row | undefined, after: Row, now: number
 export const bodyFor = (category: Category): string =>
   category === "done" ? "Run finished" : category === "input" ? "Waiting on your input" : "Run failed";
 
-/** Title from the chat row; side chats and archived chats never notify. */
-export const chatForNotification = (chat: Row | undefined): { title: string } | null => {
+/** Title from the chat row; side chats and archived chats never notify, and a
+ * snoozed chat (`snoozedUntil` epoch ms still ahead) skips "done" only, since
+ * input and failure wake it. */
+export const chatForNotification = (
+  chat: Row | undefined,
+  category?: Category,
+  now: number = Date.now()
+): { title: string } | null => {
   if (chat?.deleted) return null;
   if (str(chat?.fields.parentChatId) !== undefined) return null;
   if (chat?.fields.archived === true) return null;
+  if (category === "done" && (num(chat?.fields.snoozedUntil) ?? 0) > now) return null;
   const title = str(chat?.fields.title)?.trim();
   return { title: title ? title : "New session" };
 };

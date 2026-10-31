@@ -14,6 +14,7 @@ use crate::pickers::{
     is_windows_path, parent_path, resolve_typed_path, same_folder_path, split_typed_leaf,
     unescape_typed_path,
 };
+use super::inbox::{InboxSection, format_time_until, inbox_recency, inbox_section, settled_recency};
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{
@@ -920,6 +921,77 @@ mod pinned_session_tests {
                 );
                 shell.settings.space_filter = Some("a".into());
                 assert_eq!(shell.sidebar_visible_order(cx), ids(&["pin", "a-new"]));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn inbox_sidebar_keyboard_order_follows_its_sections(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("pin".into());
+                let now = Utc::now();
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": now
+                    })).unwrap()).collect();
+                    state.chats = [
+                        ("pin", "a", None),
+                        ("b-new", "b", None),
+                        ("snooze-late", "a", Some(5)),
+                        ("a-new", "a", None),
+                        ("snooze-soon", "b", Some(1)),
+                        ("b-old", "b", None),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (id, project, snoozed_hours))| {
+                        let mut chat = pin_test_chat(id);
+                        chat.space_id = Some(project.into());
+                        chat.created_at = now - chrono::Duration::minutes(ix as i64);
+                        chat.snoozed_until =
+                            snoozed_hours.map(|hours| now + chrono::Duration::hours(hours));
+                        chat
+                    })
+                    .collect();
+                });
+                let grouped = shell.sidebar_visible_order(cx);
+                assert_eq!(
+                    grouped,
+                    ids(&["pin", "b-new", "snooze-soon", "b-old", "snooze-late", "a-new"])
+                );
+
+                // One flat list: pins, then Inbox newest first, then Snoozed
+                // soonest wake first.
+                shell.settings.sidebar_inbox = true;
+                assert_eq!(
+                    shell.sidebar_visible_order(cx),
+                    ids(&["pin", "b-new", "a-new", "b-old", "snooze-soon", "snooze-late"])
+                );
+                // A collapsed section's rows take no jump slots, and revealing
+                // one of them opens it again.
+                shell.sidebar_collapsed_groups.insert("inbox:snoozed".into());
+                assert_eq!(
+                    shell.sidebar_visible_order(cx),
+                    ids(&["pin", "b-new", "a-new", "b-old"])
+                );
+                assert!(!shell.sidebar_hover_card_row_visible("snooze-soon", cx));
+                assert!(shell.reveal_sidebar_chat("snooze-soon", cx));
+                assert!(shell.sidebar_collapsed_groups.is_empty());
+                assert!(shell.sidebar_hover_card_row_visible("snooze-soon", cx));
+
+                // Switching the mode off restores the project grouping.
+                shell.settings.sidebar_inbox = false;
+                assert_eq!(shell.sidebar_visible_order(cx), grouped);
             })
             .unwrap();
         cx.run_until_parked();
@@ -2214,6 +2286,70 @@ pub(super) fn compare_sidebar_chats(
             .cmp(&left.last_message_at.unwrap_or(left.created_at)),
     };
     primary.then_with(|| left.id.cmp(&right.id))
+}
+
+/// The inbox sidebar's sections below Pinned, top to bottom, each in its own order: Inbox and Working newest first,
+/// Snoozed soonest wake first. `rows` are the unpinned live rows; empty
+/// sections are left out.
+pub(super) fn inbox_groups<T>(
+    rows: impl IntoIterator<Item = T>,
+    chat: impl Fn(&T) -> &zeron_proto::Chat,
+    status: impl Fn(&T) -> ChatIndicator,
+    working_shelf: bool,
+    now: chrono::DateTime<Utc>,
+) -> Vec<(InboxSection, Vec<T>)> {
+    let mut groups: Vec<(InboxSection, Vec<T>)> =
+        [InboxSection::Inbox, InboxSection::Working, InboxSection::Snoozed]
+            .into_iter()
+            .map(|section| (section, Vec::new()))
+            .collect();
+    for row in rows {
+        let section = inbox_section(chat(&row), status(&row), false, working_shelf, now);
+        if let Some((_, rows)) = groups.iter_mut().find(|(group, _)| *group == section) {
+            rows.push(row);
+        }
+    }
+    for (section, rows) in &mut groups {
+        if *section == InboxSection::Snoozed {
+            rows.sort_by(|left, right| {
+                let (left, right) = (chat(left), chat(right));
+                left.snoozed_until
+                    .cmp(&right.snoozed_until)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        } else {
+            rows.sort_by(|left, right| {
+                let (left, right) = (chat(left), chat(right));
+                inbox_recency(right, now)
+                    .cmp(&inbox_recency(left, now))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        }
+    }
+    groups.retain(|(_, rows)| !rows.is_empty());
+    groups
+}
+
+/// An inbox section's group key (its `sidebar_collapsed_groups` entry is
+/// `inbox:{key}`) and header label.
+pub(super) fn inbox_group(section: InboxSection) -> (&'static str, &'static str) {
+    match section {
+        InboxSection::Pinned => ("pinned", "Pinned"),
+        InboxSection::Inbox => ("inbox", "Inbox"),
+        InboxSection::Working => ("working", "Working"),
+        InboxSection::Snoozed => ("snoozed", "Snoozed"),
+        InboxSection::Settled => ("settled", "Settled"),
+    }
+}
+
+/// Settled shelf order: most recently settled first.
+pub(super) fn compare_settled_chats(
+    left: &zeron_proto::Chat,
+    right: &zeron_proto::Chat,
+) -> std::cmp::Ordering {
+    settled_recency(right)
+        .cmp(&settled_recency(left))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -5210,6 +5346,36 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
+        if self.settings.sidebar_inbox {
+            // Pins in their saved order, then each open inbox section.
+            let now = Utc::now();
+            let (pinned, rows): (Vec<_>, Vec<_>) = state
+                .inbox_sidebar_chats(now, filter.as_deref())
+                .into_iter()
+                .partition(|(_, chat)| pinned_order.contains(&chat.id));
+            let pinned_ids: Vec<String> = pinned.iter().map(|(_, chat)| chat.id.clone()).collect();
+            let mut visible = if self.pinned_open {
+                project_pinned_first(&pinned_ids, pinned_order)
+            } else {
+                Vec::new()
+            };
+            for (section, rows) in inbox_groups(
+                rows,
+                |(_, chat)| chat,
+                |(status, _)| *status,
+                self.settings.sidebar_inbox_working,
+                now,
+            ) {
+                let (key, _) = inbox_group(section);
+                if !self
+                    .sidebar_collapsed_groups
+                    .contains(&self.sidebar_group_collapse_key(key))
+                {
+                    visible.extend(rows.into_iter().map(|(_, chat)| chat.id.clone()));
+                }
+            }
+            return visible;
+        }
         let mut chats: Vec<zeron_proto::Chat> = state
             .sidebar_chats(Utc::now(), filter.as_deref())
             .into_iter()
@@ -5295,7 +5461,9 @@ impl Shell {
             .iter()
             .any(|id| id == chat_id)
         {
-            let in_own_section = self.active_sidebar_pins(cx).iter().any(|id| id == chat_id)
+            // The inbox order already leaves out collapsed sections.
+            let in_own_section = self.settings.sidebar_inbox
+                || self.active_sidebar_pins(cx).iter().any(|id| id == chat_id)
                 || self
                     .active_sidebar_sections(cx)
                     .iter()
@@ -5325,8 +5493,20 @@ impl Shell {
     }
 
     /// The group a chat's row sits under when the sidebar groups by device or
-    /// by project; `None` in one list.
+    /// by project, or its section in the inbox sidebar (asked of an unpinned
+    /// row); `None` in one list.
     fn sidebar_group_key(&self, state: &AppState, chat: &zeron_proto::Chat) -> Option<String> {
+        if self.settings.sidebar_inbox {
+            let now = Utc::now();
+            let section = inbox_section(
+                chat,
+                state.inbox_status_for(chat, now),
+                false,
+                self.settings.sidebar_inbox_working,
+                now,
+            );
+            return Some(inbox_group(section).0.to_owned());
+        }
         match self.settings.sidebar_organization {
             SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
             SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
@@ -5337,6 +5517,7 @@ impl Shell {
     /// A device/project group's key in `sidebar_collapsed_groups`.
     fn sidebar_group_collapse_key(&self, group: &str) -> String {
         let organization = match self.settings.sidebar_organization {
+            _ if self.settings.sidebar_inbox => "inbox",
             SidebarOrganization::ByDevice => "device",
             SidebarOrganization::ByProject => "project",
             SidebarOrganization::InOneList => "list",
@@ -5378,6 +5559,8 @@ impl Shell {
             } else if let Some(section) = self
                 .active_sidebar_sections(cx)
                 .into_iter()
+                // Custom sections stand aside in the inbox sidebar.
+                .filter(|_| !self.settings.sidebar_inbox)
                 .find(|section| section.session_ids.contains(&chat.id))
             {
                 if section.collapsed {
@@ -5402,7 +5585,8 @@ impl Shell {
                 self.queue_sidebar_reveal("sessions");
             }
         } else if let Some(index) = archived {
-            if !self.settings.sidebar_show_archived {
+            // Settled shows whatever "Show archived" says.
+            if !self.settings.sidebar_show_archived && !self.settings.sidebar_inbox {
                 self.settings.sidebar_show_archived = true;
                 self.schedule_save(cx);
             }
@@ -5518,8 +5702,14 @@ impl Shell {
             .map(|drag| drag.visible_ids.clone());
         let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
-            let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
+            // Inbox rows place, order and dot by the status folded with
+            // their helpers'.
+            let chats = if self.settings.sidebar_inbox {
+                state.inbox_sidebar_chats(now, filter.as_deref())
+            } else {
+                state.sidebar_chats(now, filter.as_deref())
+            };
+            let mut chats: Vec<_> = chats
                 .into_iter()
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
@@ -5572,7 +5762,14 @@ impl Shell {
                 .collect::<Vec<_>>(),
         );
 
-        let custom_sections = self.active_sidebar_sections(cx);
+        // The inbox sidebar is one flat list: custom sections and grouping
+        // stand aside, untouched, and their chats flow into its sections.
+        let inbox = self.settings.sidebar_inbox;
+        let custom_sections = if inbox {
+            Vec::new()
+        } else {
+            self.active_sidebar_sections(cx)
+        };
         let custom_count = custom_sections.len();
         let section_order =
             (custom_count > 1 && self.sidebar_sections_reorderable(cx)).then(|| {
@@ -5593,6 +5790,25 @@ impl Shell {
             })
             .collect();
         let mut regular_groups: Vec<(Option<(String, String)>, Vec<ActiveChatRow>)> = Vec::new();
+        let regular_rows = if inbox {
+            for (section, mut rows) in inbox_groups(
+                regular_rows,
+                |row| &row.chat,
+                |row| row.status,
+                self.settings.sidebar_inbox_working,
+                now,
+            ) {
+                let (key, label) = inbox_group(section);
+                let group = Some((key.to_owned(), label.to_owned()));
+                for row in &mut rows {
+                    row.group = group.clone();
+                }
+                regular_groups.push((group, rows));
+            }
+            Vec::new()
+        } else {
+            regular_rows
+        };
         for row in regular_rows {
             if let Some(index) = custom_sections
                 .iter()
@@ -5619,7 +5835,7 @@ impl Shell {
                     .position(|id| id == &row.chat.id)
             });
         }
-        if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
+        if !inbox && self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
         }
@@ -5755,8 +5971,8 @@ impl Shell {
             };
             // A project group wears the project icon on its header instead
             // of repeating it on every row.
-            let project_group = self.settings.sidebar_organization
-                == SidebarOrganization::ByProject
+            let project_group = !inbox
+                && self.settings.sidebar_organization == SidebarOrganization::ByProject
                 && group
                     .as_ref()
                     .is_some_and(|(key, _)| !key.starts_with("section:"));
@@ -5769,6 +5985,14 @@ impl Shell {
                 .first()
                 .filter(|row| project_group && row.chat.space_id.is_none())
                 .map(|row| row.chat.device_id.clone());
+            // Inbox sections are not drop targets (drag between them is out
+            // of scope); their rows still lift into Pinned.
+            let droppable = !inbox || pinned_group;
+            let snoozed_group = inbox
+                && !pinned_group
+                && group.as_ref().is_some_and(|(key, _)| {
+                    key == inbox_group(InboxSection::Snoozed).0
+                });
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
                 let ActiveChatRow {
@@ -5779,8 +6003,12 @@ impl Shell {
                     change_request,
                     group: _,
                 } = row;
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
+                // A snoozed row counts down to its wake instead.
+                let time_ago: SharedString = match chat.snoozed_until {
+                    Some(until) if snoozed_group => format_time_until(until, now).into(),
+                    _ => format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
+                        .into(),
+                };
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = self
                     .settings
@@ -5888,7 +6116,8 @@ impl Shell {
                     .child(element)
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
-                            if !event.bounds.contains(&event.event.position)
+                            if !droppable
+                                || !event.bounds.contains(&event.event.position)
                                 || !this.sidebar_scroll.bounds().contains(&event.event.position)
                             {
                                 return;
@@ -6006,8 +6235,8 @@ impl Shell {
             // A "No project" group's `+` opens a project-less chat on its
             // device, so the first send lands back in that group.
             let group_name = SharedString::from(format!("sidebar-group-hover-{collapse_key}"));
-            let group_target = (self.settings.sidebar_organization
-                == SidebarOrganization::ByProject)
+            let group_target = (!inbox
+                && self.settings.sidebar_organization == SidebarOrganization::ByProject)
                 .then(|| {
                     let state = self.state.read(cx);
                     match projectless_device {
@@ -6206,7 +6435,10 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.settings.sidebar_organization != SidebarOrganization::InOneList {
+        // Groups and inbox sections carry their own headers.
+        if self.settings.sidebar_organization != SidebarOrganization::InOneList
+            || self.settings.sidebar_inbox
+        {
             return content;
         }
         let open = self.sessions_open;
@@ -6278,7 +6510,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The Archived shelf's chats under the project filter, in sidebar order.
+    /// The Archived shelf's chats under the project filter, in sidebar order
+    /// (as Settled in the inbox sidebar, most recently settled first).
     fn archived_sidebar_chats(&self, cx: &App) -> Vec<zeron_proto::Chat> {
         let state = self.state.read(cx);
         let in_filter = state.project_filter(self.settings.space_filter.as_deref());
@@ -6291,18 +6524,26 @@ impl Shell {
             .filter(|chat| in_filter(chat))
             .cloned()
             .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        if self.settings.sidebar_inbox {
+            rows.sort_by(compare_settled_chats);
+        } else {
+            rows.sort_by(|left, right| {
+                compare_sidebar_chats(self.settings.sidebar_sort, left, right)
+            });
+        }
         rows
     }
 
     /// Archived sessions share active-row data and layout, with a restore action.
-    /// The shelf starts with ten sessions and pages by 25.
+    /// The shelf starts with ten sessions and pages by 25. The inbox sidebar
+    /// always shows it, as Settled.
     pub(super) fn render_archived_section(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.settings.sidebar_show_archived {
+        let inbox = self.settings.sidebar_inbox;
+        if !self.settings.sidebar_show_archived && !inbox {
             return None;
         }
         const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
@@ -6314,9 +6555,15 @@ impl Shell {
         }
         let rows: Vec<_> = {
             let state = self.state.read(cx);
+            let helpers = inbox.then(|| state.helper_activity(now));
             rows.into_iter()
                 .map(|chat| {
-                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                    let own = state.display_status_for(&chat, now);
+                    let status = match &helpers {
+                        Some(helpers) => state.inbox_status_with(&chat, own, helpers, now),
+                        None => own,
+                    };
+                    self.sidebar_chat_data(status, chat, state)
                 })
                 .collect()
         };
@@ -6358,7 +6605,11 @@ impl Shell {
         let header = sidebar_disclosure_header(
             theme,
             None,
-            "Archived".into(),
+            if inbox {
+                inbox_group(InboxSection::Settled).1.into()
+            } else {
+                "Archived".into()
+            },
             (!open).then_some(total),
             None,
             chevron,
@@ -9176,6 +9427,8 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            snoozed_until: None,
+            archived_at: None,
         }
     }
 
@@ -9185,6 +9438,107 @@ mod tests {
         let beta = chat("beta");
         assert!(compare_sidebar_chats(SidebarSort::Created, &alpha, &beta).is_lt());
         assert!(compare_sidebar_chats(SidebarSort::LastUpdated, &alpha, &beta).is_lt());
+    }
+
+    #[test]
+    fn inbox_groups_order_each_section_and_skip_empty_ones() {
+        use super::{InboxSection, inbox_groups};
+        use chrono::Duration;
+        use zeron_proto::ChatIndicator;
+
+        let now = Utc.timestamp_opt(10_000, 0).unwrap();
+        let at = |minutes_ago: i64| now - Duration::minutes(minutes_ago);
+        let row = |id: &str, minutes_ago: i64, status: ChatIndicator| {
+            let mut chat = chat(id);
+            chat.last_message_at = Some(at(minutes_ago));
+            (status, chat)
+        };
+        let idle = ChatIndicator::Idle;
+        let mut woke = row("woke", 90, idle);
+        woke.1.snoozed_until = Some(at(1));
+        let mut later = row("snooze-later", 1, idle);
+        later.1.snoozed_until = Some(now + Duration::hours(5));
+        let mut soon = row("snooze-soon", 100, ChatIndicator::Completed);
+        soon.1.snoozed_until = Some(now + Duration::hours(1));
+        // Asking for input wakes it early.
+        let mut asking = row("asking", 200, ChatIndicator::AwaitingInput);
+        asking.1.snoozed_until = Some(now + Duration::hours(2));
+        let rows = vec![
+            row("old", 60, idle),
+            later,
+            row("running", 30, ChatIndicator::Working),
+            woke,
+            soon,
+            row("new", 5, idle),
+            asking,
+            row("running-old", 120, ChatIndicator::Working),
+        ];
+        let ids = |working_shelf: bool| {
+            inbox_groups(
+                rows.clone(),
+                |(_, chat)| chat,
+                |(status, _)| *status,
+                working_shelf,
+                now,
+            )
+            .into_iter()
+            .map(|(section, rows)| {
+                (
+                    section,
+                    rows.into_iter().map(|(_, chat)| chat.id).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+        };
+        let named = |section, ids: &[&str]| {
+            (section, ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            ids(true),
+            [
+                named(InboxSection::Inbox, &["woke", "new", "old", "asking"]),
+                named(InboxSection::Working, &["running", "running-old"]),
+                named(InboxSection::Snoozed, &["snooze-soon", "snooze-later"]),
+            ]
+        );
+        // Without the Working shelf running sessions stay in the Inbox, by
+        // recency like every other row.
+        assert_eq!(
+            ids(false),
+            [
+                named(
+                    InboxSection::Inbox,
+                    &["woke", "new", "running", "old", "running-old", "asking"]
+                ),
+                named(InboxSection::Snoozed, &["snooze-soon", "snooze-later"]),
+            ]
+        );
+        assert!(
+            inbox_groups(
+                Vec::<(ChatIndicator, zeron_proto::Chat)>::new(),
+                |(_, chat)| chat,
+                |(status, _)| *status,
+                true,
+                now
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn settled_sorts_by_settle_time_then_activity() {
+        use super::compare_settled_chats;
+
+        let mut early = chat("early");
+        early.archived_at = Some(Utc.timestamp_opt(100, 0).unwrap());
+        let mut recent = chat("recent");
+        recent.archived_at = Some(Utc.timestamp_opt(200, 0).unwrap());
+        // Archived before `archivedAt` existed: falls back to its activity.
+        let legacy = chat("legacy");
+        let mut rows = vec![legacy.clone(), early, recent];
+        rows.sort_by(compare_settled_chats);
+        let order: Vec<_> = rows.iter().map(|chat| chat.id.as_str()).collect();
+        assert_eq!(order, ["recent", "early", "legacy"]);
     }
 
     #[test]

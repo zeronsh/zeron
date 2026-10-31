@@ -147,6 +147,8 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            snoozed_until: None,
+            archived_at: None,
         }
     }
 

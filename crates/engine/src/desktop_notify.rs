@@ -289,6 +289,9 @@ impl Notifier {
             }
             if let Some(prev) = prev
                 && let Some(ping) = status.ping_since(&prev, false)
+                // A snoozed chat stays quiet about finishing; input requests
+                // and failures still ring because they wake it.
+                && !(ping == Ping::Done && chat.is_some_and(|chat| chat.snoozed_at(now)))
             {
                 let title = chat
                     .and_then(|chat| chat.title.clone())
@@ -714,6 +717,36 @@ mod tests {
         .unwrap();
         notifier.sessions(&[session("a", Some("t4"), now)], &chats, now);
         assert_eq!(posted.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn snoozed_chats_skip_finished_banners_but_still_ask_and_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let now = chrono::Utc::now();
+        let mut snoozed = chat("a", "Snoozed", None);
+        snoozed.snoozed_until = Some(now + chrono::Duration::hours(1));
+        let chats = [snoozed];
+        let with_status = |turn, status| {
+            let mut session = session("a", Some(turn), now);
+            session.status = status;
+            session
+        };
+        notifier.sessions(&[session("a", Some("t1"), now)], &chats, now);
+        notifier.sessions(&[session("a", Some("t2"), now)], &chats, now);
+        assert!(posted.lock().unwrap().is_empty(), "no Run finished while snoozed");
+        notifier.sessions(
+            &[with_status("t2", zeron_proto::SessionStatus::AwaitingInput)],
+            &chats,
+            now,
+        );
+        notifier.sessions(&[with_status("t2", zeron_proto::SessionStatus::Errored)], &chats, now);
+        let bodies: Vec<String> = posted.lock().unwrap().iter().map(|p| p.1.clone()).collect();
+        assert_eq!(bodies, ["Waiting on your input", "Run failed"]);
+        // Once the wake time passes, finishing banners again.
+        let later = now + chrono::Duration::hours(2);
+        notifier.sessions(&[session("a", Some("t3"), later)], &chats, later);
+        assert_eq!(posted.lock().unwrap().last().unwrap().1, "Run finished");
     }
 
     #[test]

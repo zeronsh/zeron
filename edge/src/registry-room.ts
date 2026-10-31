@@ -650,7 +650,7 @@ export class RegistryRoom implements DurableObject {
       if (!next) continue;
       const category = notificationFor(prev, next, now);
       if (category === null) continue;
-      const chat = chatForNotification(touched.get(`chats ${chatId}`) ?? this.loadRow("chats", chatId));
+      const chat = chatForNotification(touched.get(`chats ${chatId}`) ?? this.loadRow("chats", chatId), category, now);
       if (chat === null) continue;
       notes.push({ chatId, title: chat.title, category });
     }

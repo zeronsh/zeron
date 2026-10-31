@@ -82,6 +82,8 @@ pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     processes: std::sync::Arc<background::BackgroundWork>,
+    agents: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    agents_changed: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl TurnControl {
@@ -109,7 +111,8 @@ impl TurnControl {
 
     /// Driver: the background processes the runtime runs now, oldest first —
     /// its whole set, not a delta. (Background agents are subagents, shown as
-    /// such; they count in [`Self::set_background`] only.)
+    /// such; they count in [`Self::set_background`] and
+    /// [`Self::set_background_agents`] only.)
     pub fn set_background_processes(&self, processes: Vec<zeron_proto::BackgroundTask>) {
         self.processes.set(processes);
     }
@@ -151,6 +154,30 @@ impl TurnControl {
     /// listed. May read a file: call it off the async runtime.
     pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
         self.processes.output(id)
+    }
+
+    /// Driver: how many of its background tasks are agents (subagents,
+    /// workflows). Shells are left out: a dev server must not keep a chat
+    /// counted as working for as long as it runs.
+    pub fn set_background_agents(&self, agents: usize) {
+        if self
+            .agents
+            .swap(agents, std::sync::atomic::Ordering::AcqRel)
+            != agents
+        {
+            self.agents_changed.notify_one();
+        }
+    }
+
+    /// Host: the last agent count the driver reported.
+    pub fn background_agents(&self) -> usize {
+        self.agents.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Host: resolves after [`Self::set_background_agents`] changed the
+    /// count (a change made while nobody waits is kept for the next wait).
+    pub async fn background_agents_changed(&self) {
+        self.agents_changed.notified().await;
     }
 }
 
@@ -890,5 +917,34 @@ mod stderr_tests {
         let snapshot = tail.snapshot().unwrap();
         assert!(snapshot.len() <= 1400);
         assert!(snapshot.ends_with("last stderr line"));
+    }
+}
+
+#[cfg(test)]
+mod turn_control_tests {
+    use super::TurnControl;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn an_agent_count_change_wakes_the_host_once() {
+        let turn = TurnControl::default();
+        assert_eq!(turn.background_agents(), 0);
+        // Reported before the host waits: the wake is kept.
+        turn.set_background_agents(2);
+        tokio::time::timeout(Duration::from_secs(1), turn.background_agents_changed())
+            .await
+            .expect("a change wakes the host");
+        assert_eq!(turn.background_agents(), 2);
+        // An unchanged count is no change.
+        turn.set_background_agents(2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), turn.background_agents_changed())
+                .await
+                .is_err()
+        );
+        // Shell work alone is background, not agents.
+        turn.set_background(3);
+        assert!(turn.background_live());
+        assert_eq!(turn.background_agents(), 2);
     }
 }

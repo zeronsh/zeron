@@ -279,6 +279,8 @@ fn chat(id: &str, device_id: &str) -> Chat {
         space_id: None,
         last_seen_at: None,
         room_gen: None,
+        snoozed_until: None,
+        archived_at: None,
     }
 }
 
@@ -611,6 +613,52 @@ fn field_mutators_round_trip() {
     assert_eq!(dev.cursor_sdk_version.as_deref(), Some("1.0.31"));
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
+}
+
+#[test]
+fn snooze_round_trips_and_clears() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+
+    assert!(ws.set_chat_snoozed("chat-1", Some(ts(9_000))).unwrap());
+    let chat_row = ws.chat("chat-1").unwrap().unwrap();
+    assert_eq!(chat_row.snoozed_until, Some(ts(9_000)));
+    assert!(chat_row.snoozed_at(ts(8_999)));
+    assert!(!chat_row.snoozed_at(ts(9_000)), "wakes at the stamp");
+
+    assert!(ws.set_chat_snoozed("chat-1", None).unwrap());
+    assert_eq!(ws.chat("chat-1").unwrap().unwrap().snoozed_until, None);
+    assert!(!ws.set_chat_snoozed("nope", Some(ts(9_000))).unwrap());
+
+    // A full-row upsert (a stale copy without the field) must not wipe it.
+    ws.set_chat_snoozed("chat-1", Some(ts(9_000))).unwrap();
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert_eq!(
+        ws.chat("chat-1").unwrap().unwrap().snoozed_until,
+        Some(ts(9_000))
+    );
+}
+
+#[test]
+fn archive_stamps_time_and_ends_snooze() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    ws.set_chat_snoozed("chat-1", Some(ts(9_000))).unwrap();
+
+    let before = Utc::now();
+    assert!(ws.set_chat_archived("chat-1", true).unwrap());
+    let archived = ws.chat("chat-1").unwrap().unwrap();
+    assert!(archived.archived);
+    assert_eq!(archived.snoozed_until, None, "settling ends the snooze");
+    let at = archived.archived_at.expect("archive stamps archivedAt");
+    // Millisecond precision on the wire.
+    assert!(at.timestamp_millis() >= before.timestamp_millis());
+
+    // Unarchiving keeps the stamp: it records the last archive.
+    assert!(ws.set_chat_archived("chat-1", false).unwrap());
+    let revived = ws.chat("chat-1").unwrap().unwrap();
+    assert!(!revived.archived);
+    assert_eq!(revived.archived_at, Some(at));
 }
 
 #[test]

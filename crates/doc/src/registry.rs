@@ -1364,11 +1364,36 @@ impl RegistryDoc {
         if !self.row_exists(KIND_CHATS, chat_id) {
             return Ok(false);
         }
+        let set = if archived {
+            // Settling (the inbox sidebar's name for archiving) ends a snooze
+            // and stamps when, so the Settled shelf lists newest first.
+            fields([
+                ("archived", json!(true)),
+                ("archivedAt", json!(Utc::now().timestamp_millis())),
+                ("snoozedUntil", Value::Null),
+            ])
+        } else {
+            fields([("archived", json!(false))])
+        };
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
+        Ok(true)
+    }
+
+    /// Synced LWW snooze: hide the chat from the inbox until `until`, or
+    /// clear it with `None`.
+    pub fn set_chat_snoozed(
+        &mut self,
+        chat_id: &str,
+        until: Option<DateTime<Utc>>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("archived", json!(archived))]),
+            fields([("snoozedUntil", opt_ms(until))]),
         );
         Ok(true)
     }
