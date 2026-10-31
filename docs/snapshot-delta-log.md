@@ -6,8 +6,10 @@ updates since the last successful save. It advances the saved version only after
 SQLite commits. Each row also stores a shallow registry of root container IDs:
 accessing an empty Loro root creates no operation, but a full snapshot preserves
 that root in its deep value. Replaying the registry preserves this case without
-walking the transcript. The registry has its own fixed FNV-1a integrity checksum,
-in addition to Loro's update checksum. Its bytes count toward the chain threshold and measured
+walking the transcript. The registry uses a versioned binary layout of Loro's own
+container-ID encoding (never serde, whose ID representation can change with a
+Loro upgrade and would orphan rows written before it), and has its own fixed
+FNV-1a integrity checksum, in addition to Loro's update checksum. Its bytes count toward the chain threshold and measured
 write volume. Operations included by a racing export can appear again in the
 next update; Loro imports are idempotent. A cursor reset is stored in row order,
 so recovery uses the last valid row's cursor, rather than the largest cursor.

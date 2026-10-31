@@ -527,19 +527,24 @@ impl DocsStore {
 
     /// Shallow root registry: empty roots have no Loro operations, but a full
     /// snapshot preserves them. Encoding only IDs avoids materializing data.
+    /// Layout: `fnv1a64(payload) LE | payload`, payload = `ROOT_REGISTRY_V1`
+    /// then, per root, `u32 LE length | ContainerID::to_bytes()`. Loro's own
+    /// binary ID encoding is used rather than serde, whose representation of
+    /// container IDs has changed between Loro releases and would turn every
+    /// row written before an upgrade into a "damaged" one.
     pub fn snapshot_roots(doc: &loro::LoroDoc) -> Result<Vec<u8>, StoreError> {
         let value = doc.get_value();
         let loro::LoroValue::Map(map) = value else {
             return Err(StoreError::Loro("expected document root map".into()));
         };
-        let roots: Vec<_> = map
-            .values()
-            .filter_map(|v| match v {
-                loro::LoroValue::Container(id) => Some(id.clone()),
-                _ => None,
-            })
-            .collect();
-        let payload = serde_json::to_vec(&roots).map_err(|e| StoreError::Loro(e.to_string()))?;
+        let mut payload = vec![ROOT_REGISTRY_V1];
+        for v in map.values() {
+            if let loro::LoroValue::Container(id) = v {
+                let id = id.to_bytes();
+                payload.extend((id.len() as u32).to_le_bytes());
+                payload.extend(id);
+            }
+        }
         let mut bytes = root_registry_checksum(&payload).to_le_bytes().to_vec();
         bytes.extend(payload);
         Ok(bytes)
@@ -997,6 +1002,33 @@ fn root_registry_checksum(bytes: &[u8]) -> u64 {
     })
 }
 
+const ROOT_REGISTRY_V1: u8 = 1;
+
+fn decode_root_registry(payload: &[u8]) -> Result<Vec<loro::ContainerID>, StoreError> {
+    let bad = |what: &str| StoreError::Loro(format!("delta root registry: {what}"));
+    let (version, mut rest) = payload.split_first().ok_or_else(|| bad("empty"))?;
+    if *version != ROOT_REGISTRY_V1 {
+        return Err(bad("unknown version"));
+    }
+    let mut roots = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest
+            .split_at_checked(4)
+            .ok_or_else(|| bad("truncated length"))?;
+        let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        let (id, tail) = tail
+            .split_at_checked(len)
+            .ok_or_else(|| bad("truncated id"))?;
+        let id = loro::ContainerID::try_from_bytes(id).map_err(|e| bad(&e.to_string()))?;
+        if !id.is_root() {
+            return Err(bad("contains a nested container"));
+        }
+        roots.push(id);
+        rest = tail;
+    }
+    Ok(roots)
+}
+
 fn import_snapshot_delta(
     doc: &loro::LoroDoc,
     bytes: &[u8],
@@ -1010,13 +1042,7 @@ fn import_snapshot_delta(
             "delta root registry checksum mismatch".into(),
         ));
     }
-    let roots: Vec<loro::ContainerID> =
-        serde_json::from_slice(payload).map_err(|e| StoreError::Loro(e.to_string()))?;
-    if roots.iter().any(|id| !id.is_root()) {
-        return Err(StoreError::Loro(
-            "delta root registry contains a nested container".into(),
-        ));
-    }
+    let roots = decode_root_registry(payload)?;
     loro::LoroDoc::decode_import_blob_meta(bytes, true)
         .map_err(|e| StoreError::Loro(e.to_string()))?;
     let status = doc
@@ -1326,6 +1352,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn root_registry_encoding_is_pinned_and_rejects_foreign_ids() {
+        let doc = loro::LoroDoc::new();
+        doc.get_text("empty");
+        doc.get_map("meta").insert("k", 1).unwrap();
+        doc.commit();
+        let bytes = DocsStore::snapshot_roots(&doc).unwrap();
+        let (checksum, payload) = bytes.split_at(8);
+        assert_eq!(checksum, root_registry_checksum(payload).to_le_bytes());
+        // Loro's binary ID layout, not serde: tag byte then LEB128-length name.
+        let empty = loro::ContainerID::new_root("empty", loro::ContainerType::Text);
+        let mut expected = (empty.to_bytes().len() as u32).to_le_bytes().to_vec();
+        expected.extend(empty.to_bytes());
+        assert!(payload.windows(expected.len()).any(|w| w == expected));
+        let mut roots = decode_root_registry(payload).unwrap();
+        roots.sort_by_key(|id| id.to_string());
+        assert_eq!(roots.len(), 2);
+        // A nested ID, a future version and a short length are all rejected.
+        let nested = loro::ContainerID::new_normal(loro::ID::new(1, 0), loro::ContainerType::Map);
+        let mut foreign = vec![ROOT_REGISTRY_V1];
+        foreign.extend((nested.to_bytes().len() as u32).to_le_bytes());
+        foreign.extend(nested.to_bytes());
+        assert!(decode_root_registry(&foreign).is_err());
+        assert!(decode_root_registry(&[ROOT_REGISTRY_V1 + 1]).is_err());
+        assert!(decode_root_registry(&[ROOT_REGISTRY_V1, 9, 0]).is_err());
+        assert!(decode_root_registry(&[]).is_err());
     }
 
     #[test]
