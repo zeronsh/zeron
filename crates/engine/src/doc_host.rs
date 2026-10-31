@@ -762,9 +762,7 @@ impl ChatDocHandle {
     /// The command ledger, shared until the next `commands` change. Every
     /// reader of this chat's ledger goes through here instead of a deep
     /// `read_commands`, which scales with chat age.
-    pub(crate) fn commands(
-        &self,
-    ) -> Result<Arc<Vec<SessionCommandEntry>>, DocError> {
+    pub(crate) fn commands(&self) -> Result<Arc<Vec<SessionCommandEntry>>, DocError> {
         self.commands_cache.get(&self.doc)
     }
 
@@ -4888,7 +4886,7 @@ impl DocHost {
         let messages = handle.doc.read_entries().unwrap_or_default();
         let message_landed = |mid: &str| messages.iter().any(|m| m.id == mid);
         let mut latest_dead: HashMap<String, &SessionCommandEntry> = HashMap::new();
-        for c in &commands {
+        for c in commands.iter() {
             let Some(mid) = (match &c.payload {
                 SessionCommandPayload::Run { message_id, .. } => Some(message_id.as_str()),
                 SessionCommandPayload::Steer { message_id, .. } => message_id.as_deref(),
@@ -4981,7 +4979,9 @@ impl DocHost {
         if tokio::runtime::Handle::try_current().is_ok() {
             let host = self.clone();
             let handle = handle.clone();
-            self.spawn_worker(async move { host.drain_commands(&handle).await });
+            self.spawn_worker(async move {
+                host.drain_commands(&handle).await;
+            });
         }
         Ok(())
     }
@@ -7309,7 +7309,11 @@ mod change_mask_tests {
         settle().await;
         assert!(messages.has_changed().unwrap(), "messages republished");
         assert!(!queue.has_changed().unwrap(), "queue untouched");
-        assert_eq!(*handle.commands_tx.borrow(), ledger_before, "ledger untouched");
+        assert_eq!(
+            *handle.commands_tx.borrow(),
+            ledger_before,
+            "ledger untouched"
+        );
         messages.borrow_and_update();
 
         // A command: neither watch moves, the ledger generation does.
