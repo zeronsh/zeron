@@ -346,6 +346,10 @@ pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
 /// then runs instead).
 fn parse_frame_direct(line: &str) -> Option<Frame> {
     let kind = unambiguous_top_level_type(line)?;
+    parse_frame_direct_kind(line, kind.as_ref())
+}
+
+fn parse_frame_direct_kind(line: &str, kind: &str) -> Option<Frame> {
     let frame = match kind {
         "system" => Frame::System(serde_json::from_str(line).ok()?),
         "stream_event" => Frame::StreamEvent(serde_json::from_str(line).ok()?),
@@ -424,16 +428,17 @@ fn top_level_type(line: &str) -> Option<&str> {
     None
 }
 
-/// [`top_level_type`] when a direct `from_str` can trust it.
-///
-/// Fall back when the value parser could see something the typed parser
-/// ignores: escaped strings, out-of-range numbers, or excessive nesting.
-/// The value parse also unescapes keys and keeps the last duplicate key.
-fn unambiguous_top_level_type(line: &str) -> Option<&str> {
+/// Find the top-level type while guarding differences from the value parser.
+/// Escaped keys may alias another key; surrogate escapes and deeply nested or
+/// out-of-range ignored values need the full value parser's validation.
+fn unambiguous_top_level_type(line: &str) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+
     let bytes = line.as_bytes();
     let mut depth = 0usize;
     let mut i = 0;
-    let mut found: Option<&str> = None;
+    let mut found = None;
+    let mut type_value_at = None;
     while i < bytes.len() {
         match bytes[i] {
             b'{' | b'[' => {
@@ -441,25 +446,68 @@ fn unambiguous_top_level_type(line: &str) -> Option<&str> {
                 if depth >= 128 {
                     return None;
                 }
+                i += 1;
             }
-            b'}' | b']' => depth = depth.checked_sub(1)?,
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                i += 1;
+            }
             b'"' => {
-                let start = i + 1;
-                let end = string_end(bytes, start)?;
-                if bytes[start..end].contains(&b'\\') {
+                let quote = i;
+                i += 1;
+                let start = i;
+                let mut escaped = false;
+                loop {
+                    match *bytes.get(i)? {
+                        b'"' => break,
+                        b'\\' => {
+                            escaped = true;
+                            if bytes.get(i + 1) == Some(&b'u')
+                                && matches!(bytes.get(i + 2), Some(b'd' | b'D'))
+                                && matches!(
+                                    bytes.get(i + 3),
+                                    Some(b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+                                )
+                                && bytes.get(i + 4).is_some_and(u8::is_ascii_hexdigit)
+                                && bytes.get(i + 5).is_some_and(u8::is_ascii_hexdigit)
+                            {
+                                return None;
+                            }
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                let end = i;
+                i += 1;
+                let mut after = i;
+                while matches!(bytes.get(after), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+                    after += 1;
+                }
+                let is_key = bytes.get(after) == Some(&b':');
+                if escaped && is_key {
                     return None;
                 }
-                i = end + 1;
-                if depth == 1 && &line[start..end] == "type" {
-                    let value = json_string_after_colon(line, i)?;
-                    if found.is_some() || value.text.as_bytes().contains(&b'\\') {
+                if type_value_at == Some(quote) {
+                    found = Some(if escaped {
+                        Cow::Owned(serde_json::from_str(&line[quote..i]).ok()?)
+                    } else {
+                        Cow::Borrowed(&line[start..end])
+                    });
+                    type_value_at = None;
+                } else if depth == 1 && is_key && &line[start..end] == "type" {
+                    if found.is_some() || type_value_at.is_some() {
                         return None;
                     }
-                    found = Some(value.text);
-                    i = value.next;
-                    continue;
+                    after += 1;
+                    while matches!(bytes.get(after), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+                        after += 1;
+                    }
+                    if bytes.get(after) != Some(&b'"') {
+                        return None;
+                    }
+                    type_value_at = Some(after);
                 }
-                continue;
             }
             b'-' | b'0'..=b'9' => {
                 let start = i;
@@ -469,33 +517,11 @@ fn unambiguous_top_level_type(line: &str) -> Option<&str> {
                     i += 1;
                 }
                 serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
-                continue;
             }
-            _ => {}
+            _ => i += 1,
         }
-        i += 1;
     }
     found
-}
-
-struct JsonString<'a> {
-    text: &'a str,
-    /// Index of the first byte after the closing quote.
-    next: usize,
-}
-
-/// The JSON string after a colon at `i` (the first byte after a key's
-/// closing quote). `None` when what follows is not a string.
-fn json_string_after_colon(line: &str, i: usize) -> Option<JsonString<'_>> {
-    let rest = line.get(i..)?;
-    let after_colon = rest.trim_start().strip_prefix(':')?;
-    let raw = after_colon.trim_start().strip_prefix('"')?;
-    let end = string_end(raw.as_bytes(), 0)?;
-    Some(JsonString {
-        text: &raw[..end],
-        // `raw` is a suffix of `line`, so this is the byte after its quote.
-        next: line.len() - raw.len() + end + 1,
-    })
 }
 
 /// Index of the quote closing a JSON string whose contents start at `start`.
@@ -1202,6 +1228,14 @@ mod tests {
             r#"{"type":"system","ignored":1e400}"#,
             r#"{"type":"unknown","ignored":1e400}"#,
             r#"{"type":"system","ignored":"\ud800"}"#,
+            r#"{"type":"system","ty\u0070e":"assistant","message":{"content":"escaped key"}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"te\u0078t":"one","text":"two"}}}"#,
+            r#"{"type":"assistant","message":{"co\u006etent":"first","content":"last"}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"quote: \" slash: \\ solidus: \/ backspace: \b form: \f newline: \n carriage: \r tab: \t unicode: \u0041"}}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"\uD83D\uDE00"}}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"\ud800 and \uDeAd"}}}"#,
+            r#"{"type":"system","prompt":"literal \\ud800"}"#,
+            r#"{"type":"sys\u0074em","model":"escaped type value"}"#,
             r#"{"type":"system","attempt":18446744073709551615,"retry_delay_ms":18446744073709551615}"#,
             r#"{"type":"system","attempt":18446744073709551616,"retry_delay_ms":-0.0}"#,
             r#"{"type":"system","retry_delay_ms":9007199254740993}"#,
@@ -1271,7 +1305,7 @@ mod tests {
                 preview(&got_dbg),
                 preview(&full_dbg),
             );
-            if let Some(kind) = unambiguous_top_level_type(line) {
+            if let Some(std::borrow::Cow::Borrowed(kind)) = unambiguous_top_level_type(line) {
                 assert_eq!(
                     top_level_type(line),
                     Some(kind),
@@ -1283,6 +1317,15 @@ mod tests {
                 direct_hits += 1;
             }
         }
+
+        assert!(
+            parse_frame_direct(
+                r#"{"type":"stream_event","event":{"delta":{"text":"\n\"\\\/\b\f\r\t\u0041"}}}"#
+            )
+            .is_some()
+        );
+        assert!(parse_frame_direct(r#"{"type":"system","prompt":"\\ud800"}"#).is_some());
+        assert!(parse_frame_direct(r#"{"type":"system","prompt":"\uD83D\uDE00"}"#).is_none());
 
         let fast = r#"{"type":"system","subtype":"init","model":"m","tools":["Bash"],"cwd":"/x","session_id":"s1"}"#;
         assert!(
@@ -1307,12 +1350,173 @@ mod tests {
         .is_none());
         assert!(
             parse_frame_direct(r#"{"type":"sys\u0074em","subtype":"init","session_id":"s"}"#)
-                .is_none()
+                .is_some()
         );
         assert!(
             direct_hits > 50,
             "single-pass path parsed only {direct_hits} corpus lines"
         );
+    }
+
+    // Keep historical guards here solely to measure the actual fallback rate.
+    #[test]
+    #[ignore = "release-mode fixture benchmark"]
+    fn fixture_parse_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect();
+        paths.sort();
+        let mut lines = Vec::new();
+        for path in &paths {
+            let text = std::fs::read_to_string(path).unwrap();
+            lines.extend(text.lines().map(str::to_owned));
+        }
+        assert!(!lines.is_empty());
+        let mut fallbacks = [0usize; 3];
+        for line in &lines {
+            let original =
+                original_guard(line).and_then(|kind| parse_frame_direct_kind(line, kind));
+            let conservative =
+                conservative_guard(line).and_then(|kind| parse_frame_direct_kind(line, kind));
+            let refined = parse_frame_direct(line);
+            for (count, result) in fallbacks.iter_mut().zip([original, conservative, refined]) {
+                *count += usize::from(result.is_none());
+            }
+            assert_eq!(
+                format!("{:?}", parse_frame(line)),
+                format!("{:?}", parse_frame_full(line))
+            );
+        }
+        let iterations = 500;
+        let measure = |parse: fn(&str) -> Result<Frame, serde_json::Error>| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for line in &lines {
+                    let _ = black_box(parse(black_box(line)));
+                }
+            }
+            start.elapsed().as_nanos() as f64 / (iterations * lines.len()) as f64
+        };
+        // Warm both paths before timing.
+        for line in &lines {
+            let _ = black_box(parse_frame_full(line));
+            let _ = black_box(parse_frame(line));
+        }
+        let old_ns = measure(parse_frame_full);
+        let new_ns = measure(parse_frame);
+        println!(
+            "files={} lines={} fallbacks={:?} old_ns_per_line={old_ns:.1} new_ns_per_line={new_ns:.1}",
+            paths.len(),
+            lines.len(),
+            fallbacks
+        );
+    }
+
+    fn original_guard(line: &str) -> Option<&str> {
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        let mut i = 0;
+        let mut found: Option<&str> = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth = depth.checked_sub(1)?,
+                b'"' => {
+                    let start = i + 1;
+                    let end = string_end(bytes, start)?;
+                    i = end + 1;
+                    if depth == 1 && &line[start..end] == "type" {
+                        let value = json_string_after_colon(line, i)?;
+                        if found.is_some() || value.text.as_bytes().contains(&b'\\') {
+                            return None;
+                        }
+                        found = Some(value.text);
+                        i = value.next;
+                        continue;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    }
+
+    struct JsonString<'a> {
+        text: &'a str,
+        /// Index of the first byte after the closing quote.
+        next: usize,
+    }
+
+    /// The JSON string after a colon at `i` (the first byte after a key's
+    /// closing quote). `None` when what follows is not a string.
+    fn json_string_after_colon(line: &str, i: usize) -> Option<JsonString<'_>> {
+        let rest = line.get(i..)?;
+        let after_colon = rest.trim_start().strip_prefix(':')?;
+        let raw = after_colon.trim_start().strip_prefix('"')?;
+        let end = string_end(raw.as_bytes(), 0)?;
+        Some(JsonString {
+            text: &raw[..end],
+            // `raw` is a suffix of `line`, so this is the byte after its quote.
+            next: line.len() - raw.len() + end + 1,
+        })
+    }
+
+    fn conservative_guard(line: &str) -> Option<&str> {
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        let mut i = 0;
+        let mut found: Option<&str> = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth >= 128 {
+                        return None;
+                    }
+                }
+                b'}' | b']' => depth = depth.checked_sub(1)?,
+                b'"' => {
+                    let start = i + 1;
+                    let end = string_end(bytes, start)?;
+                    if bytes[start..end].contains(&b'\\') {
+                        return None;
+                    }
+                    i = end + 1;
+                    if depth == 1 && &line[start..end] == "type" {
+                        let value = json_string_after_colon(line, i)?;
+                        if found.is_some() || value.text.as_bytes().contains(&b'\\') {
+                            return None;
+                        }
+                        found = Some(value.text);
+                        i = value.next;
+                        continue;
+                    }
+                    continue;
+                }
+                b'-' | b'0'..=b'9' => {
+                    let start = i;
+                    while i < bytes.len()
+                        && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                    {
+                        i += 1;
+                    }
+                    serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
     }
 
     fn preview(text: &str) -> String {
