@@ -3328,6 +3328,7 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
 struct SegmentRender {
     rendered: Vec<MessagePart>,
     dirty: BTreeSet<usize>,
+    refreshes: u64,
 }
 
 impl SegmentRender {
@@ -3356,6 +3357,26 @@ impl SegmentRender {
     }
 
     fn refresh(&mut self, folded: &[MessagePart]) {
+        self.refreshes = self.refreshes.wrapping_add(1);
+        let verify = cfg!(debug_assertions) || {
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            *ENABLED.get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|v| v == "1"))
+                && self.refreshes.is_multiple_of(32)
+        };
+        self.refresh_indices(folded);
+        if verify {
+            let full = render_parts_full(folded);
+            if self.rendered != full {
+                tracing::error!("segment render diverged from the full render; resetting cache");
+                self.rendered = full;
+                // The writer needs every repaired slot, including indices
+                // that an invalidation bug mistakenly left clean.
+                self.dirty = (0..folded.len()).collect();
+            }
+        }
+    }
+
+    fn refresh_indices(&mut self, folded: &[MessagePart]) {
         if self.rendered.len() > folded.len() {
             self.rendered.truncate(folded.len());
             self.dirty.retain(|index| *index < folded.len());
@@ -3420,7 +3441,7 @@ fn render_part(part: &MessagePart) -> MessagePart {
 
 /// Apply the render-parts privacy policy. Prefer [`SegmentRender`] on the
 /// streaming tick; this full pass remains for segment finish.
-fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
+fn render_parts_full(parts: &[MessagePart]) -> Vec<MessagePart> {
     parts.iter().map(render_part).collect()
 }
 
@@ -3503,7 +3524,7 @@ fn finish_segment<'a>(
     folded: &[MessagePart],
     status: MessageStatus,
 ) -> Result<(), DocError> {
-    let rendered = render_parts(folded);
+    let rendered = render_parts_full(folded);
     match writer {
         Some(w) => w.finish(&rendered, status),
         None if !folded.is_empty() => {
@@ -6711,8 +6732,8 @@ mod tests {
     }
 
     fn assert_render(render: &mut SegmentRender, folded: &[MessagePart]) {
-        render.refresh(folded);
-        assert_eq!(render.rendered, render_parts(folded));
+        render.refresh_indices(folded);
+        assert_eq!(render.rendered, render_parts_full(folded));
         render.dirty.clear();
     }
 
@@ -6738,6 +6759,36 @@ mod tests {
             subagent_status: None,
             subagent_tail: None,
         }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn render_oracle_repairs_missed_invalidations_and_sanitizes() {
+        let mut render = SegmentRender::default();
+        let folded = vec![
+            tool_call(
+                "write",
+                zeron_proto::ToolCall::WriteFile {
+                    path: "secret.txt".into(),
+                    content: Some("private body".into()),
+                },
+            ),
+            MessagePart::Text {
+                id: "t1".into(),
+                text: "corrected😀".into(),
+            },
+        ];
+        render.refresh(&folded);
+        render.dirty.clear();
+        // Simulate a missed invalidation, including an unsanitized slot.
+        render.rendered = folded.clone();
+        render.rendered[1] = MessagePart::Text {
+            id: "t1".into(),
+            text: "stale".into(),
+        };
+        render.refresh(&folded);
+        assert_eq!(render.rendered, render_parts_full(&folded));
+        assert_eq!(render.dirty, BTreeSet::from([0, 1]));
     }
 
     #[test]
