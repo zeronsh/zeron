@@ -231,30 +231,69 @@ impl ChatPersistence {
                 hook();
             }
             let vv_now = doc.doc().oplog_vv();
+            let unsaved = generation != self.saved.load(Ordering::Acquire);
             let result = (|| -> Result<(), String> {
-                let delta = if !compact {
-                    write
-                        .saved_vv
-                        .as_ref()
-                        .map(|vv| doc.doc().export(loro::ExportMode::updates(vv)))
-                        .transpose()
-                        .map_err(|e| e.to_string())?
-                } else {
-                    None
-                };
+                let delta = write
+                    .saved_vv
+                    .as_ref()
+                    .map(|vv| doc.doc().export(loro::ExportMode::updates(vv)))
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
                 let roots = DocsStore::snapshot_roots(doc.doc()).map_err(|e| e.to_string())?;
-                let full = delta.as_ref().is_none_or(|bytes| {
-                    write.delta_count + 1 > MAX_DELTAS
-                        || write.delta_bytes + bytes.len() + roots.len()
-                            > MIN_DELTA_BYTES.max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
-                });
-                if full {
-                    self.save_full(&doc, cursor)?;
-                    write.delta_count = 0;
-                    write.delta_bytes = 0;
-                    write.needs_compaction = false;
-                } else {
-                    let bytes = delta.unwrap();
+                let want_full = compact
+                    || delta.as_ref().is_none_or(|bytes| {
+                        write.delta_count + 1 > MAX_DELTAS
+                            || write.delta_bytes + bytes.len() + roots.len()
+                                > MIN_DELTA_BYTES
+                                    .max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
+                    });
+                let mut full_saved = false;
+                if want_full {
+                    if write.needs_compaction {
+                        // The chain being replaced has rows that failed
+                        // validation. Keep a copy first; the repair must
+                        // not proceed even if the copy cannot be made (a
+                        // full disk would fail the save too), but must say so.
+                        match self
+                            .store
+                            .quarantine_delta_suffix(&self.chat_id, write.delta_count)
+                        {
+                            Ok(rows) => tracing::error!(
+                                chat = %self.chat_id, rows,
+                                "damaged snapshot delta rows quarantined; replacing the chain"
+                            ),
+                            Err(error) => tracing::error!(
+                                chat = %self.chat_id, %error,
+                                "could not quarantine damaged snapshot delta rows"
+                            ),
+                        }
+                    }
+                    match self.save_full(&doc, cursor) {
+                        Ok(()) => {
+                            write.delta_count = 0;
+                            write.delta_bytes = 0;
+                            write.needs_compaction = false;
+                            full_saved = true;
+                        }
+                        // A failed compaction (a large write: disk full, a
+                        // busy timeout) must not cost the unsaved edits when
+                        // the small delta can still land. The chain is
+                        // allowed to overshoot its limits only until the
+                        // next successful compaction, and by at most 2x.
+                        Err(error)
+                            if unsaved
+                                && !write.needs_compaction
+                                && write.delta_count < 2 * MAX_DELTAS
+                                && delta.is_some() =>
+                        {
+                            tracing::warn!(chat = %self.chat_id, %error,
+                                "snapshot compaction failed; appending a delta instead");
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !full_saved {
+                    let bytes = delta.expect("a delta chain always has a saved version");
                     self.store
                         .append_snapshot_delta(&self.chat_id, &bytes, cursor, &roots)
                         .map_err(|e| e.to_string())?;
@@ -452,6 +491,19 @@ mod tests {
         repaired.doc().commit();
         next.applied(4, false);
         assert_eq!(assert_state(&store, &repaired, 4).delta_count, 0);
+        // The damaged chain was copied aside before the repair replaced it.
+        let quarantined: Vec<(i64, Vec<u8>)> = db
+            .prepare(
+                "SELECT seq,bytes FROM snapshot_delta_quarantine WHERE doc_id='whale' ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(quarantined.len(), 2);
+        assert_eq!(quarantined[0], (1, vec![0]));
+        assert_eq!(quarantined[1].0, 2);
     }
 
     #[test]
@@ -487,6 +539,220 @@ mod tests {
         p.applied(3, false);
         assert_eq!(assert_state(&store, &doc, 3).delta_count, 1);
         assert!(p.is_clean());
+    }
+
+    #[test]
+    fn failed_compaction_still_lands_unsaved_edits_as_a_delta() {
+        let (dir, doc, store, p) = fixture();
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        p.applied(1, false);
+        doc.doc().get_text("text").insert(0, "first").unwrap();
+        doc.doc().commit();
+        p.applied(2, false);
+        // The edit below cannot be appended, so it is unsaved at shutdown.
+        db.execute_batch("CREATE TRIGGER fail_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'busy'); END").unwrap();
+        doc.doc().get_text("text").insert(0, "second").unwrap();
+        doc.doc().commit();
+        p.applied(3, false);
+        assert!(!p.is_clean());
+        // Shutdown compaction fails too (it must delete the existing row).
+        db.execute_batch(
+            "DROP TRIGGER fail_delta;
+             CREATE TRIGGER fail_compact BEFORE DELETE ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'disk full'); END",
+        )
+        .unwrap();
+        let exports = zeron_counters::get(zeron_counters::C::SnapshotExports);
+        let txns = zeron_counters::get(zeron_counters::C::SqliteWriteTxns);
+        let rows = zeron_counters::get(zeron_counters::C::SnapshotDeltaRows);
+        p.flush_sync();
+        assert!(zeron_counters::get(zeron_counters::C::SnapshotExports) >= exports + 1);
+        assert!(zeron_counters::get(zeron_counters::C::SqliteWriteTxns) >= txns + 2);
+        assert!(zeron_counters::get(zeron_counters::C::SnapshotDeltaRows) >= rows + 1);
+        assert!(p.is_clean(), "the delta fallback made the edit durable");
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 2);
+        // A clean chain whose compaction fails stays as it is.
+        p.flush_sync();
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 2);
+        db.execute_batch("DROP TRIGGER fail_compact").unwrap();
+        p.flush_sync();
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 0);
+    }
+
+    /// The real persister under random edits, remote imports, cursor resets,
+    /// threshold crossings, shutdown compactions, injected write failures and
+    /// crashes. Whatever the last SUCCESSFUL flush saw is exactly what a
+    /// reopen must restore, with its VV and cursor.
+    #[test]
+    fn seeded_persister_reopen_restores_the_last_successful_flush() {
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(|n: u64| n.min(40))
+            .unwrap_or(40);
+        for seed in 1..=seeds {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+            let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+            let mut rng = seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                rng
+            };
+            let mut doc = Arc::new(SessionDoc::init("whale").unwrap());
+            let mut p = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
+            let mut peer = 0u64;
+            let mut remote = loro::LoroDoc::new();
+            remote.set_peer_id(900_000 + seed).unwrap();
+            let mut cursor = 0u64;
+            // (deep value, vv, cursor) at the last successful flush.
+            let mut expected: Option<(loro::LoroValue, loro::VersionVector, u64)> = None;
+            let mut failing = None::<&str>;
+            let (mut crashes, mut compactions, mut failures) = (0, 0, 0);
+            for op in 0..400u64 {
+                let n = next();
+                let writes = p.writes.load(Ordering::Relaxed);
+                let edit = |doc: &SessionDoc, n: u64, op: u64| match n % 5 {
+                    0 => {
+                        doc.doc()
+                            .get_map("meta")
+                            .insert(&format!("k{}", n % 9), op as i64)
+                            .unwrap();
+                    }
+                    1 => {
+                        let t = doc.doc().get_text("stream");
+                        t.insert(t.len_unicode(), "tok🦀").unwrap();
+                    }
+                    2 => {
+                        let t = doc.doc().get_text("stream");
+                        if t.len_unicode() > 3 {
+                            t.delete(1, 2).unwrap();
+                        }
+                    }
+                    3 => {
+                        let l = doc.doc().get_list("items");
+                        l.push(op as i64).unwrap();
+                    }
+                    _ => {
+                        doc.doc()
+                            .get_map("meta")
+                            .delete(&format!("k{}", n % 9))
+                            .unwrap();
+                    }
+                };
+                match next() % 20 {
+                    // Crash: nothing after the last successful flush survives.
+                    0 | 1 => {
+                        crashes += 1;
+                        let state = store.load_chat_state("whale").unwrap();
+                        match (&expected, state) {
+                            (None, None) => {
+                                doc = Arc::new(SessionDoc::init("whale").unwrap());
+                                p = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
+                                cursor = 0;
+                            }
+                            (Some((value, vv, cur)), Some(state)) => {
+                                let context = format!("seed={seed} op={op}");
+                                assert_eq!(&state.doc.get_deep_value(), value, "{context}");
+                                assert_eq!(&state.doc.oplog_vv(), vv, "{context}");
+                                assert_eq!(state.cursor, *cur, "{context}");
+                                assert!(!state.needs_compaction, "{context}");
+                                let (vv, bytes, count, delta_bytes) = (
+                                    state.doc.oplog_vv(),
+                                    state.snapshot_bytes,
+                                    state.delta_count,
+                                    state.delta_bytes,
+                                );
+                                cursor = state.cursor;
+                                doc = Arc::new(SessionDoc::from_doc(state.doc));
+                                peer += 1;
+                                doc.doc().set_peer_id(1_000_000 * seed + peer).unwrap();
+                                p = ChatPersistence::new(
+                                    &doc,
+                                    store.clone(),
+                                    "whale".into(),
+                                    cursor,
+                                );
+                                p.restore_base(vv, bytes, count, delta_bytes, false);
+                                // Remote history that was not persisted is gone
+                                // with the crash; the peer starts a new lineage.
+                                remote = loro::LoroDoc::new();
+                                remote.set_peer_id(900_000 + seed * 1000 + peer).unwrap();
+                                // The engine replays its outbox into the reopened
+                                // doc AFTER seeding the persister: those ops are
+                                // unsaved until the next flush includes them.
+                                if n % 3 == 0 {
+                                    edit(&doc, n, op);
+                                    doc.doc().commit();
+                                }
+                            }
+                            (expected, state) => panic!(
+                                "seed={seed} op={op}: persisted {} but expected {}",
+                                state.is_some(),
+                                expected.is_some()
+                            ),
+                        }
+                        continue;
+                    }
+                    // Shutdown / eviction compaction.
+                    2 | 3 => {
+                        compactions += 1;
+                        p.flush_sync();
+                    }
+                    // Toggle an injected storage failure.
+                    4 | 5 => {
+                        db.execute_batch("DROP TRIGGER IF EXISTS inject").unwrap();
+                        failing = match next() % 3 {
+                            0 => None,
+                            1 => Some("snapshot_deltas BEFORE INSERT"),
+                            _ => Some("snapshot_deltas BEFORE DELETE"),
+                        };
+                        if let Some(target) = failing {
+                            failures += 1;
+                            let (table, event) = target.split_once(" BEFORE ").unwrap();
+                            db.execute_batch(&format!(
+                                "CREATE TRIGGER inject BEFORE {event} ON {table} BEGIN SELECT RAISE(ABORT,'injected'); END"
+                            ))
+                            .unwrap();
+                        }
+                    }
+                    // A cursor rewind (room reset / repair) is stored in row order.
+                    6 => {
+                        cursor = cursor.saturating_sub(1 + next() % 3);
+                        p.reset_cursor(cursor);
+                    }
+                    // A remote device's update, then the local edit.
+                    7 | 8 => {
+                        remote
+                            .get_map("remote")
+                            .insert(&format!("r{}", n % 7), op as i64)
+                            .unwrap();
+                        remote.commit();
+                        doc.doc()
+                            .import(&remote.export(loro::ExportMode::all_updates()).unwrap())
+                            .unwrap();
+                        cursor += 1;
+                        p.applied(cursor, false);
+                    }
+                    _ => {
+                        edit(&doc, n, op);
+                        doc.doc().commit();
+                        cursor += 1;
+                        p.applied(cursor, false);
+                    }
+                }
+                if p.writes.load(Ordering::Relaxed) > writes {
+                    // A successful flush persisted exactly the current doc.
+                    expected = Some((doc.doc().get_deep_value(), doc.doc().oplog_vv(), p.cursor()));
+                }
+            }
+            drop(p);
+            db.execute_batch("DROP TRIGGER IF EXISTS inject").unwrap();
+            if seeds >= 20 {
+                assert!(crashes + compactions + failures > 40, "seed={seed}");
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -6,8 +6,10 @@ updates since the last successful save. It advances the saved version only after
 SQLite commits. Each row also stores a shallow registry of root container IDs:
 accessing an empty Loro root creates no operation, but a full snapshot preserves
 that root in its deep value. Replaying the registry preserves this case without
-walking the transcript. The registry has its own fixed FNV-1a integrity checksum,
-in addition to Loro's update checksum. Its bytes count toward the chain threshold and measured
+walking the transcript. The registry uses a versioned binary layout of Loro's own
+container-ID encoding (never serde, whose ID representation can change with a
+Loro upgrade and would orphan rows written before it), and has its own fixed
+FNV-1a integrity checksum, in addition to Loro's update checksum. Its bytes count toward the chain threshold and measured
 write volume. Operations included by a racing export can appear again in the
 next update; Loro imports are idempotent. A cursor reset is stored in row order,
 so recovery uses the last valid row's cursor, rather than the largest cursor.
@@ -22,7 +24,10 @@ version from the imported disk state **before** replaying any publication outbox
 Compaction runs after 30 seconds without save activity, on shutdown/eviction, or
 when the next delta would exceed 256 rows or
 `max(512 KiB, base_snapshot_bytes / 2)` total delta bytes. A clean chain still
-compacts on shutdown. Legacy s2 documents and the thin client's writer retain
+compacts on shutdown. If a compaction save fails (disk full, busy timeout) while
+edits are unsaved, the engine appends the small pending delta instead, so a
+failed shutdown/eviction compaction never loses what a delta could save; the
+chain may overshoot its limits by at most 2x until a compaction succeeds. Legacy s2 documents and the thin client's writer retain
 full saves; their readers, local import, salvage and inspection examples understand
 the new log. All full-save APIs invalidate existing deltas atomically.
 
@@ -31,7 +36,12 @@ then releases the connection before importing. It checks sequence continuity,
 Loro checksums, root registry decoding and causal import completion. A damaged row ends the usable
 prefix, including its cursor; later rows cannot advance past it. If importing
 that row partially changed Loro, recovery reconstructs the known-good prefix.
-The engine replaces a damaged chain before appending again. SQLite WAL
+This is logged at error level (row, reason, rows ignored), never silently. The
+engine replaces a damaged chain before appending again, but first copies every
+row after the usable prefix into `snapshot_delta_quarantine` (migration 11,
+removed with the chat) so the repair never destroys the only copy of a damaged
+suffix. The reopened chat's cursor is the last intact row's, so room history
+refills what the dropped rows held. SQLite WAL
 transactions already make interrupted inserts/compactions atomic; checksum
 checks additionally contain truncated/copied payloads. An unreadable base
 remains an error, as before.
@@ -47,18 +57,26 @@ and retries on the existing cadence.
 
 Existing snapshot-only databases load with the same state, cursor and epoch;
 there is no snapshot rewrite during migration. Older engines ignore the new
-table and read at least the last full snapshot, with that snapshot's own cursor.
-After a clean new-engine shutdown they see the compacted latest saved state.
-After a crash or forced stop, they cannot read newer delta-only changes: the
-base can lag by the bounded chain (including a long, slowly changing turn).
-An acknowledged remote update can be fetched again from the base's older room
-cursor. Unsynced delta-only state is unavailable to a downgraded binary.
+tables, so they still open the database and read the last full base with its own
+cursor. After a clean new-engine shutdown that base is the compacted latest
+state. After a crash or forced stop it can lag by the bounded chain: at most 256
+rows or `max(512 KiB, base/2)` bytes, and a chat that goes quiet is compacted
+after 30 seconds. An acknowledged remote update can be fetched again from the
+base's older room cursor, but unsynced delta-only state is invisible to a
+downgraded binary.
 
-If an older engine saves or deletes the base, the database triggers remove the
-stale delta chain in the same transaction, even though that engine does not know
-about it. A subsequent upgrade cannot merge that stale chain onto a replacement
-lineage. A save after a forced downgrade discards that delta-only chain;
-recovery of those changes then depends on the independent outbox/remote history.
+An older engine must not be able to destroy that state, so migration 10 installs
+`BEFORE UPDATE` and `BEFORE DELETE` triggers on `snapshots` that abort while the
+chat has delta rows. The old engine runs them without knowing about them: its
+save or chat delete fails with `snapshot has an unmerged delta log: run the newer
+engine to compact it`, the delta-only changes stay on disk, and the chat is not
+saved locally by the old engine until the newer engine has run once (it
+loads base + deltas and compacts). Its in-memory edits remain covered by the
+outbox and remote history. This is deliberate: a failed save is recoverable,
+an overwritten base is not. The new engine deletes the chat's deltas first and
+replaces the base second, in one transaction, so its own writes pass the guard
+(and a failure in either statement rolls back both). The AFTER triggers from
+migration 9 that clear a stale chain on base replacement stay as a backstop.
 Running two engines against the same data directory is unsupported.
 
 ## Publication outbox
@@ -79,9 +97,20 @@ written by an older binary that inspected only the base during a downgrade.
 sequences of 150 map/text/list/peer operations, randomized persistence/crash
 points and compactions. Reopening the log must match a separately saved full
 snapshot in both version vector and deep value. `PERF_SEEDS=N` increases the run.
+Every compaction in that test first dies at a random stage (the delta delete
+fails, the base upsert fails after the delete, or an uncommitted transaction is
+dropped) and the chain must reopen exactly as it was. Some crashes also leave a
+random delta row truncated, bit-flipped, emptied, with a zeroed/truncated root
+registry, or deleted (a gap); reopening must restore exactly the prefix before
+it with that prefix's cursor, quarantine the rest, and survive the repair save.
+`seeded_persister_reopen_restores_the_last_successful_flush` drives the real
+`ChatPersistence` (edits, remote imports, cursor rewinds, 256-row threshold
+crossings, shutdown compactions, injected insert/delete failures, crashes and
+outbox-style edits after `restore_base`) and requires a reopen to equal the doc,
+version vector and cursor of the last successful flush.
 Other tests cover interrupted insert/compaction transactions, truncated delta
-rows, migration, old-engine writes, threshold and quiet compaction, failed saves,
-outbox replay, and a transcript present only in a delta during open/salvage.
+rows, migration, the old-engine guard, threshold and quiet compaction, failed
+saves, outbox replay, and a transcript present only in a delta during open/salvage.
 
 `streaming_five_mb_store_write_volume` starts with 2,500,000 seeded ASCII bytes
 in a LoroText, producing a measured 5 MB serialized snapshot (Loro includes state

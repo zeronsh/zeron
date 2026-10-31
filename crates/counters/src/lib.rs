@@ -2,10 +2,11 @@
 //!
 //! Integrated engine semantics: DocReadEntries* counts full transcript reads
 //! (including mirror rebuilds), never incremental entry reads. SnapshotExports*
-//! covers all SessionDoc full exports, including compactions; SnapshotDeltaRows
+//! covers all SessionDoc full exports, including failed-save compactions; SnapshotDeltaRows
 //! and SnapshotDeltaBytes count committed delta rows and their update + root bytes.
 //! SqliteWriteTxns counts begun write transactions and autocommit write attempts,
-//! including batched outbox writes (once per batch) and salvage receipts, but not
+//! including batched outbox writes (once per batch), salvage receipts and delta
+//! quarantine writes, but not
 //! read transactions or SQLite maintenance. JournalAppends counts successfully
 //! written event records, even when batched; JournalBytes includes separator
 //! newlines. JournalSyncs stays zero: the journal writer does not fsync.
