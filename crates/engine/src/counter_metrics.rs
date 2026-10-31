@@ -54,10 +54,32 @@ pub(crate) fn malloc() -> Option<serde_json::Value> {
     let _guard = Guard;
     // malloc_info holds allocator locks while writing. A bounded, preallocated
     // fmemopen stream avoids open_memstream reallocating under those locks.
-    let mut buffer = vec![0u8; 8 * 1024 * 1024];
+    // Keep the large scratch buffer outside glibc's heap so it does not
+    // appear as an 8 MiB allocation in the sample itself.
+    const CAPACITY: usize = 8 * 1024 * 1024;
     let mut io_buffer = [0u8; 4096];
     unsafe {
-        let stream = libc::fmemopen(buffer.as_mut_ptr().cast(), buffer.len(), c"w".as_ptr());
+        let buffer = libc::mmap(
+            std::ptr::null_mut(),
+            CAPACITY,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if buffer == libc::MAP_FAILED {
+            return None;
+        }
+        struct Mapping(*mut libc::c_void);
+        impl Drop for Mapping {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::munmap(self.0, CAPACITY);
+                }
+            }
+        }
+        let _mapping = Mapping(buffer);
+        let stream = libc::fmemopen(buffer, CAPACITY, c"w".as_ptr());
         if stream.is_null() {
             return None;
         }
@@ -81,13 +103,16 @@ pub(crate) fn malloc() -> Option<serde_json::Value> {
             || error != 0
             || close_status != 0
             || size < 0
-            || size as usize >= buffer.len()
+            || size as usize >= CAPACITY
         {
             return None;
         }
-        std::str::from_utf8(&buffer[..size as usize])
-            .ok()
-            .and_then(parse_malloc_info)
+        std::str::from_utf8(std::slice::from_raw_parts(
+            buffer.cast::<u8>(),
+            size as usize,
+        ))
+        .ok()
+        .and_then(parse_malloc_info)
     }
 }
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
