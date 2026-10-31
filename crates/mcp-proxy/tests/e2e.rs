@@ -784,3 +784,18 @@ async fn resources_without_template_listing_still_cache() {
     peer.close().await;
     assert_eq!(pids(&d.join("spawn")).len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn paged_list_with_a_cursor_reaches_the_live_server() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_PAGED", "1")]);
+    peer.init().await;
+    let page = peer
+        .request(json!(2), "tools/list", json!({"cursor":"page2"}))
+        .await;
+    assert_eq!(page["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(pids(&d.join("spawn")).len(), 2);
+    peer.close().await;
+}

@@ -342,7 +342,10 @@ impl Proxy {
                 self.logging = Some(message["params"].clone());
                 Some(json!({}))
             }
-            _ if self.catalog_valid => self.cache.as_ref().and_then(|e| e.listing(method)),
+            // A cursor belongs to a live server's pagination; only the live server can resume it.
+            _ if self.catalog_valid && message["params"]["cursor"].is_null() => {
+                self.cache.as_ref().and_then(|e| e.listing(method))
+            }
             _ => None,
         };
         if let Some(result) = result {
