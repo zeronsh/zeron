@@ -208,9 +208,13 @@ impl TranscriptMirror {
         if !self.verify_due() {
             return joined;
         }
-        let Ok(expected) = joined_full(doc) else {
+        let Ok(raw) = doc.read_entries() else {
             return joined;
         };
+        let expected: Vec<_> = join_continuation_entries(raw.clone())
+            .into_iter()
+            .map(Arc::new)
+            .collect();
         if let Some(at) = first_difference(&joined, &expected) {
             self.mismatches.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -220,9 +224,12 @@ impl TranscriptMirror {
                 full = expected.len(),
                 "transcript mirror diverged from the full rebuild; using the full result"
             );
-            *state = State::default();
+            // doc_host resolves presentation provenance from with_raw right
+            // after refresh. Keep the raw side of the same full snapshot, even
+            // though the incremental indexes must be rebuilt next time.
+            state.use_full(raw);
             lock(&self.pending).full = true;
-            return Arc::new(expected);
+            return state.joined.clone();
         }
         joined
     }
@@ -286,6 +293,18 @@ fn first_difference(a: &[SharedEntry], b: &[SharedEntry]) -> Option<usize> {
 }
 
 impl State {
+    fn use_full(&mut self, raw: Vec<SessionMessageEntry>) {
+        *self = Self::default();
+        self.slots = raw
+            .into_iter()
+            .map(|entry| Slot {
+                cid: None,
+                entry: Some(Arc::new(entry)),
+            })
+            .collect();
+        self.rejoin();
+    }
+
     /// Decode one entry container exactly as `read_entries` does: deep value
     /// to JSON, then the shared strict-then-salvage decoder.
     fn decode(

@@ -530,6 +530,27 @@ fn oracle_catches_a_missed_event_and_recovers() {
 }
 
 #[test]
+fn oracle_fallback_keeps_raw_entries_for_presentation_history() {
+    let doc = SessionDoc::init("chat").unwrap();
+    let mirror = TranscriptMirror::new().with_verify(Verify::Always);
+    doc.push_message(&entry("root", MessageRole::Assistant, "root", None))
+        .unwrap();
+    mirror.refresh(&doc);
+    // A missed continuation event makes the oracle supply the joined result.
+    doc.push_message(&entry("cont", MessageRole::Assistant, "tail", Some("root")))
+        .unwrap();
+    let joined = mirror.refresh(&doc);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(mirror.mismatches(), 1);
+    mirror.with_raw(|raw| {
+        assert_eq!(
+            raw.cloned().collect::<Vec<_>>(),
+            doc.read_entries().unwrap()
+        );
+    });
+}
+
+#[test]
 fn streaming_redecodes_only_the_live_entry() {
     let doc = Arc::new(SessionDoc::init("chat").unwrap());
     let mirror = Arc::new(TranscriptMirror::new().with_verify(Verify::Never));
