@@ -824,6 +824,7 @@ impl ChatDocHandle {
                 // live-part protection, even if no commit happened while away.
                 *lock(&self.transcript_history) = Default::default();
                 self.transcript_mirror.reset();
+                self.mirror_dirty.store(true, Ordering::Release);
             }
             self.messages_tx.subscribe()
         };
@@ -6391,6 +6392,32 @@ mod transfer_progress_tests {
         let _rx = handle.watch_messages();
         let rewatched = check(&handle);
         assert_eq!(rewatched.entries[0].status, Some(MessageStatus::Aborted));
+    }
+
+    #[tokio::test]
+    async fn transcript_reattach_reads_changes_before_publish_worker() {
+        let (_dir, host) = host();
+        let handle = host.open("mirror-reattach").unwrap();
+        let rx = handle.watch_messages();
+        handle.write_user_message("root", "hello", 1).unwrap();
+        handle.publish_messages_if_watched();
+        assert_eq!(rx.borrow().entries.len(), 1);
+        drop(rx);
+        // The observer resets the unwatched mirror, but the async change
+        // worker has not run yet to mark the published snapshot dirty.
+        handle
+            .doc()
+            .set_message_status("root", zeron_doc::MessageStatus::Aborted)
+            .unwrap();
+        let rx = handle.watch_messages();
+        assert_eq!(
+            rx.borrow().entries[0].status,
+            Some(zeron_doc::MessageStatus::Aborted)
+        );
+        assert_eq!(
+            *rx.borrow().entries[0],
+            handle.doc().read_entries().unwrap()[0]
+        );
     }
 
     #[tokio::test]

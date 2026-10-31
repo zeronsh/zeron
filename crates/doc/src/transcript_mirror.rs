@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use loro::event::DiffEvent;
-use loro::{ContainerID, Index, LoroDoc, LoroValue, ToJson, ValueOrContainer};
+use loro::{ContainerID, Index, LoroDoc, LoroValue, ToJson, ValueOrContainer, VersionVector};
 
 use crate::schema::{
     DocError, SessionDoc, SessionMessageEntry, decode_entry_value, join_continuation_entries,
@@ -66,6 +66,22 @@ struct Pending {
     full: bool,
 }
 
+impl Pending {
+    fn classify(&mut self, path: &[(ContainerID, Index)]) {
+        match path.first() {
+            Some((_, Index::Key(key))) if key.as_str() == "messages" => match path.get(1) {
+                None => self.structure = true,
+                Some((entry, Index::Seq(_))) => {
+                    self.dirty.insert(entry.clone());
+                }
+                _ => self.full = true,
+            },
+            Some((_, Index::Key(_))) => {}
+            _ => self.full = true,
+        }
+    }
+}
+
 struct Slot {
     /// `None` for a plain value stored inline in the list (never a map
     /// container; such a slot only changes with the list itself).
@@ -78,6 +94,8 @@ struct Slot {
 struct State {
     /// False until the first rebuild, and again after a reset.
     primed: bool,
+    /// Committed state represented by the cache, independently of callback delivery.
+    version: VersionVector,
     slots: Vec<Slot>,
     index: HashMap<ContainerID, usize>,
     /// Published `join_continuation_entries(read_entries())`.
@@ -138,19 +156,7 @@ impl TranscriptMirror {
                 pending.full = true;
                 continue;
             }
-            let path = change.path;
-            match path.first() {
-                Some((_, Index::Key(key))) if key.as_str() == "messages" => match path.get(1) {
-                    None => pending.structure = true,
-                    Some((entry, _)) => {
-                        pending.dirty.insert(entry.clone());
-                    }
-                },
-                // commands, queue, meta, ...
-                Some((_, Index::Key(_))) => {}
-                // A path that cannot be resolved cannot be attributed.
-                _ => pending.full = true,
-            }
+            pending.classify(change.path);
         }
     }
 
@@ -173,13 +179,52 @@ impl TranscriptMirror {
     /// Bring the mirror up to date and return the joined transcript.
     ///
     /// Drain-then-read: the pending set is taken before the doc is read, so a
-    /// commit racing the read re-marks itself and the next refresh catches it.
+    /// commit racing the read re-marks itself. Also reconcile committed operation
+    /// spans: document state can advance before its callback reaches observe.
     pub fn refresh(&self, doc: &SessionDoc) -> Arc<Vec<SharedEntry>> {
         self.refreshes.fetch_add(1, Ordering::Relaxed);
         let mut state = lock(&self.state);
         let mut pending = std::mem::take(&mut *lock(&self.pending));
-        let full = pending.full || !state.primed;
         let loro = doc.doc();
+        let version = loro.state_vv();
+        // Uncommitted edits are already visible to read_entries, but have no
+        // diff event or finalized op span. Read one atomic full snapshot and
+        // leave the incremental indexes unprimed until a later refresh.
+        if loro.get_pending_txn_len() != 0 {
+            return self.fallback(doc, &mut state);
+        }
+        if state.primed && !pending.full {
+            if state.version.sub_iter(&version).next().is_some() {
+                // Checkout can remove ops, including in an unwatched interval.
+                pending.full = true;
+            } else {
+                // This read-only API does NOT implicitly commit (unlike
+                // get_changed_containers_in). Only newly committed spans are
+                // expanded; settled transcript content is never copied.
+                let mut touched = HashSet::new();
+                for span in version.sub_iter(&state.version) {
+                    let changes = loro.export_json_in_id_span(span);
+                    let len: usize = changes.iter().map(|change| change.op_len()).sum();
+                    if len != (span.counter.end - span.counter.start) as usize {
+                        // Missing history, e.g. a shallow snapshot import.
+                        pending.full = true;
+                        break;
+                    }
+                    touched.extend(
+                        changes
+                            .into_iter()
+                            .flat_map(|change| change.ops.into_iter().map(|op| op.container)),
+                    );
+                }
+                for cid in touched {
+                    match loro.get_path_to_container(&cid) {
+                        Some(path) => pending.classify(&path),
+                        None => pending.full = true,
+                    }
+                }
+            }
+        }
+        let full = pending.full || !state.primed;
         let mut changed = full;
         if full {
             state.rewalk(doc, &mut pending.dirty, false);
@@ -204,6 +249,12 @@ impl TranscriptMirror {
         if changed {
             state.rejoin();
         }
+        if !version_is_current(loro, &version) {
+            // Per-entry reads raced a writer. A full list deep value is taken
+            // under one Loro state lock; decoding/joining happens after release.
+            return self.fallback(doc, &mut state);
+        }
+        state.version = version.clone();
         let joined = state.joined.clone();
         if !self.verify_due() {
             return joined;
@@ -215,6 +266,11 @@ impl TranscriptMirror {
             .into_iter()
             .map(Arc::new)
             .collect();
+        if !version_is_current(loro, &version) {
+            state.use_full(raw, expected);
+            lock(&self.pending).full = true;
+            return state.joined.clone();
+        }
         if let Some(at) = first_difference(&joined, &expected) {
             self.mismatches.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -227,11 +283,23 @@ impl TranscriptMirror {
             // doc_host resolves presentation provenance from with_raw right
             // after refresh. Keep the raw side of the same full snapshot, even
             // though the incremental indexes must be rebuilt next time.
-            state.use_full(raw);
+            state.use_full(raw, expected);
             lock(&self.pending).full = true;
             return state.joined.clone();
         }
         joined
+    }
+
+    fn fallback(&self, doc: &SessionDoc, state: &mut State) -> Arc<Vec<SharedEntry>> {
+        if let Ok(raw) = doc.read_entries() {
+            let joined = join_continuation_entries(raw.clone())
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            state.use_full(raw, joined);
+        }
+        lock(&self.pending).full = true;
+        state.joined.clone()
     }
 
     /// The raw (continuations not joined) decodable entries in list order, as
@@ -281,6 +349,12 @@ pub fn joined_full(doc: &SessionDoc) -> Result<Vec<SharedEntry>, DocError> {
         .collect())
 }
 
+// Check both sides of the transaction-length read: a commit can finalize
+// visible edits between reading the frontiers and acquiring the txn lock.
+fn version_is_current(doc: &LoroDoc, version: &VersionVector) -> bool {
+    doc.state_vv() == *version && doc.get_pending_txn_len() == 0 && doc.state_vv() == *version
+}
+
 fn first_difference(a: &[SharedEntry], b: &[SharedEntry]) -> Option<usize> {
     if let Some(at) = a
         .iter()
@@ -293,7 +367,7 @@ fn first_difference(a: &[SharedEntry], b: &[SharedEntry]) -> Option<usize> {
 }
 
 impl State {
-    fn use_full(&mut self, raw: Vec<SessionMessageEntry>) {
+    fn use_full(&mut self, raw: Vec<SessionMessageEntry>, joined: Vec<SharedEntry>) {
         *self = Self::default();
         self.slots = raw
             .into_iter()
@@ -302,7 +376,7 @@ impl State {
                 entry: Some(Arc::new(entry)),
             })
             .collect();
-        self.rejoin();
+        self.joined = Arc::new(joined);
     }
 
     /// Decode one entry container exactly as `read_entries` does: deep value
@@ -462,5 +536,66 @@ impl State {
             out.push(entry);
         }
         *joined = Arc::new(out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_callbacks_do_not_wait_for_the_rebuild_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let doc = Arc::new(SessionDoc::init("chat").unwrap());
+        let mirror = Arc::new(TranscriptMirror::new());
+        let _sub = {
+            let mirror = mirror.clone();
+            doc.doc().subscribe_root(Arc::new(move |event| {
+                mirror.observe(&event);
+                mirror.reset();
+            }))
+        };
+        // Stand in for a deliberately stalled rebuild. Both observer paths
+        // must finish while this guard is still held.
+        let rebuilding = lock(&mirror.state);
+        let (tx, rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            doc.doc().get_map("meta").insert("test", "changed").unwrap();
+            doc.doc().commit();
+            tx.send(()).unwrap();
+        });
+        let completed = rx.recv_timeout(Duration::from_secs(2));
+        drop(rebuilding);
+        writer.join().unwrap();
+        completed.expect("commit waited for the mirror rebuild lock");
+    }
+
+    #[test]
+    fn oracle_fallback_keeps_raw_entries_for_presentation_history() {
+        let doc = SessionDoc::init("chat").unwrap();
+        let mirror = TranscriptMirror::new().with_verify(Verify::Always);
+        let map = doc
+            .doc()
+            .get_list("messages")
+            .push_container(loro::LoroMap::new())
+            .unwrap();
+        map.insert("id", "root").unwrap();
+        doc.doc().commit();
+        mirror.refresh(&doc);
+        // Simulate cache corruption at an unchanged document version so the
+        // oracle itself, rather than version reconciliation, must recover.
+        lock(&mirror.state).joined = Arc::default();
+        let joined = mirror.refresh(&doc);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(mirror.mismatches(), 1);
+        mirror.with_raw(|raw| {
+            assert_eq!(
+                raw.cloned().collect::<Vec<_>>(),
+                doc.read_entries().unwrap()
+            );
+        });
+        assert_eq!(*mirror.refresh(&doc), *joined);
+        assert_eq!(mirror.mismatches(), 1);
     }
 }
