@@ -1022,23 +1022,30 @@ impl ChatDocHandle {
         // The send that switches wrote its message first: the seam goes
         // before it (and any other unanswered message), so it reads as the
         // new provider's question, not the old one's.
-        let unanswered = entries.iter().rev().take_while(|entry| entry.role == MessageRole::User).count();
-        self.doc.insert_message_before_last(unanswered, &SessionMessageEntry {
-            id: id.clone(),
-            role: MessageRole::System,
-            parts: vec![MessagePart::Switch {
-                id,
-                from: from.to_string(),
-                to: to.to_string(),
-                from_harness: Some(from_id.as_str().to_owned()),
-                to_harness: Some(to_id.as_str().to_owned()),
-            }],
-            created_at,
-            device_id: self.device_id.clone(),
-            status: Some(MessageStatus::Complete),
-            continuation_of: None,
-            duration_ms: None,
-        })?;
+        let unanswered = entries
+            .iter()
+            .rev()
+            .take_while(|entry| entry.role == MessageRole::User)
+            .count();
+        self.doc.insert_message_before_last(
+            unanswered,
+            &SessionMessageEntry {
+                id: id.clone(),
+                role: MessageRole::System,
+                parts: vec![MessagePart::Switch {
+                    id,
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    from_harness: Some(from_id.as_str().to_owned()),
+                    to_harness: Some(to_id.as_str().to_owned()),
+                }],
+                created_at,
+                device_id: self.device_id.clone(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            },
+        )?;
         self.doc.mark_provider_switched()?;
         Ok(true)
     }
@@ -1161,23 +1168,15 @@ impl ChatDocHandle {
     }
 }
 
-/// `read_entries().is_empty()`, without materializing entry JSON.
-///
-/// `read_entries` keeps every messages-list map (strict decode or field
-/// salvage) and skips non-maps. The list length is the fast path; a
-/// value-only list is still empty.
-fn messages_list_empty(doc: &loro::LoroDoc) -> bool {
-    use loro::{Container, ValueOrContainer};
-    let messages = doc.get_list("messages");
-    if messages.len() == 0 {
-        return true;
+/// Preserve the decoder's treatment of malformed and scalar list entries.
+fn messages_list_empty(doc: &loro::LoroDoc) -> Result<bool, String> {
+    if doc.get_list("messages").is_empty() {
+        return Ok(true);
     }
-    !(0..messages.len()).any(|index| {
-        matches!(
-            messages.get(index),
-            Some(ValueOrContainer::Container(Container::Map(_)))
-        )
-    })
+    SessionDoc::from_doc(doc.clone())
+        .read_entries()
+        .map(|entries| entries.is_empty())
+        .map_err(|err| err.to_string())
 }
 
 struct SalvageScan {
@@ -1237,7 +1236,7 @@ fn scan_salvage(
             {
                 raw.import(&update).map_err(|err| err.to_string())?;
             }
-            if !messages_list_empty(&raw) {
+            if !messages_list_empty(&raw)? {
                 return Ok(SalvageScan {
                     imports,
                     kind: SalvageScanKind::Healthy,
@@ -1262,7 +1261,7 @@ fn scan_salvage(
     };
     let raw = import_snapshot(&bytes, &mut imports)?;
     let fat = SessionDoc::from_doc(raw);
-    if messages_list_empty(fat.doc()) {
+    if messages_list_empty(fat.doc())? {
         return Ok(SalvageScan {
             imports,
             kind: SalvageScanKind::Absent,
@@ -2101,7 +2100,12 @@ impl DocHost {
                             let mut order = lock(&own_order);
                             for bytes in order.order(handle.doc.doc(), bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
-                                outbox.submit(&publication_chat, weak_push.clone(), batch_id, bytes);
+                                outbox.submit(
+                                    &publication_chat,
+                                    weak_push.clone(),
+                                    batch_id,
+                                    bytes,
+                                );
                             }
                         }
                         true
@@ -3207,7 +3211,7 @@ impl DocHost {
             .await
             .map_err(|_| "recovery deferred: remote history has not converged".to_string())?;
         }
-        if !messages_list_empty(handle.doc().doc()) {
+        if !messages_list_empty(handle.doc().doc())? {
             // Transcript present — nothing lost. Mark only after the
             // non-empty doc is durable, so a crash before the snapshot
             // still retries.
@@ -3229,7 +3233,7 @@ impl DocHost {
         // the room fetch must not get history interleaved under it.
         let _drain = handle.drain_lock.lock().await;
         let _import = lock(&handle.transcript_import);
-        if Arc::strong_count(&handle.doc) > 1 || !messages_list_empty(handle.doc().doc()) {
+        if Arc::strong_count(&handle.doc) > 1 || !messages_list_empty(handle.doc().doc())? {
             return Err("doc gained entries mid-salvage; aborted".into());
         }
         for entry in &entries {
@@ -5949,8 +5953,11 @@ impl DocHost {
                 // A run on another provider than the live turn's (a stale
                 // client, another device's switch) waits for the turn: the
                 // provider never changes by killing a turn mid-flight.
-                let other_provider = sessions.live_harness(chat_id).is_some_and(|live| live != harness);
-                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request))) {
+                let other_provider = sessions
+                    .live_harness(chat_id)
+                    .is_some_and(|live| live != harness);
+                if other_provider || sessions.defers_to_turn_end(chat_id, Some((harness, &request)))
+                {
                     self.hold_until_turn_end(
                         handle,
                         message_id,
@@ -7194,7 +7201,10 @@ mod publication_eviction_tests {
         let rows = store.pending_chat_updates(chat).unwrap();
         for (_, bytes) in &rows {
             let status = replay.import(bytes).unwrap();
-            assert!(status.pending.is_none(), "row {chat}: depends on a later row");
+            assert!(
+                status.pending.is_none(),
+                "row {chat}: depends on a later row"
+            );
         }
         (rows.len(), replay.get_text("body").to_string())
     }
@@ -7241,13 +7251,20 @@ mod publication_eviction_tests {
         outbox.flush();
         for ((chat, handle), base) in chats.iter().zip(&handles).zip(&baseline) {
             let (rows, text) = replay_in_order(&store, chat);
-            assert_eq!(rows, base + COMMITS, "{chat}: one row per commit, exactly once");
+            assert_eq!(
+                rows,
+                base + COMMITS,
+                "{chat}: one row per commit, exactly once"
+            );
             assert_eq!(text, handle.doc.doc().get_text("body").to_string());
         }
         // 300 rows, never more than one transaction per 64: batching, and no
         // second INSERT from the client.
         let txs = store.outbox_write_transactions() - before;
-        assert!(txs >= 5 && txs <= 300 / 2, "{txs} transactions for 300 rows");
+        assert!(
+            txs >= 5 && txs <= 300 / 2,
+            "{txs} transactions for 300 rows"
+        );
         host.shutdown_workers().await;
     }
 
@@ -7271,12 +7288,23 @@ mod publication_eviction_tests {
             })
         };
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(!saved.load(Ordering::SeqCst), "snapshot landed before the outbox row");
-        assert_eq!(store.pending_chat_updates("barrier").unwrap().len(), baseline);
+        assert!(
+            !saved.load(Ordering::SeqCst),
+            "snapshot landed before the outbox row"
+        );
+        assert_eq!(
+            store.pending_chat_updates("barrier").unwrap().len(),
+            baseline
+        );
         drop(pause);
-        tokio::task::spawn_blocking(move || saver.join().unwrap()).await.unwrap();
+        tokio::task::spawn_blocking(move || saver.join().unwrap())
+            .await
+            .unwrap();
         // Crash here: the snapshot and the outbox both hold the commit.
-        assert_eq!(store.pending_chat_updates("barrier").unwrap().len(), baseline + 1);
+        assert_eq!(
+            store.pending_chat_updates("barrier").unwrap().len(),
+            baseline + 1
+        );
         let (bytes, _, _) = store.load_snapshot_with_cursor("barrier").unwrap().unwrap();
         let restored = loro::LoroDoc::new();
         restored.import(&bytes).unwrap();
@@ -7306,10 +7334,18 @@ mod publication_eviction_tests {
             })
         };
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(!returned.load(Ordering::SeqCst), "accepted before the row was written");
+        assert!(
+            !returned.load(Ordering::SeqCst),
+            "accepted before the row was written"
+        );
         drop(pause);
-        tokio::task::spawn_blocking(move || queuer.join().unwrap()).await.unwrap();
-        assert_eq!(store.pending_chat_updates("cmd").unwrap().len(), baseline + 1);
+        tokio::task::spawn_blocking(move || queuer.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.pending_chat_updates("cmd").unwrap().len(),
+            baseline + 1
+        );
         host.shutdown_workers().await;
     }
 
@@ -7332,7 +7368,10 @@ mod publication_eviction_tests {
             tokio::spawn(async move { host.shutdown_workers().await })
         };
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(!stopping.is_finished(), "shutdown finished with rows unwritten");
+        assert!(
+            !stopping.is_finished(),
+            "shutdown finished with rows unwritten"
+        );
         drop(pause);
         stopping.await.unwrap();
         let (rows, text) = replay_in_order(&store, "shutdown");
@@ -7633,7 +7672,7 @@ mod salvage_tests {
 
     fn emptiness_agrees(doc: &SessionDoc) {
         let old = doc.read_entries().unwrap().is_empty();
-        let new = messages_list_empty(doc.doc());
+        let new = messages_list_empty(doc.doc()).unwrap();
         assert_eq!(old, new);
     }
 
