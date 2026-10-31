@@ -36,3 +36,6 @@ pub use sample::{
     PerfTotals, RaplSample, energy_delta_uj, energy_j_net, read_package_at, run_counted,
     sample_package,
 };
+
+#[cfg(unix)]
+pub mod fixture;
