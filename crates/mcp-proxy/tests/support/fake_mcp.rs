@@ -69,8 +69,9 @@ async fn main() {
         }
     }
     eprintln!(
-        "fake MCP stderr {}",
-        "x".repeat(number("FAKE_STDERR_BYTES") as usize)
+        "fake MCP stderr {}{}",
+        "x".repeat(number("FAKE_STDERR_BYTES") as usize),
+        env("FAKE_STDERR_TEXT")
     );
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(64);
     let writer = tokio::spawn(async move {

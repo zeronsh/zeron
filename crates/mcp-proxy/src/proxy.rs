@@ -17,6 +17,8 @@ use tokio::{
     time::Instant,
 };
 
+const LOG_LIMIT: u64 = 4 << 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Cold,
@@ -77,6 +79,44 @@ struct Proxy {
     last_activity: Instant,
     last_progress: Option<Instant>,
     stderr: Arc<Mutex<Vec<u8>>>,
+    secrets: Vec<String>,
+}
+/// Values that must not reach the client or the lifecycle log: whatever a server's
+/// stderr echoes of its own credentials (inherited env, or `--token ...` style args).
+fn secret_values(config: &Config) -> Vec<String> {
+    const WORDS: [&str; 8] = [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "COOKIE",
+        "BEARER",
+    ];
+    let secret_name = |name: &str| {
+        let name = name.to_uppercase();
+        WORDS.iter().any(|w| name.contains(w))
+    };
+    let mut found: Vec<String> = std::env::vars_os()
+        .filter(|(k, _)| k.to_str().is_some_and(secret_name))
+        .filter_map(|(_, v)| v.into_string().ok())
+        .collect();
+    for (i, arg) in config.args.iter().enumerate() {
+        if !arg.starts_with('-') {
+            continue;
+        }
+        match arg.split_once('=') {
+            Some((name, value)) if secret_name(name) => found.push(value.to_owned()),
+            None if secret_name(arg) => found.extend(config.args.get(i + 1).cloned()),
+            _ => {}
+        }
+    }
+    // Short values would blank out ordinary words in the message.
+    found.retain(|v| v.len() >= 6);
+    found.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    found.dedup();
+    found
 }
 /// Relay queues are unbounded: a slow peer must delay messages, never end the session
 /// (a full bounded queue would have killed the proxy and the server with it).
@@ -157,16 +197,22 @@ impl Proxy {
         let _ = std::io::stderr().write_all(line.as_bytes());
         if self.config.run_dir.is_some() {
             let dir = self.config.data_dir.join("logs");
-            if std::fs::create_dir_all(&dir).is_ok() {
-                if let Ok(mut f) = cache::private_options()
-                    .append(true)
-                    .create(true)
-                    .open(dir.join("mcp-proxy.jsonl"))
-                {
+            if cache::private_dir_all(&dir).is_ok() {
+                let log = dir.join("mcp-proxy.jsonl");
+                // Every proxy appends here; keep the file (and one predecessor) bounded.
+                if log.metadata().is_ok_and(|m| m.len() > LOG_LIMIT) {
+                    let _ = std::fs::rename(&log, dir.join("mcp-proxy.jsonl.1"));
+                }
+                if let Ok(mut f) = cache::private_options().append(true).create(true).open(log) {
                     let _ = f.write_all(line.as_bytes());
                 }
             }
         }
+    }
+    fn redact(&self, text: &str) -> String {
+        self.secrets
+            .iter()
+            .fold(text.to_owned(), |text, secret| text.replace(secret, "***"))
     }
     fn client_out(&self, value: Value) -> io::Result<()> {
         send(&self.output, value)
@@ -270,7 +316,8 @@ impl Proxy {
         } else {
             format!("{reason}: {}", tail.trim())
         };
-        let detail: String = detail
+        let detail: String = self
+            .redact(&detail)
             .chars()
             .filter(|c| !c.is_control())
             .take(300)
@@ -310,7 +357,7 @@ impl Proxy {
         self.capture = None;
         self.catalog_valid = false;
         let _ = cache::invalidate(&self.config.data_dir, &self.key);
-        self.event("cache", json!({"status":"refresh-failed","reason":reason.chars().take(300).collect::<String>()}));
+        self.event("cache", json!({"status":"refresh-failed","reason":self.redact(&reason).chars().take(300).collect::<String>()}));
         Ok(())
     }
     fn save(&self, entry: &Entry) {
@@ -818,6 +865,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         }
     };
     let passthrough = config.mode == Mode::KeepAlive;
+    let secrets = secret_values(&config);
     let mut proxy = Proxy {
         config,
         resolved,
@@ -850,6 +898,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         last_activity: Instant::now(),
         last_progress: None,
         stderr: Arc::new(Mutex::new(Vec::new())),
+        secrets,
     };
     #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -924,4 +973,30 @@ pub async fn run(config: Config) -> io::Result<()> {
     drop(proxy);
     let _ = tokio::time::timeout(Duration::from_secs(1), writer).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn secret_values_come_from_credential_args_and_ignore_short_or_plain_ones() {
+        let args = [
+            "--server",
+            "s",
+            "--",
+            "/bin/x",
+            "--api-key=abcdefgh",
+            "--token",
+            "tok-123456",
+            "--name=plainvalue",
+            "--password=abc",
+        ]
+        .map(str::to_owned);
+        let config = Config::parse(args, std::path::PathBuf::from("/nonexistent")).unwrap();
+        let secrets = secret_values(&config);
+        assert!(secrets.contains(&"abcdefgh".to_owned()));
+        assert!(secrets.contains(&"tok-123456".to_owned()));
+        assert!(!secrets.contains(&"plainvalue".to_owned()));
+        assert!(!secrets.contains(&"abc".to_owned()));
+    }
 }

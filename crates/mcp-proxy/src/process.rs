@@ -91,7 +91,7 @@ impl Process {
     }
     fn mark(&self, pgid: u32) -> io::Result<()> {
         if let Some(dir) = &self.run_dir {
-            fs::create_dir_all(dir)?;
+            cache::private_dir_all(dir)?;
             let value = serde_json::json!({"pgid":pgid,"start":start_id(pgid)});
             cache::atomic_write(&dir.join(pgid.to_string()), value.to_string().as_bytes())?;
         }

@@ -428,7 +428,7 @@ pub async fn resolve(
 fn store(file: &Path, key: &str, entry: &CacheEntry) {
     // Cache failures must not prevent the equivalent direct executable path.
     let _ = (|| -> std::io::Result<()> {
-        fs::create_dir_all(file.parent().unwrap())?;
+        cache::private_dir_all(file.parent().unwrap())?;
         let _lock = cache::FileLock::new(&file.with_extension("lock"))?;
         let mut entries: BTreeMap<String, Value> = json_file(file)
             .filter(|d| d["version"] == CACHE_VERSION)

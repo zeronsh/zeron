@@ -947,6 +947,35 @@ async fn idle_cycles_leave_no_zombies_or_adopted_children() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_failures_do_not_echo_credentials_to_the_client_or_the_log() {
+    let dir = temp();
+    let d = dir.path();
+    let secret = "hunter2-credential-value";
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[
+            ("FAKE_INIT_ERROR", "1"),
+            ("FAKE_INIT_DELAY_MS", "100"),
+            ("API_TOKEN", secret),
+            ("FAKE_STDERR_TEXT", &format!("auth failed for {secret}")),
+        ],
+    );
+    let message = peer.init().await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("auth failed for ***"), "{message}");
+    assert!(!message.contains(secret));
+    peer.close().await;
+    assert!(
+        !fs::read_to_string(d.join("logs/mcp-proxy.jsonl"))
+            .unwrap()
+            .contains(secret)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_old_failed_discovery_marker_is_retried() {
     let dir = temp();
     let d = dir.path();
@@ -966,4 +995,24 @@ async fn an_old_failed_discovery_marker_is_retried() {
     })
     .await;
     peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn directories_are_private_and_the_lifecycle_log_is_bounded() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let d = dir.path();
+    fs::create_dir_all(d.join("logs")).unwrap();
+    let log = d.join("logs/mcp-proxy.jsonl");
+    fs::File::create(&log).unwrap().set_len(5 << 20).unwrap();
+    let mut peer = Peer::spawn(d, "lazy-keep-alive", &[]);
+    peer.init().await;
+    peer.call(2, "echo").await;
+    for private in ["mcp-cache", "mcp-cache/v1", "run"] {
+        let mode = fs::metadata(d.join(private)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{private}");
+    }
+    peer.close().await;
+    assert!(d.join("logs/mcp-proxy.jsonl.1").exists());
+    assert!(fs::metadata(&log).unwrap().len() < 1 << 20);
 }

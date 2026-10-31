@@ -216,7 +216,7 @@ pub fn read(data_dir: &Path, key: &str) -> Option<Entry> {
 /// Per-key advisory lock closes the re-read/rename race between simultaneous proxies.
 pub fn save(data_dir: &Path, entry: &Entry) -> io::Result<()> {
     let path = path(data_dir, &entry.key);
-    fs::create_dir_all(path.parent().unwrap())?;
+    private_dir_all(path.parent().unwrap())?;
     let _guard = FileLock::new(&path.with_extension("lock"))?;
     if let Some(disk) = read(data_dir, &entry.key) {
         if disk.cached_at > entry.cached_at
@@ -287,6 +287,17 @@ impl Drop for FileLock {
             libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
         }
     }
+}
+/// Cached metadata, logs and ownership markers are per-user; so are their directories.
+pub fn private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 pub fn private_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
