@@ -16,6 +16,7 @@ pub mod rebuild;
 pub mod registry;
 pub mod schema;
 pub mod transcript_delta;
+pub mod transcript_mirror;
 pub mod voice;
 pub mod workspace;
 
@@ -27,4 +28,5 @@ pub use rebuild::*;
 pub use registry::*;
 pub use schema::*;
 pub use transcript_delta::*;
+pub use transcript_mirror::*;
 pub use workspace::*;

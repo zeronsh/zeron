@@ -32,7 +32,7 @@ use zeron_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
-    evaluate_command, join_continuation_entries,
+    evaluate_command,
 };
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
@@ -554,7 +554,9 @@ pub enum FinishQueueEditOutcome {
 /// when the watch coalesces several backfill and live commits.
 #[derive(Clone, Default)]
 pub struct TranscriptSnapshot {
-    pub entries: Arc<Vec<SessionMessageEntry>>,
+    /// The joined transcript. Entries are shared with the incremental mirror
+    /// (and across snapshots), so an unchanged entry is the same `Arc`.
+    pub entries: Arc<Vec<zeron_doc::SharedEntry>>,
     pub replay_baseline: Arc<zeron_doc::TranscriptBaseline>,
 }
 
@@ -568,6 +570,9 @@ pub struct ChatDocHandle {
     /// task cannot publish recovered content before its presentation cutoff.
     transcript_import: Mutex<()>,
     transcript_history: Arc<Mutex<crate::transcript_history::TranscriptHistory>>,
+    /// The joined transcript, kept current from doc diff events while watched
+    /// so a commit costs the entries it touched, not the whole transcript.
+    transcript_mirror: Arc<zeron_doc::TranscriptMirror>,
     /// Pending-message queue watch (WatchQueue). Cheap to rebuild — a handful
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
@@ -818,6 +823,7 @@ impl ChatDocHandle {
                 // A new viewing session must not inherit the former viewer's
                 // live-part protection, even if no commit happened while away.
                 *lock(&self.transcript_history) = Default::default();
+                self.transcript_mirror.reset();
             }
             self.messages_tx.subscribe()
         };
@@ -998,22 +1004,37 @@ impl ChatDocHandle {
     // Caller holds transcript_import, shared with attach and mirror clearing.
     fn publish_messages_locked(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
-        match self.doc.read_entries() {
-            Ok(entries) => {
-                let replay_baseline =
-                    lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
-                let joined = join_continuation_entries(entries);
-                // send_replace: update the watch even with no subscribers yet, so a
-                // late subscriber's first borrow sees the current transcript.
-                self.messages_tx.send_replace(TranscriptSnapshot {
-                    entries: Arc::new(joined),
-                    replay_baseline: replay_baseline.clone(),
-                });
-            }
-            Err(err) => {
-                tracing::warn!(chat = %self.chat_id, error = %err, "transcript read failed");
-            }
-        }
+        // Incremental: only the entry maps the observer saw change are
+        // re-decoded. The mirror cross-checks itself against the full rebuild
+        // (debug builds, or ZERON_PERF_VERIFY=1 sampled) and falls back to it.
+        let joined = self.transcript_mirror.refresh(&self.doc);
+        let replay_baseline = self
+            .transcript_mirror
+            .with_raw(|raw| lock(&self.transcript_history).snapshot(self.doc.doc(), raw));
+        // send_replace: update the watch even with no subscribers yet, so a
+        // late subscriber's first borrow sees the current transcript.
+        self.messages_tx.send_replace(TranscriptSnapshot {
+            entries: joined,
+            replay_baseline,
+        });
+    }
+
+    /// The pre-mirror publish: a full `read_entries` + join, kept as the
+    /// reference the incremental path is checked against.
+    #[cfg(test)]
+    fn publish_messages_full(&self) -> Result<TranscriptSnapshot, DocError> {
+        let entries = self.doc.read_entries()?;
+        let replay_baseline =
+            lock(&self.transcript_history).snapshot(self.doc.doc(), &mut entries.iter());
+        Ok(TranscriptSnapshot {
+            entries: Arc::new(
+                zeron_doc::join_continuation_entries(entries)
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect(),
+            ),
+            replay_baseline,
+        })
     }
 
     pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
@@ -1033,6 +1054,7 @@ impl ChatDocHandle {
             // Shrink the stale mirror: watch_messages rebuilds on attach.
             self.messages_tx.send_replace(TranscriptSnapshot::default());
             *lock(&self.transcript_history) = Default::default();
+            self.transcript_mirror.reset();
         } else {
             self.publish_messages_locked();
         }
@@ -1724,6 +1746,8 @@ impl DocHost {
             crate::transcript_history::TranscriptHistory::default(),
         ));
         let history = transcript_history.clone();
+        let transcript_mirror = Arc::new(zeron_doc::TranscriptMirror::new());
+        let mirror = transcript_mirror.clone();
         let watched = messages_tx.clone();
         let weak_doc = Arc::downgrade(&doc);
         let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
@@ -1734,8 +1758,10 @@ impl DocHost {
                 if let Some(doc) = weak_doc.upgrade() {
                     lock(&history).observe(doc.doc(), &diff);
                 }
+                mirror.observe(&diff);
             } else {
                 *lock(&history) = Default::default();
+                mirror.reset();
             }
             if let Some(persistence) = &changed_persistence {
                 persistence.dirty(false);
@@ -1760,6 +1786,7 @@ impl DocHost {
             messages_tx,
             transcript_import: Mutex::default(),
             transcript_history,
+            transcript_mirror,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
@@ -6289,6 +6316,81 @@ mod transfer_progress_tests {
         let start = std::time::Instant::now();
         assert_eq!(handle.watch_messages().borrow().entries.len(), 2000);
         eprintln!("offline whale rebuilt mirror: {:?}", start.elapsed());
+    }
+
+    /// The incremental publish must equal the full rebuild it replaced: same
+    /// joined entries and the same replay baseline, through streaming,
+    /// continuations, and a watch that goes away and comes back.
+    #[tokio::test]
+    async fn incremental_publish_matches_the_full_rebuild() {
+        use super::ChatDocHandle;
+        use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+        let (_dir, host) = host();
+        let handle = host.open("mirror-eq").unwrap();
+        let check = |handle: &Arc<ChatDocHandle>| {
+            handle.publish_messages_if_watched();
+            let full = handle.publish_messages_full().unwrap();
+            let got = handle.messages_tx.borrow().clone();
+            let got_entries: Vec<_> = got.entries.iter().map(|e| (**e).clone()).collect();
+            let want_entries: Vec<_> = full.entries.iter().map(|e| (**e).clone()).collect();
+            assert_eq!(got_entries, want_entries);
+            assert_eq!(*got.replay_baseline, *full.replay_baseline);
+            got
+        };
+        let rx = handle.watch_messages();
+        handle.write_user_message("u1", "hello", 1).unwrap();
+        let first = check(&handle);
+        assert_eq!(first.entries.len(), 1);
+
+        let writer = zeron_doc::SegmentWriter::begin(handle.doc(), "a1", "dev-test", 2).unwrap();
+        let mut state = writer.into_state();
+        let mut text = String::new();
+        let mut previous = check(&handle);
+        for word in ["caf\u{e9} ", "na\u{ef}ve ", "\u{65e5}\u{672c} ", "tail"] {
+            text.push_str(word);
+            let mut writer = zeron_doc::SegmentWriter::resume(handle.doc(), state.0, state.1);
+            writer
+                .sync(&[MessagePart::Text {
+                    id: "p".into(),
+                    text: text.clone(),
+                }])
+                .unwrap();
+            state = writer.into_state();
+            let next = check(&handle);
+            // Settled entries are shared across ticks, not re-decoded copies.
+            assert!(Arc::ptr_eq(&previous.entries[0], &next.entries[0]));
+            previous = next;
+        }
+        handle
+            .doc()
+            .push_message(&SessionMessageEntry {
+                id: "a1-cont".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    id: "c".into(),
+                    text: "continued".into(),
+                }],
+                created_at: 3,
+                device_id: "dev-test".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: Some("a1".into()),
+                duration_ms: Some(7),
+            })
+            .unwrap();
+        let joined = check(&handle);
+        assert_eq!(joined.entries.len(), 2, "continuation joins onto its root");
+        assert_eq!(joined.entries[1].parts.len(), 2);
+
+        // Unwatched commits are not observed; the next attach rebuilds.
+        drop(rx);
+        handle
+            .doc()
+            .set_message_status("u1", MessageStatus::Aborted)
+            .unwrap();
+        handle.publish_messages_if_watched();
+        let _rx = handle.watch_messages();
+        let rewatched = check(&handle);
+        assert_eq!(rewatched.entries[0].status, Some(MessageStatus::Aborted));
     }
 
     #[tokio::test]

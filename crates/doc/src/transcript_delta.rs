@@ -10,10 +10,13 @@
 //! that must not diverge per surface live in one place).
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
+use crate::transcript_mirror::SharedEntry;
 
 /// Transcript changes and the current host-owned context snapshot travel together.
 /// Older readers ignore `contextUsage`; older hosts decode as unknown usage.
@@ -56,10 +59,20 @@ impl TranscriptBaseline {
     }
 
     pub fn capture(entries: &[SessionMessageEntry]) -> Self {
+        Self::capture_each(entries)
+    }
+
+    /// [`capture`](Self::capture) over the mirror's shared entries.
+    pub fn capture_shared(entries: &[SharedEntry]) -> Self {
+        Self::capture_each(entries)
+    }
+
+    fn capture_each<E: Borrow<SessionMessageEntry>>(entries: &[E]) -> Self {
         Self {
             entries: entries
                 .iter()
                 .map(|entry| {
+                    let entry: &SessionMessageEntry = entry.borrow();
                     let parts = entry
                         .parts
                         .iter()
@@ -149,6 +162,13 @@ impl TranscriptFrame {
         }
     }
 
+    /// [`reset`](Self::reset) over the mirror's shared entries.
+    pub fn reset_shared(entries: &[SharedEntry]) -> Self {
+        Self::Reset {
+            reset: entries.iter().map(|entry| (**entry).clone()).collect(),
+        }
+    }
+
     pub fn is_empty_delta(&self) -> bool {
         matches!(
             self,
@@ -207,50 +227,79 @@ pub fn diff_transcript(
     prev: &[SessionMessageEntry],
     next: &[SessionMessageEntry],
 ) -> TranscriptFrame {
-    let prev_by_id: std::collections::HashMap<&str, (usize, &SessionMessageEntry)> = prev
+    diff_entries(prev, next, |a, b| a == b, TranscriptFrame::reset)
+}
+
+/// [`diff_transcript`] over the mirror's shared entries. Identical output; an
+/// entry that is the same allocation in both snapshots is unchanged without a
+/// deep comparison, so a tick costs the changed entries, not the transcript.
+pub fn diff_transcript_shared(prev: &[SharedEntry], next: &[SharedEntry]) -> TranscriptFrame {
+    diff_entries(
+        prev,
+        next,
+        |a, b| Arc::ptr_eq(a, b) || **a == **b,
+        TranscriptFrame::reset_shared,
+    )
+}
+
+fn entry_of<E: Borrow<SessionMessageEntry>>(e: &E) -> &SessionMessageEntry {
+    e.borrow()
+}
+
+fn diff_entries<E: Borrow<SessionMessageEntry>>(
+    prev: &[E],
+    next: &[E],
+    same: impl Fn(&E, &E) -> bool,
+    reset: impl FnOnce(&[E]) -> TranscriptFrame,
+) -> TranscriptFrame {
+    let prev_by_id: std::collections::HashMap<&str, (usize, &E)> = prev
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.id.as_str(), (i, e)))
+        .map(|(i, e)| (entry_of(e).id.as_str(), (i, e)))
         .collect();
-    let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
+    let next_ids: std::collections::HashSet<&str> =
+        next.iter().map(|e| entry_of(e).id.as_str()).collect();
 
     let remove: Vec<String> = prev
         .iter()
-        .filter(|e| !next_ids.contains(e.id.as_str()))
-        .map(|e| e.id.clone())
+        .filter(|e| !next_ids.contains(entry_of(*e).id.as_str()))
+        .map(|e| entry_of(e).id.clone())
         .collect();
 
     let mut upsert = Vec::new();
     let mut append = Vec::new();
     for (i, entry) in next.iter().enumerate() {
-        let after = i.checked_sub(1).map(|p| next[p].id.as_str());
-        match prev_by_id.get(entry.id.as_str()) {
+        let after = i.checked_sub(1).map(|p| entry_of(&next[p]).id.as_str());
+        match prev_by_id.get(entry_of(entry).id.as_str()) {
             Some((prev_ix, prev_entry)) => {
-                let prev_after = prev_ix.checked_sub(1).map(|p| prev[p].id.as_str());
-                if *prev_entry == entry && prev_after == after {
+                let prev_after = prev_ix
+                    .checked_sub(1)
+                    .map(|p| entry_of(&prev[p]).id.as_str());
+                if same(prev_entry, entry) && prev_after == after {
                     continue;
                 }
                 if prev_after == after
-                    && let Some(text_append) = try_text_append(prev_entry, entry)
+                    && let Some(text_append) =
+                        try_text_append(entry_of(*prev_entry), entry_of(entry))
                 {
                     append.push(text_append);
                     continue;
                 }
                 upsert.push(TranscriptUpsert {
                     after: after.map(str::to_string),
-                    entry: entry.clone(),
+                    entry: entry_of(entry).clone(),
                 });
             }
             None => upsert.push(TranscriptUpsert {
                 after: after.map(str::to_string),
-                entry: entry.clone(),
+                entry: entry_of(entry).clone(),
             }),
         }
     }
 
     // A delta touching most rows serializes like a reset but applies slower.
     if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
-        return TranscriptFrame::reset(next);
+        return reset(next);
     }
     TranscriptFrame::Delta {
         upsert,

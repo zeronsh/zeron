@@ -2288,7 +2288,7 @@ fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<zeron_doc::SessionDoc>,
 ) -> BoxStream<'static, serde_json::Value> {
-    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript_shared};
     futures::stream::unfold(
         (
             rx,
@@ -2306,12 +2306,13 @@ fn doc_messages_stream(
                 // connection used to deep-copy the entire transcript here.
                 let current = rx.borrow_and_update().clone();
                 let frame = match prev.as_ref() {
-                    None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
+                    None => TranscriptFrame::reset_shared(&current.entries),
+                    Some(prev) => diff_transcript_shared(&prev.entries, &current.entries),
                 };
                 let replay_baseline = match prev.as_ref() {
                     None => {
-                        opening_baseline = zeron_doc::TranscriptBaseline::capture(&current.entries);
+                        opening_baseline =
+                            zeron_doc::TranscriptBaseline::capture_shared(&current.entries);
                         Some(opening_baseline.clone())
                     }
                     Some(prev)
