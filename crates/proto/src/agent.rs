@@ -16,6 +16,8 @@ pub enum HarnessId {
     Hermes,
     /// Vercel fx, driven by its native ACP server.
     Fx,
+    /// Factory's Droid agent, driven over ACP (`droid exec --output-format acp`).
+    Droid,
     /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
     Pi,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
@@ -34,7 +36,7 @@ pub enum HarnessId {
 
 impl HarnessId {
     /// Every harness, in declaration order.
-    pub const ALL: [HarnessId; 12] = [
+    pub const ALL: [HarnessId; 13] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -42,6 +44,7 @@ impl HarnessId {
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Fx,
+        HarnessId::Droid,
         HarnessId::Pi,
         HarnessId::Opencode,
         HarnessId::Antigravity,
@@ -59,6 +62,7 @@ impl HarnessId {
             HarnessId::Grok => "grok",
             HarnessId::Hermes => "hermes",
             HarnessId::Fx => "fx",
+            HarnessId::Droid => "droid",
             HarnessId::Pi => "pi",
             HarnessId::Opencode => "opencode",
             HarnessId::Antigravity => "antigravity",

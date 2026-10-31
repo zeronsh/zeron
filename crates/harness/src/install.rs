@@ -55,6 +55,14 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
         Mock => vec![],
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
+        Droid if windows => vec![
+            PowerShell("irm https://app.factory.ai/cli/windows | iex"),
+            Npm("droid", false),
+        ],
+        Droid => vec![
+            Shell("curl -fsSL https://app.factory.ai/cli | sh", "sh"),
+            Npm("droid", false),
+        ],
         Antigravity => vec![Archive],
         Muse if windows => vec![PowerShell("irm https://dev.meta.ai/install.ps1 | iex")],
         Muse => vec![Shell("curl -fsSL https://dev.meta.ai/install.sh | sh", "sh")],
@@ -164,6 +172,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
         Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
+        Droid => "npm install -g droid",
         Antigravity | Mock => return None,
     })
 }
@@ -183,6 +192,10 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Muse => ("muse", "~/.local/bin"),
         Mock => ("mock", "PATH"),
         Fx => ("fx", "~/.local/bin"),
+        Droid => (
+            "droid",
+            "~/.local/bin (~/bin on Windows) or the npm global bin",
+        ),
     }
 }
 
@@ -201,6 +214,7 @@ pub fn installed(id: HarnessId) -> bool {
         Muse => crate::MuseHarness::new().installed(),
         Mock => false,
         Fx => crate::AcpHarness::fx().installed(),
+        Droid => crate::AcpHarness::droid().installed(),
     }
 }
 
@@ -401,7 +415,7 @@ async fn run(
 mod tests {
     use super::*;
 
-    const IDS: [HarnessId; 11] = [
+    const IDS: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -410,6 +424,7 @@ mod tests {
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Fx,
+        HarnessId::Droid,
         HarnessId::Devin,
         HarnessId::Antigravity,
         HarnessId::Mock,

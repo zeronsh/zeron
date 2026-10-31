@@ -215,6 +215,16 @@ fn devin_effort_values(
     }
 }
 
+fn droid_effort_values(
+    reasoning: Option<ReasoningLevel>,
+    model: Option<&str>,
+) -> Vec<&'static str> {
+    match reasoning {
+        Some(ReasoningLevel::Minimal) => vec!["off", "minimal", "low"],
+        _ => default_effort_values(reasoning, model),
+    }
+}
+
 fn grok_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = crate::executable::home_dir() {
@@ -419,6 +429,52 @@ fn fx_install_paths() -> Vec<PathBuf> {
     crate::executable::home_dir()
         .map(|home| vec![home.join(".local/bin/fx")])
         .unwrap_or_default()
+}
+
+fn droid_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join("bin").join("droid"));
+        dirs.push(home.join(".local").join("bin").join("droid"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/droid"));
+    dirs.push(PathBuf::from("/usr/local/bin/droid"));
+    dirs
+}
+
+fn droid_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Droid,
+        display_name: "Droid",
+        executable: "droid",
+        env_override: "DROID_EXECUTABLE",
+        args: &["exec", "--output-format", "acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: droid_install_paths,
+        cli_executable: "droid",
+        cli_extra_paths: droid_install_paths,
+        install_hint: "droid (searched PATH, the login shell's PATH, ~/bin, ~/.local/bin, \
+             /opt/homebrew/bin, /usr/local/bin, and fnm/nvm/volta/pnpm/bun install dirs; \
+             install with `curl -fsSL https://app.factory.ai/cli | sh`, \
+             `irm https://app.factory.ai/cli/windows | iex` on Windows, or \
+             `npm install -g droid`; set DROID_EXECUTABLE to override)",
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: droid_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "Run `droid` once to confirm it is signed in, or set FACTORY_API_KEY.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
+        access_modes: &AccessMode::ALL,
+    }
 }
 
 fn hermes_install_paths() -> Vec<PathBuf> {
@@ -1383,6 +1439,10 @@ impl AcpHarness {
     /// fx native ACP server.
     pub fn fx() -> Self {
         Self::with_spec(fx_spec())
+    }
+
+    pub fn droid() -> Self {
+        Self::with_spec(droid_spec())
     }
 
     /// Hermes Agent (`hermes acp`) — Nous Research's native ACP server.
@@ -2899,6 +2959,7 @@ fn validate_config_model_selection(
     session_response: &Value,
     requested: Option<&str>,
     model_options: &serde_json::Map<String, Value>,
+    exact: bool,
 ) -> Result<(), HarnessError> {
     let Some(requested) = requested else {
         return Ok(());
@@ -2927,7 +2988,12 @@ fn validate_config_model_selection(
         .get("contextWindow")
         .and_then(Value::as_str)
         .is_some_and(|window| window.eq_ignore_ascii_case("1m"));
-    if pick_model_value(requested, &available, context_1m).is_some() {
+    let advertised = if exact {
+        available.contains(&requested)
+    } else {
+        pick_model_value(requested, &available, context_1m).is_some()
+    };
+    if advertised {
         return Ok(());
     }
     Err(HarnessError::Protocol(format!(
@@ -2952,7 +3018,7 @@ fn config_option_category<'a>(session_response: &'a Value, config_id: &str) -> O
 
 /// Session mode values that approve everything themselves, the agent's own
 /// full access.
-const NO_PROMPT_MODES: [&str; 7] = [
+const NO_PROMPT_MODES: [&str; 8] = [
     "bypassPermissions",
     "bypass_permissions",
     "bypass",
@@ -2960,11 +3026,12 @@ const NO_PROMPT_MODES: [&str; 7] = [
     "agent-full-access",
     "danger-full-access",
     "full-access",
+    "auto-high",
 ];
 
 /// Session mode values that ask before acting, for a run that is not in full
 /// access: Antigravity's `default` (its others are `auto_edit` and `yolo`).
-const ASKING_MODES: [&str; 1] = ["default"];
+const ASKING_MODES: [&str; 2] = ["default", "normal"];
 
 /// The `session/set_config_option` calls a session response's `configOptions`
 /// warrant for this run:
@@ -3574,7 +3641,9 @@ fn restore_method(init: &Value, harness: HarnessId) -> &'static str {
     let load = capabilities["loadSession"].as_bool() == Some(true);
     let resume = !capabilities["sessionCapabilities"]["resume"].is_null();
     match (load, resume) {
-        (true, true) if harness == HarnessId::Antigravity => "session/resume",
+        (true, true) if matches!(harness, HarnessId::Antigravity | HarnessId::Droid) => {
+            "session/resume"
+        }
         (false, true) => "session/resume",
         _ => "session/load",
     }
@@ -4146,11 +4215,12 @@ async fn select_session_config(
         )),
         model => model.map(str::to_owned),
     };
-    if rules.harness == HarnessId::Antigravity {
+    if matches!(rules.harness, HarnessId::Antigravity | HarnessId::Droid) {
         validate_config_model_selection(
             &session_response,
             requested_model.as_deref(),
             &request.model_options,
+            rules.harness == HarnessId::Droid,
         )?;
     }
     if let Some(model) = first_class_model_change(&session_response, requested_model.as_deref())? {
@@ -4188,7 +4258,7 @@ async fn select_session_config(
     );
     // Devin's effort and speed choices depend on the selected model:
     // switch the model first, then choose them from what it offers.
-    let deferred = rules.harness == HarnessId::Devin
+    let deferred = matches!(rules.harness, HarnessId::Devin | HarnessId::Droid)
         && sets
             .iter()
             .any(|(id, _)| is_model_config_option(&options_snapshot, id));
@@ -4232,7 +4302,10 @@ async fn select_session_config(
                 Err(e) => {
                     if matches!(
                         rules.harness,
-                        HarnessId::Antigravity | HarnessId::Devin | HarnessId::Fx
+                        HarnessId::Antigravity
+                            | HarnessId::Devin
+                            | HarnessId::Droid
+                            | HarnessId::Fx
                     ) && requested_model.is_some()
                         && is_model_config_option(&options_snapshot, &config_id)
                     {

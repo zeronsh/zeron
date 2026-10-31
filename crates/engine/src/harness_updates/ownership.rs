@@ -25,6 +25,7 @@ pub(super) fn npm_package(harness: HarnessId, installed: Option<&str>) -> Option
         HarnessId::Codex => Some("@openai/codex"),
         HarnessId::Pi => Some("@earendil-works/pi-coding-agent"),
         HarnessId::Opencode => Some(super::opencode_release_package(installed.unwrap_or(""))),
+        HarnessId::Droid => Some("droid"),
         _ => None,
     }
 }
