@@ -13612,6 +13612,7 @@ dependencies = [
  "futures",
  "libc",
  "rand_chacha 0.9.0",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

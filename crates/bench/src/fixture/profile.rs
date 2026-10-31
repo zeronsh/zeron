@@ -11,6 +11,9 @@ use std::{
 };
 
 pub async fn generate(name: &str, engine: &Path, seed: u64) -> Result<PathBuf> {
+    if matches!(name, "P20" | "P200") {
+        return super::multi::generate(name, engine, seed).await;
+    }
     let target: usize = match name {
         "T-100k" => 100_000,
         "T-1m" => 1_000_000,
@@ -104,7 +107,7 @@ async fn build_chat(trial: &Trial, project: &Path, script: &Path, expected: &str
     .context("transcript timed out")?
 }
 
-fn hash_tree(
+pub(super) fn hash_tree(
     base: &Path,
     dir: &Path,
     hashes: &mut std::collections::BTreeMap<String, String>,

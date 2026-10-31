@@ -55,12 +55,26 @@ enum Command {
 
 #[derive(Subcommand)]
 enum FixtureCommand {
+    #[command(hide = true)]
+    SnapshotWorker { source: PathBuf, output: PathBuf },
     Gen {
         name: String,
         #[arg(long)]
-        engine: PathBuf,
+        engine: Option<PathBuf>,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        #[arg(long)]
+        from_real_profile: bool,
+    },
+    VerifyReal {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
+    },
+    Verify {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
     },
     Convert {
         input: PathBuf,
@@ -110,9 +124,33 @@ async fn async_main(command: Command) -> Result<()> {
             zb_root,
         } => launch_hold(engine, hold, zb_root).await,
         Command::Fixture { command } => match command {
-            FixtureCommand::Gen { name, engine, seed } => {
-                let path = zeron_bench::fixture::profile::generate(&name, &engine, seed).await?;
+            FixtureCommand::SnapshotWorker { source, output } => {
+                zeron_bench::fixture::real::copy_mounted(&source, &output)
+            }
+            FixtureCommand::Gen {
+                name,
+                engine,
+                seed,
+                from_real_profile,
+            } => {
+                let path = if name == "P-real" && from_real_profile {
+                    zeron_bench::fixture::real::snapshot()?
+                } else {
+                    anyhow::ensure!(!from_real_profile, "--from-real-profile requires P-real");
+                    let engine = engine.context("--engine is required for synthetic profiles")?;
+                    zeron_bench::fixture::profile::generate(&name, &engine, seed).await?
+                };
                 println!("{}", path.display());
+                Ok(())
+            }
+            FixtureCommand::VerifyReal { path, engine } => {
+                let count = zeron_bench::fixture::real::verify(&path, &engine).await?;
+                println!("{count} chats");
+                Ok(())
+            }
+            FixtureCommand::Verify { path, engine } => {
+                zeron_bench::fixture::multi::verify(&path, &engine).await?;
+                println!("200 chats, 20 aborted");
                 Ok(())
             }
             FixtureCommand::Convert { input, cadence } => {
