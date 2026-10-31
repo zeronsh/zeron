@@ -1329,8 +1329,6 @@ pub struct SegmentWriter<'a> {
     /// What `durationMs` counts from: `created_at`, or an earlier moment the
     /// turn really began ([`Self::count_duration_from`]).
     duration_from: i64,
-    /// Syncs performed, for the release oracle sample.
-    syncs: u64,
     /// Times the incremental path diverged and the full path was used instead.
     mismatches: u64,
     verify: Verify,
@@ -1344,10 +1342,25 @@ enum Verify {
     #[default]
     Auto,
     /// Skip the oracle. Equivalence tests set this so a fallback cannot hide a bad tail.
+    #[cfg(test)]
     Never,
+    /// Exercise release sampling even in a debug test build.
+    #[cfg(test)]
+    Sampled,
 }
 
 const VERIFY_SAMPLE: u64 = 32;
+
+// Sinks resume a new writer each flush. A writer-local counter would never
+// reach the release sample, so count across resumes and segments.
+static VERIFY_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sample_verify_sync(syncs: &std::sync::atomic::AtomicU64) -> bool {
+    syncs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1)
+        .is_multiple_of(VERIFY_SAMPLE)
+}
 
 fn perf_verify_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1403,7 +1416,6 @@ impl<'a> SegmentWriter<'a> {
             flushed_len: Vec::new(),
             created_at,
             duration_from: created_at,
-            syncs: 0,
             mismatches: 0,
             verify: Verify::Auto,
         })
@@ -1441,7 +1453,6 @@ impl<'a> SegmentWriter<'a> {
             flushed_len,
             created_at,
             duration_from: created_at,
-            syncs: 0,
             mismatches: 0,
             verify: Verify::Auto,
         }
@@ -1601,15 +1612,15 @@ impl<'a> SegmentWriter<'a> {
         self.mismatches
     }
 
-    fn verify_due(&mut self) -> bool {
+    fn verify_due(&self) -> bool {
         match self.verify {
+            #[cfg(test)]
             Verify::Never => false,
+            #[cfg(test)]
+            Verify::Sampled => sample_verify_sync(&VERIFY_SYNCS),
             Verify::Auto => {
-                self.syncs = self.syncs.wrapping_add(1);
-                if cfg!(debug_assertions) {
-                    return true;
-                }
-                perf_verify_enabled() && self.syncs.is_multiple_of(VERIFY_SAMPLE)
+                cfg!(debug_assertions)
+                    || (perf_verify_enabled() && sample_verify_sync(&VERIFY_SYNCS))
             }
         }
     }
@@ -3222,6 +3233,40 @@ mod tests {
             MessagePart::Text { text, .. } => assert_eq!(text, "café 日本語😀"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn segment_sync_oracle_repairs_a_missed_dirty_index() {
+        let doc = SessionDoc::init("missed-dirty").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "before".into(),
+        }];
+        writer.sync(&parts).unwrap();
+        parts[0] = MessagePart::Text {
+            id: "t0".into(),
+            text: "after😀".into(),
+        };
+        writer.sync_indices(&parts, []).unwrap();
+        assert_eq!(writer.mismatches(), 1);
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        assert_eq!(writer.written, parts);
+    }
+
+    #[test]
+    fn release_sync_sampling_survives_writer_resumes() {
+        let doc = SessionDoc::init("resume-sampling").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut samples = 0;
+        for _ in 0..64 {
+            let (index, written) = writer.into_state();
+            writer = SegmentWriter::resume(&doc, index, written);
+            writer.verify = Verify::Sampled;
+            samples += usize::from(writer.verify_due());
+        }
+        assert_eq!(samples, 2);
     }
 
     #[test]
