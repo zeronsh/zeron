@@ -56,7 +56,8 @@ in an owned group; its separate group is recorded and stopped as well.
 
 Test-only millisecond overrides: `ZERON_MCP_PROXY_IDLE_MS`,
 `ZERON_MCP_PROXY_CHECK_MS`, `ZERON_MCP_PROXY_BACKOFF_MS`, and
-`ZERON_MCP_PROXY_START_TIMEOUT_MS`. Production startup/backoff defaults are
+`ZERON_MCP_PROXY_START_TIMEOUT_MS`, plus `ZERON_MCP_PROXY_FAIL_SETUP` (any value)
+which injects a pre-protocol setup failure. Production startup/backoff defaults are
 60 seconds. Queued cancellation produces no response; in-flight cancellation
 rewrites the target ID. Sampling/elicitation/roots requests retain server IDs.
 
@@ -93,6 +94,11 @@ preserves the caller's argv0 while dispatching by the actual executed pathname.
 `--shim-version` reports the internal handoff version so an old sibling helper
 cannot accidentally receive launcher arguments. The manifest travels through
 `ZERON_MCP_SHIM_*` env references; server env values stay inherited and hashed.
+Before any exec the entry removes its own directory from the PATH it hands on
+(every other slot is byte-identical), so a program that searches PATH for its
+argv0, such as a venv or standalone Python, finds itself and not the shim. A
+failure while setting up the proxy, before it reads stdin, execs the real
+server unproxied.
 First discovery retains channel servers as live forwarding; subsequent channel
 launches exec the real command directly using private `mcp-cache/class-v1`
 classification records. See the harness's

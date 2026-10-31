@@ -69,10 +69,18 @@ pub fn run_config(mut config: Config) -> io::Result<()> {
         #[cfg(not(unix))]
         Err(e) => return Err(e),
     };
+    #[cfg(unix)]
+    let fallback = config.clone();
     let result = runtime.block_on(proxy::run(config));
     // Tokio's stdin thread may be blocked in read after a signal; do not wait for it.
     runtime.shutdown_timeout(Duration::from_millis(100));
-    result
+    match result {
+        Ok(result) => result,
+        // Setup failed before stdin was touched: run the server unproxied.
+        #[cfg(unix)]
+        Err(_) if !fallback.selftest => exec_real(&fallback),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(unix)]

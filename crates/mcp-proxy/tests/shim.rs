@@ -206,3 +206,78 @@ fn empty_path_slot_runs_the_cwd_program_without_looping() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// An intercepted launch whose proxy cannot even start (before any stdin byte
+/// is read) must still run the real server, not fail it.
+#[test]
+fn matched_launch_execs_the_real_server_when_proxy_setup_fails() {
+    let root = tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap()).unwrap();
+    let shims = root.path().join("shim");
+    let real = root.path().join("real");
+    fs::create_dir(&shims).unwrap();
+    fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_zeron-mcp-proxy"), shims.join("node")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-mcp"), real.join("node")).unwrap();
+    let parent = std::env::current_exe().unwrap();
+    let launch = shim::Launch {
+        version: 1,
+        key: "fresh".into(),
+        parent_exe: parent.clone(),
+        parent_identity: zeron_mcp_proxy::cache::binary_id(&parent),
+        data_dir: root.path().join("data"),
+        run_dir: root.path().join("run"),
+        idle_minutes: 10,
+        servers: vec![shim::Server {
+            name: "lazy-one".into(),
+            command: "node".into(),
+            resolved_command: real.join("node").canonicalize().unwrap(),
+            args: vec!["argument".into()],
+            mode: "lazy".into(),
+            channel: false,
+            owner_legacy: false,
+        }],
+    };
+    fs::write(
+        shims.join(shim::MANIFEST),
+        serde_json::to_vec(&launch).unwrap(),
+    )
+    .unwrap();
+    let run = |fail_setup: bool| {
+        let mut cmd = Command::new(shims.join("node"));
+        cmd.arg0("node")
+            .arg("argument")
+            .env(
+                "PATH",
+                std::env::join_paths([shims.clone(), real.clone()]).unwrap(),
+            )
+            .env(shim::DIR_ENV, &shims)
+            .env(shim::KEY_ENV, "fresh")
+            .env(shim::PARENT_ENV, &parent)
+            .env("FAKE_EXEC_PROBE", "1")
+            .stdin(std::process::Stdio::null());
+        if fail_setup {
+            cmd.env("ZERON_MCP_PROXY_FAIL_SETUP", "1");
+        }
+        cmd.output().unwrap()
+    };
+    // Control: the same launch is proxied (EOF on stdin ends it quietly), proving
+    // the failing run below really was intercepted first.
+    let proxied = run(false);
+    assert_eq!(
+        proxied.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&proxied.stderr)
+    );
+    assert!(proxied.stdout.is_empty());
+    let fallback = run(true);
+    assert_eq!(
+        fallback.status.code(),
+        Some(37),
+        "{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&fallback.stdout).unwrap();
+    assert_eq!(record["args"][0], serde_json::json!(b"node".to_vec()));
+    assert_eq!(record["args"][1], serde_json::json!(b"argument".to_vec()));
+}

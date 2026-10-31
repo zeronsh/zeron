@@ -832,11 +832,36 @@ impl Proxy {
     }
 }
 
-pub async fn run(config: Config) -> io::Result<()> {
+/// The outer error is a setup failure before any byte of stdin was read, so the
+/// launcher can still exec the real server unchanged. The inner one is the
+/// proxy's own result once it owns the client's stream.
+pub async fn run(config: Config) -> io::Result<io::Result<()>> {
+    if std::env::var_os("ZERON_MCP_PROXY_FAIL_SETUP").is_some() {
+        return Err(io::Error::other("injected setup failure (test only)"));
+    }
     #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(unix)]
+    let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    Ok(serve(
+        config,
+        #[cfg(unix)]
+        term,
+        #[cfg(unix)]
+        hup,
+    )
+    .await)
+}
+
+async fn serve(
+    config: Config,
+    #[cfg(unix)] mut term: tokio::signal::unix::Signal,
+    #[cfg(unix)] mut hup: tokio::signal::unix::Signal,
+) -> io::Result<()> {
     let (tx, mut rx) = mpsc::channel(256);
     let (output, mut out_rx) = mpsc::channel::<Value>(256);
     let reader = read_lines(tokio::io::stdin(), tx.clone(), None);
@@ -894,10 +919,6 @@ pub async fn run(config: Config) -> io::Result<()> {
         last_progress: None,
         stderr: Arc::new(Mutex::new(Vec::new())),
     };
-    #[cfg(unix)]
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
-    let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let mut timer = tokio::time::interval(proxy.config.check_interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut result = Ok(());
