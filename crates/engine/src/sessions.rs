@@ -558,7 +558,9 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return None;
         }
-        lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.harness_id)
     }
 
     /// Mark the provider-switch seam for a send about to run on `harness_id`
@@ -3892,17 +3894,17 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
-    // A full window already behind us, so the run's first event commits
-    // immediately. Each commit moves this forward; `arm` then holds the next
-    // deadline on `last_commit + STREAM_COMMIT_MS`.
-    let mut last_commit =
-        tokio::time::Instant::now() - std::time::Duration::from_millis(STREAM_COMMIT_MS);
+    // No previous commit means the first event is due immediately, without
+    // subtracting from the clock (which may be paused in tests).
+    let mut last_commit: Option<tokio::time::Instant> = None;
     // Leading edge when the previous commit is already a window old;
     // otherwise the deadline stays anchored there, so a burst still
     // coalesces to one write per `STREAM_COMMIT_MS`.
-    fn arm(flush_at: &mut tokio::time::Instant, last_commit: tokio::time::Instant) {
+    fn arm(flush_at: &mut tokio::time::Instant, last_commit: Option<tokio::time::Instant>) {
         let now = tokio::time::Instant::now();
-        *flush_at = now.max(last_commit + std::time::Duration::from_millis(STREAM_COMMIT_MS));
+        *flush_at = last_commit
+            .and_then(|at| at.checked_add(std::time::Duration::from_millis(STREAM_COMMIT_MS)))
+            .map_or(now, |deadline| now.max(deadline));
     }
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
@@ -4036,6 +4038,30 @@ async fn drive_run(
     let mut final_completed_turn = None;
     let mut final_outcome = None;
     let final_status = loop {
+        // Flush even when prepared events or the harness stream stay ready.
+        if (dirty || subagents.values().any(|s| s.dirty)) && flush_at <= tokio::time::Instant::now()
+        {
+            #[cfg(test)]
+            FLUSH_TICKS.with(|t| t.set(t.get() + 1));
+            if dirty {
+                if let Err(err) = sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
+                }
+                dirty = false;
+            }
+            for sink in subagents.values_mut() {
+                sink.flush(&device_id);
+            }
+            last_commit = Some(tokio::time::Instant::now());
+            continue;
+        }
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
@@ -4146,6 +4172,9 @@ async fn drive_run(
                 }
                 // Engine-made events are final: a `show_image` image is
                 // already in uploads, outside the generated-image intake root.
+                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
+                    continue;
+                }
                 Some(event) = engine_rx.recv() => {
                     prepared_events.push_back(event);
                     continue;
@@ -4183,26 +4212,6 @@ async fn drive_run(
                         session_id: None,
                     },
                 },
-                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
-                    #[cfg(test)]
-                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
-                    // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
-                    // (parent + any dirty subagent docs). A leading edge armed
-                    // this deadline at `now`, so that event does not wait.
-                    if dirty {
-                        if let Err(err) = sync_segment(
-                            doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
-                        ) {
-                            tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
-                        }
-                        dirty = false;
-                    }
-                    for sink in subagents.values_mut() {
-                        sink.flush(&device_id);
-                    }
-                    last_commit = tokio::time::Instant::now();
-                    continue;
-                }
                 // Turn-quiesce watchdog (see the knob above). Armed only when the
                 // fold says nothing is in flight: an unresolved tool part is a
                 // command still running (legitimately silent for minutes — the
@@ -5405,7 +5414,11 @@ mod tests {
         std::io::Write::write_all(&mut f, b"{\"seq\":3,\"event\":{\"type\":\"done\"").unwrap();
         assert_eq!(
             sessions.inner.journal_harness_session("started-only"),
-            Some(("s1".into(), "/a".into(), Some(zeron_proto::HarnessId::ClaudeCode)))
+            Some((
+                "s1".into(),
+                "/a".into(),
+                Some(zeron_proto::HarnessId::ClaudeCode)
+            ))
         );
     }
 
@@ -5527,9 +5540,12 @@ mod tests {
             .unwrap();
         let mut request = request();
         request.prompt.clear();
-        core.sessions
-            .inner
-            .remember_harness_session("idle", "old-native-thread", &request.cwd, HarnessId::Codex);
+        core.sessions.inner.remember_harness_session(
+            "idle",
+            "old-native-thread",
+            &request.cwd,
+            HarnessId::Codex,
+        );
         core.sessions.start_idle("idle", request).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -5573,7 +5589,10 @@ mod tests {
                 SessionStatus::Idle
             );
             assert_eq!(
-                core.workspace.chat_harness_session("idle").unwrap().session_id,
+                core.workspace
+                    .chat_harness_session("idle")
+                    .unwrap()
+                    .session_id,
                 "new-native-thread"
             );
             let events = core.sessions.inner.journal.replay("idle", 0).unwrap();
@@ -5836,6 +5855,46 @@ mod tests {
                 .map(|s| (s.status, s.running_subagents)),
             Some((SessionStatus::Idle, 1)),
             "parked, with the subagent's sink open"
+        );
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leading_commit_is_not_starved_by_ready_events() {
+        FLUSH_TICKS.with(|t| t.set(0));
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-ready-stream";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        for _ in 0..100 {
+            feed.send(text("x")).unwrap();
+        }
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        for _ in 0..400 {
+            if core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            FLUSH_TICKS.with(|t| t.get()),
+            1,
+            "a ready stream must not starve the leading commit"
         );
         core.sessions.shutdown().await;
     }
