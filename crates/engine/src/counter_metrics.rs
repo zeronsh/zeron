@@ -29,7 +29,7 @@ fn parse_malloc_info(xml: &str) -> Option<serde_json::Value> {
         return None;
     }
     let system = system?.checked_add(mapped?)?;
-    let free = fast?.checked_add(rest?)?;
+    let free = fast.unwrap_or(0).checked_add(rest?)?;
     Some(
         serde_json::json!({"arenas": arenas, "system_bytes": system, "in_use_bytes": system.checked_sub(free)?, "free_bytes": free}),
     )
@@ -114,6 +114,18 @@ mod tests {
             .is_none()
         );
         assert!(parse_malloc_info(&xml.replace("</malloc>", "")).is_none());
-        assert!(malloc().is_some());
+        assert!(
+            parse_malloc_info(&xml.replace(r#"<total size="10" count="1" type="fast"/>"#, ""))
+                .is_some()
+        );
+        // The RPC test can sample concurrently; a busy sampler intentionally
+        // returns None rather than starting another blocking allocator walk.
+        assert!((0..200).any(|_| {
+            if malloc().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            false
+        }));
     }
 }
