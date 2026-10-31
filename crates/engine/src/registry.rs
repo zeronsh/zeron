@@ -156,7 +156,7 @@ pub struct McpPrefs {
     /// `"<harness>:<name>"` → off, eager, lazy, lazy-keep-alive, or main-only.
     #[serde(default)]
     pub servers: BTreeMap<String, McpServerChoice>,
-    /// Which chat may run channel-capable servers.
+    /// Reserved for future channel ownership; has no effect in v1.
     #[serde(default)]
     pub channel_owner: ChannelOwnerSetting,
     /// Parked-session idle window, in minutes. `0` means never. The reaper
@@ -708,8 +708,7 @@ impl HarnessRegistry {
 
     /// Replace the MCP block and persist it. Omitted fields are the caller's
     /// problem: deserializing a partial object already filled them from
-    /// [`McpPrefs`]'s defaults. Does not touch channel leases; the settings
-    /// RPC applies the new owner to the live map.
+    /// [`McpPrefs`]'s defaults. Channel ownership is inert in v1.
     pub fn set_mcp_prefs(&self, prefs: McpPrefs) {
         self.prefs().mcp = prefs;
         self.persist_prefs();

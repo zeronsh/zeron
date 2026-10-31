@@ -411,7 +411,7 @@ pub struct McpPlan {
     /// live here; main-only on a main chat does not.
     #[serde(default)]
     pub modes: std::collections::BTreeMap<String, McpMode>,
-    /// This chat is not the channel owner, so channel servers are omitted.
+    /// Reserved for future channel ownership. The engine sets this false in v1.
     #[serde(default)]
     pub drop_channels: bool,
     /// Side chat, or a chat an agent spawned (its parent chat id is set).
