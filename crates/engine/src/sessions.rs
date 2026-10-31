@@ -6813,6 +6813,29 @@ mod tests {
     fn assert_render(render: &mut SegmentRender, folded: &[MessagePart]) {
         render.refresh_indices(folded);
         assert_eq!(render.rendered, render_parts_full(folded));
+    }
+
+    fn assert_render_sync(
+        render: &mut SegmentRender,
+        folded: &[MessagePart],
+        inc: &mut SegmentWriter<'_>,
+        full: &mut SegmentWriter<'_>,
+        inc_doc: &SessionDoc,
+        full_doc: &SessionDoc,
+    ) {
+        use loro::ToJson;
+
+        // Bypass the render oracle; neither fallback may hide a bad cache
+        // or a missed dirty index in the equivalence test.
+        assert_render(render, folded);
+        inc.sync_indices(&render.rendered, render.dirty.iter().copied())
+            .unwrap();
+        full.sync_full(&render_parts_full(folded)).unwrap();
+        assert_eq!(inc.mismatches(), 0);
+        assert_eq!(
+            inc_doc.doc().get_deep_value().to_json_value(),
+            full_doc.doc().get_deep_value().to_json_value()
+        );
         render.dirty.clear();
     }
 
@@ -6868,6 +6891,50 @@ mod tests {
         render.refresh(&folded);
         assert_eq!(render.rendered, render_parts_full(&folded));
         assert_eq!(render.dirty, BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn render_cache_invalidates_reorders_removals_and_merges() {
+        let mut folded = vec![
+            MessagePart::Text {
+                id: "a".into(),
+                text: "first😀".into(),
+            },
+            tool_call(
+                "write",
+                zeron_proto::ToolCall::WriteFile {
+                    path: "private.txt".into(),
+                    content: Some("secret".into()),
+                },
+            ),
+            MessagePart::Reasoning {
+                id: "b".into(),
+                text: "thinking🦀".into(),
+            },
+            MessagePart::Text {
+                id: "c".into(),
+                text: "lasté".into(),
+            },
+        ];
+        let mut render = SegmentRender::default();
+        assert_render(&mut render, &folded);
+        render.dirty.clear();
+        folded.swap(0, 3);
+        render.note(Touched::All, folded.len());
+        assert_render(&mut render, &folded);
+        render.dirty.clear();
+        folded.remove(1);
+        render.note(Touched::All, folded.len());
+        assert_render(&mut render, &folded);
+        folded = vec![MessagePart::Text {
+            id: "a".into(),
+            text: "lastéfirst😀".into(),
+        }];
+        render.invalidate_all(folded.len());
+        assert_render(&mut render, &folded);
+        folded.clear();
+        render.invalidate_all(0);
+        assert_render(&mut render, &folded);
     }
 
     #[test]
@@ -7078,6 +7145,11 @@ mod tests {
             Some(MessagePart::Text { text, .. }) => assert_eq!(text, "café 日本語😀"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn incremental_render_and_sync_match_full_on_seeded_ops() {
+        use zeron_proto::ToolCall;
 
         let seeds: u64 = std::env::var("PERF_SEEDS")
             .ok()
@@ -7089,8 +7161,21 @@ mod tests {
             let mut folded = Vec::new();
             let mut render = SegmentRender::default();
             let mut seq = 0u32;
-            for _step in 0..150 {
+            let inc_doc = SessionDoc::init("render-eq").unwrap();
+            let full_doc = SessionDoc::init("render-eq").unwrap();
+            let mut segment = 0;
+            let mut inc = SegmentWriter::begin(&inc_doc, "s0", "dev", 0).unwrap();
+            let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 0).unwrap();
+            for step in 0..150 {
                 if !folded.is_empty() && rng.below(20) == 0 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
                     note_fold(
                         &mut render,
                         &mut folded,
@@ -7101,9 +7186,28 @@ mod tests {
                     );
                     assert!(folded.is_empty());
                     assert!(render.rendered.is_empty());
+                    segment += 1;
+                    let id = format!("s{segment}");
+                    inc = SegmentWriter::begin(&inc_doc, &id, "dev", 0).unwrap();
+                    full = SegmentWriter::begin(&full_doc, &id, "dev", 0).unwrap();
                     continue;
                 }
                 if !folded.is_empty() && rng.below(24) == 0 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
+                    // Snapshot replacements cross a segment boundary, like
+                    // steer clears. In-place structural cache edits are
+                    // exercised separately below.
+                    segment += 1;
+                    let id = format!("s{segment}");
+                    inc = SegmentWriter::begin(&inc_doc, &id, "dev", 0).unwrap();
+                    full = SegmentWriter::begin(&full_doc, &id, "dev", 0).unwrap();
                     seq += 1;
                     folded = vec![tool_call(
                         &format!("setup-{seq}"),
@@ -7118,7 +7222,7 @@ mod tests {
                 let roll = if folded.is_empty() {
                     rng.below(3)
                 } else {
-                    rng.below(8)
+                    rng.below(10)
                 };
                 match roll {
                     0 => note_fold(
@@ -7269,7 +7373,7 @@ mod tests {
                             message: format!("boom {}", tails[rng.below(tails.len())]),
                         },
                     ),
-                    _ => {
+                    7 => {
                         seq += 1;
                         note_fold(
                             &mut render,
@@ -7282,6 +7386,62 @@ mod tests {
                             },
                         );
                     }
+                    8 => {
+                        let tools: Vec<_> = folded
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::Tool { id, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !tools.is_empty() {
+                            let id = tools[rng.below(tools.len())].clone();
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::ToolResult {
+                                    id,
+                                    is_error: rng.below(2) == 0,
+                                    output: Some("journal only".into()),
+                                    diff: None,
+                                },
+                            );
+                        }
+                    }
+                    _ => {
+                        let pending = folded.iter().find_map(|part| match part {
+                            MessagePart::Input {
+                                request_id,
+                                resolved: false,
+                                ..
+                            } => Some(request_id.clone()),
+                            _ => None,
+                        });
+                        let event = if let Some(request_id) = pending {
+                            AgentEvent::InputResolved {
+                                request_id,
+                                answers: Some(Vec::new()),
+                            }
+                        } else {
+                            seq += 1;
+                            AgentEvent::InputRequested {
+                                request_id: format!("q{seq}"),
+                                questions: Vec::new(),
+                            }
+                        };
+                        note_fold(&mut render, &mut folded, &event);
+                    }
+                }
+                // Exercise several dirty events coalescing before a sync.
+                if rng.below(4) == 0 || step == 149 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
                 }
             }
         }

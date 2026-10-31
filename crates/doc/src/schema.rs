@@ -3313,6 +3313,46 @@ mod tests {
     }
 
     #[test]
+    fn incremental_sync_preserves_full_sync_structural_semantics() {
+        let inc_doc = SessionDoc::init("structural-eq").unwrap();
+        let full_doc = SessionDoc::init("structural-eq").unwrap();
+        let mut inc = open_incremental(&inc_doc, 0);
+        let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+        let a = MessagePart::Text {
+            id: "a".into(),
+            text: "first😀".into(),
+        };
+        let b = MessagePart::Text {
+            id: "b".into(),
+            text: "lasté".into(),
+        };
+        let snapshots = [
+            vec![a.clone(), b.clone()],
+            vec![b.clone(), a.clone()],
+            vec![b],
+            vec![MessagePart::Text {
+                id: "a".into(),
+                text: "lastéfirst😀".into(),
+            }],
+            Vec::new(),
+            vec![a],
+        ];
+        for parts in snapshots {
+            inc.sync_indices(&parts, 0..parts.len()).unwrap();
+            full.sync_full(&parts).unwrap();
+            // Both APIs retain the trailing doc parts on a shortened
+            // snapshot. Production clears close the segment and start a
+            // new writer; do not silently change the legacy sync contract.
+            assert_eq!(inc.written, full.written);
+            assert_eq!(inc.flushed_len, full.flushed_len);
+            assert_eq!(
+                inc_doc.doc().get_deep_value().to_json_value(),
+                full_doc.doc().get_deep_value().to_json_value()
+            );
+        }
+    }
+
+    #[test]
     fn incremental_sync_matches_full_sync_on_seeded_ops() {
         let seeds: u64 = std::env::var("PERF_SEEDS")
             .ok()
