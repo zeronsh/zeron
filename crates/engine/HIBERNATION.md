@@ -54,7 +54,8 @@ edit cannot clear an older runtime's channel protection. No channel leases or
 ownership changes are introduced.
 
 Memory pressure is sampled every ten seconds. Linux uses MemAvailable below the
-larger of 2 GiB and ten percent of MemTotal, or PSI `some avg10 > 10`. Windows
+larger of 2 GiB and ten percent of MemTotal (never more than a quarter of
+MemTotal, so a small machine's normal state is not pressure), or PSI `some avg10 > 10`. Windows
 uses GlobalMemoryStatusEx with the same availability threshold. macOS uses the
 read-only `kern.memorystatus_vm_pressure_level` sysctl (warning/critical). An
 unavailable probe is a no-op; no system tuning or privileges are required. Two

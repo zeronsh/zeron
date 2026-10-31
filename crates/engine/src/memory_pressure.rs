@@ -21,8 +21,12 @@ impl Pressure {
     }
 }
 
+/// Below the larger of 2 GiB and a tenth of RAM, but never above a quarter of
+/// RAM: on a small machine "2 GiB available" is its normal state, and a
+/// permanent pressure signal would put every session to sleep after two idle
+/// minutes for no memory gain.
 fn low_memory(available: u64, total: u64) -> bool {
-    available < (2 * 1024 * 1024 * 1024).max(total / 10)
+    available < (2 * 1024 * 1024 * 1024).max(total / 10).min(total / 4)
 }
 
 #[cfg(target_os = "linux")]
@@ -320,8 +324,23 @@ mod tests {
             linux_sample("MemTotal: 40000000 kB\nMemAvailable: 3000000 kB", ""),
             Some(true)
         );
+        // 10% of a large machine outranks the 2 GiB floor.
+        assert_eq!(
+            linux_sample("MemTotal: 64000000 kB\nMemAvailable: 6000000 kB", ""),
+            Some(true)
+        );
+        assert_eq!(
+            linux_sample("MemTotal: 64000000 kB\nMemAvailable: 7000000 kB", ""),
+            Some(false)
+        );
+        // A 4 GiB machine idling at 2 GiB available is not under pressure;
+        // below a quarter of its RAM it is.
         assert_eq!(
             linux_sample("MemTotal: 4000000 kB\nMemAvailable: 2000000 kB", ""),
+            Some(false)
+        );
+        assert_eq!(
+            linux_sample("MemTotal: 4000000 kB\nMemAvailable: 900000 kB", ""),
             Some(true)
         );
         assert_eq!(linux_sample("", ""), None);
