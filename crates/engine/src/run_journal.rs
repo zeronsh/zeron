@@ -10,7 +10,7 @@
 //! journal flags it for the same pick-up on the next boot.
 //!
 //! Bounded-window compaction is not done: existing files are append-only and are never
-//! rewritten, truncated, or deleted except by the test-only [`RunJournal::discard`]. A torn
+//! rewritten, truncated, or deleted. A torn
 //! trailing line from a crash mid-write is tolerated everywhere.
 //!
 //! Appends are queued to one writer thread, which batches consecutive lines per chat into
@@ -99,10 +99,6 @@ enum Job {
     Barrier {
         ack: SyncSender<Result<(), JournalError>>,
     },
-    Forget {
-        chat_id: String,
-        ack: SyncSender<()>,
-    },
     Stop,
 }
 
@@ -120,8 +116,7 @@ pub struct RunJournal {
     dir: PathBuf,
     /// Lookup and insert only. Per-chat ordering lives on [`ChatState`].
     chats: Mutex<HashMap<String, Arc<Mutex<ChatState>>>>,
-    /// Held across enqueue and across [`Self::discard`], so a discard cannot
-    /// delete a file a publisher has already sequenced but not yet sent.
+    /// Serializes sequence assignment and enqueue across publishers.
     gate: Mutex<()>,
     tx: Mutex<Option<SyncSender<Job>>>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -322,25 +317,6 @@ impl RunJournal {
         Ok(stale)
     }
 
-    /// Remove a chat's journal file entirely. Test-only: nothing in the engine
-    /// compacts or deletes journal data.
-    pub fn discard(&self, chat_id: &str) -> Result<(), JournalError> {
-        let _gate = lock_mutex(&self.gate);
-        self.flush()?;
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        self.send_job(Job::Forget {
-            chat_id: chat_id.to_string(),
-            ack: ack_tx,
-        })?;
-        ack_rx.recv().map_err(|_| writer_stopped())?;
-        lock_mutex(&self.chats).remove(chat_id);
-        let path = self.path_for(chat_id);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
     fn record(&self, chat_id: &str, event: &AgentEvent, wait: bool) -> Result<u64, JournalError> {
         let _gate = lock_mutex(&self.gate);
         let state = self.chat(chat_id);
@@ -518,7 +494,7 @@ fn writer_loop(dir: PathBuf, rx: Receiver<Job>) {
                 write_batch(&dir, &mut open, &mut clock, &mut last_error, batch);
             }
             other => {
-                if handle_control(&mut open, &mut last_error, other) {
+                if handle_control(&mut last_error, other) {
                     break;
                 }
             }
@@ -526,11 +502,7 @@ fn writer_loop(dir: PathBuf, rx: Receiver<Job>) {
     }
 }
 
-fn handle_control(
-    open: &mut HashMap<String, OpenJournal>,
-    last_error: &mut Option<String>,
-    job: Job,
-) -> bool {
+fn handle_control(last_error: &mut Option<String>, job: Job) -> bool {
     match job {
         Job::Barrier { ack } => {
             let result = match last_error.take() {
@@ -538,11 +510,6 @@ fn handle_control(
                 None => Ok(()),
             };
             let _ = ack.send(result);
-            false
-        }
-        Job::Forget { chat_id, ack } => {
-            open.remove(&chat_id);
-            let _ = ack.send(());
             false
         }
         Job::Stop => true,
