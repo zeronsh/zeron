@@ -10,7 +10,7 @@ export default function (pi) {
   const config = JSON.parse(process.env.ZERON_PI_MCP);
   let child, lines, connecting, nextId = 0, active = false, ready = false, dead = false;
   const pending = new Map();
-  const chatId = config.env?.ZERON_CHAT_ID;
+  const chatId = config.env?.ZERON_CHAT_ID ?? process.env.ZERON_CHAT_ID;
   const inChat = typeof chatId === "string" && chatId.trim() !== "";
   const omitted = new Set(CATALOG.omitWithoutChat);
   function fail(error) {

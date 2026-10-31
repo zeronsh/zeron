@@ -1991,6 +1991,25 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(Value::Array(filtered), no_chat);
+        // Side-chat mode changes initialize instructions, but must not change
+        // the catalog Pi registers, both inside and outside a chat.
+        for (chat_id, expected) in [
+            (Some("chat-alpha-1".to_owned()), &embedded["tools"]),
+            (None, &no_chat),
+        ] {
+            let side = tools(
+                Arc::new(World::default()),
+                Origin {
+                    chat_id,
+                    side_chats_only: true,
+                    ..Default::default()
+                },
+            );
+            let listed = crate::jsonrpc::handle_request(&side, json!(1), "tools/list", Value::Null)
+                .await["result"]["tools"]
+                .clone();
+            assert_eq!(&listed, expected);
+        }
     }
 
     #[test]

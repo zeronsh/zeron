@@ -86,5 +86,13 @@ if (process.argv[2] === 'server') {
     expected += 1;
     assert.equal(spawns(), expected, 'the first call starts the server outside a chat too');
   } finally { handlers.session_shutdown(); }
+  process.env.ZERON_CHAT_ID = 'inherited';
+  process.env.ZERON_PI_MCP = JSON.stringify({name:'zeron',command:process.execPath,args:[process.argv[1],'server'],env:{}});
+  const inherited = {}, inheritedTools = {};
+  extension({on:(event,fn)=>inherited[event]=fn,registerTool:tool=>inheritedTools[tool.name]=tool});
+  await inherited.session_start();
+  assert.ok(inheritedTools.zeron_show_visual, 'catalog must follow the inherited server environment');
+  inherited.session_shutdown();
+  delete process.env.ZERON_CHAT_ID;
   rmSync(mark, {force: true});
 }
