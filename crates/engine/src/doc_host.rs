@@ -647,6 +647,7 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
+    purged: AtomicBool,
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
@@ -1912,6 +1913,7 @@ impl DocHost {
             snapshot_bytes: AtomicUsize::new(snapshot_len),
             room_gen,
             retired: AtomicBool::new(false),
+            purged: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
             sync_started: AtomicBool::new(false),
@@ -1979,6 +1981,7 @@ impl DocHost {
                     if handle.retired.load(Ordering::Acquire) { return Ok(()); }
                     {
                         let mut order = lock(&snapshot_order);
+                        if handle.purged.load(Ordering::Acquire) { return Ok(()); }
                         for update in order.snapshot_prefix(bytes).map_err(std::io::Error::other)? {
                             snapshot_outbox.submit(chat, snapshot_weak.clone(), uuid::Uuid::new_v4().to_string(), update);
                         }
@@ -2005,6 +2008,7 @@ impl DocHost {
                             // Ordering and submitting share one lock so two
                             // hooks cannot swap their updates on the queue.
                             let mut order = lock(&own_order);
+                            if handle.purged.load(Ordering::Acquire) { return true; }
                             for bytes in order.order(bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 outbox.submit(&publication_chat, weak_push.clone(), batch_id, bytes);
@@ -3403,6 +3407,7 @@ impl DocHost {
     }
 
     fn pinned(&self, handle: &Arc<ChatDocHandle>) -> bool {
+        if self.inner.outbox.has_in_flight(&handle.chat_id) { return true; }
         if handle.sync_started.load(Ordering::Acquire) {
             return true;
         }
@@ -3727,8 +3732,22 @@ impl DocHost {
     /// chat is gone (DeleteChat / DeleteSpace cascade). Watchers see the
     /// stream end; a racing writer keeps its orphaned doc until the run ends.
     pub fn purge_chat(&self, chat_id: &str) {
+        let _opening = lock(&self.inner.opening);
         let removed = lock(&self.inner.handles).remove(chat_id);
-        drop(removed);
+        if let Some(handle) = &removed {
+            // A racing orphaned writer may already have entered its callback.
+            // Fence its submit before draining and deleting the outbox.
+            let order = lock(&handle.own_ops_order).clone();
+            let _order = order.as_ref().map(|order| lock(order));
+            handle.purged.store(true, Ordering::Release);
+        }
+        if let Some(handle) = &removed {
+            lock(&handle.chat2_local_sub).take();
+            lock(&handle.publication_barrier).take();
+            if let Some(persistence) = &handle.persistence { persistence.stop(); }
+            lock(&handle.chat2).take();
+        }
+        self.inner.outbox.flush();
         if let Err(err) = self.inner.store.delete_snapshot(chat_id) {
             tracing::warn!(chat = %chat_id, error = %err, "snapshot delete failed");
         }
@@ -6331,6 +6350,7 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        if handle.purged.load(Ordering::Acquire) { return; }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -7269,6 +7289,34 @@ mod publication_eviction_tests {
         let recovered = reopened.open_local("shutdown").unwrap();
         assert_eq!(recovered.doc.doc().get_text("body").to_string(), text);
         reopened.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_drains_queued_rows_and_disables_orphaned_writers_and_snapshots() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("deleted").unwrap();
+        let outbox = host.inner.outbox.clone();
+        let pause = outbox.pause();
+        commit_text(&handle, "queued before delete");
+        assert!(host.pinned(&handle), "queued updates must pin the handle");
+        let purging = {
+            let host = host.clone();
+            std::thread::spawn(move || host.purge_chat("deleted"))
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(pause);
+        tokio::task::spawn_blocking(move || purging.join().unwrap()).await.unwrap();
+        commit_text(&handle, "orphaned after delete");
+        handle.persistence.as_ref().unwrap().dirty(true);
+        handle.persistence.as_ref().unwrap().flush_sync();
+        host.save_snapshot(&handle);
+        outbox.flush();
+        assert!(!store.has_snapshot("deleted").unwrap());
+        assert!(store.pending_chat_updates("deleted").unwrap().is_empty());
+        host.shutdown_workers().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
