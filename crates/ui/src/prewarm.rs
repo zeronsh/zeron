@@ -48,7 +48,6 @@ pub struct PrewarmState {
     gate: PrewarmGate,
     /// The ask waiting out its debounce.
     pending: Option<Task<()>>,
-    pending_key: Option<String>,
     focus: Option<Subscription>,
     /// The chat the composer last had focus on, so opening another chat
     /// with the input already focused still asks.
@@ -85,20 +84,15 @@ impl Composer {
     }
 
     /// Ask for a prewarm of the chat the composer shows once the debounce
-    /// passes. A second trigger while one waits joins it.
+    /// passes. Each trigger restarts the debounce.
     pub(crate) fn schedule_prewarm(&mut self, cx: &mut Context<Self>) {
-        let Some((chat_id, _)) = self.prewarm_target(cx) else {
-            return;
-        };
-        if self.prewarm.pending_key.as_deref() == Some(&chat_id) {
+        if self.prewarm_target(cx).is_none() {
             return;
         }
-        self.prewarm.pending_key = Some(chat_id);
         self.prewarm.pending = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PREWARM_DEBOUNCE).await;
             this.update(cx, |composer, cx| {
                 composer.prewarm.pending = None;
-                composer.prewarm.pending_key = None;
                 composer.send_prewarm(cx);
             })
             .ok();
@@ -348,6 +342,24 @@ mod tests {
         let asked = rig.asked();
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[1]["chatId"], "c2");
+    }
+
+    #[gpui::test]
+    fn typing_restarts_the_debounce(cx: &mut gpui::TestAppContext) {
+        let (rig, cx) = rig(cx, None);
+        let _guard = rig.runtime.enter();
+        rig.focus(cx);
+        cx.executor().advance_clock(Duration::from_millis(200));
+        rig.composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("h", cx))
+        });
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        assert!(rig.asked().is_empty());
+        rig.settle(cx);
+        assert_eq!(rig.asked().len(), 1);
     }
 
     #[gpui::test]
