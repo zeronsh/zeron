@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicU32},
     time::{Instant, SystemTime},
@@ -34,6 +35,7 @@ struct State {
     used_labels: HashSet<String>,
     last_complete_scan: Option<Instant>,
     last_prune_bucket: Option<i64>,
+    socket_index: SocketIndex,
 }
 #[derive(Clone)]
 pub struct LocalRoute {
@@ -58,6 +60,12 @@ struct ProjectName {
     #[serde(default)]
     last_seen_ms: i64,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SocketIdentity {
+    inode: String,
+    address: SocketAddr,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ServiceName {
     id: String,
@@ -66,6 +74,8 @@ struct ServiceName {
     /// Hour bucket, ms since the epoch. `0` is a registry written before stamps.
     #[serde(default)]
     last_seen_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_socket: Option<SocketIdentity>,
 }
 /// Seen-at is stored as the start of the current hour, so a service that stays
 /// up rewrites the registry at most hourly, including across restarts.
@@ -170,14 +180,57 @@ fn verify_used_labels(used: &mut HashSet<String>, names: &Names) {
     }
 }
 
+#[derive(Default)]
+struct SocketIndex {
+    inodes: HashMap<String, Vec<(String, String)>>,
+    addresses: HashMap<SocketAddr, Vec<(String, String)>>,
+}
+impl SocketIndex {
+    fn build(names: &Names) -> Self {
+        let mut index = Self::default();
+        for (cwd, project) in &names.projects {
+            for service in &project.services {
+                if let Some(socket) = &service.last_socket {
+                    let key = (cwd.clone(), service.id.clone());
+                    index
+                        .inodes
+                        .entry(socket.inode.clone())
+                        .or_default()
+                        .push(key.clone());
+                    index.addresses.entry(socket.address).or_default().push(key);
+                }
+            }
+        }
+        index
+    }
+    fn matches(&self, evidence: &crate::discovery::SocketEvidence) -> HashSet<(String, String)> {
+        let mut result = HashSet::new();
+        for (inode, address) in &evidence.sockets {
+            if let Some(keys) = self.inodes.get(inode) {
+                result.extend(keys.iter().cloned());
+            }
+            if let Some(keys) = self.addresses.get(address) {
+                result.extend(keys.iter().cloned());
+            }
+        }
+        result
+    }
+}
+
 // A complete scan clock excludes downtime, failed scans, and partial scans.
 // The extra hour compensates for rounding last-seen stamps down to an hour.
-fn prune_names(names: &mut Names, routed: &HashSet<String>, now: i64) -> bool {
+fn prune_names(
+    names: &mut Names,
+    routed: &HashSet<String>,
+    now: i64,
+    preserve_unknown: bool,
+) -> bool {
     let mut changed = false;
     for project in names.projects.values_mut() {
         let before = project.services.len();
         project.services.retain(|service| {
             routed.contains(&service.id)
+                || (preserve_unknown && service.last_socket.is_none())
                 || now.saturating_sub(service.last_seen_ms) <= SERVICE_TTL_MS + SEEN_BUCKET_MS
         });
         changed |= before != project.services.len();
@@ -240,6 +293,7 @@ impl Catalog {
         if migrated {
             write_names(&file, &names)?;
         }
+        let socket_index = SocketIndex::build(&names);
         let mut used_labels = used_labels_full(&names);
         verify_used_labels(&mut used_labels, &names);
         let (changes, _) = watch::channel(PreviewSnapshot::default());
@@ -257,6 +311,7 @@ impl Catalog {
                 used_labels,
                 last_complete_scan: None,
                 last_prune_bucket: None,
+                socket_index,
             }),
             changes,
             internal_changes,
@@ -439,8 +494,20 @@ impl Catalog {
     }
     pub(crate) fn replace_local_scanned(
         &self,
+        observations: Vec<(PathBuf, Listener)>,
+        complete: bool,
+    ) -> anyhow::Result<()> {
+        self.replace_local_scanned_with_sockets(
+            observations,
+            complete,
+            &crate::discovery::SocketEvidence::default(),
+        )
+    }
+    pub(crate) fn replace_local_scanned_with_sockets(
+        &self,
         mut observations: Vec<(PathBuf, Listener)>,
         complete: bool,
+        evidence: &crate::discovery::SocketEvidence,
     ) -> anyhow::Result<()> {
         observations.sort_by_key(|(root, l)| {
             (
@@ -456,6 +523,7 @@ impl Catalog {
         let complete = complete && observations.len() <= 256;
         let instant = Instant::now();
         let mut changed_names = false;
+        let mut socket_index_dirty = false;
         if complete {
             if let Some(previous) = state.last_complete_scan {
                 // Large scheduling gaps do not count as evidence of scans.
@@ -474,6 +542,7 @@ impl Catalog {
             state.last_complete_scan = None;
         }
         let now = state.names.scan_clock_ms;
+        let protected_sockets = state.socket_index.matches(evidence);
         let mut next = HashMap::new();
         let mut seen_listeners = HashSet::new();
         for (root, listener) in observations.into_iter().take(256) {
@@ -529,17 +598,36 @@ impl Catalog {
             let device_label = state.names.device_label.clone();
             let existing = {
                 let project = state.names.projects.get(&cwd).unwrap();
+                let current_inode = evidence.owners.get(&(listener.pid, listener.address));
+                let same_socket = |service: &ServiceName| {
+                    current_inode.is_some()
+                        && service.last_socket.as_ref().is_some_and(|socket| {
+                            if evidence.sockets.contains_key(&socket.inode) {
+                                current_inode == Some(&socket.inode)
+                            } else {
+                                socket.address == listener.address
+                            }
+                        })
+                };
+                let available = |service: &ServiceName| {
+                    !next.contains_key(&service.id)
+                        && (!protected_sockets.contains(&(cwd.clone(), service.id.clone()))
+                            || same_socket(service))
+                };
                 project
                     .services
                     .iter()
-                    .find(|service| {
-                        service.fingerprint == fingerprint
-                            && previous_id.as_ref() == Some(&service.id)
-                            && !next.contains_key(&service.id)
+                    .find(|service| available(service) && same_socket(service))
+                    .or_else(|| {
+                        project.services.iter().find(|service| {
+                            available(service)
+                                && service.fingerprint == fingerprint
+                                && previous_id.as_ref() == Some(&service.id)
+                        })
                     })
                     .or_else(|| {
                         project.services.iter().find(|service| {
-                            service.fingerprint == fingerprint && !next.contains_key(&service.id)
+                            available(service) && service.fingerprint == fingerprint
                         })
                     })
                     .map(|service| service.id.clone())
@@ -575,6 +663,7 @@ impl Catalog {
                         fingerprint,
                         label,
                         last_seen_ms: 0,
+                        last_socket: None,
                     });
                 changed_names = true;
                 id
@@ -588,6 +677,17 @@ impl Catalog {
                 .find(|service| service.id == id)
                 .unwrap();
             changed_names |= touch_seen(&mut service_name.last_seen_ms, now);
+            if let Some(inode) = evidence.owners.get(&(listener.pid, listener.address)) {
+                let socket = SocketIdentity {
+                    inode: inode.clone(),
+                    address: listener.address,
+                };
+                if service_name.last_socket.as_ref() != Some(&socket) {
+                    service_name.last_socket = Some(socket);
+                    changed_names = true;
+                    socket_index_dirty = true;
+                }
+            }
             let label = service_name.label.clone();
             let service = PreviewService {
                 id: id.clone(),
@@ -611,11 +711,30 @@ impl Catalog {
             };
             next.insert(id, LocalRoute { service, listener });
         }
+        if socket_index_dirty {
+            state.socket_index = SocketIndex::build(&state.names);
+        }
+        if complete {
+            let maybe_live = state.socket_index.matches(evidence);
+            for (cwd, id) in maybe_live {
+                if let Some(project) = state.names.projects.get_mut(&cwd) {
+                    if let Some(service) =
+                        project.services.iter_mut().find(|service| service.id == id)
+                    {
+                        changed_names |= touch_seen(&mut service.last_seen_ms, now);
+                    }
+                }
+            }
+        }
         if complete && state.last_prune_bucket != Some(seen_bucket(now)) {
             // Old routes remain visible until persistence and publication succeed.
             let routed = next.keys().chain(state.routes.keys()).cloned().collect();
-            if prune_names(&mut state.names, &routed, now) {
+            // A legacy entry has no socket identity. An unreadable process
+            // may still own any listening socket, so its name is ambiguous.
+            let preserve_unknown = evidence.unreadable > 0 && !evidence.sockets.is_empty();
+            if prune_names(&mut state.names, &routed, now, preserve_unknown) {
                 state.used_labels = used_labels_full(&state.names);
+                state.socket_index = SocketIndex::build(&state.names);
                 changed_names = true;
             }
             state.last_prune_bucket = Some(seen_bucket(now));
@@ -842,6 +961,7 @@ mod tests {
                     fingerprint: format!("other-{i}"),
                     label: format!("other-{i}"),
                     last_seen_ms: 0,
+                    last_socket: None,
                 });
             }
             write_names(&file, &state.names).unwrap();
@@ -911,13 +1031,15 @@ mod tests {
                     fingerprint: "f".into(),
                     label: "app".into(),
                     last_seen_ms: 1,
+                    last_socket: None,
                 }],
             },
         );
         assert!(!prune_names(
             &mut names,
             &HashSet::from(["live".into()]),
-            SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS
+            SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS,
+            false
         ));
         assert_eq!(names.projects["/missing"].services[0].id, "live");
     }
@@ -958,13 +1080,13 @@ mod tests {
             )
             .unwrap()
         };
-        let (_, complete, unreadable) = scan(libc::EACCES);
+        let (_, complete, unreadable, _) = scan(libc::EACCES);
         assert!(complete);
         assert_eq!(unreadable, 1);
-        let (_, complete_ep, unreadable_ep) = scan(libc::EPERM);
+        let (_, complete_ep, unreadable_ep, _) = scan(libc::EPERM);
         assert!(complete_ep);
         assert_eq!(unreadable_ep, 1);
-        let (_, complete_io, _) = scan(libc::EIO);
+        let (_, complete_io, _, _) = scan(libc::EIO);
         assert!(!complete_io);
 
         let catalog = Catalog::open(
@@ -1007,6 +1129,292 @@ mod tests {
         let before = catalog.0.state.lock().unwrap().names.scan_clock_ms;
         catalog.replace_local_scanned(Vec::new(), true).unwrap();
         assert_eq!(catalog.0.state.lock().unwrap().names.scan_clock_ms, before);
+    }
+    #[test]
+    fn socket_identity_matches_inode_or_address_fallback() {
+        let address = ([127, 0, 0, 1], 5173).into();
+        let mut names = Names::default();
+        names.projects.insert(
+            "/app".into(),
+            ProjectName {
+                id: "p".into(),
+                label: "app".into(),
+                last_seen_ms: 1,
+                services: vec![ServiceName {
+                    id: "s".into(),
+                    fingerprint: "f".into(),
+                    label: "app".into(),
+                    last_seen_ms: 1,
+                    last_socket: Some(SocketIdentity {
+                        inode: "123".into(),
+                        address,
+                    }),
+                }],
+            },
+        );
+        let index = SocketIndex::build(&names);
+        let expected = HashSet::from([("/app".into(), "s".into())]);
+        let fallback = crate::discovery::SocketEvidence {
+            sockets: HashMap::from([("456".into(), address)]),
+            ..Default::default()
+        };
+        assert_eq!(index.matches(&fallback), expected);
+        let same_inode = crate::discovery::SocketEvidence {
+            sockets: HashMap::from([("123".into(), ([127, 0, 0, 1], 9999).into())]),
+            ..Default::default()
+        };
+        assert_eq!(index.matches(&same_inode), expected);
+        assert!(
+            index
+                .matches(&crate::discovery::SocketEvidence::default())
+                .is_empty()
+        );
+    }
+    #[test]
+    fn legacy_unknown_socket_names_are_kept_while_ownership_is_ambiguous() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(
+            temp.path().join("names.json"),
+            "device".into(),
+            "Mac".into(),
+        )
+        .unwrap();
+        let root = temp.path().to_path_buf();
+        catalog
+            .replace_local(vec![(root, server(5173, 1, "vite"))])
+            .unwrap();
+        let id = catalog.snapshot().services[0].id.clone();
+        {
+            let mut state = catalog.0.state.lock().unwrap();
+            state.names.scan_clock_ms += SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS;
+        }
+        // The unknown legacy name could belong to an inaccessible listener.
+        let ambiguous = crate::discovery::SocketEvidence {
+            sockets: HashMap::from([("unknown".into(), ([127, 0, 0, 1], 5173).into())]),
+            unreadable: 1,
+            ..Default::default()
+        };
+        catalog
+            .replace_local_scanned_with_sockets(Vec::new(), true, &ambiguous)
+            .unwrap();
+        catalog
+            .replace_local_scanned_with_sockets(Vec::new(), true, &ambiguous)
+            .unwrap();
+        assert!(service_rows(&catalog).iter().any(|(name, _)| name == &id));
+        // Once no inaccessible owner exists, a later complete scan may expire it.
+        {
+            let mut state = catalog.0.state.lock().unwrap();
+            state.names.scan_clock_ms += SEEN_BUCKET_MS;
+        }
+        catalog
+            .replace_local_scanned_with_sockets(
+                Vec::new(),
+                true,
+                &crate::discovery::SocketEvidence::default(),
+            )
+            .unwrap();
+        assert!(!service_rows(&catalog).iter().any(|(name, _)| name == &id));
+    }
+    #[test]
+    fn a_live_unreadable_socket_cannot_be_reassigned_to_a_matching_new_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(
+            temp.path().join("names.json"),
+            "device".into(),
+            "Mac".into(),
+        )
+        .unwrap();
+        let root = temp.path().to_path_buf();
+        let first = server(5173, 1, "vite");
+        let second = server(5174, 2, "vite");
+        let initial = crate::discovery::SocketEvidence {
+            sockets: HashMap::from([("first".into(), first.address)]),
+            owners: HashMap::from([((first.pid, first.address), "first".into())]),
+            unreadable: 0,
+        };
+        catalog
+            .replace_local_scanned_with_sockets(vec![(root.clone(), first.clone())], true, &initial)
+            .unwrap();
+        let original = catalog.snapshot().services[0].clone();
+        let both = crate::discovery::SocketEvidence {
+            sockets: HashMap::from([
+                ("first".into(), first.address),
+                ("second".into(), second.address),
+            ]),
+            owners: HashMap::from([((second.pid, second.address), "second".into())]),
+            unreadable: 1,
+        };
+        catalog
+            .replace_local_scanned_with_sockets(vec![(root.clone(), second)], true, &both)
+            .unwrap();
+        assert_ne!(catalog.snapshot().services[0].id, original.id);
+        assert!(
+            service_rows(&catalog)
+                .iter()
+                .any(|(id, label)| id == &original.id && original.hostname.contains(label))
+        );
+        catalog
+            .replace_local_scanned_with_sockets(vec![(root, first)], true, &initial)
+            .unwrap();
+        assert_eq!(catalog.snapshot().services[0].id, original.id);
+        assert_eq!(catalog.snapshot().services[0].hostname, original.hostname);
+    }
+    #[cfg(target_os = "linux")]
+    fn assert_unreadable_socket_keeps_name(transfer: bool) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                // Also reap a forked socket holder if an assertion fails.
+                if self.0.try_wait().ok().flatten().is_none() {
+                    unsafe {
+                        libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+                    }
+                    let _ = self.0.wait();
+                }
+            }
+        }
+        let script = r#"import ctypes,os,socket,sys,time
+s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen()
+print(s.getsockname()[1], flush=True)
+sys.stdin.readline()
+if sys.argv[1] == 'transfer':
+    r,w=os.pipe(); pid=os.fork()
+    if pid == 0:
+        os.close(r); assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0
+        os.write(w,b'1'); os.close(w); time.sleep(120); os._exit(0)
+    os.close(w); os.read(r,1); os.close(r); s.close()
+else:
+    assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0
+print('hidden', pid if sys.argv[1] == 'transfer' else os.getpid(), flush=True)
+sys.stdin.readline()
+if sys.argv[1] == 'transfer': os.kill(pid,9); os.waitpid(pid,0)
+"#;
+        let mut child = Child(
+            Command::new("python3")
+                .args([
+                    "-u",
+                    "-c",
+                    script,
+                    if transfer { "transfer" } else { "hide" },
+                ])
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut output = BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let port: u16 = line.trim().parse().unwrap();
+        let mut origins = crate::discovery::Origins::default();
+        let (listeners, _, _, before) =
+            crate::discovery::listeners_with_completeness(&mut origins).unwrap();
+        let listener = listeners
+            .into_iter()
+            .find(|listener| listener.pid == child.0.id() && listener.address.port() == port)
+            .expect("initial owner");
+        let inode = before.owners[&(listener.pid, listener.address)].clone();
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("names.json");
+        let root = temp.path().to_path_buf();
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        catalog
+            .replace_local_scanned_with_sockets(vec![(root.clone(), listener)], true, &before)
+            .unwrap();
+        let original = catalog.snapshot().services[0].clone();
+        writeln!(child.0.stdin.as_mut().unwrap(), "hide").unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let mut hidden = line.split_whitespace();
+        assert_eq!(hidden.next(), Some("hidden"));
+        let hidden_pid: u32 = hidden.next().unwrap().parse().unwrap();
+        let catalog = {
+            drop(catalog);
+            Catalog::open(&file, "device".into(), "Mac".into()).unwrap()
+        };
+        for _ in 0..5 {
+            // The test user namespace may have ptrace capabilities over its
+            // child. Inject the denied fd read while using the real socket table.
+            let evidence = (0..20)
+                .find_map(|_| {
+                    let (_, stable, _, mut evidence) =
+                        crate::discovery::listeners_with_completeness(&mut origins)?;
+                    let (_, complete, skipped, owners) = crate::discovery::listeners_from(
+                        &mut origins,
+                        &evidence.sockets,
+                        Path::new("/proc"),
+                        &mut |path| {
+                            if path
+                                .parent()
+                                .and_then(Path::file_name)
+                                .and_then(|n| n.to_str())
+                                .and_then(|s| s.parse::<u32>().ok())
+                                == Some(hidden_pid)
+                            {
+                                Err(std::io::Error::from_raw_os_error(libc::EACCES))
+                            } else {
+                                std::fs::read_dir(path)
+                            }
+                        },
+                    )?;
+                    if !stable || !complete || skipped == 0 {
+                        return None;
+                    }
+                    evidence.owners = owners;
+                    Some(evidence)
+                })
+                .expect("complete socket and process scans");
+            assert!(evidence.sockets.contains_key(&inode));
+            assert!(
+                !evidence
+                    .owners
+                    .keys()
+                    .any(|(pid, address)| *pid == hidden_pid && address.port() == original.port)
+            );
+            {
+                let mut state = catalog.0.state.lock().unwrap();
+                state.names.scan_clock_ms += SERVICE_TTL_MS / 2;
+            }
+            catalog
+                .replace_local_scanned_with_sockets(Vec::new(), true, &evidence)
+                .unwrap();
+            assert!(
+                service_rows(&catalog)
+                    .iter()
+                    .any(|(id, _)| *id == original.id)
+            );
+        }
+        writeln!(child.0.stdin.as_mut().unwrap(), "stop").unwrap();
+        assert!(child.0.wait().unwrap().success());
+        let (_, _, _, evidence) =
+            crate::discovery::listeners_with_completeness(&mut origins).unwrap();
+        assert!(!evidence.sockets.contains_key(&inode));
+        {
+            let mut state = catalog.0.state.lock().unwrap();
+            state.names.scan_clock_ms += SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS;
+        }
+        catalog
+            .replace_local_scanned_with_sockets(Vec::new(), true, &evidence)
+            .unwrap();
+        assert!(
+            !service_rows(&catalog)
+                .iter()
+                .any(|(id, _)| *id == original.id)
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_named_server_that_becomes_non_dumpable_keeps_its_name() {
+        assert_unreadable_socket_keeps_name(false);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_handed_to_an_unreadable_process_keeps_its_name() {
+        assert_unreadable_socket_keeps_name(true);
     }
     #[test]
     fn seen_stamps_are_hourly_and_survive_restart() {
@@ -1063,6 +1471,7 @@ mod tests {
                 fingerprint: format!("fp-{i}"),
                 label: format!("label-{i}"),
                 last_seen_ms: 0,
+                last_socket: None,
             })
             .collect();
         names.projects.insert(

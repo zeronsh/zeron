@@ -163,7 +163,11 @@ pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<(Vec<(PathBuf, discovery::Listener)>, bool)> {
+) -> Option<(
+    Vec<(PathBuf, discovery::Listener)>,
+    bool,
+    discovery::SocketEvidence,
+)> {
     let Scope {
         chats,
         terminals,
@@ -195,10 +199,11 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some((Vec::new(), false));
+        return Some((Vec::new(), false, discovery::SocketEvidence::default()));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    let (listeners, complete, unreadable) = discovery::listeners_with_completeness(origins)?;
+    let (listeners, complete, unreadable, evidence) =
+        discovery::listeners_with_completeness(origins)?;
     if unreadable > 0 {
         tracing::debug!(unreadable, "preview discovery skipped unreadable processes");
     }
@@ -231,6 +236,7 @@ fn candidates(
             })
             .collect(),
         complete && scope_complete,
+        evidence,
     ))
 }
 impl PreviewService {
@@ -404,9 +410,9 @@ impl PreviewService {
                     })
                     .await;
                     let candidates = match scanned {
-                        Ok((Some((candidates, complete)), kept)) => {
+                        Ok((Some((candidates, complete, evidence)), kept)) => {
                             *origins = kept;
-                            (candidates, complete)
+                            (candidates, complete, evidence)
                         }
                         // A failed enumeration says nothing about what runs:
                         // keep the services already listed.
@@ -424,7 +430,7 @@ impl PreviewService {
                             return;
                         }
                     };
-                    let (candidates, mut complete) = candidates;
+                    let (candidates, mut complete, evidence) = candidates;
                     let candidate_count = candidates.len();
                     let now = Instant::now();
                     let listeners: HashSet<_> =
@@ -447,7 +453,9 @@ impl PreviewService {
                         }
                     }
                     complete &= servers.len() == candidate_count;
-                    if let Err(error) = catalog.replace_local_scanned(servers, complete) {
+                    if let Err(error) =
+                        catalog.replace_local_scanned_with_sockets(servers, complete, &evidence)
+                    {
                         tracing::warn!(%error, "could not update preview services");
                     }
                 };
@@ -629,7 +637,7 @@ mod tests {
                     let period = ScanCadence::default().period(watched, start);
                     while count < if watched { 10 } else { 2 } {
                         std::thread::sleep(period);
-                        let (_, scan_complete, unreadable) = discovery::listeners_with_completeness(&mut origins).expect("process scan");
+                        let (_, scan_complete, unreadable, _) = discovery::listeners_with_completeness(&mut origins).expect("process scan");
                         complete += usize::from(scan_complete);
                         skipped += unreadable;
                         count += 1;

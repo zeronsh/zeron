@@ -331,34 +331,50 @@ fn listen_sockets() -> Option<(HashMap<String, SocketAddr>, bool)> {
     (tables > 0).then_some((sockets, tables == 2 && valid))
 }
 
+#[derive(Default)]
+pub(crate) struct SocketEvidence {
+    pub sockets: HashMap<String, SocketAddr>,
+    pub owners: HashMap<(u32, SocketAddr), String>,
+    pub unreadable: usize,
+}
+
 /// This user's loopback-reachable TCP listeners, attributed to their origin
 /// chat. A failed process-table read returns `None` so callers keep their
 /// previous result. Socket ownership can change without changing inode sets,
 /// so every scan walks the process descriptors.
 #[cfg(target_os = "linux")]
 pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
-    listeners_with_completeness(origins).map(|(listeners, _, _)| listeners)
+    listeners_with_completeness(origins).map(|(listeners, _, _, _)| listeners)
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn listeners_with_completeness(
     origins: &mut Origins,
-) -> Option<(Vec<Listener>, bool, usize)> {
+) -> Option<(Vec<Listener>, bool, usize, SocketEvidence)> {
     let (sockets, tables_complete) = listen_sockets()?;
-    let (listeners, complete, unreadable) =
+    let (listeners, complete, unreadable, owners) =
         listeners_from(origins, &sockets, Path::new("/proc"), &mut |path| {
             std::fs::read_dir(path)
         })?;
     let stable = listen_sockets().is_some_and(|(after, complete)| complete && after == sockets);
-    Some((listeners, complete && tables_complete && stable, unreadable))
+    Some((
+        listeners,
+        complete && tables_complete && stable,
+        unreadable,
+        SocketEvidence {
+            sockets,
+            owners,
+            unreadable,
+        },
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn listeners_with_completeness(
     origins: &mut Origins,
-) -> Option<(Vec<Listener>, bool, usize)> {
+) -> Option<(Vec<Listener>, bool, usize, SocketEvidence)> {
     // The platform enumerator does not report every per-process read failure.
-    listeners(origins).map(|listeners| (listeners, false, 0))
+    listeners(origins).map(|listeners| (listeners, false, 0, SocketEvidence::default()))
 }
 
 #[cfg(target_os = "linux")]
@@ -367,13 +383,19 @@ pub(crate) fn listeners_from(
     sockets: &HashMap<String, SocketAddr>,
     proc_root: &Path,
     open_fds: &mut impl FnMut(&Path) -> std::io::Result<std::fs::ReadDir>,
-) -> Option<(Vec<Listener>, bool, usize)> {
+) -> Option<(
+    Vec<Listener>,
+    bool,
+    usize,
+    HashMap<(u32, SocketAddr), String>,
+)> {
     use std::{fs, os::unix::fs::MetadataExt};
     let mut complete = true;
     let mut unreadable = HashSet::new();
     let (boot, ticks) = linux_clock();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
+    let mut owners = HashMap::new();
     let mut processes = HashMap::new();
     'processes: for entry in fs::read_dir(proc_root).ok()? {
         let process = match entry {
@@ -455,12 +477,12 @@ pub(crate) fn listeners_from(
                 }
             };
             let link = link.to_string_lossy();
-            if let Some(address) = link
+            if let Some((inode, address)) = link
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
-                .and_then(|inode| sockets.get(inode))
+                .and_then(|inode| sockets.get(inode).map(|address| (inode, address)))
             {
-                addresses.push(*address);
+                addresses.push((*address, inode.to_owned()));
             }
         }
         if addresses.is_empty() {
@@ -485,7 +507,8 @@ pub(crate) fn listeners_from(
             .filter(|b| !b.is_empty())
             .map(|b| String::from_utf8_lossy(b).into_owned())
             .collect::<Vec<_>>();
-        for address in addresses {
+        for (address, inode) in addresses {
+            owners.insert((pid, address), inode);
             result.push(Listener {
                 pid,
                 parent,
@@ -510,7 +533,7 @@ pub(crate) fn listeners_from(
     });
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
-    Some((result, complete, unreadable.len()))
+    Some((result, complete, unreadable.len(), owners))
 }
 
 #[cfg(target_os = "linux")]
