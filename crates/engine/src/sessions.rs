@@ -374,9 +374,10 @@ impl SessionsEngine {
     }
 
     /// The settings RPC changed who may hold a channel lease.
-    pub(crate) fn apply_channel_owner(&self) {
-        let setting = self.inner.registry.mcp_prefs().channel_owner;
-        lock(&self.inner.channel_leases).apply_setting(&setting);
+    pub(crate) fn set_mcp_prefs(&self, prefs: crate::registry::McpPrefs) {
+        let mut leases = lock(&self.inner.channel_leases);
+        self.inner.registry.set_mcp_prefs(prefs);
+        leases.apply_setting(&self.inner.registry.mcp_prefs().channel_owner);
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -2339,6 +2340,7 @@ impl Inner {
         harness_id: HarnessId,
         lazy_env: Option<&str>,
     ) {
+        let mut leases = lock(&self.channel_leases);
         let prefs = self.registry.mcp_prefs();
         if !prefs.lazy || crate::registry::HarnessRegistry::env_forces_mcp_legacy(lazy_env) {
             request.mcp_plan = None;
@@ -2346,7 +2348,6 @@ impl Inner {
         }
         let worker = self.chat_is_worker(chat_id);
         let drop_channels = {
-            let mut leases = lock(&self.channel_leases);
             leases.drop_channels_for_launch(
                 crate::channel_leases::LAUNCH_LEASE,
                 chat_id,
@@ -2354,6 +2355,7 @@ impl Inner {
                 &prefs.channel_owner,
             )
         };
+        drop(leases);
         let proxy_command = std::env::current_exe()
             .ok()
             .and_then(|path| path.to_str().map(str::to_owned))
@@ -2777,8 +2779,9 @@ impl Inner {
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
             let successor = self.channel_lease_successor(&runs, chat_id);
+            let mut leases = lock(&self.channel_leases);
             let setting = self.registry.mcp_prefs().channel_owner;
-            lock(&self.channel_leases).release(chat_id, &setting, successor.as_deref());
+            leases.release(chat_id, &setting, successor.as_deref());
         }
     }
 }
