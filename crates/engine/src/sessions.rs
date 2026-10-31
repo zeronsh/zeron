@@ -797,7 +797,19 @@ impl SessionsEngine {
         Arc<VoiceActivity>,
     )> {
         let mut runs = lock(&self.inner.runs);
-        let run = runs.get_mut(chat_id)?;
+        // A runtime being retired has no voice left to bridge.
+        let run = runs
+            .get_mut(chat_id)
+            .filter(|run| !run.retiring.load(std::sync::atomic::Ordering::Acquire))?;
+        // The call registers on `voice_active` only after the connect awaits
+        // its lease. Until then the idle runtime would read as free to
+        // hibernate, so the attach counts as activity.
+        run.parked_activity.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_millis() as u64),
+            std::sync::atomic::Ordering::Release,
+        );
         Some((
             run.voice.clone()?,
             run.voice.as_ref()?.events.subscribe(),
@@ -6350,6 +6362,29 @@ mod tests {
         t.fixture
             .lose_session
             .store(false, std::sync::atomic::Ordering::Release);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_cannot_retire_a_runtime_a_voice_call_is_attaching_to() {
+        let t = HibernationTest::configured(false, false, 10, HarnessId::Codex, None, None).await;
+        // The bridge is taken first; the call guard only exists once the
+        // connect has its lease. A manual request in between must not win.
+        assert!(t.core.sessions.take_voice_bridge("sleep").is_some());
+        assert!(!t.core.sessions.hibernate("sleep"));
+        // A runtime already claimed has nothing left to attach to.
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .parked_activity
+            .store(0, std::sync::atomic::Ordering::Release);
+        let run_id = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+        assert!(t.core.sessions.hibernate("sleep"));
+        assert!(
+            t.core
+                .sessions
+                .inner
+                .claim_hibernation("sleep", &run_id)
+                .is_some()
+        );
+        assert!(t.core.sessions.take_voice_bridge("sleep").is_none());
         t.core.sessions.shutdown().await;
     }
     #[tokio::test]
