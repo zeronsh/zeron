@@ -72,7 +72,15 @@ async fn handle_request(
         let out = out.clone();
         async move {
             match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+                Ok(json) => {
+                    let bytes = json.len() as u64;
+                    out.send(json).await.map_err(|_| RpcError::Closed)?;
+                    if frame.item.is_some() {
+                        zeron_counters::add(zeron_counters::C::RpcItemsOut, 1);
+                        zeron_counters::add(zeron_counters::C::RpcBytesOut, bytes);
+                    }
+                    Ok(())
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "rpc: failed to serialize server frame");
                     Err(RpcError::Closed)
@@ -138,9 +146,13 @@ async fn handle_request(
                 return;
             }
             while let Some(item) = stream.next().await {
-                if out.send(crate::item_frame(id, &item)).await.is_err() {
+                let json = crate::item_frame(id, &item);
+                let bytes = json.len() as u64;
+                if out.send(json).await.is_err() {
                     return; // connection gone
                 }
+                zeron_counters::add(zeron_counters::C::RpcItemsOut, 1);
+                zeron_counters::add(zeron_counters::C::RpcBytesOut, bytes);
             }
             let _ = send(ServerFrame {
                 id,
@@ -174,7 +186,13 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
+                let service = if peer.ip().is_loopback() {
+                    service.clone()
+                } else {
+                    Arc::new(crate::device_room::RelayService(service.clone()))
+                        as Arc<dyn RpcService>
+                };
+                tokio::spawn(serve_ws_socket(stream, service, token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");

@@ -575,6 +575,8 @@ fn write_chat(
     let borrowed: Vec<&[u8]> = lines.iter().map(|(_, line, _)| line.as_slice()).collect();
     let buf = encode_batch(journal.needs_newline, &borrowed);
     journal.file.write_all(&buf)?;
+    zeron_counters::add(zeron_counters::C::JournalAppends, lines.len() as u64);
+    zeron_counters::add(zeron_counters::C::JournalBytes, buf.len() as u64);
     journal.needs_newline = false;
     Ok(())
 }

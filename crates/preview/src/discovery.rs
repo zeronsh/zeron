@@ -397,6 +397,7 @@ pub(crate) fn listeners_from(
     let mut result = Vec::new();
     let mut owners = HashMap::new();
     let mut processes = HashMap::new();
+    zeron_counters::add(zeron_counters::C::PreviewProcScans, 1);
     'processes: for entry in fs::read_dir(proc_root).ok()? {
         let process = match entry {
             Ok(entry) => entry,

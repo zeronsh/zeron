@@ -571,6 +571,7 @@ impl SessionDoc {
     /// whole transcript — one bad entry took down every publish for the chat
     /// (2026-07-31, "missing field `id`" during a multi-update import).
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
+        zeron_counters::add(zeron_counters::C::DocReadEntriesCalls, 1);
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
         let messages = self
@@ -579,6 +580,7 @@ impl SessionDoc {
             .get_deep_value()
             .to_json_value();
         let raw = json_array(messages)?;
+        zeron_counters::add(zeron_counters::C::DocReadEntriesEntries, raw.len() as u64);
         Ok(raw
             .iter()
             .filter_map(|v| match decode_entry_value(v) {
@@ -948,9 +950,14 @@ impl SessionDoc {
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
-        self.doc
+        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
+        let bytes = self
+            .doc
             .export(ExportMode::Snapshot)
-            .map_err(|e| DocError::Schema(e.to_string()))
+            .map_err(|e| DocError::Schema(e.to_string()))?;
+        zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
+        Ok(bytes)
     }
 }
 
@@ -1885,6 +1892,24 @@ pub fn materialize_tail(
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
+
+    #[test]
+    fn snapshot_export_counters_include_all_callers() {
+        let before = zeron_counters::snapshot();
+        let bytes = SessionDoc::init("counter-test")
+            .unwrap()
+            .export_snapshot()
+            .unwrap();
+        let after = zeron_counters::snapshot();
+        assert!(
+            after[zeron_counters::C::SnapshotExports as usize].1
+                >= before[zeron_counters::C::SnapshotExports as usize].1 + 1
+        );
+        assert!(
+            after[zeron_counters::C::SnapshotExportBytes as usize].1
+                >= before[zeron_counters::C::SnapshotExportBytes as usize].1 + bytes.len() as u64
+        );
+    }
 
     #[test]
     fn fork_seam_round_trips_through_the_doc() {

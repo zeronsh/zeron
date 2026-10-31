@@ -210,6 +210,12 @@ struct OsState {
     failed: HashSet<PathBuf>,
 }
 
+impl Drop for OsState {
+    fn drop(&mut self) {
+        zeron_counters::sub(zeron_counters::C::FsWatchLive, self.installed.len() as u64);
+    }
+}
+
 #[derive(Default)]
 struct Batch {
     /// Bumped on every registration change.
@@ -666,6 +672,7 @@ impl FsWatchHub {
                 .collect();
             for path in stale {
                 os.installed.remove(&path);
+                zeron_counters::sub(zeron_counters::C::FsWatchLive, 1);
                 if os.roots.remove(&path).is_some() {
                     touched = true;
                 } else if let Some(watcher) = os.watcher.as_mut() {
@@ -692,6 +699,8 @@ impl FsWatchHub {
                     Ok(()) => {
                         os.installed.insert(path, recursive);
                         attached_new = true;
+                        zeron_counters::add(zeron_counters::C::FsWatchAdds, 1);
+                        zeron_counters::add(zeron_counters::C::FsWatchLive, 1);
                     }
                     Err(err) => {
                         tracing::debug!(path = %path.display(), error = %err, "fs-watch: watch failed");

@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zeron-counters.workspace = true
 # Host-side answers to terminal queries (terminals/replies.rs).
 alacritty_terminal.workspace = true
 zeron-preview.workspace = true
@@ -50,6 +51,9 @@ tempfile.workspace = true
 # `show_image` reads a shown image's size from its header (already in the
 # tree with these decoders via zeron-ui).
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+roxmltree = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"

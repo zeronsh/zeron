@@ -4199,6 +4199,7 @@ async fn drive_run(
         {
             #[cfg(test)]
             FLUSH_TICKS.with(|t| t.set(t.get() + 1));
+            zeron_counters::add(zeron_counters::C::StreamCommits, 1);
             if dirty {
                 if let Err(err) = sync_segment(
                     doc_ref,
@@ -5027,6 +5028,7 @@ async fn drive_run(
         // background re-invocations) must not wipe the segment being written.
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
+            zeron_counters::add(zeron_counters::C::StreamEventsFolded, 1);
             let touched = fold_event_into_parts(&mut folded, &event);
             segment_render.note(touched, folded.len());
             // R2 sidecar PARKED (2026-08-10, product call): the fold's

@@ -463,7 +463,9 @@ fn make_virtual_conn(
 ) -> VirtualConn {
     let (in_tx, in_rx) = mpsc::channel::<String>(256);
     let (srv_out_tx, mut srv_out_rx) = mpsc::channel::<String>(256);
-    tokio::spawn(serve_connection(service, srv_out_tx, in_rx));
+    tokio::spawn(serve_connection(
+        Arc::new(RelayService(service)), srv_out_tx, in_rx,
+    ));
     tokio::spawn(async move {
         while let Some(text) = srv_out_rx.recv().await {
             let header = DeviceFrameHeader::new(RPC_KIND, RPC_KIND).with_to(conn_id.clone());
@@ -478,6 +480,22 @@ fn make_virtual_conn(
         }
     });
     VirtualConn { in_tx }
+}
+
+// The relay shares the engine service with IPC, so enforce local-only methods here.
+pub(crate) struct RelayService(pub(crate) Arc<dyn RpcService>);
+#[async_trait::async_trait]
+impl RpcService for RelayService {
+    async fn handle(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::RpcReply, RpcError> {
+        if method == crate::methods::ENGINE_COUNTERS {
+            return Err(RpcError::Failed("EngineCounters is IPC-only".into()));
+        }
+        self.0.handle(method, params).await
+    }
 }
 
 /// One relay session: connect as host, serve RPC per client conn, until the socket drops.
@@ -737,7 +755,7 @@ impl DeviceLink {
         });
 
         Self {
-            client: Arc::new(RpcClient::new(out_tx, in_rx)),
+            client: Arc::new(RpcClient::new(out_tx, in_rx).for_relay()),
             closed_rx,
             pump,
         }
@@ -1258,5 +1276,40 @@ mod tests {
         );
         let host = device_room_ws_url("http://localhost:26640", "d", "host", None, "t");
         assert_eq!(host, "ws://localhost:26640/device/d/ws?role=host&token=t");
+    }
+}
+
+#[cfg(test)]
+mod counters_transport_tests {
+    use super::*;
+    struct Echo;
+    #[async_trait::async_trait]
+    impl RpcService for Echo {
+        async fn handle(&self, _: &str, _: serde_json::Value) -> Result<crate::RpcReply, RpcError> {
+            crate::RpcReply::value(&true)
+        }
+    }
+    #[tokio::test]
+    async fn engine_counters_relay_outbound_refused() {
+        let (out, mut wire) = mpsc::channel(4);
+        let (_in_tx, inbound) = mpsc::channel(4);
+        let client = RpcClient::new(out, inbound).for_relay();
+        assert!(client.call(crate::methods::ENGINE_COUNTERS, serde_json::json!({})).await.is_err());
+        assert!(client.subscribe(crate::methods::ENGINE_COUNTERS, serde_json::json!({})).await.is_err());
+        assert!(wire.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn engine_counters_relay_refused() {
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let conn = make_virtual_conn(Arc::new(Echo), "peer".into(), out_tx);
+        for (id, method) in [(1, crate::methods::ENGINE_COUNTERS), (2, "Other")] {
+            conn.in_tx.send(serde_json::json!({"id": id, "method": method, "params": {}}).to_string()).await.unwrap();
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv()).await.unwrap().unwrap();
+            let (_, payload) = decode_device_frame(&bytes).unwrap();
+            let frame: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            if id == 1 { assert!(frame.get("err").is_some(), "{frame}"); }
+            else { assert_eq!(frame["ok"], true); }
+        }
     }
 }

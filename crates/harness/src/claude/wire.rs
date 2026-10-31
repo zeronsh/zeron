@@ -335,6 +335,7 @@ pub(crate) struct ControlRequestBody {
 /// A plain, unique top-level `type` is deserialized straight into that frame.
 /// Ambiguous or unreadable input falls through to [`parse_frame_full`].
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeLines, 1);
     if let Some(frame) = parse_frame_direct(line) {
         return Ok(frame);
     }
@@ -350,6 +351,7 @@ fn parse_frame_direct(line: &str) -> Option<Frame> {
 }
 
 fn parse_frame_direct_kind(line: &str, kind: &str) -> Option<Frame> {
+    zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
     let frame = match kind {
         "system" => Frame::System(serde_json::from_str(line).ok()?),
         "stream_event" => Frame::StreamEvent(serde_json::from_str(line).ok()?),
@@ -490,6 +492,7 @@ fn unambiguous_top_level_type(line: &str) -> Option<std::borrow::Cow<'_, str>> {
                 }
                 if type_value_at == Some(quote) {
                     found = Some(if escaped {
+                        zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
                         Cow::Owned(serde_json::from_str(&line[quote..i]).ok()?)
                     } else {
                         Cow::Borrowed(&line[start..end])
@@ -516,6 +519,7 @@ fn unambiguous_top_level_type(line: &str) -> Option<std::borrow::Cow<'_, str>> {
                 {
                     i += 1;
                 }
+                zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
                 serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
             }
             _ => i += 1,
@@ -538,8 +542,12 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn parse_value(line: &str) -> Result<Value, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
     serde_json::from_str(line).or_else(|error| match repair_lone_surrogates(line) {
-        Some(repaired) => serde_json::from_str(&repaired),
+        Some(repaired) => {
+            zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+            serde_json::from_str(&repaired)
+        }
         None => Err(error),
     })
 }
@@ -875,6 +883,14 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+    }
+
+    #[test]
+    fn repaired_value_counts_each_json_parse() {
+        let before = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(parse_value(r#"{"text":"\ud83d"}"#).is_ok());
+        let after = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(after >= before + 2);
     }
 
     #[test]

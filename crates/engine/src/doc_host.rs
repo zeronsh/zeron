@@ -1101,6 +1101,8 @@ impl ChatDocHandle {
 
     // Caller holds transcript_import, shared with attach and mirror clearing.
     fn publish_messages_locked(&self) {
+        zeron_counters::add(zeron_counters::C::PublishMessagesCalls, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::PublishMessagesNanos);
         self.mirror_dirty.store(false, Ordering::Release);
         // Incremental: only the entry maps the observer saw change are
         // re-decoded. The mirror cross-checks itself against the full rebuild
@@ -3187,6 +3189,8 @@ impl DocHost {
     }
 
     async fn salvage_chat_transcript(&self, chat_id: &str) -> Result<(), String> {
+        zeron_counters::add(zeron_counters::C::SalvageChats, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::SalvageNanos);
         // Inspection must not register a handle or start sync. A healthy
         // history used to open one room per journal during every boot.
         // The import and the emptiness check run off the async worker.
@@ -7119,6 +7123,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
         let sleep_until = save_deadline.unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
             changed = changed_rx.changed() => {
+                zeron_counters::add(zeron_counters::C::PublishMessagesWakes, 1);
                 if changed.is_err() {
                     break; // doc handle (and its change sender) is gone
                 }

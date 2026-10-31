@@ -425,6 +425,10 @@ impl State {
             LoroValue::List(items) => items,
             _ => Default::default(),
         };
+        if !reuse {
+            zeron_counters::add(zeron_counters::C::DocReadEntriesCalls, 1);
+            zeron_counters::add(zeron_counters::C::DocReadEntriesEntries, items.len() as u64);
+        }
         let mut old: HashMap<ContainerID, Option<SharedEntry>> = if reuse {
             std::mem::take(&mut self.slots)
                 .into_iter()

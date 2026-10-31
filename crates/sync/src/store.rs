@@ -247,6 +247,7 @@ impl DocsStore {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         let result = self.conn().execute(
             "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
             params![doc_id, batch_id, bytes],
@@ -280,6 +281,7 @@ impl DocsStore {
         self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         {
             let mut insert = tx.prepare_cached(
                 "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
@@ -356,6 +358,7 @@ impl DocsStore {
     }
 
     fn reject_chat_update_blocking(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -390,6 +393,7 @@ impl DocsStore {
         doc_id: &str,
         batch_id: &str,
     ) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -430,6 +434,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         if tx.execute(
             "INSERT OR IGNORE INTO chat_outbox_initialized(doc_id) VALUES (?1)",
             params![doc_id],
@@ -559,6 +564,7 @@ impl DocsStore {
         store_blocking(|| {
             let mut conn = self.conn();
             let tx = conn.transaction()?;
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
             tx.execute(
                 "INSERT INTO snapshot_deltas(doc_id,seq,bytes,cursor,roots)
                  SELECT ?1,COALESCE((SELECT MAX(seq) FROM snapshot_deltas WHERE doc_id=?1),0)+1,?2,?3,?4
@@ -567,6 +573,11 @@ impl DocsStore {
             ).and_then(|n| if n == 1 { Ok(n) } else { Err(rusqlite::Error::QueryReturnedNoRows) })?;
             self.invalidate_failed_publication(&tx, doc_id)?;
             tx.commit()?;
+            zeron_counters::add(zeron_counters::C::SnapshotDeltaRows, 1);
+            zeron_counters::add(
+                zeron_counters::C::SnapshotDeltaBytes,
+                (bytes.len() + roots.len()) as u64,
+            );
             self.snapshot_payload_bytes
                 .fetch_add((bytes.len() + roots.len()) as u64, Ordering::Relaxed);
             Ok(())
@@ -608,6 +619,7 @@ impl DocsStore {
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
@@ -644,6 +656,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -680,6 +693,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -780,6 +794,7 @@ impl DocsStore {
     fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
             "DELETE FROM snapshot_deltas WHERE doc_id = ?1",
@@ -835,6 +850,7 @@ impl DocsStore {
         epoch: u32,
     ) -> Result<(), StoreError> {
         store_blocking(|| {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
             self.conn().execute(
                 "INSERT OR IGNORE INTO salvage_checked (doc_id)
                  SELECT doc_id FROM snapshots WHERE doc_id = ?1 AND bytes = ?2
@@ -892,6 +908,7 @@ impl DocsStore {
         let mut inserted = 0;
         let conn = self.conn();
         for (command_id, processed_at) in rows {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
             inserted += conn.execute(
                 "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
                 params![command_id, processed_at],
@@ -925,6 +942,7 @@ impl DocsStore {
     }
 
     fn mark_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         let changed = self.conn().execute(
             "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
             params![command_id, now_ms()],
@@ -1072,6 +1090,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             continue;
         }
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute_batch(sql)?;
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
@@ -1167,6 +1186,17 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autocommit_writes_increment_transaction_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let before = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        store.enqueue_chat_update("chat", "batch", b"data").unwrap();
+        store.acknowledge_chat_update("chat", "batch").unwrap();
+        let after = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        assert!(after >= before + 2);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contended_connection_does_not_starve_a_two_worker_runtime() {

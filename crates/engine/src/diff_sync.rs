@@ -358,9 +358,6 @@ fn interested_chats(inner: &DiffSyncInner) -> HashSet<String> {
     interest.keys().cloned().collect()
 }
 
-/// Git spawn attempts in diff-sync and Repos, for idle-cost checks.
-static GIT_SPAWNS: AtomicU64 = AtomicU64::new(0);
-
 /// Per working directory, so a test can count only its own fixture's spawns
 /// while the rest of the suite runs git in parallel.
 #[cfg(test)]
@@ -369,7 +366,7 @@ static GIT_SPAWNS_BY_DIR: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
 
 /// Count one git spawn made with `cwd` as its working directory.
 pub(crate) fn note_git_spawn(cwd: Option<&Path>) {
-    GIT_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    zeron_counters::add(zeron_counters::C::GitSpawns, 1);
     #[cfg(test)]
     if let Some(cwd) = cwd {
         *lock(&GIT_SPAWNS_BY_DIR)
@@ -382,7 +379,7 @@ pub(crate) fn note_git_spawn(cwd: Option<&Path>) {
 
 /// Git spawn attempts in diff-sync and Repos since boot.
 pub fn git_spawn_count() -> u64 {
-    GIT_SPAWNS.load(Ordering::Relaxed)
+    zeron_counters::get(zeron_counters::C::GitSpawns)
 }
 
 /// Spawns made in `dir` or below it.
@@ -1273,6 +1270,7 @@ async fn diff_sync_task(
                 reconcile(&inner, chats, false).await;
             }
             _ = repair.tick() => {
+                zeron_counters::add(zeron_counters::C::DiffRepairTicks, 1);
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow().clone();
                 repair_pass(&inner, chats).await;

@@ -248,7 +248,10 @@ fn write_names(file: &Path, names: &Names) -> anyhow::Result<()> {
         .context("preview registry has no parent directory")?;
     std::fs::create_dir_all(parent)?;
     let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temporary, serde_json::to_vec(names)?)?;
+    let bytes = serde_json::to_vec(names)?;
+    std::fs::write(&temporary, &bytes)?;
+    zeron_counters::add(zeron_counters::C::PreviewsJsonWrites, 1);
+    zeron_counters::add(zeron_counters::C::PreviewsJsonBytes, bytes.len() as u64);
     std::fs::rename(temporary, file)?;
     Ok(())
 }

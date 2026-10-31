@@ -2562,6 +2562,9 @@ impl crate::remote_terminals::Relay for EngineRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::ENGINE_COUNTERS && params.get("targetDeviceId").is_some() {
+            return Err(RpcError::Failed("EngineCounters is IPC-only".into()));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -2645,6 +2648,14 @@ impl RpcService for EngineRpc {
             .await;
         }
         match method {
+            methods::ENGINE_COUNTERS => {
+                let metrics = tokio::runtime::Handle::current().metrics();
+                RpcReply::value(&serde_json::json!({
+                    "counters": zeron_counters::snapshot().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+                    "malloc": tokio::task::spawn_blocking(crate::counter_metrics::malloc).await.ok().flatten(),
+                    "tokio": { "workers": metrics.num_workers(), "alive_tasks": metrics.num_alive_tasks() },
+                }))
+            }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::LIST_CLOUD_BRANCHES => Box::pin(self.cloud_branches(params)).await,
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -4859,6 +4870,10 @@ impl RpcService for EngineRpc {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rpc_counter_tests.rs"]
+mod counter_tests;
 
 #[cfg(test)]
 mod tests {
