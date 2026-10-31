@@ -54,6 +54,16 @@ async fn eventually(mut check: impl FnMut() -> bool) {
 }
 impl Peer {
     fn spawn(dir: &Path, mode: &str, env: &[(&str, &str)]) -> Self {
+        Self::spawn_command(dir, mode, env, env!("CARGO_BIN_EXE_fake-mcp"), &[], &[])
+    }
+    fn spawn_command(
+        dir: &Path,
+        mode: &str,
+        env: &[(&str, &str)],
+        command: &str,
+        args: &[&str],
+        proxy_args: &[&str],
+    ) -> Self {
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -62,8 +72,10 @@ impl Peer {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeron-mcp-proxy"));
         cmd.args(["--server", "fake", "--mode", mode, "--run-dir"])
             .arg(dir.join("run"))
+            .args(proxy_args)
             .arg("--")
-            .arg(env!("CARGO_BIN_EXE_fake-mcp"))
+            .arg(command)
+            .args(args)
             .env("ZERON_DATA_DIR", dir)
             .env("FAKE_SPAWN_MARK", dir.join("spawn"))
             .env("FAKE_CHILD_MARK", dir.join("children"))
@@ -500,6 +512,95 @@ async fn keep_alive_starts_before_initialize_and_selftest_is_in_process() {
     drop(input);
     assert!(child.wait().await.unwrap().success());
     assert_eq!(pids(&d.join("spawn")).len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn npx_resolves_without_wrapper_composes_path_and_has_an_escape_hatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let d = dir.path();
+    let npm = d.join("npm");
+    let install = npm.join("_npx/direct");
+    let pkg = install.join("node_modules/demo");
+    let bins = install.join("node_modules/.bin");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::create_dir_all(&bins).unwrap();
+    fs::write(
+        install.join("package.json"),
+        r#"{"dependencies":{"demo":"1.2.3"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("package.json"),
+        r#"{"version":"1.2.3","bin":"cli.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("cli.js"),
+        "// fixture: node is our native fake peer\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-mcp"), bins.join("node")).unwrap();
+    std::os::unix::fs::symlink(pkg.join("cli.js"), bins.join("demo")).unwrap();
+    let wrapper = d.join("npx");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf 'wrapper\\n' >> \"$WRAPPER_MARK\"\nexec \"$FAKE_BINARY\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let dump = d.join("dump");
+    let mark = d.join("wrapper-mark");
+    let env = [
+        ("ZERON_NPM_CACHE", npm.to_str().unwrap()),
+        ("FAKE_DUMP_ENV", dump.to_str().unwrap()),
+        ("FAKE_BINARY", env!("CARGO_BIN_EXE_fake-mcp")),
+        ("WRAPPER_MARK", mark.to_str().unwrap()),
+    ];
+    let mut peer = Peer::spawn_command(
+        d,
+        "lazy-keep-alive",
+        &env,
+        wrapper.to_str().unwrap(),
+        &["--yes", "demo@1.2.3", "--token=secret-value"],
+        &[],
+    );
+    assert!(peer.init().await.get("result").is_some());
+    assert!(!mark.exists());
+    let dump_env: Value = serde_json::from_slice(&fs::read(&dump).unwrap()).unwrap();
+    assert_eq!(
+        std::env::split_paths(std::ffi::OsStr::new(dump_env["PATH"].as_str().unwrap())).next(),
+        Some(bins)
+    );
+    assert!(
+        !fs::read_to_string(d.join("mcp-cache/npx.json"))
+            .unwrap()
+            .contains("secret-value")
+    );
+    peer.close().await;
+    let mut peer = Peer::spawn_command(
+        d,
+        "keep-alive",
+        &env,
+        wrapper.to_str().unwrap(),
+        &["--yes", "demo@1.2.3"],
+        &["--no-npx-resolve"],
+    );
+    assert!(peer.init().await.get("result").is_some());
+    assert!(mark.exists());
+    peer.close().await;
+    fs::remove_file(&mark).unwrap();
+    let mut peer = Peer::spawn_command(
+        d,
+        "keep-alive",
+        &env,
+        wrapper.to_str().unwrap(),
+        &["--unsupported", "demo"],
+        &[],
+    );
+    assert!(peer.init().await.get("result").is_some());
+    assert!(mark.exists());
+    peer.close().await;
 }
 
 #[tokio::test(flavor = "current_thread")]

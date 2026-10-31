@@ -439,3 +439,7 @@ as `Voice/WebRTC-LICENSE.txt`. The binary also contains WebRTC's own bundled
 third-party components (such as BoringSSL, libsrtp, Opus, libyuv and Abseil)
 under their respective licenses; see the WebRTC source tree's `third_party/`
 for each license.
+
+## pi-mcp-adapter
+
+`crates/mcp-proxy/src/npx.rs` ports the npx resolver from [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter), revision `3fc01da222891e7588a4450034a7e8a0d2bf3018` (MIT, Copyright (c) 2026 Nico Bailon); its complete MIT notice is retained in the source. Metadata cache, lifecycle and failure-backoff behavior also adapt that design.

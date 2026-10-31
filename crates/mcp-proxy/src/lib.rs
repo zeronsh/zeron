@@ -1,6 +1,7 @@
 //! One stdio MCP server per proxy. No engine, UI, or MCP bridge dependencies.
 pub mod cache;
 pub mod config;
+pub mod npx;
 pub mod process;
 mod proxy;
 pub mod rpc;

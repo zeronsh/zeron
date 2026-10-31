@@ -25,6 +25,10 @@ still needs native validation; only Linux has been executed here.
 - `mcp-cache/v1/<sha256>.json`: original initialization and merged catalogs;
   private 0600 files replaced atomically. `<sha256>.lock` serializes each key's
   freshness check and replacement. Identity env values are hashed, never saved.
+- `mcp-cache/npx.json`: version-2 resolution records keyed by package spec and
+  bin, with a 24-hour TTL, plus `npx.lock`. Runtime arguments are never stored.
+  Floating specs re-scan the npm cache so an engine refresh takes effect on the
+  next session even within that TTL.
 - `run/mcp/<run>/<pgid>` when `--run-dir` is supplied: private ownership markers.
   Linux markers include the leader's start ticks to reject PID reuse.
   `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups.
@@ -59,8 +63,8 @@ rewrites the target ID. Sampling/elicitation/roots requests retain server IDs.
 Run `cargo test -p zeron-mcp-proxy` in the performance worker environment.
 The fake server and PSS helper use only target-local scratch storage.
 
-Initial Linux debug measurement (2026-10-30, 7 samples/state, proxy PID only):
-2,120 KiB PSS cached idle and 2,400 KiB while forwarding an outstanding fake
+Final Linux debug measurement (2026-10-30, 7 samples/state, proxy PID only):
+2,279 KiB PSS cached idle and 2,564 KiB while forwarding an outstanding fake
 call. Reproduce with:
 
 ```
@@ -72,3 +76,13 @@ The full GUI-linked `zeron` fallback has not been measured; the reported budget
 is for the packaged small proxy. Real browser servers and CLI harness rewrites
 belong to the subsequent work units, as do engine run-dir sweeps and daily npm
 cache refresh.
+
+The npx resolver prefers `ZERON_NPM_CACHE`, then `NPM_CONFIG_CACHE` (also the
+npm lowercase spelling), then one bounded `npm config get cache` invocation.
+It chooses exact top-level specs before newer transitive copies, checks exact
+version pins, resolves `.bin` symlinks, and prepends the install's `.bin` to the
+child PATH. JS entries use the first executable `node` on that PATH. Unsupported
+invocations, local/git specs, Windows, and failures keep the original command;
+`--no-npx-resolve` explicitly selects that behavior. Unlike pi's optional slow
+population path, the proxy does not run a preliminary npm installation: the
+original invocation handles a cold npm cache. Daily refresh is engine work.

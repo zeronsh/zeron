@@ -47,6 +47,7 @@ struct Capture {
 }
 struct Proxy {
     config: Config,
+    resolved: Option<crate::npx::Resolution>,
     state: State,
     process: Option<Process>,
     child_tx: Option<mpsc::Sender<Value>>,
@@ -189,8 +190,15 @@ impl Proxy {
         self.started = Instant::now();
         self.last_activity = self.started;
         self.stderr.lock().unwrap().clear();
-        let mut process =
-            Process::spawn(&self.config, &self.config.command, &self.config.args, None)?;
+        let (command, args, path) = match &self.resolved {
+            Some(r) => (
+                r.command.to_string_lossy().into_owned(),
+                r.args.clone(),
+                Some(r.path.clone()),
+            ),
+            None => (self.config.command.clone(), self.config.args.clone(), None),
+        };
+        let mut process = Process::spawn(&self.config, &command, &args, path.as_deref())?;
         self.generation += 1;
         let g = self.generation;
         process.tasks.push(read_lines(
@@ -253,8 +261,9 @@ impl Proxy {
         self.event("stop", json!({"reason":reason}));
     }
     async fn fail(&mut self, reason: String) -> io::Result<()> {
-        let startup =
-            self.state == State::Starting || self.discovery || self.started.elapsed() < Duration::from_secs(10);
+        let startup = self.state == State::Starting
+            || self.discovery
+            || self.started.elapsed() < Duration::from_secs(10);
         let tail = String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned();
         let detail = if tail.trim().is_empty() {
             reason
@@ -375,13 +384,11 @@ impl Proxy {
             self.initialize = Some(message["params"].clone());
             let command =
                 cache::executable(&self.config.command, std::env::var_os("PATH").as_deref());
-            self.key = cache::key(
-                &self.config,
-                &message["params"],
-                &command,
-                &command,
-                Value::Null,
-            );
+            let (command, bin, npx) = match &self.resolved {
+                Some(r) => (r.command.clone(), r.bin.clone(), r.identity()),
+                None => (command.clone(), command, Value::Null),
+            };
+            self.key = cache::key(&self.config, &message["params"], &command, &bin, npx);
             let disk = cache::read(&self.config.data_dir, &self.key);
             if disk.as_ref().is_some_and(|e| e.discovery_failed) {
                 self.passthrough = true;
@@ -782,9 +789,15 @@ pub async fn run(config: Config) -> io::Result<()> {
             }
         }
     });
+    let resolved = if config.no_npx_resolve || config.selftest {
+        None
+    } else {
+        crate::npx::resolve(&config.command, &config.args, &config.data_dir).await
+    };
     let passthrough = config.mode == Mode::KeepAlive;
     let mut proxy = Proxy {
         config,
+        resolved,
         state: State::Cold,
         process: None,
         child_tx: None,
@@ -829,13 +842,14 @@ pub async fn run(config: Config) -> io::Result<()> {
         }
     }
     loop {
-        let start_deadline = if proxy.state == State::Starting || (proxy.discovery && proxy.process.is_some()) {
-            proxy.started + proxy.config.start_timeout
-        } else if let Some(capture) = &proxy.capture {
-            capture.at + proxy.config.start_timeout
-        } else {
-            Instant::now() + Duration::from_secs(86400)
-        };
+        let start_deadline =
+            if proxy.state == State::Starting || (proxy.discovery && proxy.process.is_some()) {
+                proxy.started + proxy.config.start_timeout
+            } else if let Some(capture) = &proxy.capture {
+                capture.at + proxy.config.start_timeout
+            } else {
+                Instant::now() + Duration::from_secs(86400)
+            };
         tokio::select! {
             event = rx.recv() => {
                 let action = match event {
