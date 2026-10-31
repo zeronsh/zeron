@@ -2330,6 +2330,7 @@ struct GateInputs {
     config_stamps: Vec<(Option<FileStamp>, Option<FileStamp>)>,
     paths: Vec<PathBuf>,
     external: bool,
+    replace_dir: Option<PathBuf>,
 }
 
 fn input_stamp(path: &Path) -> (Option<FileStamp>, Option<FileStamp>) {
@@ -2350,19 +2351,27 @@ impl GateInputs {
     }
 
     async fn read(repos: &Repos, root: &Path) -> Option<Self> {
+        let root = std::path::absolute(root).ok()?;
+        let root = root.as_path();
         let identity = repos.checkout_identity(root).await.ok()?;
         let git_dir = identity.git_dir;
         if !git_dir.is_dir() {
             return None;
         }
-        let common_dir = match std::fs::read(git_dir.join("commondir")) {
-            Ok(path) => git_dir.join(path_argument(
-                path.strip_suffix(b"\r\n")
-                    .or_else(|| path.strip_suffix(b"\n"))
-                    .unwrap_or(&path),
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
-            Err(_) => return None,
+        let common_dir = if let Some(path) =
+            std::env::var_os("GIT_COMMON_DIR").filter(|path| !path.is_empty())
+        {
+            root.join(path)
+        } else {
+            match std::fs::read(git_dir.join("commondir")) {
+                Ok(path) => git_dir.join(path_argument(
+                    path.strip_suffix(b"\r\n")
+                        .or_else(|| path.strip_suffix(b"\n"))
+                        .unwrap_or(&path),
+                )),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
+                Err(_) => return None,
+            }
         };
         if !common_dir.is_dir() {
             return None;
@@ -2472,11 +2481,24 @@ impl GateInputs {
         if std::env::var_os("GIT_ATTR_NOSYSTEM").is_none() {
             inputs.paths.push(PathBuf::from("/etc/gitattributes"));
         }
+        inputs.replace_dir = Some(common_dir.join(
+            std::env::var_os("GIT_REPLACE_REF_BASE").unwrap_or_else(|| "refs/replace".into()),
+        ));
         inputs.paths.extend([
+            common_dir.join("packed-refs"),
             common_dir.join("info/attributes"),
             common_dir.join("info/exclude"),
-            git_dir.join("index"),
+            std::env::var_os("GIT_INDEX_FILE")
+                .map(|path| root.join(path))
+                .unwrap_or_else(|| git_dir.join("index")),
         ]);
+        for path in inputs
+            .config_paths
+            .iter_mut()
+            .chain(inputs.paths.iter_mut())
+        {
+            *path = root.join(&*path);
+        }
         inputs.config_paths.sort();
         inputs.config_paths.dedup();
         inputs.config_stamps = inputs
@@ -2516,6 +2538,28 @@ impl GateState {
         let mut stamps: HashSet<PathBuf> = inputs.paths.iter().cloned().collect();
         stamps.extend([root.join(".gitattributes"), root.join(".gitignore")]);
         let mut ancestors = HashSet::new();
+        // Replacement refs can change the old blob without changing the HEAD
+        // oid, porcelain hashes or working file's stat. They are a flat set.
+        if let Some(dir) = &inputs.replace_dir {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => {
+                    for (index, entry) in entries.enumerate() {
+                        if index >= MAX_GATE_PATHS {
+                            trusted = false;
+                            break;
+                        }
+                        match entry {
+                            Ok(entry) => {
+                                stamps.insert(entry.path());
+                            }
+                            Err(_) => trusted = false,
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => trusted = false,
+            }
+        }
         for path in paths.iter().take(MAX_GATE_PATHS) {
             let path = root.join(path_argument(path));
             let mut parent = path.parent();
@@ -3888,6 +3932,32 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
         assert_eq!(first.patch, next.patch);
         assert_ne!(first.head_sha, next.head_sha);
         assert_ne!(first.checksum, next.checksum);
+    }
+
+    #[tokio::test]
+    async fn replacement_blob_refs_invalidate_an_otherwise_identical_gate() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dir = tmp.path().join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        let (first, gate) = trusted_capture(&repos, &dir).await;
+        let status = super::capture_status(&dir).await.unwrap().raw;
+        let old = git(&dir, &["rev-parse", "HEAD:a.txt"]);
+        let replacement = git(&dir, &["rev-parse", "HEAD:b.txt"]);
+        git(&dir, &["replace", &old, &replacement]);
+        assert_eq!(status, super::capture_status(&dir).await.unwrap().raw);
+        let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("replacement must invalidate");
+        };
+        assert_ne!(first.patch, next.patch);
+        assert_eq!(
+            *next,
+            capture_diff_legacy(&repos, &dir, None).await.unwrap()
+        );
     }
 
     #[tokio::test]
