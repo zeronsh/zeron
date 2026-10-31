@@ -48,6 +48,7 @@ pub struct PrewarmState {
     gate: PrewarmGate,
     /// The ask waiting out its debounce.
     pending: Option<Task<()>>,
+    pending_key: Option<String>,
     focus: Option<Subscription>,
     /// The chat the composer last had focus on, so opening another chat
     /// with the input already focused still asks.
@@ -86,13 +87,18 @@ impl Composer {
     /// Ask for a prewarm of the chat the composer shows once the debounce
     /// passes. A second trigger while one waits joins it.
     pub(crate) fn schedule_prewarm(&mut self, cx: &mut Context<Self>) {
-        if self.prewarm.pending.is_some() || self.prewarm_target(cx).is_none() {
+        let Some((chat_id, _)) = self.prewarm_target(cx) else {
+            return;
+        };
+        if self.prewarm.pending_key.as_deref() == Some(&chat_id) {
             return;
         }
+        self.prewarm.pending_key = Some(chat_id);
         self.prewarm.pending = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PREWARM_DEBOUNCE).await;
             this.update(cx, |composer, cx| {
                 composer.prewarm.pending = None;
+                composer.prewarm.pending_key = None;
                 composer.send_prewarm(cx);
             })
             .ok();
@@ -123,7 +129,10 @@ impl Composer {
         ) || state
             .session_for(&self.current_key)
             .is_some_and(|session| session.status != SessionStatus::Idle);
-        (supported && !running).then(|| (self.current_key.clone(), host))
+        (supported
+            && !running
+            && state.runtime_state_for(&self.current_key) == Some(RuntimeState::Hibernated))
+        .then(|| (self.current_key.clone(), host))
     }
 
     fn send_prewarm(&mut self, cx: &mut Context<Self>) {
@@ -231,6 +240,13 @@ mod tests {
                     })
                     .collect();
                 state.selected_chat = Some("c1".into());
+                state.apply_runtime_states(
+                    [
+                        ("c1".to_owned(), RuntimeState::Hibernated),
+                        ("c2".to_owned(), RuntimeState::Hibernated),
+                    ]
+                    .into(),
+                );
             });
             let mut composer = Composer::new(state, cx);
             // Focus comes only when a test gives it.
@@ -372,6 +388,33 @@ mod tests {
         rig.focus(cx);
         rig.settle(cx);
         assert_eq!(rig.asked().len(), 1);
+    }
+
+    #[gpui::test]
+    fn unknown_runtime_is_not_prewarmed(cx: &mut gpui::TestAppContext) {
+        let (rig, cx) = rig(cx, None);
+        let _guard = rig.runtime.enter();
+        rig.state.update(cx, |state, _| {
+            state.apply_runtime_states(Default::default());
+        });
+        rig.focus(cx);
+        rig.settle(cx);
+        assert!(rig.asked().is_empty());
+    }
+
+    #[gpui::test]
+    fn switching_chats_during_debounce_prewarm_the_new_chat(cx: &mut gpui::TestAppContext) {
+        let (rig, cx) = rig(cx, None);
+        let _guard = rig.runtime.enter();
+        rig.focus(cx);
+        rig.state.update(cx, |state, cx| {
+            state.selected_chat = Some("c2".into());
+            cx.notify();
+        });
+        rig.focus(cx);
+        rig.settle(cx);
+        assert_eq!(rig.asked().len(), 1);
+        assert_eq!(rig.asked()[0]["chatId"], "c2");
     }
 
     #[gpui::test]
