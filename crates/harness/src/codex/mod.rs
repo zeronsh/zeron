@@ -402,13 +402,11 @@ fn codex_identity_env_keys(row: &serde_json::Map<String, Value>) -> Vec<String> 
     keys
 }
 
-/// A missing incoming plan keeps today's reuse. That is a path which does
-/// not carry a plan, such as a title run. When both plans are present,
-/// relaunch if the policy differs. `run_dir` is a fresh id every launch
-/// and is not compared.
+/// Relaunch when lazy MCP is enabled, disabled, or its policy changes.
+/// `run_dir` is a fresh id every launch and is not compared.
 fn same_mcp_plan(live: &Option<zeron_proto::McpPlan>, next: &Option<zeron_proto::McpPlan>) -> bool {
     let Some(next) = next else {
-        return true;
+        return live.is_none();
     };
     let Some(live) = live else {
         return false;
@@ -3480,7 +3478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_mcp_plan_does_not_relaunch_and_a_changed_one_does() {
+    fn mcp_plan_changes_relaunch_without_run_dir_storms() {
         let harness = CodexHarness::new();
         let live = run_request(AccessMode::FullAccess, false);
         let mut stamped = live.clone();
@@ -3489,8 +3487,9 @@ mod tests {
             run_dir: "/data/run/mcp/run-1".into(),
             ..zeron_proto::McpPlan::default()
         });
-        // A follow-up with no plan, such as a title run, keeps the live runtime.
-        assert!(harness.same_runtime(&stamped, &live));
+        // Disabling lazy MCP removes the plan and must replace the runtime.
+        assert!(!harness.same_runtime(&stamped, &live));
+        assert!(harness.same_runtime(&live, &live));
         let mut next = stamped.clone();
         next.mcp_plan.as_mut().unwrap().run_dir = "/data/run/mcp/run-2".into();
         assert!(harness.same_runtime(&stamped, &next));
