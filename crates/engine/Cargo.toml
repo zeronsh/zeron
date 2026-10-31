@@ -24,7 +24,7 @@ futures.workspace = true
 zeron-term-link.workspace = true
 async-trait.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 rusqlite.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

@@ -123,6 +123,21 @@ async fn handle_request(
             })
             .await;
         }
+        Ok(RpcReply::RawStream(mut stream)) => {
+            // Items are already serialized: splice each into its frame. The
+            // checkout-PR readiness frame above is a `Stream` concern.
+            while let Some(item) = stream.next().await {
+                if out.send(crate::item_frame(id, &item)).await.is_err() {
+                    return; // connection gone
+                }
+            }
+            let _ = send(ServerFrame {
+                id,
+                done: true,
+                ..Default::default()
+            })
+            .await;
+        }
         Err(err) => {
             let _ = send(ServerFrame {
                 id,

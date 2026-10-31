@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{ClientFrame, RpcError, ServerFrame};
+use crate::{ClientFrame, RpcError, ServerFrameRef};
+
+type RawItem = Box<serde_json::value::RawValue>;
 
 /// Per-stream queue depth. Bounded: route_frame awaits a full queue, pausing
 /// the connection reader — transport backpressure instead of unbounded growth
@@ -14,11 +16,37 @@ use crate::{ClientFrame, RpcError, ServerFrame};
 /// during streaming used to pile up whole-transcript payloads here).
 const STREAM_QUEUE_CAP: usize = 256;
 
+/// Where a stream's items go. `Value` consumers get a parsed tree; `Raw`
+/// consumers get the item's bytes and decode them once, straight into their
+/// own type.
+#[derive(Clone)]
+enum ItemSink {
+    Value(mpsc::Sender<serde_json::Value>),
+    Raw(mpsc::Sender<RawItem>),
+}
+
+impl ItemSink {
+    /// `false` once the receiver is gone (or the item is not valid JSON, which
+    /// the framing already rules out).
+    async fn send(&self, item: &serde_json::value::RawValue) -> bool {
+        match self {
+            Self::Value(tx) => match serde_json::from_str(item.get()) {
+                Ok(value) => tx.send(value).await.is_ok(),
+                Err(err) => {
+                    tracing::warn!(error = %err, "rpc: dropping unparsable stream item");
+                    true
+                }
+            },
+            Self::Raw(tx) => tx.send(item.to_owned()).await.is_ok(),
+        }
+    }
+}
+
 enum Pending {
     Call(oneshot::Sender<Result<serde_json::Value, RpcError>>),
-    Stream(mpsc::Sender<serde_json::Value>),
+    Stream(ItemSink),
     CheckedStream {
-        items: mpsc::Sender<serde_json::Value>,
+        items: ItemSink,
         ready: Option<oneshot::Sender<Result<(), RpcError>>>,
     },
 }
@@ -46,12 +74,17 @@ pub struct RpcClient {
     close_reason: Arc<std::sync::OnceLock<String>>,
 }
 
-/// Owned stream receiver whose drop immediately cancels the server task.
-pub struct RpcSubscription {
+/// Cancels a stream server-side when dropped.
+struct CancelOnDrop {
     id: u64,
-    items: mpsc::Receiver<serde_json::Value>,
     out: mpsc::Sender<String>,
     shared: Arc<Shared>,
+}
+
+/// Owned stream receiver whose drop immediately cancels the server task.
+pub struct RpcSubscription {
+    items: mpsc::Receiver<serde_json::Value>,
+    _cancel: CancelOnDrop,
 }
 
 impl RpcSubscription {
@@ -60,7 +93,21 @@ impl RpcSubscription {
     }
 }
 
-impl Drop for RpcSubscription {
+/// [`RpcSubscription`] whose items are the raw JSON bytes of each frame's
+/// `item`, so the consumer decodes once into its own type instead of through
+/// a `Value` tree.
+pub struct RpcRawSubscription {
+    items: mpsc::Receiver<RawItem>,
+    _cancel: CancelOnDrop,
+}
+
+impl RpcRawSubscription {
+    pub async fn recv(&mut self) -> Option<RawItem> {
+        self.items.recv().await
+    }
+}
+
+impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if self.shared.lock().remove(&self.id).is_none() {
             return;
@@ -103,7 +150,7 @@ impl RpcClient {
                     if line.is_empty() {
                         continue;
                     }
-                    let frame: ServerFrame = match serde_json::from_str(line) {
+                    let frame: ServerFrameRef = match serde_json::from_str(line) {
                         Ok(frame) => frame,
                         Err(err) => {
                             tracing::warn!(error = %err, "rpc: dropping malformed server frame");
@@ -196,9 +243,31 @@ impl RpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<mpsc::Receiver<serde_json::Value>, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
-        self.shared.lock().insert(id, Pending::Stream(tx));
+        self.open_stream(method, params, ItemSink::Value(tx))
+            .await?;
+        Ok(rx)
+    }
+
+    /// [`Self::subscribe`] delivering each item as raw JSON bytes.
+    pub async fn subscribe_raw(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<mpsc::Receiver<RawItem>, RpcError> {
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
+        self.open_stream(method, params, ItemSink::Raw(tx)).await?;
+        Ok(rx)
+    }
+
+    async fn open_stream(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        sink: ItemSink,
+    ) -> Result<(), RpcError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.shared.lock().insert(id, Pending::Stream(sink));
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -208,8 +277,7 @@ impl RpcClient {
         .await
         .inspect_err(|_| {
             self.shared.lock().remove(&id);
-        })?;
-        Ok(rx)
+        })
     }
 
     /// A drop-cancelled stream without waiting for its first item. Unlike a
@@ -219,14 +287,42 @@ impl RpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcSubscription, RpcError> {
+        let (tx, items) = mpsc::channel(STREAM_QUEUE_CAP);
+        let cancel = self
+            .open_scoped(method, params, ItemSink::Value(tx))
+            .await?;
+        Ok(RpcSubscription {
+            items,
+            _cancel: cancel,
+        })
+    }
+
+    /// [`Self::subscribe_scoped`] delivering each item as raw JSON bytes.
+    pub async fn subscribe_scoped_raw(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcRawSubscription, RpcError> {
+        let (tx, items) = mpsc::channel(STREAM_QUEUE_CAP);
+        let cancel = self.open_scoped(method, params, ItemSink::Raw(tx)).await?;
+        Ok(RpcRawSubscription {
+            items,
+            _cancel: cancel,
+        })
+    }
+
+    async fn open_scoped(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        sink: ItemSink,
+    ) -> Result<CancelOnDrop, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
-        self.shared.lock().insert(id, Pending::Stream(tx));
+        self.shared.lock().insert(id, Pending::Stream(sink));
         // Own cancellation before the send, including cancellation while the
         // outbound channel is backpressured.
-        let subscription = RpcSubscription {
+        let cancel = CancelOnDrop {
             id,
-            items: rx,
             out: self.out.clone(),
             shared: self.shared.clone(),
         };
@@ -237,7 +333,7 @@ impl RpcClient {
             cancel: false,
         })
         .await?;
-        Ok(subscription)
+        Ok(cancel)
     }
 
     /// Streaming request with a server acknowledgement before returning.
@@ -249,19 +345,47 @@ impl RpcClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<RpcSubscription, RpcError> {
+        let (tx, items) = mpsc::channel(STREAM_QUEUE_CAP);
+        let cancel = self
+            .open_checked(method, params, ItemSink::Value(tx))
+            .await?;
+        Ok(RpcSubscription {
+            items,
+            _cancel: cancel,
+        })
+    }
+
+    /// [`Self::subscribe_checked`] delivering each item as raw JSON bytes.
+    pub async fn subscribe_checked_raw(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcRawSubscription, RpcError> {
+        let (tx, items) = mpsc::channel(STREAM_QUEUE_CAP);
+        let cancel = self.open_checked(method, params, ItemSink::Raw(tx)).await?;
+        Ok(RpcRawSubscription {
+            items,
+            _cancel: cancel,
+        })
+    }
+
+    async fn open_checked(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        sink: ItemSink,
+    ) -> Result<CancelOnDrop, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (items_tx, items_rx) = mpsc::channel(STREAM_QUEUE_CAP);
         let (ready_tx, ready_rx) = oneshot::channel();
         self.shared.lock().insert(
             id,
             Pending::CheckedStream {
-                items: items_tx,
+                items: sink,
                 ready: Some(ready_tx),
             },
         );
-        let subscription = RpcSubscription {
+        let cancel = CancelOnDrop {
             id,
-            items: items_rx,
             out: self.out.clone(),
             shared: self.shared.clone(),
         };
@@ -276,7 +400,7 @@ impl RpcClient {
             self.shared.lock().remove(&id);
         })?;
         ready_rx.await.map_err(|_| RpcError::Closed)??;
-        Ok(subscription)
+        Ok(cancel)
     }
 
     async fn send(&self, frame: ClientFrame) -> Result<(), RpcError> {
@@ -292,7 +416,7 @@ impl Drop for RpcClient {
     }
 }
 
-async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: ServerFrame) {
+async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: ServerFrameRef<'_>) {
     let id = frame.id;
     if let Some(err) = frame.err {
         let error = wire_error(err);
@@ -312,11 +436,14 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
         }
         return;
     }
-    if let Some(value) = frame.ok {
+    if let Some(ok) = frame.ok {
         let mut pending = shared.lock();
         if matches!(pending.get(&id), Some(Pending::Call(_))) {
             if let Some(Pending::Call(tx)) = pending.remove(&id) {
-                let _ = tx.send(Ok(value));
+                let _ = tx.send(
+                    serde_json::from_str(ok.get())
+                        .map_err(|e| RpcError::Transport(format!("malformed reply: {e}"))),
+                );
             }
         } else if let Some(Pending::CheckedStream { ready, .. }) = pending.get_mut(&id)
             && let Some(ready) = ready.take()
@@ -335,13 +462,13 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
         }
         // Clone the sender out of the lock: the bounded send must await
         // (backpressure) without holding `shared`.
-        let tx = match shared.lock().get(&id) {
-            Some(Pending::Stream(tx)) => Some(tx.clone()),
+        let sink = match shared.lock().get(&id) {
+            Some(Pending::Stream(sink)) => Some(sink.clone()),
             Some(Pending::CheckedStream { items, .. }) => Some(items.clone()),
             _ => None,
         };
-        let dead = match tx {
-            Some(tx) => tx.send(item).await.is_err(),
+        let dead = match sink {
+            Some(sink) => !sink.send(item).await,
             None => false,
         };
         if dead {

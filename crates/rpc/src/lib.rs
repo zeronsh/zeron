@@ -24,7 +24,7 @@ pub mod ipc_auth;
 mod server;
 mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ws};
+pub use client::{RpcClient, RpcRawSubscription, RpcSubscription, connect_ipc, connect_ws};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
@@ -438,15 +438,84 @@ where
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
+/// [`ServerFrame`]'s envelope with `ok` and `item` left as unparsed bytes
+/// borrowed from the frame line: the reader scans the payload once to find
+/// where it ends and decodes it only into the type the consumer wants.
+/// Accepts exactly the frames [`ServerFrame`] does, with the same
+/// null-versus-absent rules (`"ok": null` is present, `"item": null` is not).
+#[derive(Deserialize)]
+pub(crate) struct ServerFrameRef<'a> {
+    pub id: u64,
+    #[serde(default, borrow, deserialize_with = "present_raw")]
+    pub ok: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    pub err: Option<String>,
+    #[serde(default, borrow)]
+    pub item: Option<&'a serde_json::value::RawValue>,
+    #[serde(default)]
+    pub done: bool,
+}
+
+fn present_raw<'de, D>(
+    deserializer: D,
+) -> Result<Option<&'de serde_json::value::RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <&serde_json::value::RawValue>::deserialize(deserializer).map(Some)
+}
+
+/// Write the `{id, item}` frame for an already serialized item. Byte-for-byte
+/// what `serde_json::to_string(&ServerFrame { id, item: Some(value), .. })`
+/// produces for the same compact `raw` (the frame's fields are `id, ok, err,
+/// item, done` in that order and the unset ones are skipped), without parsing
+/// `raw` into a tree first.
+pub(crate) fn item_frame(id: u64, raw: &serde_json::value::RawValue) -> String {
+    let raw = raw.get();
+    // ndjson: a frame is one line. Raw bytes that came from a pretty-printing
+    // producer are re-compacted rather than split across lines.
+    if raw.contains(['\n', '\r'])
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Ok(compact) = serde_json::to_string(&value)
+    {
+        return item_frame_compact(id, &compact);
+    }
+    item_frame_compact(id, raw)
+}
+
+fn item_frame_compact(id: u64, raw: &str) -> String {
+    use std::fmt::Write;
+    let mut frame = String::with_capacity(raw.len() + 32);
+    let _ = write!(frame, "{{\"id\":{id},\"item\":{raw}}}");
+    frame
+}
+
 /// What a service returns for one invocation.
 pub enum RpcReply {
     /// Unary response — sent as `{id, ok}`.
     Value(serde_json::Value),
     /// Stream — each item sent as `{id, item}`, then `{id, done: true}` when it ends.
     Stream(BoxStream<'static, serde_json::Value>),
+    /// [`Stream`](Self::Stream) whose items are already serialized: the server
+    /// splices each into its frame instead of encoding a `Value` tree. The
+    /// wire bytes are those of the equivalent `Stream` of parsed items.
+    RawStream(BoxStream<'static, Box<serde_json::value::RawValue>>),
 }
 
 impl RpcReply {
+    /// The stream of a streaming reply as parsed values, whichever way the
+    /// service produced it. `Err` hands a unary reply back.
+    pub fn into_value_stream(self) -> Result<BoxStream<'static, serde_json::Value>, Self> {
+        use futures::StreamExt;
+        match self {
+            Self::Stream(stream) => Ok(stream),
+            Self::RawStream(stream) => Ok(stream
+                .filter_map(|raw| async move { serde_json::from_str(raw.get()).ok() })
+                .boxed()),
+            reply @ Self::Value(_) => Err(reply),
+        }
+    }
+
     /// Serialize a value into a unary reply.
     pub fn value<T: Serialize>(value: &T) -> Result<Self, RpcError> {
         serde_json::to_value(value)
@@ -477,6 +546,9 @@ pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
     tokio::spawn(serve_connection(service, server_out, server_in));
     RpcClient::new(client_out, client_in)
 }
+
+#[cfg(test)]
+mod raw_tests;
 
 #[cfg(test)]
 mod tests {
