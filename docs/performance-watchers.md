@@ -4,7 +4,9 @@ Diff-sync and workspace-files register their source trees with `FsWatchHub::watc
 The shared `ignore::WalkBuilder` walk excludes gitignored directories and does not
 follow symlinks. Both consumers use that same walk for their initial 8,000-directory
 budget. An ignored `target/` or `node_modules/` no longer disables live source edits.
-Diff-sync registers git metadata explicitly because the source walk excludes `.git`.
+`ignore` does not skip `.git`, so an inline checkout's git directory is part of the
+root walk (and its budget); diff-sync still registers the git directory explicitly,
+which is a deduplicated no-op inline and the only coverage for a linked worktree.
 
 On Linux and kqueue, the hub installs NonRecursive watches and shares one native
 watcher across every accepted directory and consumer. The legacy recursive API
@@ -23,7 +25,17 @@ are delivered unchanged. A rescan after reconciliation covers files populated
 before a new watch attached. Overflow broadcasts notify's rescan signal to all
 consumers, recomputes directory sets and rearms existing paths as well: a lost
 remove/recreate may leave the same pathname referring to a new inode. Watch failures
-leave the tree unhealthy, and the existing repair ticks remain enabled.
+leave the tree unhealthy, and the existing repair ticks remain enabled. Hitting the
+inotify limit (`fs.inotify.max_user_watches`) logs a warning; the tree is not live,
+diff-sync keeps kicking on every repair tick, and workspace-files keeps its 120 s
+resync. A directory that cannot be read or watched (permissions) behaves the same
+way, and recovers on the next re-walk.
+
+A directory created after its tree was walked but before its parent's watch attached
+raises no event and is not in the walked set. Each pass that installed watches
+therefore walks the tree a second time and repeats the pass if the sets differ
+(bounded per `apply`, then handed to the batch worker). A re-walk that finds the same
+directory set sends no rescan.
 Workspace-files converts notify's rescan flag into `resync_required` on its stream.
 Its watch setup runs on the blocking pool and completes before the subscription's
 initial resync baseline.
@@ -81,21 +93,41 @@ directories; neither ignored dependency/build subtree is watched by the hub.
 Linux event tests cover create, modify, file/directory rename, delete, populated new
 subdirectories, changing ignore rules, symlink isolation, different consumer
 filters, shared flat/tree paths, and injected overflow with a missed directory.
-Overflow injection uses notify's exact rescan event; it does not fill the kernel
-queue. macOS and Windows require separate native validation.
+One test fills the real kernel queue (a handler stalls notify's reader while
+`max_queued_events` entries are created, then a directory is made whose event is
+dropped) and checks the overflow signal repairs the directory set; the others inject
+notify's exact rescan event. macOS and Windows require separate native validation.
 
 Validation on Linux, 2026-10-30 (all commands used the unit's isolated environment):
 
 | Command | Result |
 | --- | --- |
-| `cargo test -p zeron-engine --lib fs_watch` | 16 passed, 0 failed, 1 measurement test ignored |
-| `cargo test -p zeron-engine --lib diff_sync` | 45 passed, 0 failed |
+| `cargo test -p zeron-engine --lib fs_watch` | 26 passed, 0 failed, 2 measurement tests ignored |
+| `cargo test -p zeron-engine --lib diff_sync` | 46 passed, 0 failed |
 | `cargo test -p zeron-engine --lib workspace_files` | 58 passed, 0 failed |
+| `cargo test -p zeron-engine --lib spaces` | 3 passed, 0 failed |
 | `cargo test -p zeron-engine --lib fs_watch::tests::fixture_inotify_counts_before_and_after -- --ignored --nocapture --test-threads=1` | 1 passed, 0 failed |
+| `cargo test -p zeron-engine --lib fs_watch::tests::register_unregister_cycles_leave_no_inotify_fds_or_threads -- --ignored --nocapture --test-threads=1` | 1 passed, 0 failed (200 cycles, instances/watches/threads back to baseline) |
 | `cargo test -p zeron-engine --test diff_sync_churn` | 7 passed, 0 failed |
 | `cargo test -p zeron-engine --test workspace_files` | 8 passed, 0 failed |
 
-Ignore inputs outside registered roots are not watched. Updating those inputs can
-require a later topology/ignore event or re-registration to refresh the pruned watch
-set; the existing repair ticks still refresh consumer results. Ignored subtree
-contents intentionally have no native watch and retain repair-based resyncs.
+Ignore inputs inside a registered tree (`.gitignore`, `.ignore`, `.git/info/exclude`)
+raise events and reconcile at once. Inputs outside every registered root (global
+excludes, an ancestor `.gitignore`, a linked worktree's shared `info/exclude`) raise
+none. Both consumers call `FsWatch::refresh` from their 120 s repair tick, which
+re-walks the tree; a changed directory set attaches the new directories and rescans
+the consumers, an unchanged one is silent. A change outside the roots is therefore
+picked up within one repair interval (about 120 s plus the batch quiet time), not
+whenever the next topology event happens. Without it diff-sync's gate would have left
+a newly un-ignored directory unseen until the forced capture on every 10th tick
+(about 20 min). Ignored subtree contents intentionally have no native watch and
+retain repair-based resyncs.
+
+Reading a directory raises Access events, including `Access` on `.git` itself for
+the walker. Every consumer must drop them; the spaces watcher now does, since it
+would otherwise re-probe git on every walk.
+
+Known limits, not changed here: macOS and Windows are unvalidated; a pattern in an
+ancestor `.gitignore` that happens to match a directory inside `.git` (`logs/`)
+prunes that directory from the git-dir walk; force-added tracked files under an
+ignored directory are only seen by the repair tick.
