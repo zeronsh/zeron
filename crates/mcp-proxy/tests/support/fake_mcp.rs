@@ -26,6 +26,21 @@ fn reply(id: Value, result: Value) -> Value {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if env("FAKE_EXEC_PROBE") == "1" {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let args: Vec<Vec<u8>> = std::env::args_os().map(|a| a.as_bytes().to_vec()).collect();
+            let mut byte = [0u8; 1];
+            let inherited_fd = unsafe { libc::read(9, byte.as_mut_ptr().cast(), 1) } == 1;
+            println!(
+                "{}",
+                json!({"args":args, "sentinel":env("SHIM_SENTINEL"),
+                "path":env("PATH"), "fd9":inherited_fd})
+            );
+            std::process::exit(37);
+        }
+    }
     if std::env::args().any(|a| a.contains("telemetry/watchdog/main.js")) {
         // Deliberately survives parent exit: the proxy must find this separate group.
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -41,6 +56,9 @@ async fn main() {
         )
         .unwrap();
     }
+    // Resident, touched ballast for session-subtree PSS comparisons.
+    let ballast = vec![1u8; number("FAKE_BALLAST_MIB") as usize * 1024 * 1024];
+    std::hint::black_box(&ballast);
     let mut descendants = Vec::new();
     #[cfg(unix)]
     {
@@ -105,7 +123,13 @@ async fn main() {
                     tx.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"fake init failure"}})).await.unwrap();
                     continue;
                 }
-                json!({"protocolVersion":params["protocolVersion"],"serverInfo":{"name":"fake","version":"1"},"instructions":env("FAKE_INSTRUCTIONS"),"capabilities":{"tools":{"listChanged":true},"prompts":{},"resources":{"subscribe":true}}})
+                {
+                    let mut caps = json!({"tools":{"listChanged":true},"prompts":{},"resources":{"subscribe":true}});
+                    if env("FAKE_CHANNEL") == "1" {
+                        caps["experimental"] = json!({"claude/channel":{}});
+                    }
+                    json!({"protocolVersion":params["protocolVersion"],"serverInfo":{"name":"fake","version":"1"},"instructions":env("FAKE_INSTRUCTIONS"),"capabilities":caps})
+                }
             }
             "tools/list" => {
                 let mut result = json!({"tools":tools});
@@ -183,4 +207,5 @@ async fn main() {
     }
     drop(tx);
     let _ = writer.await;
+    std::hint::black_box(&ballast);
 }

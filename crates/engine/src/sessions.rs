@@ -775,6 +775,12 @@ impl SessionsEngine {
             tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
             return Ok(String::new());
         }
+        // Compare the effective host policy, not the client's skipped/unstamped
+        // mcp_plan. Keep the existing run id when considering an in-place turn.
+        let live_run_id = lock(&self.inner.runs).get(chat_id).map(|h| h.run_id.clone());
+        if let Some(run_id) = live_run_id {
+            self.inner.stamp_mcp_plan(&mut request, chat_id, &run_id, harness_id);
+        }
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -1011,6 +1017,7 @@ impl SessionsEngine {
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
         let run_id = new_id();
+        self.inner.stamp_mcp_plan(&mut request, chat_id, &run_id, harness_id);
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -2310,11 +2317,9 @@ impl Inner {
 
     /// Stamp the lazy-MCP plan for the process this run is about to start.
     /// `ZERON_MCP_LAZY=0`, or `mcp.lazy` off, clears any plan already on the
-    /// request and grants no channel lease. Called from `drive_run` only:
-    /// dispatch's `same_runtime` check still sees the unstamped request a
-    /// client sent, so a later harness unit must treat a missing incoming
-    /// plan as unchanged or stamp before that check. Title runs never get
-    /// here; they call the harness directly.
+    /// request and grants no channel lease. Dispatch stamps before routing and
+    /// before saving RuntimeConfig, so preference/lease changes restart a CLI.
+    /// Title runs call the harness directly and never get here.
     fn stamp_mcp_plan(
         &self,
         request: &mut RunRequest,
@@ -3667,8 +3672,8 @@ async fn drive_run(
     }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
-    // the event loop) can take ownership. Taken before the MCP stamp, which
-    // the retry's own dispatch redoes with the settings of its time.
+    // the event loop) can take ownership. The retry's dispatch
+    // stamps a fresh MCP plan with the settings of its time.
     let mut retry_request = Some(RunRequest {
         resume: None,
         ..request.clone()
@@ -3678,7 +3683,6 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
     }
-    inner.stamp_mcp_plan(&mut request, &chat_id, &run_id, harness_id);
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).

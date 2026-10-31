@@ -444,3 +444,11 @@ mod tests {
         assert!(!disk.valid("key", &json!("v")));
     }
 }
+
+/// Channels must keep a live connection even when status snapshots omit caps.
+pub fn declares_channel(initialize: &Value) -> bool {
+    initialize
+        .pointer("/capabilities/experimental")
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.keys().any(|k| k == "channel" || k.ends_with("/channel")))
+}

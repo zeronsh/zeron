@@ -24,6 +24,7 @@ required-features = ["native-fixture"]
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-proto.workspace = true
+zeron-mcp-proxy.workspace = true
 base64 = "0.22"
 reqwest.workspace = true
 tokio.workspace = true
@@ -53,3 +54,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+
+[[bin]]
+name = "harness-claude-shim-fixture"
+path = "tests/fixtures/claude_shim.rs"
+required-features = ["native-fixture"]

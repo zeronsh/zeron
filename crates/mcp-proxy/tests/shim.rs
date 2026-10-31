@@ -1,0 +1,70 @@
+#![cfg(target_os = "linux")]
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::{ffi::OsStringExt, process::CommandExt},
+    path::Path,
+    process::Command,
+};
+use zeron_mcp_proxy::shim;
+
+#[test]
+fn shell_passthrough_preserves_argv0_non_utf8_env_fds_and_exit_code_even_with_broken_manifest() {
+    let root = tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap()).unwrap();
+    let shims = root.path().join("shim");
+    let real = root.path().join("real");
+    fs::create_dir(&shims).unwrap();
+    fs::create_dir(&real).unwrap();
+    let helper = env!("CARGO_BIN_EXE_zeron-mcp-proxy");
+    let fake = env!("CARGO_BIN_EXE_fake-mcp");
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&shims, &alias).unwrap();
+    let path =
+        std::env::join_paths([shims.clone(), alias, real.clone(), "/usr/bin".into()]).unwrap();
+    fs::write(shims.join(shim::MANIFEST), "corrupt").unwrap();
+    for command in ["node", "npx", "python3"] {
+        std::os::unix::fs::symlink(helper, shims.join(command)).unwrap();
+        std::os::unix::fs::symlink(fake, real.join(command)).unwrap();
+        for manifest in [true, false] {
+            let run = |program: &Path| {
+                let mut cmd = Command::new(program);
+                cmd.arg0("custom-argv0")
+                    .arg(OsString::from_vec(vec![b'x', 0xff]))
+                    .env("PATH", &path)
+                    .env("FAKE_EXEC_PROBE", "1")
+                    .env("SHIM_SENTINEL", "exact value")
+                    .env(shim::DIR_ENV, &shims);
+                if manifest {
+                    cmd.env(shim::PARENT_ENV, std::env::current_exe().unwrap());
+                } else {
+                    cmd.env_remove(shim::DIR_ENV).env_remove(shim::PARENT_ENV);
+                }
+                unsafe {
+                    cmd.pre_exec(|| {
+                        let fd = libc::open(c"/dev/zero".as_ptr(), libc::O_RDONLY);
+                        if fd < 0 || libc::dup2(fd, 9) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if fd != 9 {
+                            libc::close(fd);
+                        }
+                        Ok(())
+                    });
+                }
+                cmd.output().unwrap()
+            };
+            let baseline = run(&real.join(command));
+            let shimmed = run(&shims.join(command));
+            assert_eq!(baseline.status.code(), Some(37));
+            assert_eq!(
+                shimmed.status.code(),
+                Some(37),
+                "{}",
+                String::from_utf8_lossy(&shimmed.stderr)
+            );
+            assert_eq!(baseline.stdout, shimmed.stdout);
+            let record: serde_json::Value = serde_json::from_slice(&shimmed.stdout).unwrap();
+            assert_eq!(record["fd9"], true);
+        }
+    }
+}

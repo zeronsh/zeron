@@ -55,6 +55,7 @@ pub mod catalog;
 mod discovery;
 mod fork_tail;
 pub mod mcp_capture;
+mod mcp_plan;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -434,7 +435,11 @@ impl ClaudeHarness {
         args
     }
 
-    fn build_command(exe: &std::path::Path, request: &RunRequest, title_only: bool) -> Command {
+    fn build_command(
+        exe: &std::path::Path,
+        request: &RunRequest,
+        title_only: bool,
+    ) -> (Command, Option<mcp_plan::ShimRun>) {
         let mut cmd = Command::new(exe);
         // Its own process group, so teardown reaches the MCP servers and
         // tools it started; and no inherited Claude Code session markers.
@@ -498,7 +503,8 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        cmd
+        let shim = mcp_plan::prepare(&mut cmd, exe, request, title_only);
+        (cmd, shim)
     }
 
     /// Start one CLI process for a run, with its stdio wired up.
@@ -507,12 +513,11 @@ impl ClaudeHarness {
         request: &RunRequest,
         title_only: bool,
     ) -> Result<Runtime, HarnessError> {
-        let mut child = Self::build_command(exe, request, title_only)
-            .spawn()
-            .map_err(|e| {
-                let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
-                crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
-            })?;
+        let (mut command, shim) = Self::build_command(exe, request, title_only);
+        let mut child = command.spawn().map_err(|e| {
+            let cwd = (!request.cwd.is_empty()).then(|| std::path::Path::new(&request.cwd));
+            crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
+        })?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -526,6 +531,7 @@ impl ClaudeHarness {
             tokio::spawn(read_stderr(stderr, stderr_tail.clone()));
         }
         Ok(Runtime {
+            shim,
             child,
             stdout_lines: crate::lossy_lines::lossy_lines(stdout),
             stdin: Stdin::new(
@@ -822,6 +828,7 @@ impl Harness for ClaudeHarness {
         live.cwd == next.cwd
             && Self::launch_args(live) == Self::launch_args(next)
             && access(live) == access(next)
+            && mcp_plan::same_plan(&live.mcp_plan, &next.mcp_plan)
     }
     /// Model, context window, effort, fast mode, thinking, ultracode, the
     /// access mode and plan mode all change on the live process
@@ -832,6 +839,7 @@ impl Harness for ClaudeHarness {
     /// a switch the CLI refused would run it with less asked than chosen.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && mcp_plan::same_plan(&live.mcp_plan, &next.mcp_plan)
             && live.auto_approve == next.auto_approve
             && strictness(permission_mode(next)) <= strictness(permission_mode(live))
     }
@@ -983,6 +991,7 @@ impl ClaudeHarness {
             None => Normalizer::new(),
         };
         let Runtime {
+            shim,
             child,
             stdout_lines,
             mut stdin,
@@ -1018,6 +1027,7 @@ impl ClaudeHarness {
             title_only,
             exe,
             launched: request.clone(),
+            shim,
             child,
             stdout_lines,
             first_command,
@@ -1051,6 +1061,7 @@ async fn read_stderr(stderr: impl tokio::io::AsyncRead + Unpin, tail: crate::Std
 
 /// One launched CLI process and its stdio.
 struct Runtime {
+    shim: Option<mcp_plan::ShimRun>,
     child: Child,
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     stdin: Stdin,
@@ -1215,6 +1226,7 @@ struct Session {
     /// session cannot be restored.
     exe: PathBuf,
     launched: RunRequest,
+    shim: Option<mcp_plan::ShimRun>,
     child: Child,
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     /// The uuid the opening prompt was written with.
@@ -1242,6 +1254,7 @@ async fn run_session(session: Session) {
         title_only,
         exe,
         launched,
+        mut shim,
         mut child,
         mut stdout_lines,
         first_command,
@@ -1353,12 +1366,16 @@ async fn run_session(session: Session) {
             }
             stdin.close_for_teardown();
             child.shutdown(kill_grace).await;
+            if let Some(shim) = shim.take() {
+                shim.cleanup().await;
+            }
             shells = background::BackgroundShells::default();
             turn.set_background_processes(Vec::new());
             let mut fresh = launched.clone();
             fresh.resume = None;
             match ClaudeHarness::launch(&exe, &fresh, title_only) {
                 Ok(runtime) => {
+                    shim = runtime.shim;
                     child = runtime.child;
                     stdout_lines = runtime.stdout_lines;
                     stdin = runtime.stdin;
@@ -1893,6 +1910,9 @@ async fn run_session(session: Session) {
     }
     stdin.close_for_teardown();
     child.shutdown_with(torn_down, kill_grace).await;
+    if let Some(shim) = shim {
+        shim.cleanup().await;
+    }
     if let Some(handle) = escalation {
         handle.abort();
     }
@@ -2260,7 +2280,8 @@ mod tests {
             env: Default::default(),
             mcp_plan: None,
         };
-        let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
+        let (mut cmd, _shim) =
+            ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
         let value = cmd
             .as_std_mut()
             .get_envs()
@@ -2372,6 +2393,26 @@ mod access_tests {
             access_permission_mode(&request(AutoAcceptEdits, false, true)),
             "acceptEdits"
         );
+    }
+
+    #[test]
+    fn mcp_plan_change_cannot_reconfigure_in_place() {
+        let harness = ClaudeHarness::new();
+        let mut live = request(AccessMode::Supervised, false, false);
+        live.mcp_plan = Some(zeron_proto::McpPlan::default());
+        let mut next = live.clone();
+        next.mcp_plan.as_mut().unwrap().run_dir = "new-run".into();
+        assert!(harness.same_runtime(&live, &next));
+        next.mcp_plan
+            .as_mut()
+            .unwrap()
+            .modes
+            .insert("srv".into(), zeron_proto::McpMode::Eager);
+        assert!(!harness.same_runtime(&live, &next));
+        assert!(!harness.reconfigures_in_place(&live, &next));
+        next.mcp_plan = None;
+        assert!(!harness.same_runtime(&live, &next));
+        assert!(!harness.reconfigures_in_place(&live, &next));
     }
 
     #[test]
@@ -2509,4 +2550,46 @@ mod mcp_injection_tests {
             "chat-1"
         );
     }
+}
+
+/// Test-only entry to the production command builder and teardown, with stdio
+/// attached to the deterministic control client rather than the session parser.
+#[cfg(all(feature = "native-fixture", unix))]
+#[doc(hidden)]
+pub async fn shim_fixture(
+    exe: &std::path::Path,
+    fixture: &std::path::Path,
+    action: &str,
+) -> std::io::Result<()> {
+    let value: Value = serde_json::from_slice(&std::fs::read(fixture)?)?;
+    let mut request: RunRequest = serde_json::from_value(value["request"].clone())?;
+    if !value["plan"].is_null() {
+        request.mcp_plan = Some(serde_json::from_value(value["plan"].clone())?);
+    }
+    let inputs = mcp_capture::FingerprintInputs::for_run(
+        Some(std::path::Path::new(&request.cwd)),
+        &request.env,
+    )?;
+    if action == "capture" {
+        let key = inputs.key(exe)?;
+        let rows = mcp_capture::parse_status(&value["status"])?;
+        return mcp_capture::SnapshotStore::new(&PathBuf::from(value["dataDir"].as_str().unwrap()))
+            .save(&mcp_capture::ClaudeMcpSnapshot::new(key, rows));
+    }
+    let (mut command, shim) = ClaudeHarness::build_command(exe, &request, false);
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(flags) = value["flags"].as_array() {
+        command.args(flags.iter().map(|f| f.as_str().unwrap()));
+    }
+    let mut child = Child::new(command.spawn()?);
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! { result = child.wait() => { let _ = result?; }, _ = term.recv() => {} }
+    child.shutdown(Duration::from_millis(200)).await;
+    if let Some(shim) = shim {
+        shim.cleanup().await;
+    }
+    Ok(())
 }

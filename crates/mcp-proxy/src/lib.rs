@@ -5,6 +5,7 @@ pub mod npx;
 pub mod process;
 mod proxy;
 pub mod rpc;
+pub mod shim;
 
 pub use config::{Config, Mode};
 pub use process::cleanup_run_dir;

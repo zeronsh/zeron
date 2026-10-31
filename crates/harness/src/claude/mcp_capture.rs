@@ -273,11 +273,21 @@ pub struct FingerprintInputs {
 
 impl FingerprintInputs {
     pub fn for_probe(project: Option<&Path>) -> io::Result<Self> {
-        let config_root = super::config_root(&BTreeMap::new());
-        let config_file = if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
+        Self::for_run(project, &BTreeMap::new())
+    }
+
+    pub fn for_run(project: Option<&Path>, env: &BTreeMap<String, String>) -> io::Result<Self> {
+        let config_root = super::config_root(env);
+        let config_file = if env.get("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty())
+            || (!env.contains_key("HOME")
+                && std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()))
+        {
             config_root.join(".claude.json")
         } else {
-            crate::executable::home_or_current_dir().join(".claude.json")
+            env.get("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(crate::executable::home_or_current_dir)
+                .join(".claude.json")
         };
         let managed = if cfg!(target_os = "macos") {
             PathBuf::from("/Library/Application Support/ClaudeCode")

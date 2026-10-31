@@ -13725,6 +13725,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-mcp-proxy",
  "zeron-proto",
  "zeron-voice-media",
  "zip",

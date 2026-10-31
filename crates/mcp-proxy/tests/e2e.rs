@@ -695,3 +695,19 @@ async fn lone_server_request_blocks_idle_and_inflight_cancel_is_remapped() {
     eventually(|| !alive(*pids(&d.join("spawn")).last().unwrap())).await;
     peer.close().await;
 }
+
+#[tokio::test]
+async fn channel_capability_never_idles_and_cached_channel_starts_eagerly() {
+    let dir = temp();
+    let mut first = Peer::spawn(dir.path(), "lazy", &[("FAKE_CHANNEL", "1")]);
+    first.init().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(pids(&dir.path().join("spawn")).len(), 1);
+    assert!(pids(&dir.path().join("spawn")).into_iter().all(alive));
+    first.close().await;
+    let mut second = Peer::spawn(dir.path(), "lazy", &[("FAKE_CHANNEL", "1")]);
+    second.init().await;
+    eventually(|| pids(&dir.path().join("spawn")).len() == 2).await;
+    assert!(alive(*pids(&dir.path().join("spawn")).last().unwrap()));
+    second.close().await;
+}

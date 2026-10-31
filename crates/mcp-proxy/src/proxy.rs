@@ -390,7 +390,10 @@ impl Proxy {
             };
             self.key = cache::key(&self.config, &message["params"], &command, &bin, npx);
             let disk = cache::read(&self.config.data_dir, &self.key);
-            if disk.as_ref().is_some_and(|e| e.discovery_failed) {
+            if disk
+                .as_ref()
+                .is_some_and(|e| e.discovery_failed || cache::declares_channel(&e.initialize))
+            {
                 self.passthrough = true;
                 self.event("cache", json!({"status":"discovery-failed-passthrough"}));
             } else if let Some(entry) =
@@ -638,6 +641,10 @@ impl Proxy {
             let result = message["result"].clone();
             if !result.is_object() {
                 return self.fail("initialize result is not an object".into()).await;
+            }
+            if cache::declares_channel(&result) {
+                self.config.mode = Mode::LazyKeepAlive;
+                self.stop_after_capture = false;
             }
             self.child_out(rpc::notification("notifications/initialized", json!({})))?;
             if let Some(params) = self.logging.clone() {

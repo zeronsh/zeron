@@ -485,8 +485,8 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
-    /// Lazy-MCP plan, stamped by the host in `drive_run` the same way `mcp`
-    /// and `env` are. `serde(skip)` in both directions, exactly as `env`:
+    /// Lazy-MCP plan, stamped by the host before dispatch routes a turn or
+    /// saves its runtime configuration. `serde(skip)` in both directions, exactly as `env`:
     /// a remote sender cannot inject a plan, and the plan never rides the
     /// command plane, the session doc, or the run journal. The host
     /// recomputes it for the process it is about to start.
