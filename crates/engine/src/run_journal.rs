@@ -935,6 +935,39 @@ mod tests {
     }
 
     #[test]
+    fn writer_counters_include_queued_and_synchronous_records() {
+        use zeron_counters::{C, get};
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let appends = get(C::JournalAppends);
+        let bytes = get(C::JournalBytes);
+        journal
+            .append(
+                "counter-chat",
+                &AgentEvent::TextDelta {
+                    text: "sync".into(),
+                },
+            )
+            .unwrap();
+        for _ in 0..64 {
+            journal
+                .enqueue(
+                    "counter-chat",
+                    &AgentEvent::TextDelta {
+                        text: "queued".into(),
+                    },
+                )
+                .unwrap();
+        }
+        journal.flush().unwrap();
+        assert!(get(C::JournalAppends) >= appends + 65);
+        let written = std::fs::metadata(journal.path_for("counter-chat"))
+            .unwrap()
+            .len();
+        assert!(get(C::JournalBytes) >= bytes + written);
+    }
+
+    #[test]
     fn appends_are_monotonic_and_replayable() {
         let dir = tempfile::tempdir().unwrap();
         let journal = RunJournal::open(dir.path()).unwrap();

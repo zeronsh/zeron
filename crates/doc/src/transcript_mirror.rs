@@ -553,6 +553,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_mirror_rebuilds_count_transcript_reads() {
+        use zeron_counters::{C, get};
+        let doc = SessionDoc::init("counter-chat").unwrap();
+        for id in ["a", "b"] {
+            let map = doc
+                .doc()
+                .get_list("messages")
+                .push_container(loro::LoroMap::new())
+                .unwrap();
+            map.insert("id", id).unwrap();
+        }
+        doc.doc().commit();
+        let mirror = TranscriptMirror::new().with_verify(Verify::Never);
+        let calls = get(C::DocReadEntriesCalls);
+        let entries = get(C::DocReadEntriesEntries);
+        assert_eq!(mirror.refresh(&doc).len(), 2);
+        assert!(get(C::DocReadEntriesCalls) >= calls + 1);
+        assert!(get(C::DocReadEntriesEntries) >= entries + 2);
+    }
+
+    #[test]
     fn commit_callbacks_do_not_wait_for_the_rebuild_lock() {
         use std::sync::mpsc;
         use std::time::Duration;

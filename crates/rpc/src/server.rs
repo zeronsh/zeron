@@ -274,3 +274,60 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token:
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_counters::{C, get};
+
+    struct ItemService(bool);
+
+    #[async_trait::async_trait]
+    impl RpcService for ItemService {
+        async fn handle(&self, _: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+            let value = serde_json::json!({"text": "x".repeat(4096)});
+            Ok(if self.0 {
+                RpcReply::RawStream(
+                    futures::stream::iter([serde_json::value::to_raw_value(&value).unwrap()])
+                        .boxed(),
+                )
+            } else {
+                RpcReply::Stream(futures::stream::iter([value]).boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_counters_include_raw_and_typed_item_envelopes() {
+        for raw in [false, true] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let items = get(C::RpcItemsOut);
+            let bytes = get(C::RpcBytesOut);
+            handle_request(
+                Arc::new(ItemService(raw)),
+                tx,
+                7,
+                "watch".into(),
+                serde_json::Value::Null,
+            )
+            .await;
+            let item = rx.recv().await.unwrap();
+            assert!(
+                serde_json::from_str::<ServerFrame>(&item)
+                    .unwrap()
+                    .item
+                    .is_some()
+            );
+            assert!(get(C::RpcItemsOut) >= items + 1, "raw={raw}");
+            assert!(
+                get(C::RpcBytesOut) >= bytes + item.len() as u64,
+                "raw={raw}"
+            );
+            assert!(
+                serde_json::from_str::<ServerFrame>(&rx.recv().await.unwrap())
+                    .unwrap()
+                    .done
+            );
+        }
+    }
+}

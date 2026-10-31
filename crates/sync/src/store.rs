@@ -1188,6 +1188,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batched_outbox_delta_and_salvage_writes_are_counted() {
+        use zeron_counters::{C, get};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &base, 0, 2)
+            .unwrap();
+        let txns = get(C::SqliteWriteTxns);
+        store.mark_salvage_checked("chat", &base, 2).unwrap();
+        store
+            .enqueue_chat_updates(&[("chat", "b1", b"one"), ("chat", "b2", b"two")])
+            .unwrap();
+        let version = doc.oplog_vv();
+        doc.get_text("text").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&version)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        let rows = get(C::SnapshotDeltaRows);
+        let bytes = get(C::SnapshotDeltaBytes);
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert!(get(C::SqliteWriteTxns) >= txns + 3);
+        assert!(get(C::SnapshotDeltaRows) >= rows + 1);
+        assert!(get(C::SnapshotDeltaBytes) >= bytes + (delta.len() + roots.len()) as u64);
+    }
+
+    #[test]
     fn autocommit_writes_increment_transaction_counter() {
         let dir = tempfile::tempdir().unwrap();
         let store = DocsStore::open(dir.path()).unwrap();

@@ -886,6 +886,22 @@ mod tests {
     }
 
     #[test]
+    fn direct_and_fallback_frames_count_lines_and_text_parses() {
+        use zeron_counters::{C, get};
+        for (line, parses) in [
+            (r#"{"type":"system"}"#, 1),
+            (r#"{"type":"system","tools":null}"#, 3),
+            (r#"{"type":"sys\u0074em","attempt":2}"#, 3),
+        ] {
+            let lines_before = get(C::ClaudeLines);
+            let parses_before = get(C::ClaudeJsonParses);
+            assert!(parse_frame(line).is_ok());
+            assert!(get(C::ClaudeLines) >= lines_before + 1);
+            assert!(get(C::ClaudeJsonParses) >= parses_before + parses);
+        }
+    }
+
+    #[test]
     fn repaired_value_counts_each_json_parse() {
         let before = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
         assert!(parse_value(r#"{"text":"\ud83d"}"#).is_ok());
