@@ -530,18 +530,10 @@ impl SessionsEngine {
     /// parked runtime is put to sleep now so the next message starts it that
     /// way; a running turn finishes as it is and the next send relaunches.
     pub fn restart_with_all_mcp(&self, chat_id: &str) {
-        let live = lock(&self.inner.runs).get(chat_id).map(|h| h.run_id.clone());
-        {
-            let mut full = lock(&self.inner.full_mcp);
-            // A run that already took the request stays pinned to it.
-            let pinned = matches!(
-                full.get(chat_id),
-                Some(FullMcp::Run(taken)) if live.as_ref() == Some(taken)
-            );
-            if !pinned {
-                full.insert(chat_id.to_owned(), FullMcp::Armed);
-            }
-        }
+        // Serialize arming with the insertion of a new run.
+        let runs = lock(&self.inner.runs);
+        lock(&self.inner.full_mcp).insert(chat_id.to_owned(), FullMcp::Armed);
+        drop(runs);
         self.hibernate(chat_id);
     }
 
@@ -622,18 +614,18 @@ impl SessionsEngine {
     }
 
     /// Status watch: the full session list, re-sent on every transition.
-    pub fn watch_runtime_states(
-        &self,
-    ) -> watch::Receiver<std::collections::BTreeMap<String, zeron_proto::RuntimeState>> {
-        self.inner.runtime_states_tx.subscribe()
-    }
-
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner
             .activity_tx
             .get()
             .unwrap_or(&self.inner.sessions_tx)
             .subscribe()
+    }
+
+    pub fn watch_runtime_states(
+        &self,
+    ) -> watch::Receiver<std::collections::BTreeMap<String, zeron_proto::RuntimeState>> {
+        self.inner.runtime_states_tx.subscribe()
     }
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
@@ -1092,7 +1084,9 @@ impl SessionsEngine {
             // A parked session started with another account (Cloud), from a
             // CLI binary since updated, or with native subagents since
             // switched: replace it.
-            let route = if self
+            let restart_requested = matches!(lock(&self.inner.full_mcp).get(chat_id), Some(FullMcp::Armed));
+            let route = if restart_requested
+                || self
                 .credential_changed(chat_id, harness_id, credential.as_deref())
                 .await
                 || self
@@ -1289,8 +1283,6 @@ impl SessionsEngine {
         }
 
         let run_id = new_id();
-        self.inner
-            .stamp_mcp_plan_for_launch(&mut request, chat_id, &run_id, harness_id);
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -1391,6 +1383,7 @@ impl SessionsEngine {
             let mut runs = lock(&self.inner.runs);
             if prewarmed
                 && (runs.contains_key(chat_id)
+                    || matches!(lock(&self.inner.full_mcp).get(chat_id), Some(FullMcp::Armed))
                     || stops_seen.is_some_and(|seen| seen != stops)
                     || !self.inner.registry.mcp_prefs().prewarm
                     || self
@@ -1428,6 +1421,7 @@ impl SessionsEngine {
                 if !idle {
                     self.inner.journal.clear_user_stop(chat_id);
                 }
+                self.inner.stamp_mcp_plan_for_launch(&mut request, chat_id, &run_id, harness_id);
                 runs.insert(
                     chat_id.to_string(),
                     RunHandle {
@@ -2685,6 +2679,12 @@ impl Inner {
             let was_active = matches!(
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
+            );
+            if let Some(turn) = completed_turn {
+                entry.last_completed_turn = Some(turn);
+            }
+            entry.status = status;
+            entry.runtime = runtime;
             self.runtime_states_tx.send_if_modified(|states| {
                 if states.get(chat_id).copied() == runtime {
                     return false;
@@ -2696,12 +2696,6 @@ impl Inner {
                 }
                 true
             });
-            );
-            if let Some(turn) = completed_turn {
-                entry.last_completed_turn = Some(turn);
-            }
-            entry.status = status;
-            entry.runtime = runtime;
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -6132,6 +6126,12 @@ mod tests {
                     run.idle_since.unwrap_or_else(tokio::time::Instant::now),
                 ));
                 run.hibernate.notify_one();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
+        }
+    }
+
     #[tokio::test]
     async fn runtime_states_watch_tracks_transitions_without_heartbeat_updates() {
         let t = HibernationTest::new(false, false).await;
@@ -6146,10 +6146,21 @@ mod tests {
         t.core.sessions.shutdown().await;
     }
 
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
-        }
+    #[tokio::test]
+    async fn restart_with_all_mcp_survives_prewarm_and_ends_with_its_run() {
+        let t = HibernationTest::new(false, false).await;
+        t.core.sessions.restart_with_all_mcp("sleep");
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        assert!(!t.core.sessions.prewarm("sleep", t.fixture.harness_id, t.request.clone()).await.unwrap());
+        t.core.sessions.dispatch("sleep", t.fixture.harness_id, t.request.clone(), None).await.unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        assert!(lock(&t.fixture.launches).last().unwrap().mcp_plan.is_none());
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.dispatch("sleep", t.fixture.harness_id, t.request.clone(), None).await.unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        assert!(lock(&t.fixture.launches).last().unwrap().mcp_plan.is_some());
+        t.core.sessions.shutdown().await;
     }
 
     async fn prewarm_sleep(t: &HibernationTest) -> String {
