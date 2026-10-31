@@ -5642,6 +5642,9 @@ mod tests {
         fn supports_steering(&self) -> bool {
             true
         }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::StepBoundary
+        }
         fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
             &[]
         }

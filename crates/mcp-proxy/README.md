@@ -86,3 +86,25 @@ invocations, local/git specs, Windows, and failures keep the original command;
 `--no-npx-resolve` explicitly selects that behavior. Unlike pi's optional slow
 population path, the proxy does not run a preliminary npm installation: the
 original invocation handles a cold npm cache. Daily refresh is engine work.
+
+Claude launch interception uses the standalone helper as a Linux multicall
+executable: private per-run PATH entries such as `node`/`npx` link to it. It
+preserves the caller's argv0 while dispatching by the actual executed pathname.
+`--shim-version` reports the internal handoff version so an old sibling helper
+cannot accidentally receive launcher arguments. The manifest travels through
+`ZERON_MCP_SHIM_*` env references; server env values stay inherited and hashed.
+First discovery retains channel servers as live forwarding; subsequent channel
+launches exec the real command directly using private `mcp-cache/class-v1`
+classification records. See the harness's
+[`SHIM_VALIDATION.md`](../harness/src/claude/SHIM_VALIDATION.md) for lifecycle,
+platform fallbacks and credential-free reproduction.
+
+The shared core performs channel classification for every launcher, including
+Codex config overrides. Known channels exec their real command before any
+Tokio/stdin setup on Unix; Windows retains eager keep-alive forwarding. A first
+channel discovery never stops or restarts its server and forwards its original
+initialize result and notifications. Both catalog and classification identities
+include the actual startup cwd even without `--cwd`; catalogs also retain their
+client/protocol partition. Classification records contain hashes and verdicts,
+not env values. Failed discovery falls back to eager forwarding in that same
+session and execs eagerly on later sessions of that identity.
