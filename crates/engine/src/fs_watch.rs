@@ -263,6 +263,24 @@ impl FsWatch {
     }
 }
 
+impl FsWatch {
+    /// Re-walk a pruned tree on the next batch. Ignore inputs outside the
+    /// registered roots (global excludes, an ancestor `.gitignore`, the
+    /// `info/exclude` of a linked worktree's main repository) raise no event
+    /// under the tree, so a consumer calls this from its repair tick. An
+    /// unchanged tree costs a walk and sends nothing. No-op for flat watches.
+    pub(crate) fn refresh(&self) {
+        let tree = lock(&self.hub.routes)
+            .regs
+            .get(&self.id)
+            .and_then(|reg| reg.tree.clone());
+        if let Some(tree) = tree {
+            tree.dirty.store(true, Ordering::Release);
+            self.hub.schedule_with_fallback(false);
+        }
+    }
+}
+
 impl Drop for FsWatch {
     fn drop(&mut self) {
         if lock(&self.hub.routes).regs.remove(&self.id).is_some() {
@@ -565,9 +583,15 @@ impl FsWatchHub {
                 for path in &dirs {
                     os.failed.remove(path);
                 }
+                // A walk that found the same directories attaches nothing and
+                // leaves nothing unobserved, so consumers need no rescan.
+                let changed =
+                    dirs != *lock(&tree.dirs) || complete != tree.complete.load(Ordering::Acquire);
                 *lock(&tree.dirs) = dirs;
                 tree.complete.store(complete, Ordering::Release);
-                tree.rescan.store(true, Ordering::Release);
+                if changed {
+                    tree.rescan.store(true, Ordering::Release);
+                }
                 walked.push((root, tree));
             }
         }
@@ -1749,6 +1773,71 @@ mod tests {
         let file = racing.join("file");
         std::fs::write(&file, "x").unwrap();
         event_matching(&mut a, |e| e.paths.contains(&file)).await;
+    }
+
+    /// Ignore inputs outside the registered root (an ancestor `.gitignore`, the
+    /// global excludes, a linked worktree's shared `info/exclude`) raise no
+    /// event under it. The consumers' repair ticks call `refresh`, which must
+    /// pick up the change, and cost nothing downstream when nothing changed.
+    #[tokio::test]
+    async fn refresh_picks_up_ignore_changes_outside_the_root() {
+        let (_tmp, base) = tree();
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join("build/inner")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(base.join(".gitignore"), "build/\n").unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let watch = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        hub.apply();
+        settle(&hub).await;
+        assert!(!hub.installed().contains_key(&root.join("build")));
+        while a.try_recv().is_ok() {}
+
+        // Nothing changed: a refresh walks, but no consumer hears of it.
+        watch.refresh();
+        settle(&hub).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The walk itself reads directories, which raises Access events; the
+        // consumers drop those.
+        while let Ok(event) = a.try_recv() {
+            assert!(
+                matches!(event.kind, notify::EventKind::Access(_)),
+                "an unchanged tree stays silent: {event:?}"
+            );
+        }
+
+        std::fs::write(base.join(".gitignore"), "").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !hub.installed().contains_key(&root.join("build")),
+            "no native event reaches the hub for a file outside the root"
+        );
+        watch.refresh();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(hub.installed().contains_key(&root.join("build/inner")));
+        let file = root.join("build/inner/out");
+        std::fs::write(&file, "x").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&file)).await;
+    }
+
+    #[tokio::test]
+    async fn git_info_exclude_edits_inside_the_root_reconcile_without_refresh() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::create_dir_all(root.join("out/deep")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "out/\n").unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let _watch = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        hub.apply();
+        settle(&hub).await;
+        assert!(!hub.installed().contains_key(&root.join("out")));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while a.try_recv().is_ok() {}
+        std::fs::write(root.join(".git/info/exclude"), "").unwrap();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(hub.installed().contains_key(&root.join("out/deep")));
     }
 
     #[cfg(target_os = "linux")]

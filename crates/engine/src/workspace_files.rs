@@ -918,6 +918,11 @@ async fn watch_task(
                 watch.publish(true, Vec::new());
             }
             Wake::Repair => {
+                // Re-check the pruned directory set for ignore inputs outside
+                // the root; a changed set rescans through the watcher.
+                if let Some(watcher) = lock(&watch.watcher).as_ref() {
+                    watcher.refresh();
+                }
                 overflow.store(false, Ordering::Release);
                 tracing::trace!(
                     checkout_id = %watch.checkout_id,

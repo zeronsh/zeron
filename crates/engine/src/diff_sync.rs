@@ -222,6 +222,13 @@ impl CheckoutEntry {
     /// (bar a periodic safety-net pass), otherwise a capture that the gate
     /// cheapens to one `git status` when nothing changed.
     fn repair_kick(&self) {
+        // Ignore inputs outside the registered roots (global excludes, a
+        // linked worktree's shared info/exclude) raise no watch event, so the
+        // pruned directory set is re-checked here. An unchanged set is silent;
+        // a changed one rescans through the watcher and kicks a capture.
+        for watcher in lock(&self.watchers).iter() {
+            watcher.refresh();
+        }
         let ticks = self.signals.quiet_ticks.fetch_add(1, Ordering::AcqRel) + 1;
         if ticks >= REPAIR_FORCE_EVERY {
             self.signals.quiet_ticks.store(0, Ordering::Release);
@@ -3117,6 +3124,62 @@ mod watch_budget_tests {
         }
         assert!(watchers.iter().all(super::FsWatch::is_live));
         assert!(signals.events.load(std::sync::atomic::Ordering::Acquire) >= 7);
+    }
+
+    #[tokio::test]
+    async fn repair_tick_refreshes_the_pruned_watch_set_for_ignore_inputs_outside_the_root() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join(".git/refs")).unwrap();
+        std::fs::create_dir_all(root.join("build/inner")).unwrap();
+        std::fs::write(base.join(".gitignore"), "build/\n").unwrap();
+        let hub = crate::fs_watch::FsWatchHub::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let signals = Arc::new(super::WatchSignals::new());
+        let identity = identity(&root, &root.join(".git"));
+        let watchers = super::build_watchers(&hub, &identity, &tx, &signals);
+        hub.apply();
+        let entry = super::CheckoutEntry {
+            identity,
+            chats: std::sync::Mutex::new(Vec::new()),
+            checksum: std::sync::Mutex::new(None),
+            orphaned_since: std::sync::Mutex::new(None),
+            skipped_while_orphaned: std::sync::atomic::AtomicBool::new(false),
+            kick_tx: tx.clone(),
+            watchers: std::sync::Mutex::new(watchers),
+            signals: signals.clone(),
+            gate: std::sync::Mutex::new(None),
+            sync_lock: tokio::sync::Mutex::new(()),
+            force_capture: std::sync::atomic::AtomicBool::new(false),
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // A capture has seen everything so far: the watcher is quiet.
+        signals
+            .captured_events
+            .store(signals.events.load(Ordering::Acquire), Ordering::Release);
+        while rx.try_recv().is_ok() {}
+        entry.repair_kick();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(rx.try_recv().is_err(), "an unchanged tree skips the tick");
+
+        // Un-ignore `build/` where no watch can see it, then let the tick run.
+        std::fs::write(base.join(".gitignore"), "").unwrap();
+        entry.repair_kick();
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the refreshed watch set rescans and kicks")
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while rx.try_recv().is_ok() {}
+        std::fs::write(root.join("build/inner/out"), "x").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an edit in the un-ignored directory is watched")
+            .unwrap();
     }
 
     #[test]
