@@ -77,10 +77,10 @@ const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 /// flicking between chats must not tear down and rebuild (full capture) its
 /// checkout every time.
 const INTEREST_LINGER: Duration = Duration::from_secs(30);
-/// Max subdirectories a checkout may have before we skip its live recursive
+/// Max non-ignored subdirectories before we skip a checkout's live tree
 /// watch (one OS watch per dir; past this the watcher thread's own bookkeeping
 /// costs more than instant diffs are worth). A normal source tree is well
-/// under this; a node_modules/vendored tree blows past it. The repair tick
+/// under this; a large unignored vendored tree can exceed it. The repair tick
 /// still covers skipped checkouts.
 const MAX_WATCH_DIRS: usize = 8_000;
 /// Byte ceiling for the tracked-change metadata (`--name-status` and `--numstat`
@@ -927,53 +927,18 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
 }
 
 /// True if `root`'s directory tree exceeds [`MAX_WATCH_DIRS`] — the signal that
-/// a live recursive watch would cost more than it's worth. Bounded BFS: stops
-/// the moment the budget is blown (never walks a whole node_modules), skips
-/// symlinks (a symlinked dep cycle must not send this into a spin), and treats
-/// unreadable dirs as leaves. `.git` internal churn is real diff signal, so it
-/// counts toward the budget rather than being skipped.
+/// a live tree watch would cost more than it's worth. Bounded walk: stops
+/// the moment the budget is blown, respects git ignores, and skips symlinks.
+/// The same walk installs watches, so ignored build/dependency directories do
+/// not disqualify a source checkout.
 fn exceeds_watch_budget(root: &Path) -> bool {
-    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
-    let mut seen = 0usize;
-    while let Some(dir) = queue.pop_front() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            // `file_type()` on the dirent does NOT follow symlinks — a symlinked
-            // directory reports as a symlink and is skipped, so cyclic deps
-            // (pnpm/npm) can't blow up the walk.
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                seen += 1;
-                if seen > MAX_WATCH_DIRS {
-                    return true;
-                }
-                queue.push_back(entry.path());
-            }
-        }
-    }
-    false
+    crate::fs_watch::exceeds_tree_budget(root, MAX_WATCH_DIRS)
 }
 
-/// Which paths a checkout's entry live-watches.
-///
-/// A recursive `notify` watch installs one OS watch per subdirectory and has
-/// no way to prune subtrees. On a checkout carrying big dependency trees
-/// (node_modules, target/, vendored deps) that is tens of thousands of
-/// watches: the watcher thread pegs a core just maintaining them — even with
-/// the tree completely idle — which starved a real device's whole async
-/// runtime (presence heartbeats and IPC stalled; it showed permanently
-/// offline). So the worktree root is only watched when it fits
-/// [`MAX_WATCH_DIRS`].
-///
-/// An over-budget root still gets its GIT DIR watched (a bounded tree —
-/// objects fanout + refs): commits, index moves, and branch switches then
-/// refresh the diff instantly, and only raw working-tree edits wait for the
-/// repair tick. Without this, a commit right after an edit left the pane
-/// showing the pre-commit diff for up to two minutes (user report — the
-/// dev checkout's target/ alone blows the budget). Linked worktrees keep
-/// their git dir outside the root, so it rides along whenever the root's
-/// watch doesn't already cover it.
+/// Pruned source tree (budget permitting), plus explicit git metadata. The
+/// source walk excludes .git; linked worktrees also keep metadata outside the
+/// root. Over-budget source trees still get live HEAD/index/ref updates while
+/// working-tree edits use the repair tick.
 fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
     let mut targets = Vec::new();
     let root_fits = !exceeds_watch_budget(&identity.root);
@@ -983,8 +948,9 @@ fn watch_targets(identity: &CheckoutIdentity) -> Vec<PathBuf> {
         tracing::info!(path = %identity.root.display(),
             "diff-sync: tree too large to watch live; watching the git dir, edits ride the repair tick");
     }
-    let git_covered = root_fits && identity.git_dir.starts_with(&identity.root);
-    if !git_covered && !exceeds_watch_budget(&identity.git_dir) {
+    // ignore::WalkBuilder deliberately prunes .git. Register it explicitly,
+    // including for inline repos, so HEAD/index/refs keep their live signal.
+    if identity.git_dir.is_dir() && !exceeds_watch_budget(&identity.git_dir) {
         targets.push(identity.git_dir.clone());
     }
     targets
@@ -1036,7 +1002,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
     });
 }
 
-/// Recursive watches on the worktree root (budget permitting) and the git
+/// Pruned watches on the worktree root (budget permitting) and the git
 /// dir — HEAD/index churn and file edits both land here. Registered on the
 /// shared [`FsWatchHub`], so a checkout costs OS watches but no thread of its
 /// own; the hub's rescan signals (watch went live, events possibly lost) kick
@@ -1055,16 +1021,14 @@ fn build_watchers(
         if target == identity.root {
             signals.covers_worktree.store(true, Ordering::Release);
         }
-        watchers.push(
-            hub.watch(&target, notify::RecursiveMode::Recursive, move |event| {
-                if is_checkout_change(event) {
-                    // Count before kicking: the tick must never see a quiet
-                    // watcher while a kick is already on its way.
-                    signals.events.fetch_add(1, Ordering::AcqRel);
-                    let _ = tx.send(());
-                }
-            }),
-        );
+        watchers.push(hub.watch_tree(&target, Arc::new(|_| true), move |event| {
+            if is_checkout_change(event) {
+                // Count before kicking: the tick must never see a quiet
+                // watcher while a kick is already on its way.
+                signals.events.fetch_add(1, Ordering::AcqRel);
+                let _ = tx.send(());
+            }
+        }));
     }
     watchers
 }
@@ -1074,7 +1038,7 @@ fn build_watchers(
 /// roots, so kicking on them would re-sync every checkout forever. A write
 /// still arrives as a modify event before its close.
 fn is_checkout_change(event: &notify::Event) -> bool {
-    !matches!(event.kind, notify::EventKind::Access(_))
+    event.need_rescan() || !matches!(event.kind, notify::EventKind::Access(_))
 }
 
 /// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
@@ -3115,6 +3079,46 @@ mod watch_budget_tests {
             .expect("kick channel open");
     }
 
+    #[tokio::test]
+    async fn pruned_diff_watcher_kicks_for_create_rename_delete_new_directory_and_overflow() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+        let hub = crate::fs_watch::FsWatchHub::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let signals = Arc::new(super::WatchSignals::new());
+        let watchers =
+            super::build_watchers(&hub, &identity(&root, &root.join(".git")), &tx, &signals);
+        hub.apply();
+        let mut kick = async |op: usize| {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            while rx.try_recv().is_ok() {}
+            match op {
+                0 => std::fs::write(root.join("a"), "one").unwrap(),
+                1 => std::fs::rename(root.join("a"), root.join("b")).unwrap(),
+                2 => std::fs::remove_file(root.join("b")).unwrap(),
+                3 => std::fs::create_dir_all(root.join("new/deep")).unwrap(),
+                4 => std::fs::write(root.join("new/deep/child"), "new").unwrap(),
+                5 => std::fs::write(root.join(".git/refs/heads/main"), "oid").unwrap(),
+                _ => hub.inject_event(
+                    notify::Event::new(notify::EventKind::Other)
+                        .set_flag(notify::event::Flag::Rescan),
+                ),
+            }
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("diff watcher kick")
+                .unwrap();
+        };
+        for op in 0..7 {
+            kick(op).await;
+        }
+        assert!(watchers.iter().all(super::FsWatch::is_live));
+        assert!(signals.events.load(std::sync::atomic::Ordering::Acquire) >= 7);
+    }
+
     #[test]
     fn reads_do_not_kick_a_sync_but_writes_do() {
         use notify::event::{
@@ -3179,6 +3183,24 @@ mod watch_budget_tests {
         assert!(exceeds_watch_budget(root));
     }
 
+    #[test]
+    fn ignored_build_trees_do_not_exceed_the_source_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git/refs")).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+        for i in 0..(MAX_WATCH_DIRS + 50) {
+            std::fs::create_dir_all(root.join(format!("target/d{i}"))).unwrap();
+        }
+        std::fs::create_dir_all(root.join("node_modules/pkg/deep")).unwrap();
+        assert!(!exceeds_watch_budget(root));
+        assert_eq!(
+            watch_targets(&identity(root, &root.join(".git"))),
+            vec![root.to_path_buf(), root.join(".git")]
+        );
+    }
+
     fn identity(root: &std::path::Path, git_dir: &std::path::Path) -> CheckoutIdentity {
         CheckoutIdentity {
             id: "test".into(),
@@ -3188,15 +3210,15 @@ mod watch_budget_tests {
     }
 
     #[test]
-    fn small_checkout_watches_root_only() {
+    fn small_checkout_watches_root_and_explicit_git_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join(".git/refs")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        // The root watch covers the inline .git — no second watcher.
+        // The pruned root excludes .git; git metadata is explicit.
         assert_eq!(
             watch_targets(&identity(root, &root.join(".git"))),
-            vec![root.to_path_buf()]
+            vec![root.to_path_buf(), root.join(".git")]
         );
     }
 

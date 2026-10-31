@@ -26,6 +26,7 @@ use zeron_proto::{
 };
 use zeron_rpc::RpcError;
 
+use crate::fs_watch::{FsWatch, FsWatchHub};
 use crate::workspace_search::{IndexState, NameKinds, normalize_name_query};
 use crate::{Repos, WorkspaceHost, WorkspaceSearch};
 
@@ -83,7 +84,7 @@ struct CheckoutWatch {
     subscribers: AtomicUsize,
     changes_tx: broadcast::Sender<WorkspaceFileChanges>,
     cancel: CancellationToken,
-    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    watcher: Mutex<Option<FsWatch>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -643,18 +644,17 @@ impl WorkspaceFiles {
             }
         }
 
-        let root = workspace.root.clone();
-        let over_budget = tokio::task::spawn_blocking(move || exceeds_watch_budget(&root))
-            .await
-            .map_err(|error| {
-                WorkspaceFilesError::Io(format!("watch budget worker failed: {error}"))
-            })?;
-        let candidate = CheckoutWatch::start(
-            workspace.checkout_id.clone(),
-            workspace.root,
-            over_budget,
-            self.inner.cancel.child_token(),
-        );
+        let root = workspace.root;
+        let checkout_id = workspace.checkout_id.clone();
+        let cancel = self.inner.cancel.child_token();
+        // Preserve the subscription's live-watch baseline without walking or
+        // installing native watches on an async runtime worker.
+        let candidate = tokio::task::spawn_blocking(move || {
+            let over_budget = exceeds_watch_budget(&root);
+            CheckoutWatch::start(checkout_id, root, over_budget, cancel)
+        })
+        .await
+        .map_err(|error| WorkspaceFilesError::Io(format!("watch setup worker failed: {error}")))?;
         let subscription = {
             let mut watches = lock(&self.inner.watches);
             if let Some(existing) = watches.get(&workspace.checkout_id) {
@@ -700,16 +700,34 @@ impl CheckoutWatch {
         over_budget: bool,
         cancel: CancellationToken,
     ) -> Arc<Self> {
+        Self::start_with_hub(FsWatchHub::global(), checkout_id, root, over_budget, cancel)
+    }
+
+    fn start_with_hub(
+        hub: Arc<FsWatchHub>,
+        checkout_id: String,
+        root: PathBuf,
+        over_budget: bool,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
         let (changes_tx, _) = broadcast::channel(WATCH_BROADCAST_BUFFER);
         let (event_tx, event_rx) = mpsc::channel(WATCH_EVENT_BUFFER);
         let overflow = Arc::new(AtomicBool::new(false));
         let overflow_notify = Arc::new(Notify::new());
+        let accepting = Arc::new(AtomicBool::new(false));
         let watcher = if over_budget {
             None
         } else {
             let callback_overflow = overflow.clone();
             let callback_notify = overflow_notify.clone();
-            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+            let callback_accepting = accepting.clone();
+            Some(hub.watch_tree(&root, Arc::new(|_| true), move |event| {
+                // The subscription starts with its own resync baseline
+                // after apply(). Do not queue a redundant attach rescan.
+                if event.need_rescan() && !callback_accepting.load(Ordering::Acquire) {
+                    return;
+                }
+                let event = Ok(event.clone());
                 if event
                     .as_ref()
                     .is_ok_and(|event| matches!(event.kind, notify::EventKind::Access(_)))
@@ -728,16 +746,12 @@ impl CheckoutWatch {
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
-            })
-            .ok()
-            .and_then(|mut watcher| {
-                use notify::Watcher as _;
-                watcher
-                    .watch(&root, notify::RecursiveMode::Recursive)
-                    .ok()
-                    .map(|()| watcher)
-            })
+            }))
         };
+        if watcher.is_some() {
+            hub.apply();
+        }
+        accepting.store(true, Ordering::Release);
         let repair_only = over_budget || watcher.is_none();
         let watch = Arc::new(Self {
             checkout_id,
@@ -963,6 +977,7 @@ fn normalize_watch_events(
                 continue;
             }
         };
+        resync_required |= event.need_rescan();
         if matches!(
             event.kind,
             EventKind::Modify(ModifyKind::Name(RenameMode::Both))
@@ -1072,23 +1087,7 @@ fn is_internal_temp_wire_path(path: &str) -> bool {
 }
 
 fn exceeds_watch_budget(root: &Path) -> bool {
-    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
-    let mut seen = 0usize;
-    while let Some(directory) = queue.pop_front() {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-                seen += 1;
-                if seen > MAX_WATCH_DIRS {
-                    return true;
-                }
-                queue.push_back(entry.path());
-            }
-        }
-    }
-    false
+    crate::fs_watch::exceeds_tree_budget(root, MAX_WATCH_DIRS)
 }
 
 struct CancelOnDrop(Option<Arc<AtomicBool>>);
@@ -3619,6 +3618,108 @@ mod tests {
         assert!(batch.changes.iter().any(|change| change.path == "busy.txt"));
         assert!(!producer.is_finished());
         producer.await.unwrap();
+    }
+
+    async fn watch_batch_matching(
+        subscription: &mut WorkspaceFileSubscription,
+        matches: impl Fn(&WorkspaceFileChanges) -> bool,
+    ) -> WorkspaceFileChanges {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let batch = tokio::time::timeout_at(deadline, subscription.recv())
+                .await
+                .expect("workspace event timeout")
+                .unwrap();
+            if matches(&batch) {
+                return batch;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shared_hub_delivers_workspace_create_modify_rename_delete_subdir_and_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let hub = FsWatchHub::new();
+        let watch = CheckoutWatch::start_with_hub(
+            hub.clone(),
+            "fixture".into(),
+            root.clone(),
+            false,
+            CancellationToken::new(),
+        );
+        let mut subscription = watch.subscribe(Weak::new());
+        assert!(subscription.recv().await.unwrap().resync_required);
+        let (tx, mut raw) = mpsc::unbounded_channel();
+        let _other = hub.watch_tree(&root, Arc::new(|_| true), move |event| {
+            let _ = tx.send(event.clone());
+        });
+        hub.apply();
+        let has = |batch: &WorkspaceFileChanges, path: &str, kind| {
+            batch
+                .changes
+                .iter()
+                .any(|c| c.path == path && c.kind == kind)
+        };
+        std::fs::write(root.join("a"), "one").unwrap();
+        watch_batch_matching(&mut subscription, |b| {
+            has(b, "a", WorkspaceFileChangeKind::Created)
+        })
+        .await;
+        std::fs::write(root.join("a"), "two").unwrap();
+        watch_batch_matching(&mut subscription, |b| {
+            has(b, "a", WorkspaceFileChangeKind::Modified)
+        })
+        .await;
+        std::fs::rename(root.join("a"), root.join("b")).unwrap();
+        let renamed = watch_batch_matching(&mut subscription, |b| {
+            has(b, "b", WorkspaceFileChangeKind::Renamed)
+        })
+        .await;
+        assert!(
+            renamed
+                .changes
+                .iter()
+                .any(|c| c.old_path.as_deref() == Some("a"))
+        );
+        std::fs::remove_file(root.join("b")).unwrap();
+        watch_batch_matching(&mut subscription, |b| {
+            has(b, "b", WorkspaceFileChangeKind::Removed)
+        })
+        .await;
+        std::fs::create_dir_all(root.join("new/deep")).unwrap();
+        std::fs::write(root.join("new/deep/early"), "one").unwrap();
+        watch_batch_matching(&mut subscription, |b| b.resync_required).await;
+        assert_eq!(std::fs::read(root.join("new/deep/early")).unwrap(), b"one");
+        std::fs::write(root.join("new/deep/late"), "two").unwrap();
+        watch_batch_matching(&mut subscription, |b| {
+            has(b, "new/deep/late", WorkspaceFileChangeKind::Created)
+        })
+        .await;
+        while raw.try_recv().is_ok() {}
+        hub.inject_event(
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan),
+        );
+        watch_batch_matching(&mut subscription, |b| b.resync_required).await;
+        let mut other_rescan = false;
+        while let Ok(event) = raw.try_recv() {
+            other_rescan |= event.need_rescan();
+        }
+        assert!(other_rescan, "the other consumer receives overflow too");
+    }
+
+    #[test]
+    fn notify_overflow_and_errors_require_workspace_resync() {
+        let root = Path::new("/workspace");
+        for event in [
+            Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)),
+            Err(notify::Error::generic("lost events")),
+        ] {
+            let (resync, changes) = normalize_watch_events(root, vec![event]);
+            assert!(resync);
+            assert!(changes.is_empty());
+        }
     }
 
     #[tokio::test]

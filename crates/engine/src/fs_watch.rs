@@ -6,8 +6,17 @@
 //! per space folder put ~25-30 idle threads on a normal device at boot. The hub
 //! instead installs every path on a single watcher and routes each event to
 //! the registrations whose path covers it, so the whole engine pays for one
-//! watcher thread. Exception: inotify/kqueue get one watcher per installed
-//! root (see [`SHARED_WATCHER`]); they still share the routing and batching.
+//! watcher thread for pruned trees and flat watches. Legacy recursive watches
+//! on inotify/kqueue retain one instance per root (see [`SHARED_WATCHER`]).
+//!
+//! [`FsWatchHub::watch_tree`] walks source directories without following links,
+//! respects git ignores, and installs shared NonRecursive inotify/kqueue
+//! watches. FSEvents/Windows retain native recursion and filter delivery using
+//! the pruned directory set, avoiding per-directory stream/handle limits. Directory
+//! create/move/delete and ignore-rule changes reconcile the directory set in a
+//! batch. A rescan closes the walk-to-install gap, including files populated
+//! before a new directory's watch attached. Overflow broadcasts a rescan and
+//! repairs the directory set, so lost creates cannot leave unwatched subtrees.
 //!
 //! Semantics match a private watcher per registration:
 //!
@@ -52,7 +61,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use notify::Watcher as _;
@@ -71,6 +80,56 @@ const STREAM_RESTARTS_ON_CHANGE: bool = cfg!(target_os = "macos");
 /// watcher per installed root instead, exactly as before the hub.
 const SHARED_WATCHER: bool = cfg!(any(target_os = "macos", windows));
 
+pub(crate) type TreeFilter = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
+/// The same pruned directory walk drives both the budget and installation.
+/// Explicit roots (including a checkout's git dir) are always visited.
+pub(crate) fn tree_directories(
+    root: &Path,
+    filter: TreeFilter,
+) -> impl Iterator<Item = Result<PathBuf, ignore::Error>> {
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(move |entry| entry.depth() == 0 || filter(entry.path()))
+        .build()
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_dir()) => {
+                Some(Ok(entry.into_path()))
+            }
+            Ok(_) => None,
+            Err(err) => Some(Err(err)),
+        })
+}
+
+pub(crate) fn exceeds_tree_budget(root: &Path, limit: usize) -> bool {
+    // Count children, as the previous budget did. Errors cannot establish a
+    // healthy watch, so leave those roots on their repair tick.
+    let mut seen = 0;
+    for entry in tree_directories(root, Arc::new(|_| true)) {
+        match entry {
+            Ok(path) if path == root => {}
+            Ok(_) => {
+                seen += 1;
+                if seen > limit {
+                    return true;
+                }
+            }
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+struct Tree {
+    filter: TreeFilter,
+    dirs: Mutex<HashSet<PathBuf>>,
+    dirty: AtomicBool,
+    rescan: AtomicBool,
+    complete: AtomicBool,
+}
+
 type Handler = Arc<dyn Fn(&notify::Event) + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -86,6 +145,7 @@ struct Registration {
     /// Canonical path — what FSEvents/inotify report events under.
     path: PathBuf,
     recursive: bool,
+    tree: Option<Arc<Tree>>,
     handler: Handler,
     /// Shared with the [`FsWatch`]: an installed OS watch covers `path`.
     attached: Arc<AtomicBool>,
@@ -93,6 +153,12 @@ struct Registration {
 
 impl Registration {
     fn covers(&self, path: &Path) -> bool {
+        if let Some(tree) = &self.tree {
+            let dirs = lock(&tree.dirs);
+            return path == self.path
+                || dirs.contains(path)
+                || path.parent().is_some_and(|parent| dirs.contains(parent));
+        }
         path.starts_with(&self.path)
             && (self.recursive || path == self.path || path.parent() == Some(self.path.as_path()))
     }
@@ -106,11 +172,12 @@ struct Routes {
 
 #[derive(Default)]
 struct OsState {
-    /// The shared watcher ([`SHARED_WATCHER`] backends). Created lazily on the
+    /// Shared NonRecursive watcher, also used for recursive watches on
+    /// [`SHARED_WATCHER`] backends. Created lazily on the
     /// first install. On macOS an FSEvents watcher with no paths has no
     /// run-loop thread at all.
     watcher: Option<notify::RecommendedWatcher>,
-    /// One watcher per installed root on the other backends. Dropping one
+    /// One watcher per legacy recursive root on the other backends. Dropping one
     /// closes its instance, releasing every OS watch it added — including
     /// those a failed recursive `watch` left behind.
     roots: HashMap<PathBuf, notify::RecommendedWatcher>,
@@ -143,6 +210,8 @@ pub(crate) struct FsWatchHub {
     /// FSEvents `watch`/`unwatch`/drop stop and join the run-loop thread,
     /// which may be inside the callback waiting on this lock.
     routes: Arc<Mutex<Routes>>,
+    weak: Weak<FsWatchHub>,
+    invalidated: Mutex<HashSet<PathBuf>>,
     /// Serializes OS watch changes.
     os: Mutex<OsState>,
     batch: Mutex<Batch>,
@@ -191,7 +260,9 @@ impl Drop for WorkerGuard<'_> {
 
 impl FsWatchHub {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
+            invalidated: Mutex::new(HashSet::new()),
             routes: Arc::new(Mutex::new(Routes::default())),
             os: Mutex::new(OsState::default()),
             batch: Mutex::new(Batch::default()),
@@ -218,6 +289,21 @@ impl FsWatchHub {
         mode: notify::RecursiveMode,
         handler: impl Fn(&notify::Event) + Send + Sync + 'static,
     ) -> FsWatch {
+        self.register(
+            path,
+            matches!(mode, notify::RecursiveMode::Recursive),
+            None,
+            Arc::new(handler),
+        )
+    }
+
+    fn register(
+        self: &Arc<Self>,
+        path: &Path,
+        recursive: bool,
+        tree: Option<Arc<Tree>>,
+        handler: Handler,
+    ) -> FsWatch {
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let attached = Arc::new(AtomicBool::new(false));
         let id = {
@@ -228,8 +314,9 @@ impl FsWatchHub {
                 id,
                 Registration {
                     path,
-                    recursive: matches!(mode, notify::RecursiveMode::Recursive),
-                    handler: Arc::new(handler),
+                    recursive,
+                    tree,
+                    handler,
                     attached: attached.clone(),
                 },
             );
@@ -243,11 +330,102 @@ impl FsWatchHub {
         }
     }
 
+    /// Install a pruned tree using NonRecursive directory watches on inotify
+    /// and kqueue. Native subtree backends retain their single recursive root
+    /// and prune delivery with the same directory set. Unlike the legacy
+    /// recursive API, the NonRecursive paths may share an inotify instance:
+    /// the walk never follows a symlink. Identical directory paths are installed
+    /// once, even across tree and flat consumers. Call from the blocking pool.
+    pub(crate) fn watch_tree(
+        self: &Arc<Self>,
+        root: &Path,
+        filter: TreeFilter,
+        handler: impl Fn(&notify::Event) + Send + Sync + 'static,
+    ) -> FsWatch {
+        self.register(
+            root,
+            true,
+            Some(Arc::new(Tree {
+                filter,
+                dirs: Mutex::new(HashSet::new()),
+                dirty: AtomicBool::new(true),
+                rescan: AtomicBool::new(false),
+                complete: AtomicBool::new(false),
+            })),
+            Arc::new(handler),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_event(self: &Arc<Self>, event: notify::Event) {
+        self.on_event(event);
+    }
+
+    fn on_event(self: &Arc<Self>, event: notify::Event) {
+        use notify::event::{ModifyKind, RenameMode};
+        if matches!(event.kind, notify::EventKind::Access(_)) && !event.need_rescan() {
+            dispatch(&self.routes, &event);
+            return;
+        }
+        let ignore_changed = event.paths.iter().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name == ".gitignore" || name == ".ignore" || name == "exclude")
+        });
+        let removed = matches!(
+            event.kind,
+            notify::EventKind::Remove(_)
+                | notify::EventKind::Modify(ModifyKind::Name(
+                    RenameMode::From | RenameMode::Both | RenameMode::Any
+                ))
+        );
+        let mut changed = false;
+        {
+            let routes = lock(&self.routes);
+            for reg in routes.regs.values() {
+                let Some(tree) = &reg.tree else { continue };
+                let dirs = lock(&tree.dirs);
+                let topology = event.need_rescan()
+                    || ignore_changed
+                    || event.paths.iter().any(|path| {
+                        path.starts_with(&reg.path)
+                            && ((matches!(
+                                event.kind,
+                                notify::EventKind::Create(_)
+                                    | notify::EventKind::Modify(ModifyKind::Name(_))
+                            ) && std::fs::symlink_metadata(path)
+                                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()))
+                                || (removed && dirs.contains(path)))
+                    });
+                if topology {
+                    if event.need_rescan() {
+                        lock(&self.invalidated).insert(reg.path.clone());
+                    }
+                    tree.dirty.store(true, Ordering::Release);
+                    changed = true;
+                }
+            }
+        }
+        if changed && removed {
+            lock(&self.invalidated).extend(event.paths.iter().cloned());
+        }
+        // Deliver the native event unchanged, including both rename paths.
+        dispatch(&self.routes, &event);
+        if changed {
+            // Never reconcile inline on notify's own event-loop thread: a
+            // watch/unwatch waits for that thread to service its command.
+            self.schedule_with_fallback(false);
+        }
+    }
+
     /// Note a registration change; start a batch worker unless one is pending.
     /// The worker is a short-lived plain thread (not the tokio blocking pool):
     /// a task queued on a runtime that shuts down before running it would
     /// leave `worker` set and wedge the hub for the rest of the process.
     fn schedule(self: &Arc<Self>) {
+        self.schedule_with_fallback(true);
+    }
+
+    fn schedule_with_fallback(self: &Arc<Self>, inline: bool) {
         {
             let mut batch = lock(&self.batch);
             batch.generation += 1;
@@ -261,9 +439,24 @@ impl FsWatchHub {
             .name("fs-watch batch".into())
             .spawn(move || hub.run_batches());
         if let Err(err) = spawned {
-            tracing::debug!(error = %err, "fs-watch: batch worker spawn failed; applying inline");
+            tracing::debug!(error = %err, "fs-watch: batch worker spawn failed");
             lock(&self.batch).worker = false;
-            self.apply();
+            if inline {
+                self.apply();
+            } else {
+                // Repair ticks must not trust a tree whose new directories
+                // could not be attached. A later topology change retries.
+                for reg in lock(&self.routes).regs.values() {
+                    if reg
+                        .tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.dirty.load(Ordering::Acquire))
+                    {
+                        reg.attached.store(false, Ordering::Release);
+                    }
+                }
+                dispatch(&self.routes, &rescan_event());
+            }
         }
     }
 
@@ -307,10 +500,63 @@ impl FsWatchHub {
     }
 
     fn reconcile_os(&self, os: &mut OsState) -> Vec<Handler> {
-        // Wanted set: distinct paths, recursive if any registration recurses.
+        // Walk outside the routes lock: native events keep flowing during a
+        // scan. A concurrent topology change marks dirty and schedules a pass.
+        let trees: Vec<_> = lock(&self.routes)
+            .regs
+            .values()
+            .filter_map(|reg| {
+                reg.tree
+                    .as_ref()
+                    .map(|tree| (reg.path.clone(), tree.clone()))
+            })
+            .collect();
+        for (root, tree) in &trees {
+            if tree.dirty.swap(false, Ordering::AcqRel) {
+                let mut dirs = HashSet::new();
+                let mut complete = true;
+                for entry in tree_directories(root, tree.filter.clone()) {
+                    match entry {
+                        Ok(path) => {
+                            dirs.insert(path);
+                        }
+                        Err(err) => {
+                            complete = false;
+                            tracing::debug!(error = %err, "fs-watch: tree walk failed");
+                        }
+                    }
+                }
+                for path in &dirs {
+                    os.failed.remove(path);
+                }
+                *lock(&tree.dirs) = dirs;
+                tree.complete.store(complete, Ordering::Release);
+                tree.rescan.store(true, Ordering::Release);
+            }
+        }
+        // Removed/replaced directories may have the same spelling by the
+        // next pass, but their old kernel watch refers to a different inode.
+        let mut invalid = std::mem::take(&mut *lock(&self.invalidated));
+        let invalid_before = invalid.clone();
+        // Wanted set: distinct paths, recursive only for legacy registrations.
         let mut wanted: HashMap<PathBuf, bool> = HashMap::new();
         for reg in lock(&self.routes).regs.values() {
-            *wanted.entry(reg.path.clone()).or_default() |= reg.recursive;
+            if let Some(tree) = &reg.tree {
+                if self.shared_watcher {
+                    // FSEvents and ReadDirectoryChangesW watch a whole tree
+                    // natively. Per-directory FSEvent paths hit the stream's
+                    // path limit; Windows flat watches can lose subtree events.
+                    // Keep their native recursion and prune delivery via dirs.
+                    // inotify/kqueue still install only NonRecursive paths.
+                    wanted.insert(reg.path.clone(), true);
+                } else {
+                    for path in lock(&tree.dirs).iter() {
+                        wanted.entry(path.clone()).or_default();
+                    }
+                }
+            } else {
+                *wanted.entry(reg.path.clone()).or_default() |= reg.recursive;
+            }
         }
         os.failed.retain(|path| wanted.contains_key(path));
         let before = os.installed.clone();
@@ -321,7 +567,7 @@ impl FsWatchHub {
         // until a pass adds no new failures (bounded: `failed` only grows).
         loop {
             let desired = minimal_cover(&wanted, &os.failed);
-            if desired == os.installed {
+            if desired == os.installed && invalid.is_empty() {
                 break;
             }
             if self.restarts_on_change && !bridge_tried {
@@ -333,7 +579,10 @@ impl FsWatchHub {
             let stale: Vec<PathBuf> = os
                 .installed
                 .iter()
-                .filter(|(path, recursive)| desired.get(*path) != Some(*recursive))
+                .filter(|(path, recursive)| {
+                    desired.get(*path) != Some(*recursive)
+                        || invalid.iter().any(|gone| path.starts_with(gone))
+                })
                 .map(|(path, _)| path.clone())
                 .collect();
             for path in stale {
@@ -347,6 +596,7 @@ impl FsWatchHub {
                     }
                 }
             }
+            invalid.clear();
             let mut new_failure = false;
             for (path, recursive) in desired {
                 if os.installed.get(&path) == Some(&recursive) {
@@ -354,7 +604,7 @@ impl FsWatchHub {
                 }
                 match install(
                     os,
-                    &self.routes,
+                    &self.weak,
                     self.shared_watcher,
                     &path,
                     recursive,
@@ -382,11 +632,29 @@ impl FsWatchHub {
         drop(bridge);
         let gap = self.restarts_on_change && touched && !bridged;
 
+        if os.installed.is_empty() {
+            os.watcher.take();
+        }
         let routes = lock(&self.routes);
         let mut rescans = Vec::new();
         for reg in routes.regs.values() {
-            if !is_covered(&reg.path, &os.installed) {
+            let covered = if let Some(tree) = &reg.tree {
+                let dirs = lock(&tree.dirs);
+                tree.complete.load(Ordering::Acquire)
+                    && !dirs.is_empty()
+                    && dirs.iter().all(|path| is_covered(path, &os.installed))
+            } else {
+                is_covered(&reg.path, &os.installed)
+            };
+            let tree_rescan = reg
+                .tree
+                .as_ref()
+                .is_some_and(|tree| tree.rescan.swap(false, Ordering::AcqRel));
+            if !covered {
                 reg.attached.store(false, Ordering::Release);
+                if tree_rescan {
+                    rescans.push(reg.handler.clone());
+                }
                 continue;
             }
             let was_attached = reg.attached.swap(true, Ordering::AcqRel);
@@ -397,7 +665,15 @@ impl FsWatchHub {
             // unchanged roots, so the swap itself was unobserved.
             let moved =
                 covering_roots(&reg.path, &before) != covering_roots(&reg.path, &os.installed);
-            if !was_attached || moved || (gap && is_covered(&reg.path, &before)) {
+            let rearmed = invalid_before.iter().any(|path| {
+                reg.path.starts_with(path) || (reg.recursive && path.starts_with(&reg.path))
+            });
+            if !was_attached
+                || moved
+                || tree_rescan
+                || rearmed
+                || (gap && is_covered(&reg.path, &before))
+            {
                 rescans.push(reg.handler.clone());
             }
         }
@@ -423,10 +699,10 @@ impl FsWatchHub {
             .map(|(path, _)| path)
             .collect();
         let ancestor = common_ancestor(&survivors)?;
-        let routes = self.routes.clone();
+        let weak = self.weak.clone();
         let opened = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event {
-                dispatch(&routes, &event);
+            if let Some(hub) = weak.upgrade() {
+                hub.on_event(event.unwrap_or_else(|_| rescan_event()));
             }
         })
         .and_then(|mut watcher| {
@@ -455,7 +731,7 @@ impl FsWatchHub {
 
 fn install(
     os: &mut OsState,
-    routes: &Arc<Mutex<Routes>>,
+    hub: &Weak<FsWatchHub>,
     shared: bool,
     path: &Path,
     recursive: bool,
@@ -466,11 +742,21 @@ fn install(
     if !path.exists() {
         return Err(notify::Error::path_not_found().add_path(path.to_path_buf()));
     }
+    if !recursive && !std::fs::canonicalize(path).is_ok_and(|canonical| canonical == path) {
+        return Err(
+            notify::Error::generic("directory changed to a symlink during watch setup")
+                .add_path(path.to_path_buf()),
+        );
+    }
     let new_watcher = || {
-        let routes = routes.clone();
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-            Ok(event) => dispatch(&routes, &event),
-            Err(err) => tracing::debug!(error = %err, "fs-watch: watcher error"),
+        let hub = hub.clone();
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if let Some(hub) = hub.upgrade() {
+                hub.on_event(event.unwrap_or_else(|err| {
+                    tracing::debug!(error = %err, "fs-watch: watcher error");
+                    rescan_event()
+                }));
+            }
         })
     };
     let mode = if recursive {
@@ -478,7 +764,7 @@ fn install(
     } else {
         notify::RecursiveMode::NonRecursive
     };
-    if !shared {
+    if !shared && recursive {
         // On failure the watcher drops here, with any partial watches.
         let mut watcher = new_watcher()?;
         *touched = true;
@@ -496,24 +782,25 @@ fn install(
         .watch(path, mode)
 }
 
-fn root_covers(root: &Path, recursive: bool, path: &Path) -> bool {
-    path == root || (recursive && path.starts_with(root))
-}
-
 fn is_covered(path: &Path, installed: &HashMap<PathBuf, bool>) -> bool {
-    installed
-        .iter()
-        .any(|(root, recursive)| root_covers(root, *recursive, path))
+    installed.contains_key(path)
+        || path
+            .ancestors()
+            .skip(1)
+            .any(|parent| installed.get(parent) == Some(&true))
 }
 
 fn covering_roots<'a>(
     path: &Path,
     installed: &'a HashMap<PathBuf, bool>,
 ) -> std::collections::BTreeSet<(&'a PathBuf, bool)> {
-    installed
-        .iter()
-        .filter(|(root, recursive)| root_covers(root, **recursive, path))
-        .map(|(root, recursive)| (root, *recursive))
+    path.ancestors()
+        .filter_map(|ancestor| {
+            installed
+                .get_key_value(ancestor)
+                .filter(|(_, recursive)| ancestor == path || **recursive)
+                .map(|(root, recursive)| (root, *recursive))
+        })
         .collect()
 }
 
@@ -534,19 +821,50 @@ fn minimal_cover(
     wanted: &HashMap<PathBuf, bool>,
     failed: &HashSet<PathBuf>,
 ) -> HashMap<PathBuf, bool> {
-    let candidates: Vec<(&PathBuf, bool)> = wanted
+    let cover: HashMap<_, _> = wanted
+        .iter()
+        .filter(|(path, _)| {
+            !failed.contains(*path)
+                && !path
+                    .ancestors()
+                    .skip(1)
+                    .any(|parent| wanted.get(parent) == Some(&true) && !failed.contains(parent))
+        })
+        .map(|(path, recursive)| (path.clone(), *recursive))
+        .collect();
+    static VERIFY: OnceLock<bool> = OnceLock::new();
+    static SAMPLES: AtomicUsize = AtomicUsize::new(0);
+    if cfg!(debug_assertions)
+        || (*VERIFY.get_or_init(|| {
+            std::env::var_os("ZERON_PERF_VERIFY").is_some_and(|value| value == "1")
+        }) && SAMPLES.fetch_add(1, Ordering::Relaxed) % 32 == 0)
+    {
+        let full = minimal_cover_full(wanted, failed);
+        if full != cover {
+            tracing::error!("fs-watch: cover oracle mismatch; rebuilding from full cover");
+            return full;
+        }
+    }
+    cover
+}
+
+/// Original pairwise cover calculation, retained as the equivalence oracle.
+fn minimal_cover_full(
+    wanted: &HashMap<PathBuf, bool>,
+    failed: &HashSet<PathBuf>,
+) -> HashMap<PathBuf, bool> {
+    let candidates: Vec<_> = wanted
         .iter()
         .filter(|(path, _)| !failed.contains(*path))
-        .map(|(path, recursive)| (path, *recursive))
         .collect();
     candidates
         .iter()
         .filter(|(path, _)| {
             !candidates
                 .iter()
-                .any(|(other, recursive)| *recursive && other != path && path.starts_with(other))
+                .any(|(other, recursive)| **recursive && other != path && path.starts_with(other))
         })
-        .map(|(path, recursive)| ((*path).clone(), *recursive))
+        .map(|(path, recursive)| ((*path).clone(), **recursive))
         .collect()
 }
 
@@ -556,12 +874,59 @@ fn dispatch(routes: &Mutex<Routes>, event: &notify::Event) {
     let handlers: Vec<Handler> = lock(routes)
         .regs
         .values()
-        .filter(|reg| event.paths.is_empty() || event.paths.iter().any(|path| reg.covers(path)))
+        .filter(|reg| {
+            event.need_rescan()
+                || event.paths.is_empty()
+                || event.paths.iter().any(|path| reg.covers(path))
+        })
         .map(|reg| reg.handler.clone())
         .collect();
     for handler in handlers {
         handler(event);
     }
+}
+
+/// Kernel counts, rather than registration counts: useful for fixture checks
+/// of deduplication and for catching notify's implicit recursive installs.
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct InotifyCounts {
+    pub watches: usize,
+    pub instances: usize,
+    pub threads: usize,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn inotify_counts() -> InotifyCounts {
+    let mut counts = InotifyCounts {
+        watches: 0,
+        instances: 0,
+        threads: 0,
+    };
+    for entry in std::fs::read_dir("/proc/self/fdinfo").unwrap().flatten() {
+        let Ok(info) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let watches = info
+            .lines()
+            .filter(|line| line.starts_with("inotify wd:"))
+            .count();
+        // Empty inotify instances have no wd lines; identify the fd as well.
+        let target = std::fs::read_link(Path::new("/proc/self/fd").join(entry.file_name()))
+            .unwrap_or_default();
+        if target.to_string_lossy().contains("inotify") {
+            counts.instances += 1;
+            counts.watches += watches;
+        }
+    }
+    for entry in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+        if std::fs::read_to_string(entry.path().join("comm"))
+            .is_ok_and(|name| name.starts_with("notify-rs inoti"))
+        {
+            counts.threads += 1;
+        }
+    }
+    counts
 }
 
 #[cfg(test)]
@@ -573,6 +938,7 @@ mod tests {
         Registration {
             path: PathBuf::from(path),
             recursive,
+            tree: None,
             handler: Arc::new(|_| {}),
             attached: Arc::default(),
         }
@@ -708,6 +1074,7 @@ mod tests {
                 Registration {
                     path: PathBuf::from(path),
                     recursive,
+                    tree: None,
                     handler: Arc::new(move |_| lock(&hits).push(name)),
                     attached: Arc::default(),
                 },
@@ -898,11 +1265,16 @@ mod tests {
 
     /// A hub configured like inotify's: a watcher per root, no restarts.
     fn per_root_hub() -> Arc<FsWatchHub> {
-        let hub = Arc::into_inner(FsWatchHub::new()).expect("fresh hub");
-        Arc::new(FsWatchHub {
+        Arc::new_cyclic(|weak| FsWatchHub {
+            weak: weak.clone(),
             shared_watcher: false,
             restarts_on_change: false,
-            ..hub
+            routes: Arc::default(),
+            os: Mutex::default(),
+            invalidated: Mutex::default(),
+            batch: Mutex::default(),
+            bridge_enabled: AtomicBool::new(true),
+            stats: Stats::default(),
         })
     }
 
@@ -960,5 +1332,404 @@ mod tests {
         drop(watch_a);
         hub.apply();
         assert_eq!(lock(&hub.os).roots.keys().collect::<Vec<_>>(), [&b]);
+    }
+    #[test]
+    fn seeded_cover_matches_full_for_registration_mode_failure_and_drop_churn() {
+        let seeds = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut random = seed as u64;
+            let mut next = || {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                random
+            };
+            let paths: Vec<_> = (0..24)
+                .map(|i| {
+                    let mut path = PathBuf::from(format!("/r/{}", i % 4));
+                    if i >= 4 {
+                        path.push(format!("b{}", i % 3));
+                    }
+                    if i >= 12 {
+                        path.push(format!("c{}", i % 2));
+                    }
+                    path
+                })
+                .collect();
+            let mut wanted = HashMap::new();
+            let mut failed = HashSet::new();
+            for _ in 0..150 {
+                let path = paths[next() as usize % paths.len()].clone();
+                match next() % 5 {
+                    0 => {
+                        wanted.insert(path, true);
+                    }
+                    1 => {
+                        wanted.insert(path, false);
+                    }
+                    2 => {
+                        wanted.remove(&path);
+                    }
+                    3 => {
+                        failed.insert(path);
+                    }
+                    _ => {
+                        failed.remove(&path);
+                    }
+                }
+                let cover = minimal_cover(&wanted, &failed);
+                assert_eq!(cover, minimal_cover_full(&wanted, &failed), "seed {seed}");
+                for path in &paths {
+                    let full: std::collections::BTreeSet<_> = cover
+                        .iter()
+                        .filter(|(root, recursive)| {
+                            path == *root || (**recursive && path.starts_with(root))
+                        })
+                        .map(|(root, recursive)| (root, *recursive))
+                        .collect();
+                    assert_eq!(covering_roots(path, &cover), full, "seed {seed}");
+                    assert_eq!(is_covered(path, &cover), !full.is_empty(), "seed {seed}");
+                }
+            }
+        }
+    }
+
+    fn record_events() -> (
+        impl Fn(&notify::Event) + Send + Sync + 'static,
+        UnboundedReceiver<notify::Event>,
+    ) {
+        let (tx, rx) = unbounded_channel();
+        (
+            move |event: &notify::Event| {
+                let _ = tx.send(event.clone());
+            },
+            rx,
+        )
+    }
+
+    async fn event_matching(
+        rx: &mut UnboundedReceiver<notify::Event>,
+        matches: impl Fn(&notify::Event) -> bool,
+    ) -> notify::Event {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let event = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("event timeout")
+                .expect("open channel");
+            if matches(&event) {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pruned_tree_fans_out_native_create_modify_rename_delete_and_new_dirs() {
+        use notify::EventKind;
+        use notify::event::ModifyKind;
+        let (_tmp, root) = tree();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let (on_b, mut b) = record_events();
+        let wa = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        let wb = hub.watch_tree(&root, Arc::new(|_| true), on_b);
+        hub.apply();
+        assert!(wa.is_live() && wb.is_live());
+        assert_eq!(
+            hub.installed().len(),
+            2,
+            "one watch per directory for two consumers"
+        );
+        assert!(hub.installed().values().all(|recursive| !recursive));
+        assert!(
+            lock(&hub.os).roots.is_empty(),
+            "no private recursive instances"
+        );
+        assert!(lock(&hub.os).watcher.is_some());
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, notify::Event::need_rescan).await;
+        }
+
+        let file = root.join("src/a");
+        std::fs::write(&file, "one").unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| {
+                matches!(e.kind, EventKind::Create(_)) && e.paths.contains(&file)
+            })
+            .await;
+        }
+        std::fs::write(&file, "two").unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| {
+                matches!(e.kind, EventKind::Modify(ModifyKind::Data(_))) && e.paths.contains(&file)
+            })
+            .await;
+        }
+        let renamed = root.join("src/b");
+        std::fs::rename(&file, &renamed).unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| {
+                matches!(
+                    e.kind,
+                    EventKind::Modify(ModifyKind::Name(_)) | EventKind::Create(_)
+                ) && e.paths.contains(&renamed)
+            })
+            .await;
+        }
+        std::fs::remove_file(&renamed).unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| {
+                matches!(e.kind, EventKind::Remove(_)) && e.paths.contains(&renamed)
+            })
+            .await;
+        }
+        std::fs::create_dir_all(root.join("new/deep")).unwrap();
+        // Populate before watch attachment: the post-install rescan covers it.
+        std::fs::write(root.join("new/deep/early"), "one").unwrap();
+        settle(&hub).await;
+        assert!(hub.installed().contains_key(&root.join("new/deep")));
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, notify::Event::need_rescan).await;
+        }
+        let late = root.join("new/deep/late");
+        std::fs::write(&late, "two").unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| e.paths.contains(&late)).await;
+        }
+
+        std::fs::rename(root.join("new"), root.join("moved")).unwrap();
+        settle(&hub).await;
+        assert!(!hub.installed().contains_key(&root.join("new/deep")));
+        assert!(hub.installed().contains_key(&root.join("moved/deep")));
+        let moved = root.join("moved/deep/late");
+        std::fs::write(&moved, "three").unwrap();
+        for rx in [&mut a, &mut b] {
+            event_matching(rx, |e| e.paths.contains(&moved)).await;
+        }
+        std::fs::remove_dir_all(root.join("moved")).unwrap();
+        settle(&hub).await;
+        assert_eq!(hub.installed().len(), 2);
+        drop(wa);
+        hub.apply();
+        assert!(wb.is_live());
+        assert_eq!(hub.installed().len(), 2);
+        drop(wb);
+        hub.apply();
+        assert!(hub.installed().is_empty());
+        assert!(lock(&hub.os).watcher.is_none());
+    }
+
+    #[tokio::test]
+    async fn pruned_tree_ignores_build_dirs_and_refreshes_ignore_rules() {
+        let (_tmp, root) = tree();
+        for dir in ["src", "target/deep", "node_modules/pkg", "hidden"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let _a = hub.watch_tree(
+            &root,
+            Arc::new(|p| p.file_name().is_none_or(|n| n != "hidden")),
+            on_a,
+        );
+        hub.apply();
+        assert_eq!(hub.installed().len(), 2);
+        assert!(
+            !exceeds_tree_budget(&root, 2),
+            "ignored dirs do not spend the budget"
+        );
+        settle(&hub).await;
+        while a.try_recv().is_ok() {}
+        std::fs::write(root.join("target/deep/noise"), "x").unwrap();
+        std::fs::write(root.join("node_modules/pkg/noise"), "x").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(a.try_recv().is_err(), "ignored subtree events stay pruned");
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(hub.installed().contains_key(&root.join("target/deep")));
+        std::fs::write(root.join("target/deep/live"), "x").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&root.join("target/deep/live"))).await;
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(!hub.installed().contains_key(&root.join("target")));
+    }
+
+    #[tokio::test]
+    async fn different_tree_filters_and_flat_consumers_share_paths_without_cross_delivery() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("private/deep")).unwrap();
+        let hub = per_root_hub();
+        let (on_filtered, mut filtered) = record_events();
+        let (on_all, mut all) = record_events();
+        let filtered_watch = hub.watch_tree(
+            &root,
+            Arc::new(|p| p.file_name().is_none_or(|name| name != "private")),
+            on_filtered,
+        );
+        let all_watch = hub.watch_tree(&root, Arc::new(|_| true), on_all);
+        let flat = hub.watch(&root, notify::RecursiveMode::NonRecursive, |_| {});
+        hub.apply();
+        settle(&hub).await;
+        assert_eq!(
+            hub.installed().len(),
+            3,
+            "flat and both tree roots share one OS watch"
+        );
+        while filtered.try_recv().is_ok() {}
+        while all.try_recv().is_ok() {}
+        let file = root.join("private/deep/file");
+        std::fs::write(&file, "x").unwrap();
+        event_matching(&mut all, |e| e.paths.contains(&file)).await;
+        assert!(filtered.try_recv().is_err());
+        drop(all_watch);
+        hub.apply();
+        assert_eq!(
+            hub.installed().len(),
+            1,
+            "excluded subtree released with its last consumer"
+        );
+        assert!(filtered_watch.is_live() && flat.is_live());
+    }
+
+    #[tokio::test]
+    async fn pruned_tree_overflow_broadcasts_and_rebuilds_missed_directories() {
+        let (_tmp, root) = tree();
+        let hub = per_root_hub();
+        let (on_a, mut a) = recorder();
+        let (on_b, mut b) = recorder();
+        let _a = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        let (on_flat, mut flat_rx) = recorder();
+        let _flat = hub.watch(&root, notify::RecursiveMode::NonRecursive, on_flat);
+        // A second consumer of a different root still gets the loss signal.
+        std::fs::create_dir(root.join("other")).unwrap();
+        let _b = hub.watch_tree(&root.join("other"), Arc::new(|_| true), on_b);
+        hub.apply();
+        settle(&hub).await;
+        drain(&mut a);
+        drain(&mut b);
+        drain(&mut flat_rx);
+        // Simulate an event lost before delivery: create while the directory's
+        // OS watch is absent, then feed notify's exact IN_Q_OVERFLOW signal.
+        {
+            let mut os = lock(&hub.os);
+            os.watcher.as_mut().unwrap().unwatch(&root).unwrap();
+        }
+        std::fs::create_dir_all(root.join("missed/deep")).unwrap();
+        hub.on_event(rescan_event().add_path(root.join("unrelated")));
+        expect(&mut a, Seen::Rescan).await;
+        expect(&mut b, Seen::Rescan).await;
+        expect(&mut flat_rx, Seen::Rescan).await;
+        hub.apply();
+        expect(&mut flat_rx, Seen::Rescan).await; // closes the shared rearm gap
+        assert!(hub.installed().contains_key(&root.join("missed/deep")));
+        std::fs::write(root.join("missed/deep/file"), "x").unwrap();
+        expect(&mut a, Seen::Event).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pruned_tree_symlink_into_other_root_does_not_alias_shared_instance() {
+        let (_tmp, root) = tree();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir_all(b.join("deep")).unwrap();
+        std::os::unix::fs::symlink(&b, a.join("linked")).unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a_rx) = record_events();
+        let (on_b, mut b_rx) = record_events();
+        let wa = hub.watch_tree(&a, Arc::new(|_| true), on_a);
+        let wb = hub.watch_tree(&b, Arc::new(|_| true), on_b);
+        hub.apply();
+        settle(&hub).await;
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+        assert_eq!(hub.installed().len(), 3);
+        let file = b.join("deep/file");
+        std::fs::write(&file, "x").unwrap();
+        event_matching(&mut b_rx, |e| e.paths.contains(&file)).await;
+        assert!(
+            a_rx.try_recv().is_err(),
+            "symlink aliases do not relabel events"
+        );
+        drop(wa);
+        hub.apply();
+        assert!(wb.is_live());
+        std::fs::write(&file, "xx").unwrap();
+        event_matching(&mut b_rx, |e| e.paths.contains(&file)).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "process-wide kernel measurement; run alone with --ignored --nocapture"]
+    fn fixture_inotify_counts_before_and_after() {
+        let (_tmp, root) = tree();
+        for dir in [
+            ".git/refs/heads",
+            "src/deep",
+            "target/debug/deps",
+            "node_modules/pkg/lib",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+        std::fs::write(root.join("src/deep/a.rs"), "// source").unwrap();
+        let idle = inotify_counts();
+        let search = crate::WorkspaceSearch::new();
+        search.warm(&root).unwrap();
+        assert!(search.wait_until_indexed(&root, Duration::from_secs(20)));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while inotify_counts().instances == idle.instances {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let fff = inotify_counts();
+        let mut old_diff = notify::recommended_watcher(|_| {}).unwrap();
+        let mut old_files = notify::recommended_watcher(|_| {}).unwrap();
+        old_diff
+            .watch(&root, notify::RecursiveMode::Recursive)
+            .unwrap();
+        old_files
+            .watch(&root, notify::RecursiveMode::Recursive)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let before = inotify_counts();
+        drop(old_diff);
+        drop(old_files);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while inotify_counts() != fff {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let hub = per_root_hub();
+        let a = hub.watch_tree(&root, Arc::new(|_| true), |_| {});
+        let b = hub.watch_tree(&root, Arc::new(|_| true), |_| {});
+        let git = hub.watch_tree(&root.join(".git"), Arc::new(|_| true), |_| {});
+        hub.apply();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while inotify_counts().threads != idle.threads + 2 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let after = inotify_counts();
+        println!("fixture: idle={idle:?}, fff_only={fff:?}, before={before:?}, after={after:?}");
+        assert_eq!(before.instances - idle.instances, 3);
+        assert_eq!(after.instances - idle.instances, 2);
+        assert_eq!(after.threads - idle.threads, 2);
+        assert_eq!(
+            hub.installed().len(),
+            6,
+            "root + src/deep + .git/refs/heads"
+        );
+        assert!(after.watches < before.watches);
+        drop((a, b, git));
+        hub.apply();
+        search.release_all();
     }
 }
