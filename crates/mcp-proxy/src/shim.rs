@@ -60,6 +60,20 @@ pub fn decide<'a>(
     .then_some(row)
 }
 
+/// `path` without any entry equal to `dir`; None when nothing was removed.
+/// Every other entry keeps its exact bytes, order and empty slots.
+pub fn path_without(path: &OsStr, dir: &Path) -> Option<OsString> {
+    let mut removed = false;
+    let kept: Vec<_> = std::env::split_paths(path)
+        .filter(|p| {
+            let hit = p == dir;
+            removed |= hit;
+            !hit
+        })
+        .collect();
+    removed.then(|| std::env::join_paths(kept).ok()).flatten()
+}
+
 /// Resolve with execvp's PATH order, excluding every alias of this helper.
 /// Keep the chosen path spelling (npx's basename matters to the resolver).
 pub fn real_command(command: &OsStr, shim_dir: &Path) -> io::Result<PathBuf> {
@@ -70,7 +84,12 @@ pub fn real_command(command: &OsStr, shim_dir: &Path) -> io::Result<PathBuf> {
         if dir == shim_dir {
             continue;
         }
-        let path = dir.join(command);
+        let mut path = dir.join(command);
+        if path.parent().is_none_or(|p| p.as_os_str().is_empty()) {
+            // An empty PATH slot means the cwd. Keep a slash so exec never
+            // falls back to a PATH search that could find this shim again.
+            path = Path::new(".").join(command);
+        }
         let Ok(meta) = path.metadata() else {
             continue;
         };
@@ -135,6 +154,13 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
     let dir = std::env::var_os(DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|| invoked.parent().unwrap_or(Path::new("")).to_owned());
+    // Programs that locate themselves by searching PATH for their argv0 (Python
+    // finding its venv/prefix) must find the real executable, not this entry.
+    // Only this process's PATH changes, and only by dropping the shim directory.
+    if let Some(path) = std::env::var_os("PATH").and_then(|p| path_without(&p, &dir)) {
+        // SAFETY: still the single main thread; no runtime or thread exists yet.
+        unsafe { std::env::set_var("PATH", path) };
+    }
     let real = real_command(command, &dir)?;
     let selected = (|| -> Option<crate::Config> {
         // Shell children take this branch without even opening launch.json.
@@ -275,6 +301,16 @@ mod tests {
             &args.iter().map(OsString::from).collect::<Vec<_>>(),
         )
         .is_some()
+    }
+    #[test]
+    fn path_without_drops_only_the_shim_dir_and_keeps_every_other_slot() {
+        let dir = Path::new("/run/shim");
+        let drop = |p: &str| path_without(OsStr::new(p), dir).map(|v| v.into_string().unwrap());
+        assert_eq!(drop("/run/shim:/a::/b"), Some("/a::/b".into()));
+        assert_eq!(drop("/a:/run/shim/:/b:/run/shim"), Some("/a:/b".into()));
+        assert_eq!(drop("/a::/b"), None);
+        assert_eq!(drop(""), None);
+        assert_eq!(drop("/run/shim-2:/a"), None);
     }
     #[test]
     fn shim_requires_all_three_conditions() {
