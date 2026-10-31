@@ -4173,6 +4173,7 @@ async fn drive_run(
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
                     #[cfg(test)]
                     FLUSH_TICKS.with(|t| t.set(t.get() + 1));
+                    zeron_counters::add(zeron_counters::C::StreamCommits, 1);
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
                     if dirty {
@@ -4838,6 +4839,7 @@ async fn drive_run(
         // background re-invocations) must not wipe the segment being written.
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
+            zeron_counters::add(zeron_counters::C::StreamEventsFolded, 1);
             fold_event_into_parts(&mut folded, &event);
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no

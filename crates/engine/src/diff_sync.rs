@@ -1033,6 +1033,7 @@ async fn diff_sync_task(
                 reconcile(&inner, chats, false).await;
             }
             _ = repair.tick() => {
+                zeron_counters::add(zeron_counters::C::DiffRepairTicks, 1);
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow().clone();
                 // Fresh: revalidate every memoized identity against git.
@@ -1075,6 +1076,7 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     max_bytes: usize,
     snapshot: Option<&TreeSnapshot>,
 ) -> Result<Capture, EngineError> {
+    zeron_counters::add(zeron_counters::C::GitSpawns, 1);
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -1757,6 +1759,7 @@ async fn run_git_for_path_batch(
     fixed_args: &[OsString],
     paths: &[Vec<u8>],
 ) -> Result<(), EngineError> {
+    zeron_counters::add(zeron_counters::C::GitSpawns, 1);
     let mut command = tokio::process::Command::new("git");
     #[cfg(windows)]
     {

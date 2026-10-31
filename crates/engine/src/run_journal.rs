@@ -211,6 +211,8 @@ impl RunJournal {
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
         journal.file.write_all(&buf)?;
+        zeron_counters::add(zeron_counters::C::JournalAppends, 1);
+        zeron_counters::add(zeron_counters::C::JournalBytes, buf.len() as u64);
         journal.file.flush()?;
         journal.needs_newline = false;
         journal.next_seq = seq + 1;

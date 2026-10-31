@@ -270,6 +270,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         if tx.execute(
             "INSERT OR IGNORE INTO chat_outbox_initialized(doc_id) VALUES (?1)",
             params![doc_id],
@@ -311,6 +312,7 @@ impl DocsStore {
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
@@ -343,6 +345,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -375,6 +378,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -470,6 +474,7 @@ impl DocsStore {
     fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
@@ -638,6 +643,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             continue;
         }
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute_batch(sql)?;
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",

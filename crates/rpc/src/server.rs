@@ -72,7 +72,15 @@ async fn handle_request(
         let out = out.clone();
         async move {
             match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+                Ok(json) => {
+                    let bytes = json.len() as u64;
+                    out.send(json).await.map_err(|_| RpcError::Closed)?;
+                    if frame.item.is_some() {
+                        zeron_counters::add(zeron_counters::C::RpcItemsOut, 1);
+                        zeron_counters::add(zeron_counters::C::RpcBytesOut, bytes);
+                    }
+                    Ok(())
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "rpc: failed to serialize server frame");
                     Err(RpcError::Closed)

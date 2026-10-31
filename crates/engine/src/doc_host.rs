@@ -997,6 +997,8 @@ impl ChatDocHandle {
 
     // Caller holds transcript_import, shared with attach and mirror clearing.
     fn publish_messages_locked(&self) {
+        zeron_counters::add(zeron_counters::C::PublishMessagesCalls, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::PublishMessagesNanos);
         self.mirror_dirty.store(false, Ordering::Release);
         match self.doc.read_entries() {
             Ok(entries) => {
@@ -2892,6 +2894,8 @@ impl DocHost {
     }
 
     async fn salvage_chat_transcript(&self, chat_id: &str) -> Result<(), String> {
+        zeron_counters::add(zeron_counters::C::SalvageChats, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::SalvageNanos);
         // Inspection must not register a handle or start sync. A healthy
         // history used to open one room per journal during every boot.
         let stored = self
@@ -6152,8 +6156,14 @@ impl DocHost {
             persistence.flush_sync();
             return;
         }
-        match handle.doc.export_snapshot() {
+        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
+        let snapshot = {
+            let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
+            handle.doc.export_snapshot()
+        };
+        match snapshot {
             Ok(bytes) => {
+                zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
                 handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
                 if let Err(err) = self.inner.store.save_snapshot(&handle.chat_id, &bytes) {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
@@ -6167,7 +6177,12 @@ impl DocHost {
 
     /// A fork must be durable before publishing its discoverable registry row.
     pub(crate) fn persist_fork(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
-        let bytes = handle.doc.export_snapshot()?;
+        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
+        let bytes = {
+            let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
+            handle.doc.export_snapshot()?
+        };
+        zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
         self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
         Ok(())
@@ -6614,6 +6629,7 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
         let sleep_until = save_deadline.unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
             changed = changed_rx.changed() => {
+                zeron_counters::add(zeron_counters::C::PublishMessagesWakes, 1);
                 if changed.is_err() {
                     break; // doc handle (and its change sender) is gone
                 }

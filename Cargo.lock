@@ -13635,6 +13635,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-counters"
+version = "0.2.130"
+
+[[package]]
 name = "zeron-doc"
 version = "0.2.130"
 dependencies = [
@@ -13645,6 +13649,7 @@ dependencies = [
  "similar",
  "thiserror 2.0.20",
  "tracing",
+ "zeron-counters",
  "zeron-proto",
 ]
 
@@ -13685,6 +13690,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-counters",
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
@@ -13724,6 +13730,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-counters",
  "zeron-proto",
  "zeron-voice-media",
  "zip",
@@ -13829,6 +13836,7 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows-sys 0.61.2",
+ "zeron-counters",
  "zeron-proto",
 ]
 
@@ -13859,6 +13867,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "zeron-counters",
  "zeron-doc",
  "zeron-proto",
  "zeron-sync",
@@ -13883,6 +13892,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "zeron-counters",
  "zeron-doc",
  "zeron-proto",
 ]

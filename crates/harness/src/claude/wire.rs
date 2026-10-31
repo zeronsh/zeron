@@ -339,6 +339,7 @@ pub(crate) struct ControlRequestBody {
 /// `result` line that still won't parse becomes an unreadable result rather
 /// than an error, so the turn it ends still ends.
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeLines, 1);
     let error = match parse_value(line).and_then(typed_frame) {
         Ok(frame) => return Ok(frame),
         Err(error) => error,
@@ -400,6 +401,7 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn parse_value(line: &str) -> Result<Value, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
     serde_json::from_str(line).or_else(|error| match repair_lone_surrogates(line) {
         Some(repaired) => serde_json::from_str(&repaired),
         None => Err(error),

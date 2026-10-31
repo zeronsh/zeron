@@ -311,6 +311,7 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
     let mut processes = HashMap::new();
+    zeron_counters::add(zeron_counters::C::PreviewProcScans, 1);
     for process in fs::read_dir("/proc").ok()?.flatten() {
         let Ok(pid) = process.file_name().to_string_lossy().parse::<u32>() else {
             continue;

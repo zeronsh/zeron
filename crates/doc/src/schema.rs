@@ -567,6 +567,7 @@ impl SessionDoc {
     /// whole transcript — one bad entry took down every publish for the chat
     /// (2026-07-31, "missing field `id`" during a multi-update import).
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
+        zeron_counters::add(zeron_counters::C::DocReadEntriesCalls, 1);
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
         let messages = self
@@ -575,6 +576,7 @@ impl SessionDoc {
             .get_deep_value()
             .to_json_value();
         let raw: Vec<serde_json::Value> = serde_json::from_value(messages)?;
+        zeron_counters::add(zeron_counters::C::DocReadEntriesEntries, raw.len() as u64);
         Ok(raw
             .into_iter()
             .filter_map(|v| match entry_from_json(v) {

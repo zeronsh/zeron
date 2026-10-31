@@ -255,7 +255,10 @@ impl Catalog {
             .0
             .file
             .with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&temporary, serde_json::to_vec_pretty(names)?)?;
+        let bytes = serde_json::to_vec_pretty(names)?;
+        std::fs::write(&temporary, &bytes)?;
+        zeron_counters::add(zeron_counters::C::PreviewsJsonWrites, 1);
+        zeron_counters::add(zeron_counters::C::PreviewsJsonBytes, bytes.len() as u64);
         std::fs::rename(temporary, &self.0.file)?;
         Ok(())
     }
