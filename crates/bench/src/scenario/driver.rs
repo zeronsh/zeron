@@ -61,6 +61,10 @@ pub struct ChatState {
     pub frames: u64,
     pub resets: u64,
     pub bytes: u64,
+    /// Frame count captured by [`Watch::arm`]. `None` until the watch is armed.
+    pub armed_frames: Option<u64>,
+    /// `t_recv_ns` of the first frame strictly after `armed_frames`.
+    pub after: Option<u64>,
     /// `(t_recv_ns, bytes)` of the first frame.
     pub first: Option<(u64, usize)>,
     /// `(t_recv_ns, bytes)` of the first authoritative reset (not the tail preview).
@@ -109,6 +113,9 @@ impl Watch {
                 let st = &mut *st;
                 st.frames += 1;
                 st.bytes += item.bytes as u64;
+                if st.after.is_none() && st.armed_frames.is_some_and(|mark| st.frames > mark) {
+                    st.after = Some(item.t_recv_ns);
+                }
                 if st.first.is_none() {
                     st.first = Some((item.t_recv_ns, item.bytes));
                 }
@@ -136,6 +143,13 @@ impl Watch {
 
     pub fn with<R>(&self, f: impl FnOnce(&ChatState) -> R) -> R {
         f(&self.state.lock().unwrap())
+    }
+
+    /// The next frame's receive time lands in [`ChatState::after`].
+    pub fn arm(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.armed_frames = Some(st.frames);
+        st.after = None;
     }
 
     /// Poll until `cond` holds. A watch error or a closed stream fails the wait.
@@ -319,6 +333,10 @@ impl Probe {
             let _ = thread.join();
         }
         std::mem::take(&mut *self.events.lock().unwrap())
+    }
+
+    pub fn snapshot(&self) -> Vec<(u64, ProbeEvent)> {
+        self.events.lock().unwrap().clone()
     }
 
     /// `(chat8, seq)` to the replay's write time.

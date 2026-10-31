@@ -935,7 +935,7 @@ pub fn run_ab(opts: &AbOptions) -> Result<ExecuteResult> {
     Ok(result)
 }
 
-/// A real scenario (S-stream, S-boot, S-idle, S-switch) over the two built engines.
+/// A real scenario (S-stream, S-boot, S-idle, S-switch, S-hibernate) over the two built engines.
 fn live_scenario(
     opts: &AbOptions,
     run_id: &str,

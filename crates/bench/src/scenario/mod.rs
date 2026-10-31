@@ -1,4 +1,4 @@
-//! The main scenarios: S-stream, S-boot, S-idle, S-switch (bench.md 3.4).
+//! The main scenarios: S-stream, S-boot, S-idle, S-switch, S-hibernate (bench.md 3.4).
 //!
 //! Each scenario is a [`Workload`]: it names its fixture and drives one engine
 //! through a [`TrialCtx`]. [`Live`] wraps a workload into B6's
@@ -16,6 +16,7 @@ pub mod boot;
 pub mod content;
 mod driver;
 pub mod fixture;
+pub mod hibernate;
 pub mod idle;
 pub mod stream;
 pub mod switch;
@@ -185,7 +186,7 @@ impl ScenarioArg {
 }
 
 /// Names `ab --scenario` accepts for a live scenario.
-pub const SCENARIOS: &[&str] = &["S-stream", "S-boot", "S-idle", "S-switch"];
+pub const SCENARIOS: &[&str] = &["S-stream", "S-boot", "S-idle", "S-switch", "S-hibernate"];
 
 /// The live scenario `name` (with options), or `None` when it is not one of ours.
 pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
@@ -207,6 +208,10 @@ pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
         )?),
         "switch" => Box::new(Live::new(
             switch::Switch::from_params(tier, &arg.overrides)?,
+            env,
+        )?),
+        "hibernate" => Box::new(Live::new(
+            hibernate::Hibernate::from_params(tier, &arg.overrides)?,
             env,
         )?),
         _ => return Ok(None),

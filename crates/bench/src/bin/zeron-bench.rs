@@ -65,13 +65,13 @@ enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
-    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch; `S-stream:K=2,watch=one` sets options).
+    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch, S-hibernate; `S-stream:K=2,watch=one` sets options).
     Ab {
         /// Baseline revision.
         a: String,
         /// Candidate revision.
         b: String,
-        /// `stream`, `boot`, `idle` or `switch` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
+        /// `stream`, `boot`, `idle`, `switch` or `hibernate` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
         #[arg(long)]
         scenario: String,
         /// `quick` (2 pairs), `standard` (5), or `full` (7).
@@ -100,7 +100,7 @@ enum Command {
     Control {
         /// Revision to run against itself.
         rev: String,
-        /// Scenario name, or `all` (the default) for S-stream, S-boot, S-idle and S-switch. `S-build` is refused.
+        /// Scenario name, or `all` (the default) for S-stream, S-boot, S-idle, S-switch and S-hibernate. `S-build` is refused.
         #[arg(long, default_value = "all")]
         scenario: String,
         /// `quick`, `standard`, or `full`.
