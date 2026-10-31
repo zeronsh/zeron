@@ -85,8 +85,9 @@ pub struct TurnControl {
     /// to wake the runtime; 0 = none. Not a task in the roster, but retiring
     /// the runtime before it fires loses it all the same.
     scheduled_until: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Unix ms of the last change to the background task count.
-    background_changed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// When the background task count last changed (tokio's clock, so a
+    /// paused test clock moves it).
+    background_changed: std::sync::Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
     processes: std::sync::Arc<background::BackgroundWork>,
 }
 
@@ -114,8 +115,10 @@ impl TurnControl {
             .swap(tasks, std::sync::atomic::Ordering::AcqRel)
             != tasks
         {
-            self.background_changed
-                .store(unix_ms(), std::sync::atomic::Ordering::Release);
+            *self
+                .background_changed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokio::time::Instant::now());
         }
     }
 
@@ -141,10 +144,10 @@ impl TurnControl {
     /// just finished is about to wake the agent with its result; a runtime
     /// retired in that gap loses the wake.
     pub fn background_settled(&self, quiet: std::time::Duration) -> bool {
-        let changed = self
-            .background_changed
-            .load(std::sync::atomic::Ordering::Acquire);
-        changed == 0 || unix_ms().saturating_sub(changed) >= quiet.as_millis() as u64
+        self.background_changed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none_or(|changed| changed.elapsed() >= quiet)
     }
 
     /// Driver: the background processes the runtime runs now, oldest first —

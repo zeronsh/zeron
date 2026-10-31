@@ -175,14 +175,10 @@ const BACKGROUND_SETTLE: std::time::Duration = std::time::Duration::from_secs(30
 /// such event.
 const PARKED_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn parked_quiet(last: &std::sync::atomic::AtomicU64) -> bool {
-    let at = last.load(std::sync::atomic::Ordering::Acquire);
-    at == 0
-        || std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64)
-            .saturating_sub(at)
-            >= PARKED_QUIET.as_millis() as u64
+type ParkedActivity = Arc<Mutex<Option<tokio::time::Instant>>>;
+
+fn parked_quiet(last: &ParkedActivity) -> bool {
+    lock(last).is_none_or(|at| at.elapsed() >= PARKED_QUIET)
 }
 
 fn session_idle_window(
@@ -201,9 +197,9 @@ fn session_idle_window(
 }
 
 struct RunHandle {
-    /// Unix ms of the last stream event that arrived while parked, past the
-    /// tail-flush gate (0 = none): the agent has started a turn of its own.
-    parked_activity: Arc<std::sync::atomic::AtomicU64>,
+    /// When the last stream event arrived while parked, past the tail-flush
+    /// gate: the agent has started a turn of its own.
+    parked_activity: ParkedActivity,
     hibernate: Arc<tokio::sync::Notify>,
     hibernate_reason: Option<(HibernateReason, tokio::time::Instant)>,
     idle_since: Option<tokio::time::Instant>,
@@ -804,12 +800,7 @@ impl SessionsEngine {
         // The call registers on `voice_active` only after the connect awaits
         // its lease. Until then the idle runtime would read as free to
         // hibernate, so the attach counts as activity.
-        run.parked_activity.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(1, |d| d.as_millis() as u64),
-            std::sync::atomic::Ordering::Release,
-        );
+        *lock(&run.parked_activity) = Some(tokio::time::Instant::now());
         Some((
             run.voice.clone()?,
             run.voice.as_ref()?.events.subscribe(),
@@ -1190,7 +1181,7 @@ impl SessionsEngine {
             })
         };
         let hibernate = Arc::new(tokio::sync::Notify::new());
-        let parked_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let parked_activity = ParkedActivity::default();
         let session_idle = session_idle_window(
             std::env::var("ZERON_SESSION_IDLE_MS").ok().as_deref(),
             zeron_proto::voice::is_orchestrator_chat(chat_id),
@@ -3837,7 +3828,7 @@ fn finish_segment<'a>(
 /// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
     session_idle: Option<std::time::Duration>,
-    parked_activity: Arc<std::sync::atomic::AtomicU64>,
+    parked_activity: ParkedActivity,
     hibernate: Arc<tokio::sync::Notify>,
     sent_at: tokio::time::Instant,
     idle: bool,
@@ -4869,12 +4860,7 @@ async fn drive_run(
         // the parked gate has yet to recognise (it drops reasoning and results
         // until text or a tool call opens the segment).
         if idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
-            resume_state.parked_activity.store(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(1, |d| d.as_millis() as u64),
-                std::sync::atomic::Ordering::Release,
-            );
+            *lock(&resume_state.parked_activity) = Some(tokio::time::Instant::now());
         }
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
@@ -5796,6 +5782,19 @@ mod tests {
             .expect("runtime transition");
         }
         async fn rejects(&self) {
+            self.rejects_now().await;
+            // The automatic idle deadline must honor the same exclusion too.
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(601)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(self.core.sessions.has_run("sleep"));
+            tokio::time::resume();
+        }
+        /// Every request path refuses, now. For guards that expire with the
+        /// clock, which an idle deadline ten virtual minutes on rightly outlasts.
+        async fn rejects_now(&self) {
             // Make parked runs old enough for pressure selection as well.
             if let Some(at) = &mut lock(&self.core.sessions.inner.runs)
                 .get_mut("sleep")
@@ -5818,14 +5817,6 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
-            // The automatic idle deadline must honor the same exclusion too.
-            tokio::time::pause();
-            tokio::time::advance(std::time::Duration::from_secs(601)).await;
-            for _ in 0..10 {
-                tokio::task::yield_now().await;
-            }
-            assert!(self.core.sessions.has_run("sleep"));
-            tokio::time::resume();
         }
     }
 
@@ -5913,21 +5904,15 @@ mod tests {
         let t = HibernationTest::new(false, false).await;
         t.fixture.think.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while lock(&t.core.sessions.inner.runs)["sleep"]
-                .parked_activity
-                .load(std::sync::atomic::Ordering::Acquire)
-                == 0
-            {
+            while lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity).is_none() {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("reasoning while parked is recorded");
-        t.rejects().await;
+        t.rejects_now().await;
         // Quiet again: the usual rules apply.
-        lock(&t.core.sessions.inner.runs)["sleep"]
-            .parked_activity
-            .store(0, std::sync::atomic::Ordering::Release);
+        *lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity) = None;
         assert!(t.core.sessions.hibernate("sleep"));
         t.wait(zeron_proto::RuntimeState::Hibernated).await;
         t.core.sessions.shutdown().await;
@@ -5939,7 +5924,7 @@ mod tests {
         turn.set_background(1);
         turn.set_background(0);
         // The roster just emptied: the agent's notification turn is on its way.
-        t.rejects().await;
+        t.rejects_now().await;
         t.core.sessions.shutdown().await;
     }
     #[tokio::test]
@@ -6372,9 +6357,7 @@ mod tests {
         assert!(t.core.sessions.take_voice_bridge("sleep").is_some());
         assert!(!t.core.sessions.hibernate("sleep"));
         // A runtime already claimed has nothing left to attach to.
-        lock(&t.core.sessions.inner.runs)["sleep"]
-            .parked_activity
-            .store(0, std::sync::atomic::Ordering::Release);
+        *lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity) = None;
         let run_id = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
         assert!(t.core.sessions.hibernate("sleep"));
         assert!(
