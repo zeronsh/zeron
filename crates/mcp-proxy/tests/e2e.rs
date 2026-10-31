@@ -707,6 +707,20 @@ fn cache_files(d: &Path, extension: &str) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+fn children_of(parent: u32) -> Vec<(u32, char)> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| {
+            let pid: u32 = e.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            (fields.get(1)?.parse::<u32>().ok()? == parent)
+                .then(|| (pid, fields[0].chars().next().unwrap()))
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stray_server_stdout_lines_are_skipped_like_a_direct_client_would() {
     for mode in ["lazy", "lazy-keep-alive", "keep-alive"] {
@@ -820,5 +834,112 @@ async fn first_call_during_discovery_does_not_force_a_restart_for_the_second() {
     peer.response(json!(2)).await;
     peer.call(3, "echo").await;
     assert_eq!(pids(&d.join("spawn")).len(), 1);
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_sessions_leave_one_private_cache_without_secrets() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let d = dir.path();
+    let secret = "super-secret-token-value";
+    let mut peers = Vec::new();
+    for _ in 0..6 {
+        peers.push(Peer::spawn_command(
+            d,
+            "lazy",
+            &[("TOKEN", secret)],
+            env!("CARGO_BIN_EXE_fake-mcp"),
+            &[],
+            &["--identity-env", "TOKEN"],
+        ));
+    }
+    for peer in &mut peers {
+        peer.send(zeron_mcp_proxy::rpc::request(
+            "init",
+            "initialize",
+            json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1"},"capabilities":{}}),
+        ))
+        .await;
+    }
+    for peer in &mut peers {
+        assert!(peer.response(json!("init")).await.get("result").is_some());
+    }
+    for peer in peers {
+        peer.close().await;
+    }
+    let files = cache_files(d, "json");
+    assert_eq!(files.len(), 1);
+    assert!(cache_files(d, "tmp").is_empty());
+    serde_json::from_slice::<Value>(&fs::read(&files[0]).unwrap()).unwrap();
+    for entry in ["mcp-cache/v1", "logs"] {
+        for file in fs::read_dir(d.join(entry)).unwrap().flatten() {
+            let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{:?}", file.path());
+            assert!(
+                !fs::read_to_string(file.path()).unwrap().contains(secret),
+                "{:?}",
+                file.path()
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn calls_straddling_the_idle_deadline_are_never_lost() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[
+            ("ZERON_MCP_PROXY_IDLE_MS", "40"),
+            ("ZERON_MCP_PROXY_CHECK_MS", "5"),
+        ],
+    );
+    peer.init().await;
+    let mut seed = 12345u64;
+    for id in 1..=80 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        tokio::time::sleep(Duration::from_millis(25 + (seed >> 33) % 40)).await;
+        let response = peer.call(id, "echo").await;
+        assert_eq!(
+            response["result"]["content"][0]["text"], "echo",
+            "call {id}"
+        );
+    }
+    assert!(
+        pids(&d.join("spawn")).len() > 5,
+        "the stop path was exercised"
+    );
+    peer.close().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn idle_cycles_leave_no_zombies_or_adopted_children() {
+    let dir = temp();
+    let d = dir.path();
+    let env = [("FAKE_GRANDCHILD", "1"), ("FAKE_WATCHDOG", "1")];
+    let mut peer = Peer::spawn(d, "lazy", &env);
+    peer.init().await;
+    let proxy = peer.child.id().unwrap();
+    for id in 1..=3 {
+        peer.call(id, "echo").await;
+        eventually(|| {
+            let spawned = pids(&d.join("spawn"));
+            spawned.len() == id as usize + 1 && !alive(*spawned.last().unwrap())
+        })
+        .await;
+        // Reaping trails the server's exit by a few milliseconds; a persistent zombie fails.
+        eventually(|| children_of(proxy).is_empty()).await;
+    }
+    assert!(
+        pids(&d.join("children")).iter().all(|p| !alive(*p)),
+        "grandchildren and watchdogs are gone"
+    );
     peer.close().await;
 }
