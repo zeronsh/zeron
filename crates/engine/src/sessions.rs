@@ -3171,6 +3171,63 @@ thread_local! {
     static FLUSH_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// One run's running-subagent count on the session row: the larger of its
+/// open sinks and the driver's background agents.
+///
+/// A drop to zero while the turn is parked is published late: Claude wakes
+/// the parent when a background agent finishes, and reports the drain just
+/// before that wake turn starts. Published at once, the chat would read as
+/// settled in between (leaving Working, and ringing "Run finished" for the
+/// eager turn before the wake turn rings again). The drop waits for the next
+/// turn to settle, or for [`Self::DRAIN_GRACE`] of parent silence.
+struct RunningSubagents {
+    published: usize,
+    drain_at: Option<tokio::time::Instant>,
+}
+
+impl RunningSubagents {
+    const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn new() -> Self {
+        Self {
+            published: 0,
+            drain_at: None,
+        }
+    }
+
+    fn update(&mut self, inner: &Inner, chat_id: &str, running: usize, parked: bool) {
+        if running == 0 && parked && self.published > 0 {
+            self.drain_at
+                .get_or_insert_with(|| tokio::time::Instant::now() + Self::DRAIN_GRACE);
+            return;
+        }
+        self.publish(inner, chat_id, running);
+    }
+
+    /// A turn just settled on the row: a held drop publishes after it.
+    fn settled(&mut self, inner: &Inner, chat_id: &str, running: usize) {
+        if self.drain_at.is_some() {
+            self.publish(inner, chat_id, running);
+        }
+    }
+
+    fn publish(&mut self, inner: &Inner, chat_id: &str, running: usize) {
+        self.drain_at = None;
+        self.published = running;
+        inner.set_running_subagents(chat_id, running);
+    }
+
+    /// When a held drop publishes: the grace, pushed out by parent activity
+    /// (a wake turn streaming).
+    fn drain_deadline(
+        &self,
+        last_activity: tokio::time::Instant,
+    ) -> Option<tokio::time::Instant> {
+        self.drain_at
+            .map(|at| at.max(last_activity + Self::DRAIN_GRACE))
+    }
+}
+
 /// A live subagent transcript sink: its own doc (opened by id — the room
 /// `chat2/{docId}/ws` dials automatically, so viewers sync it like a chat),
 /// one streaming assistant entry folded from the tagged events. The held
@@ -4017,6 +4074,7 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    let mut running_subagents = RunningSubagents::new();
     // Last tagged subagent event. A background subagent outlives the turn that
     // spawned it, and its traffic never un-parks the chat, so the idle reaper
     // measures from here as well as from the park.
@@ -4059,7 +4117,21 @@ async fn drive_run(
                 // subagents and workflows, Claude's background agents): it
                 // reaches the row with no stream event of its own.
                 _ = turn.background_agents_changed() => {
-                    inner.set_running_subagents(
+                    running_subagents.update(
+                        &inner,
+                        &chat_id,
+                        subagents.len().max(turn.background_agents()),
+                        idle_since.is_some(),
+                    );
+                    continue;
+                }
+                _ = tokio::time::sleep_until(
+                    running_subagents
+                        .drain_deadline(last_stream_activity)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if running_subagents.drain_at.is_some() => {
+                    running_subagents.publish(
+                        &inner,
                         &chat_id,
                         subagents.len().max(turn.background_agents()),
                     );
@@ -4266,6 +4338,11 @@ async fn drive_run(
                     inner.set_status_with_completion(
                         &chat_id, SessionStatus::Idle, false, completed_turn, Some(DoneStatus::Completed),
                     );
+                    running_subagents.settled(
+                        &inner,
+                        &chat_id,
+                        subagents.len().max(turn.background_agents()),
+                    );
                     continue;
                 }
             };
@@ -4385,9 +4462,11 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    inner.set_running_subagents(
+                    running_subagents.update(
+                        &inner,
                         &chat_id,
                         subagents.len().max(turn.background_agents()),
+                        idle_since.is_some(),
                     );
                     if !chip_streaming {
                         let _ = doc_ref.update_subagent_chip(
@@ -4446,9 +4525,11 @@ async fn drive_run(
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
-                    inner.set_running_subagents(
+                    running_subagents.update(
+                        &inner,
                         &chat_id,
                         subagents.len().max(turn.background_agents()),
+                        idle_since.is_some(),
                     );
                     let doc_id = sink.doc_id.clone();
                     // FREEZE: the finished transcript uploads as a static R2
@@ -4991,6 +5072,11 @@ async fn drive_run(
                     false,
                     completed_turn,
                     (!pending_steer && turn_was_active).then_some(*status),
+                );
+                running_subagents.settled(
+                    &inner,
+                    &chat_id,
+                    subagents.len().max(turn.background_agents()),
                 );
                 continue;
             }
@@ -6022,12 +6108,17 @@ mod tests {
         })
         .await;
 
+        // The last one finishing while parked: the drop waits for the wake
+        // turn it announces, so the chat never reads as settled in between.
         feed.send(AgentEvent::Subagent {
             parent_tool_use_id: "tool-1".into(),
             event: Box::new(done(DoneStatus::Completed)),
         })
         .unwrap();
-        until("the last one finishing drops the count", || {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(row(), Some((SessionStatus::Idle, 1)), "the drain is held");
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        until("the wake turn's end publishes the drain", || {
             row() == Some((SessionStatus::Idle, 0))
         })
         .await;

@@ -30,7 +30,7 @@ import { isDeadToken, sendApns, type ApnsEnvironment } from "./apns";
 import {
   apnsPayload,
   chatForNotification,
-  notificationFor,
+  decideNotification,
   parsePrefs,
   type Category,
   type PushPrefs
@@ -121,6 +121,9 @@ export class RegistryRoom implements DurableObject {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS push_targets (device TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, prefs TEXT NOT NULL, updated_at INTEGER NOT NULL)"
     );
+    // A finished turn whose "done" push waits on its subagents, per chat
+    // (push-notify.ts `decideNotification`). Private too, like push_targets.
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS push_held (chat_id TEXT PRIMARY KEY, turn TEXT NOT NULL)");
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
@@ -432,6 +435,7 @@ export class RegistryRoom implements DurableObject {
       // rowToSeedOp) — the ws4 repair recipe, built in.
       this.ctx.storage.sql.exec("DELETE FROM rows");
       this.ctx.storage.sql.exec("DELETE FROM meta");
+      this.ctx.storage.sql.exec("DELETE FROM push_held");
       for (const ws of this.ctx.getWebSockets()) {
         try {
           ws.close(4410, "registry reset");
@@ -638,6 +642,23 @@ export class RegistryRoom implements DurableObject {
     }));
   }
 
+  private pushHeld(chatId: string): string | undefined {
+    const rows = [...this.ctx.storage.sql.exec("SELECT turn FROM push_held WHERE chat_id = ?", chatId)];
+    return rows[0]?.turn as string | undefined;
+  }
+
+  private setPushHeld(chatId: string, turn: string | undefined): void {
+    if (turn === undefined) {
+      this.ctx.storage.sql.exec("DELETE FROM push_held WHERE chat_id = ?", chatId);
+    } else {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO push_held (chat_id, turn) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET turn = excluded.turn",
+        chatId,
+        turn
+      );
+    }
+  }
+
   /** Session rows that changed in a batch → the desktop's notifications
    * (done / needs input / failed), sent to every registered phone after the
    * batch commits. Best effort: a failed delivery is logged, never retried. */
@@ -648,7 +669,9 @@ export class RegistryRoom implements DurableObject {
     for (const [chatId, prev] of before) {
       const next = touched.get(`sessions ${chatId}`);
       if (!next) continue;
-      const category = notificationFor(prev, next, now);
+      const wasHeld = this.pushHeld(chatId);
+      const { category, held } = decideNotification(prev, next, now, wasHeld);
+      if (held !== wasHeld) this.setPushHeld(chatId, held);
       if (category === null) continue;
       const chat = chatForNotification(touched.get(`chats ${chatId}`) ?? this.loadRow("chats", chatId), category, now);
       if (chat === null) continue;

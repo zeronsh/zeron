@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apnsPayload, chatForNotification, notificationFor, parsePrefs, SESSION_STALE_MS } from "./push-notify";
+import { apnsPayload, chatForNotification, decideNotification, notificationFor, parsePrefs, SESSION_STALE_MS } from "./push-notify";
 import type { Row } from "./registry-core";
 
 const NOW = 1_800_000_000_000;
@@ -60,6 +60,75 @@ describe("notificationFor (desktop parity)", () => {
 
   it("a question on a dead (stale) session is not news", () => {
     expect(notificationFor(session("working", null), session("awaitingInput", null, NOW - 60_000), NOW)).toBeNull();
+  });
+});
+
+// The engine's held finish (crates/engine/src/desktop_notify.rs tests).
+describe("decideNotification (finish held for running subagents)", () => {
+  const row = (status: string, turn: string | null, count: number, updatedAt = NOW): Row => {
+    const base = session(status, turn, updatedAt);
+    return { ...base, fields: { ...base.fields, runningSubagents: count } };
+  };
+
+  /** Feeds rows in order like RegistryRoom does, carrying the hold; the
+   * categories each change rang. */
+  const play = (rows: Row[]): Array<string | null> => {
+    let held: string | undefined;
+    return rows.slice(1).map((after, i) => {
+      const decision = decideNotification(rows[i], after, NOW, held);
+      held = decision.held;
+      return decision.category;
+    });
+  };
+
+  it("a finish with running subagents rings once they are done", () => {
+    expect(
+      play([row("working", null, 2), row("idle", "t1", 2), row("idle", "t1", 1), row("idle", "t1", 0), row("idle", "t1", 0)])
+    ).toEqual([null, null, "done", null]);
+  });
+
+  it("a wake turn rings once for the held finish", () => {
+    // The engine settles the wake turn before publishing the drain.
+    expect(
+      play([row("working", null, 1), row("idle", "t1", 1), row("working", "t1", 1), row("idle", "t2", 1), row("idle", "t2", 0)])
+    ).toEqual([null, null, null, "done"]);
+  });
+
+  it("a completion reported while working rings once, not again on the drain", () => {
+    expect(
+      play([row("working", "old", 0), row("working", "t1", 1), row("idle", "t1", 1), row("idle", "t1", 0)])
+    ).toEqual(["done", null, null]);
+  });
+
+  it("subagents starting after a finish rang never ring it again", () => {
+    expect(play([row("working", null, 0), row("idle", "t1", 0), row("idle", "t1", 1), row("idle", "t1", 0)])).toEqual([
+      "done",
+      null,
+      null
+    ]);
+  });
+
+  it("a question, failure or new run supersedes the held finish", () => {
+    const held = [row("working", null, 1), row("idle", "t1", 1)];
+    expect(play([...held, row("awaitingInput", "t1", 1), row("idle", "t1", 0)])).toEqual([null, "input", null]);
+    expect(play([...held, row("errored", "t1", 1), row("idle", "t1", 0)])).toEqual([null, "failed", null]);
+    // A run started and was interrupted: no new completion, the hold is gone.
+    expect(play([...held, row("working", "t1", 1), row("idle", "t1", 1), row("idle", "t1", 0)])).toEqual([
+      null,
+      null,
+      null,
+      null
+    ]);
+  });
+
+  it("a stale row drops the hold for good", () => {
+    const stale = row("idle", "t1", 1, NOW - SESSION_STALE_MS - 1);
+    expect(play([row("working", null, 1), row("idle", "t1", 1), stale, row("idle", "t1", 1), row("idle", "t1", 0)])).toEqual([
+      null,
+      null,
+      null,
+      null
+    ]);
   });
 });
 

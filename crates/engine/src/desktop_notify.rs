@@ -54,11 +54,20 @@ pub enum Ping {
 
 /// Notification baseline is separate from the visual activity indicator:
 /// going idle can mean cancellation, expiry, or an internal handoff.
+///
+/// A finished turn whose subagents still run is held (the agent is still
+/// working; Claude wakes the parent again when they finish) and rings once
+/// they are done, unless a newer turn took over by then.
 #[derive(Debug, Clone)]
 pub struct SessionNotificationState {
     indicator: Indicator,
     last_completed_turn: Option<String>,
     fresh: bool,
+    running_subagents: u32,
+    /// The completed turn whose ping waits on its subagents. Clones share
+    /// it: callers store a clone of the new baseline before asking it for
+    /// its ping, and the hold that ping decides must reach the stored copy.
+    held: Arc<Mutex<Option<String>>>,
 }
 
 impl SessionNotificationState {
@@ -70,12 +79,21 @@ impl SessionNotificationState {
                 .signed_duration_since(session.updated_at)
                 .num_milliseconds()
                 <= zeron_proto::view::SESSION_STALE_MS,
+            running_subagents: zeron_proto::view::running_subagents(Some(session), now),
+            held: Arc::default(),
         }
     }
 
     /// Call after saving the new baseline, including when delivery is pending
     /// or outputs are disabled. Suppressed pings must never be replayed later.
     pub fn ping_since(&self, prev: &Self, send_pending: bool) -> Option<Ping> {
+        let mut held = None;
+        let ping = self.decide(prev, send_pending, &mut held);
+        *lock(&self.held) = held;
+        ping
+    }
+
+    fn decide(&self, prev: &Self, send_pending: bool, held: &mut Option<String>) -> Option<Ping> {
         if self.indicator == Indicator::Errored && prev.indicator != Indicator::Errored {
             return Some(Ping::Attention);
         }
@@ -83,15 +101,36 @@ impl SessionNotificationState {
         {
             return Some(Ping::Request);
         }
-        if !send_pending
-            && self.fresh
-            && self.last_completed_turn.is_some()
+        if send_pending || !self.fresh {
+            return None;
+        }
+        // Idle: no newer turn is running, asking, or failing.
+        let idle = self.indicator == Indicator::None;
+        if self.last_completed_turn.is_some()
             && self.last_completed_turn != prev.last_completed_turn
         {
+            if idle && self.running_subagents > 0 {
+                *held = self.last_completed_turn.clone();
+                return None;
+            }
+            return Some(Ping::Done);
+        }
+        let waiting = lock(&prev.held).clone();
+        if idle && waiting.is_some() && waiting == self.last_completed_turn {
+            if self.running_subagents > 0 {
+                *held = waiting;
+                return None;
+            }
             return Some(Ping::Done);
         }
         None
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The engine already holds raw transport degradation for four seconds before
@@ -440,11 +479,96 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn baseline(indicator: Indicator, turn: Option<&str>) -> SessionNotificationState {
+        running(indicator, turn, 0)
+    }
+
+    fn running(indicator: Indicator, turn: Option<&str>, subagents: u32) -> SessionNotificationState {
         SessionNotificationState {
             indicator,
             last_completed_turn: turn.map(str::to_owned),
             fresh: true,
+            running_subagents: subagents,
+            held: Arc::default(),
         }
+    }
+
+    /// The callers' order: store the new baseline, then ask it for its ping.
+    fn step(stored: &mut SessionNotificationState, next: SessionNotificationState) -> Option<Ping> {
+        let prev = std::mem::replace(stored, next.clone());
+        next.ping_since(&prev, false)
+    }
+
+    #[test]
+    fn a_finish_with_running_subagents_rings_once_they_are_done() {
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 2)), None);
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        assert_eq!(
+            step(&mut stored, running(Indicator::None, Some("t1"), 0)),
+            Some(Ping::Done)
+        );
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 0)), None);
+        // Subagents of a turn that already rang never ring it again.
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 0)), None);
+    }
+
+    #[test]
+    fn a_wake_turn_rings_once_for_the_held_finish() {
+        // The wake turn runs before the count drops: only its own end rings.
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        assert_eq!(step(&mut stored, running(Indicator::Working, Some("t1"), 1)), None);
+        assert_eq!(step(&mut stored, running(Indicator::Working, Some("t1"), 0)), None);
+        assert_eq!(
+            step(&mut stored, running(Indicator::None, Some("t2"), 0)),
+            Some(Ping::Done)
+        );
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t2"), 0)), None);
+
+        // The wake turn settles (never seen Working) before the count drops:
+        // its finish takes over the hold and rings once.
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t2"), 1)), None);
+        assert_eq!(
+            step(&mut stored, running(Indicator::None, Some("t2"), 0)),
+            Some(Ping::Done)
+        );
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t2"), 0)), None);
+    }
+
+    #[test]
+    fn input_requests_and_failures_are_never_held() {
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        assert_eq!(
+            step(&mut stored, running(Indicator::AwaitingInput, Some("t1"), 1)),
+            Some(Ping::Request)
+        );
+        assert_eq!(
+            step(&mut stored, running(Indicator::Errored, Some("t1"), 1)),
+            Some(Ping::Attention)
+        );
+        // The asking/failing turn superseded the held finish.
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 0)), None);
+    }
+
+    #[test]
+    fn a_held_finish_is_dropped_by_a_send_or_a_stale_row() {
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        let next = running(Indicator::None, Some("t1"), 1);
+        let prev = std::mem::replace(&mut stored, next.clone());
+        assert_eq!(next.ping_since(&prev, true), None);
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 0)), None);
+
+        let mut stored = baseline(Indicator::Working, Some("t0"));
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 1)), None);
+        let mut stale = running(Indicator::None, Some("t1"), 0);
+        stale.fresh = false;
+        assert_eq!(step(&mut stored, stale), None);
+        assert_eq!(step(&mut stored, running(Indicator::None, Some("t1"), 0)), None);
     }
 
     #[test]
@@ -747,6 +871,27 @@ mod tests {
         let later = now + chrono::Duration::hours(2);
         notifier.sessions(&[session("a", Some("t3"), later)], &chats, later);
         assert_eq!(posted.lock().unwrap().last().unwrap().1, "Run finished");
+    }
+
+    #[test]
+    fn finished_banners_wait_for_running_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, _) = notifier(dir.path());
+        let now = chrono::Utc::now();
+        let chats = [chat("a", "Fan out", None)];
+        let with_subagents = |turn, running| {
+            let mut session = session("a", Some(turn), now);
+            session.running_subagents = running;
+            session
+        };
+        notifier.sessions(&[with_subagents("t1", 0)], &chats, now);
+        notifier.sessions(&[with_subagents("t2", 2)], &chats, now);
+        notifier.sessions(&[with_subagents("t2", 1)], &chats, now);
+        assert!(posted.lock().unwrap().is_empty(), "held while subagents run");
+        notifier.sessions(&[with_subagents("t2", 0)], &chats, now);
+        notifier.sessions(&[with_subagents("t2", 0)], &chats, now);
+        let bodies: Vec<String> = posted.lock().unwrap().iter().map(|p| p.1.clone()).collect();
+        assert_eq!(bodies, ["Run finished"]);
     }
 
     #[test]
