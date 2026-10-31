@@ -98,7 +98,9 @@ Before any exec the entry removes its own directory from the PATH it hands on
 (every other slot is byte-identical), so a program that searches PATH for its
 argv0, such as a venv or standalone Python, finds itself and not the shim. A
 failure while setting up the proxy, before it reads stdin, execs the real
-server unproxied.
+server unproxied. The shim's env identity hashes the inherited environment but
+skips per-session/login/terminal values (`shim::identity_env_key`), so a new
+login or service start does not force a fresh discovery.
 First discovery retains channel servers as live forwarding; subsequent channel
 launches exec the real command directly using private `mcp-cache/class-v1`
 classification records. See the harness's

@@ -60,6 +60,53 @@ pub fn decide<'a>(
     .then_some(row)
 }
 
+/// Whether an inherited variable takes part in the cache identity. The shim
+/// cannot tell the entry's own env from the inherited one, so it hashes
+/// everything except values that change per Zeron/Claude session, login,
+/// terminal or service start and never decide what a server offers. Hashing
+/// them would give every such change a fresh discovery and a stale cache file
+/// that is never collected. A wrongly excluded value only costs a refreshed
+/// catalog: every real connection refreshes the metadata.
+pub fn identity_env_key(key: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "ZERON_",
+        "CLAUDE_CODE_",
+        "SSH_",
+        "VSCODE_",
+        "__MISE_",
+        "KITTY_",
+        "ITERM_",
+    ];
+    const NAMES: &[&str] = &[
+        "CLAUDECODE",
+        "CLAUDE_SESSION_ID",
+        "CLAUDE_PID",
+        "PWD",
+        "OLDPWD",
+        "SHLVL",
+        "_",
+        "COLUMNS",
+        "LINES",
+        "INVOCATION_ID",
+        "JOURNAL_STREAM",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_SESSION_ID",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "WINDOWID",
+        "TMUX",
+        "TMUX_PANE",
+        "STY",
+        "TERM_SESSION_ID",
+        "SESSION_MANAGER",
+        "GPG_AGENT_INFO",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "SWAYSOCK",
+        "I3SOCK",
+    ];
+    !PREFIXES.iter().any(|p| key.starts_with(p)) && !NAMES.contains(&key)
+}
+
 /// `path` without any entry equal to `dir`; None when nothing was removed.
 /// Every other entry keeps its exact bytes, order and empty slots.
 pub fn path_without(path: &OsStr, dir: &Path) -> Option<OsString> {
@@ -212,20 +259,7 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
         // except volatile session markers; persist only the resulting digest.
         config.identity_env = std::env::vars_os()
             .filter_map(|(k, _)| k.into_string().ok())
-            .filter(|k| {
-                !k.starts_with("ZERON_")
-                    && !k.starts_with("CLAUDE_CODE_")
-                    && !matches!(
-                        k.as_str(),
-                        "CLAUDECODE"
-                            | "CLAUDE_SESSION_ID"
-                            | "CLAUDE_PID"
-                            | "PWD"
-                            | "OLDPWD"
-                            | "SHLVL"
-                            | "_"
-                    )
-            })
+            .filter(|k| identity_env_key(k))
             .collect();
         config.identity_path = Some(
             std::env::join_paths(
@@ -311,6 +345,34 @@ mod tests {
         assert_eq!(drop("/a::/b"), None);
         assert_eq!(drop(""), None);
         assert_eq!(drop("/run/shim-2:/a"), None);
+    }
+    #[test]
+    fn identity_env_skips_session_volatile_values_but_keeps_server_config() {
+        for volatile in [
+            "ZERON_MCP_SHIM_KEY",
+            "CLAUDE_CODE_SESSION_ID",
+            "INVOCATION_ID",
+            "SSH_AUTH_SOCK",
+            "__MISE_DIFF",
+            "TMUX_PANE",
+            "COLUMNS",
+            "WAYLAND_DISPLAY",
+        ] {
+            assert!(!identity_env_key(volatile), "{volatile}");
+        }
+        for config in [
+            "HOME",
+            "PATH",
+            "GITHUB_TOKEN",
+            "NODE_OPTIONS",
+            "CLAUDE_PLUGIN_ROOT",
+            "CLAUDE_PLUGIN_DATA",
+            "XDG_CONFIG_HOME",
+            "LANG",
+            "MISE_SHELL",
+        ] {
+            assert!(identity_env_key(config), "{config}");
+        }
     }
     #[test]
     fn shim_requires_all_three_conditions() {
