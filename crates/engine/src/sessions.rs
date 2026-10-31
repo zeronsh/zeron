@@ -5627,6 +5627,88 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn mcp_plan_prefs_change_replaces_runtime_and_unchanged_plan_reuses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            Arc::new(HarnessRegistry::new()),
+            HarnessId::ClaudeCode,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_chat(
+                "main",
+                None,
+                Some(&core.device_id),
+                None,
+                Some("/work".into()),
+            )
+            .unwrap();
+        let inner = &core.sessions.inner;
+        let mut prefs = core.registry.mcp_prefs();
+        prefs.lazy = true;
+        prefs.servers.insert(
+            "claude-code:playwright".into(),
+            zeron_proto::McpServerChoice::Lazy,
+        );
+        core.registry.set_mcp_prefs(prefs.clone());
+        let mut live = request();
+        inner.apply_mcp_plan(
+            &mut live,
+            "main",
+            "live-run",
+            HarnessId::ClaudeCode,
+            Some("1"),
+        );
+        let runtime = RuntimeConfig::new(
+            HarnessId::ClaudeCode,
+            &live,
+            Arc::new(zeron_harness::ClaudeHarness::new()),
+        );
+        // A client request has no plan. Dispatch stamps before route(), using
+        // the live run's id; unchanged prefs must retain the parked runtime.
+        let mut incoming = request();
+        inner.apply_mcp_plan(
+            &mut incoming,
+            "main",
+            "live-run",
+            HarnessId::ClaudeCode,
+            Some("1"),
+        );
+        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), Some(false));
+        prefs.servers.insert(
+            "claude-code:playwright".into(),
+            zeron_proto::McpServerChoice::Eager,
+        );
+        core.registry.set_mcp_prefs(prefs.clone());
+        inner.apply_mcp_plan(
+            &mut incoming,
+            "main",
+            "live-run",
+            HarnessId::ClaudeCode,
+            Some("1"),
+        );
+        assert_eq!(
+            incoming.mcp_plan.as_ref().unwrap().modes.get("playwright"),
+            Some(&zeron_proto::McpMode::Eager)
+        );
+        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), None);
+        prefs.lazy = false;
+        core.registry.set_mcp_prefs(prefs);
+        inner.apply_mcp_plan(
+            &mut incoming,
+            "main",
+            "live-run",
+            HarnessId::ClaudeCode,
+            Some("1"),
+        );
+        assert!(incoming.mcp_plan.is_none());
+        assert_eq!(runtime.route(HarnessId::ClaudeCode, &incoming), None);
+        core.sessions.shutdown().await;
+    }
+
     struct IdleStartupFixture {
         idle_calls: Arc<std::sync::atomic::AtomicUsize>,
         inference_calls: Arc<std::sync::atomic::AtomicUsize>,
