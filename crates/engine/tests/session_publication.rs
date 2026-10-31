@@ -453,16 +453,12 @@ async fn disconnected_cleanup_is_durable_before_snapshot_debounce() {
         handle.doc().doc().commit();
     }
     let expected = handle.doc().doc().oplog_vv();
-    // The outbox writer inserts off the committing thread, so the rows are
-    // durable a moment after the commits return, and always before shutdown
-    // returns (shutdown flushes the writer).
-    let started = std::time::Instant::now();
-    while store.pending_chat_updates(CHAT).unwrap().len() < 136 {
-        assert!(started.elapsed().as_secs() < 10, "outbox rows never landed");
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
     drop(handle);
     host.shutdown_workers().await;
+    assert!(
+        store.pending_chat_updates(CHAT).unwrap().len() >= 136,
+        "shutdown returned before queued cleanup rows were durable"
+    );
     drop(host);
     // Crash shape: the durable update journal is newer than the last snapshot.
     store

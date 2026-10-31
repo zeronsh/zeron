@@ -1378,6 +1378,12 @@ impl DocHost {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
+        // Deliver all queued commits before stopping the room actors. Their
+        // final persistence may itself run a snapshot barrier.
+        let outbox = self.inner.outbox.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || outbox.flush()).await {
+            tracing::error!(%error, "shutdown outbox flush failed");
+        }
         // Stop room actors before the final snapshot so shutdown does not
         // leave a scheduled debounce behind an already-dropped document.
         let clients: Vec<_> = lock(&self.inner.handles)
