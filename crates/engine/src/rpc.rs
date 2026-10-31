@@ -2201,6 +2201,7 @@ fn forwardable(method: &str) -> bool {
             | methods::PREWARM_CHAT
             | methods::HIBERNATE_CHAT
             | methods::HIBERNATE_IDLE
+            | methods::RESTART_CHAT_WITH_ALL_MCP
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
@@ -2283,6 +2284,29 @@ where
             serde_json::to_value(&*borrowed).ok()?
         };
         Some((value, (rx, true)))
+    })
+    .boxed()
+}
+
+/// Each chat's runtime state on this engine: the in-process half of
+/// [`zeron_proto::Session::runtime`], which no synced row or watch frame
+/// carries. Current map first, then only when it changes.
+fn runtime_states_stream(
+    rx: watch::Receiver<Vec<zeron_proto::Session>>,
+) -> BoxStream<'static, serde_json::Value> {
+    futures::stream::unfold((rx, None), |(mut rx, last)| async move {
+        loop {
+            let states: std::collections::BTreeMap<String, zeron_proto::RuntimeState> = rx
+                .borrow_and_update()
+                .iter()
+                .filter_map(|session| Some((session.chat_id.clone(), session.runtime?)))
+                .collect();
+            if last.as_ref() != Some(&states) {
+                let value = serde_json::to_value(&states).ok()?;
+                return Some((value, (rx, Some(states))));
+            }
+            rx.changed().await.ok()?;
+        }
     })
     .boxed()
 }
@@ -3127,6 +3151,14 @@ impl RpcService for EngineRpc {
                     &serde_json::json!({ "hibernating": self.sessions.hibernate(&p.chat_id) }),
                 )
             }
+            methods::RESTART_CHAT_WITH_ALL_MCP => {
+                let p: ChatParams = parse_params(params)?;
+                self.sessions.restart_with_all_mcp(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "restarting": true }))
+            }
+            methods::WATCH_RUNTIME_STATES => Ok(RpcReply::Stream(runtime_states_stream(
+                self.sessions.watch_sessions(),
+            ))),
             methods::HIBERNATE_IDLE => RpcReply::value(
                 &serde_json::json!({ "hibernating": self.sessions.hibernate_idle() }),
             ),
@@ -4862,6 +4894,69 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_with(chat: &str, runtime: Option<zeron_proto::RuntimeState>) -> zeron_proto::Session {
+        zeron_proto::Session {
+            last_turn_outcome: None,
+            terminal_activity: None,
+            last_completed_turn: None,
+            chat_id: chat.into(),
+            device_id: "dev".into(),
+            status: zeron_proto::SessionStatus::Idle,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            runtime,
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_states_stream_sends_the_map_then_only_changes() {
+        use zeron_proto::RuntimeState::{Hibernated, Parked};
+        let (tx, rx) = watch::channel(vec![
+            session_with("a", Some(Parked)),
+            session_with("none", None),
+        ]);
+        let mut stream = runtime_states_stream(rx);
+        async fn next(stream: &mut BoxStream<'static, serde_json::Value>) -> serde_json::Value {
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .expect("a frame")
+                .expect("the stream is open")
+        }
+        assert_eq!(next(&mut stream).await, serde_json::json!({ "a": "parked" }));
+        // A status-only change is not news to this stream.
+        let mut same = tx.borrow().clone();
+        same[0].updated_at += chrono::Duration::seconds(1);
+        tx.send(same).unwrap();
+        tx.send(vec![session_with("a", Some(Hibernated))]).unwrap();
+        assert_eq!(
+            next(&mut stream).await,
+            serde_json::json!({ "a": "hibernated" })
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_with_all_mcp_answers_over_the_memory_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let reply = client
+            .call(
+                methods::RESTART_CHAT_WITH_ALL_MCP,
+                serde_json::json!({ "chatId": "chat" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["restarting"], true);
+    }
 
     #[tokio::test]
     async fn mcp_policy_settings_round_trip_over_the_memory_transport() {

@@ -310,6 +310,14 @@ struct Revival {
     continuation: Option<String>,
 }
 
+/// A chat's one-shot full-MCP launch: armed until the next launch takes it,
+/// then pinned to that run so its later sends keep comparing equal to the
+/// legacy launch instead of relaunching into the lazy plan.
+enum FullMcp {
+    Armed,
+    Run(String),
+}
+
 struct Inner {
     voice: crate::voice::VoiceManager,
     device_id: String,
@@ -362,6 +370,9 @@ struct Inner {
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
     last_requests: Mutex<HashMap<String, RunRequest>>,
+    /// Per chat: the user asked for a launch with every MCP server eager
+    /// ([`SessionsEngine::restart_with_all_mcp`]).
+    full_mcp: Mutex<HashMap<String, FullMcp>>,
     /// Harness-native session ids per chat (resume continuity across turns) —
     /// the live-process cache over the durable copy on the workspace chat row
     /// (zeron kept the same pair on `chats.harness_session_id`). An empty
@@ -433,6 +444,7 @@ impl SessionsEngine {
                 activity_tx: OnceLock::new(),
                 activity_task: Mutex::new(None),
                 last_requests: Mutex::new(HashMap::new()),
+                full_mcp: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 rejected_resumes: Mutex::new(HashMap::new()),
                 fresh_start_notices: Mutex::new(std::collections::HashSet::new()),
@@ -508,6 +520,26 @@ impl SessionsEngine {
     pub fn hibernate_idle(&self) -> usize {
         let chats: Vec<_> = lock(&self.inner.runs).keys().cloned().collect();
         chats.iter().filter(|chat| self.hibernate(chat)).count()
+    }
+
+    /// Launch `chat_id` once with every MCP server eager: the lazy plan is
+    /// skipped for the next run it starts (and kept for that run's life). A
+    /// parked runtime is put to sleep now so the next message starts it that
+    /// way; a running turn finishes as it is and the next send relaunches.
+    pub fn restart_with_all_mcp(&self, chat_id: &str) {
+        let live = lock(&self.inner.runs).get(chat_id).map(|h| h.run_id.clone());
+        {
+            let mut full = lock(&self.inner.full_mcp);
+            // A run that already took the request stays pinned to it.
+            let pinned = matches!(
+                full.get(chat_id),
+                Some(FullMcp::Run(taken)) if live.as_ref() == Some(taken)
+            );
+            if !pinned {
+                full.insert(chat_id.to_owned(), FullMcp::Armed);
+            }
+        }
+        self.hibernate(chat_id);
     }
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
@@ -1248,7 +1280,8 @@ impl SessionsEngine {
         }
 
         let run_id = new_id();
-        self.inner.stamp_mcp_plan(&mut request, chat_id, &run_id, harness_id);
+        self.inner
+            .stamp_mcp_plan_for_launch(&mut request, chat_id, &run_id, harness_id);
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -2808,6 +2841,40 @@ impl Inner {
         );
     }
 
+    /// [`Self::stamp_mcp_plan`] for the run being launched: an armed full-MCP
+    /// request is taken by this run, and one a previous run took is spent.
+    fn stamp_mcp_plan_for_launch(
+        &self,
+        request: &mut RunRequest,
+        chat_id: &str,
+        run_id: &str,
+        harness_id: HarnessId,
+    ) {
+        {
+            let mut full = lock(&self.full_mcp);
+            match full.get(chat_id) {
+                Some(FullMcp::Armed) => {
+                    full.insert(chat_id.to_owned(), FullMcp::Run(run_id.to_owned()));
+                }
+                Some(FullMcp::Run(taken)) if taken != run_id => {
+                    full.remove(chat_id);
+                }
+                _ => {}
+            }
+        }
+        self.stamp_mcp_plan(request, chat_id, run_id, harness_id);
+    }
+
+    /// Whether `chat_id`'s run `run_id` launches with every MCP server: armed
+    /// and not yet launched, or the run that took the request.
+    fn full_mcp_applies(&self, chat_id: &str, run_id: &str) -> bool {
+        match lock(&self.full_mcp).get(chat_id) {
+            Some(FullMcp::Armed) => true,
+            Some(FullMcp::Run(taken)) => taken == run_id,
+            None => false,
+        }
+    }
+
     fn apply_mcp_plan(
         &self,
         request: &mut RunRequest,
@@ -2817,7 +2884,10 @@ impl Inner {
         lazy_env: Option<&str>,
     ) {
         let prefs = self.registry.mcp_prefs();
-        if !prefs.lazy || crate::registry::HarnessRegistry::env_forces_mcp_legacy(lazy_env) {
+        if !prefs.lazy
+            || crate::registry::HarnessRegistry::env_forces_mcp_legacy(lazy_env)
+            || self.full_mcp_applies(chat_id, run_id)
+        {
             request.mcp_plan = None;
             return;
         }
@@ -7525,6 +7595,49 @@ mod tests {
                 assert!(!next.mcp_plan.unwrap().drop_channels, "{chat}");
             }
         }
+
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restart_with_all_mcp_is_one_shot_and_stays_with_the_run_that_took_it() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let inner = &core.sessions.inner;
+        let stamp = |chat: &str, run_id: &str, launch: bool| {
+            let mut next = request();
+            if launch {
+                inner.stamp_mcp_plan_for_launch(&mut next, chat, run_id, HarnessId::Codex);
+            } else {
+                inner.apply_mcp_plan(&mut next, chat, run_id, HarnessId::Codex, None);
+            }
+            next.mcp_plan
+        };
+        assert!(stamp("main", "run-1", true).is_some(), "lazy by default");
+
+        core.sessions.restart_with_all_mcp("main");
+        // Armed: a send into the live run compares against the legacy launch
+        // (so the runtime is replaced), and other chats stay lazy.
+        assert!(stamp("main", "run-1", false).is_none());
+        assert!(stamp("other", "run-1", false).is_some());
+        // The next launch takes it; that run keeps comparing equal to it.
+        assert!(stamp("main", "run-2", true).is_none());
+        assert!(stamp("main", "run-2", false).is_none());
+        // Asking again re-arms it for the next launch (this fixture has no
+        // live run to pin), and a run that took it is unaffected.
+        core.sessions.restart_with_all_mcp("main");
+        assert!(stamp("main", "run-2", false).is_none());
+        assert!(stamp("main", "run-2", true).is_none());
+        // One shot: the launch after it is lazy again.
+        assert!(stamp("main", "run-3", true).is_some());
+        assert!(stamp("main", "run-3", false).is_some());
 
         core.sessions.shutdown().await;
     }

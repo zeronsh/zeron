@@ -57,6 +57,15 @@ pub mod methods {
     pub const PREWARM_CHAT: &str = "PrewarmChat";
     pub const HIBERNATE_CHAT: &str = "HibernateChat";
     pub const HIBERNATE_IDLE: &str = "HibernateIdle";
+    /// Where each chat's agent runtime is on this engine (`chatId` →
+    /// `live`/`parked`/`hibernated`/`starting`): current map first, then
+    /// every change. The runtime state stays off synced session rows, so the
+    /// sidebar's sleeping mark reads it here. No params; IPC-only.
+    pub const WATCH_RUNTIME_STATES: &str = "WatchRuntimeStates";
+    /// Arm a one-shot launch of `{chatId}` with every MCP server eager
+    /// (the lazy plan skipped), putting its parked runtime to sleep so the
+    /// next message starts it that way. Capability `mcp-lazy-v1`.
+    pub const RESTART_CHAT_WITH_ALL_MCP: &str = "RestartChatWithAllMcp";
     pub const GET_MCP_SETTINGS: &str = "GetMcpSettings";
     pub const SET_MCP_SETTINGS: &str = "SetMcpSettings";
     /// Whether agents' commits on this device credit Zeron
