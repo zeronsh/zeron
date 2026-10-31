@@ -38,6 +38,11 @@ enum Command {
         #[arg(long)]
         zb_root: Option<PathBuf>,
     },
+    /// Generate fixtures.
+    Fixture {
+        #[command(subcommand)]
+        command: FixtureCommand,
+    },
     /// Report scope, smaps, perf, RAPL, and the live engine.
     Doctor,
     /// Run `command` under user-space perf counters. Does not change its environment.
@@ -45,6 +50,22 @@ enum Command {
         /// Command and arguments. A leading `--` is ignored.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
         command: Vec<OsString>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FixtureCommand {
+    Gen {
+        name: String,
+        #[arg(long)]
+        engine: PathBuf,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    Convert {
+        input: PathBuf,
+        #[arg(long, default_value = "opus")]
+        cadence: String,
     },
 }
 
@@ -88,6 +109,23 @@ async fn async_main(command: Command) -> Result<()> {
             hold,
             zb_root,
         } => launch_hold(engine, hold, zb_root).await,
+        Command::Fixture { command } => match command {
+            FixtureCommand::Gen { name, engine, seed } => {
+                let path = zeron_bench::fixture::profile::generate(&name, &engine, seed).await?;
+                println!("{}", path.display());
+                Ok(())
+            }
+            FixtureCommand::Convert { input, cadence } => {
+                let source = std::fs::read_to_string(&input)?;
+                let script = zeron_bench::fixture::scripts::convert(&source, &cadence)?;
+                let root = zeron_bench::fixture::safe_root()?;
+                let dir = zeron_bench::fixture::fixture_dir(&root, &["fixtures", "private"])?;
+                let path = dir.join(format!("converted-{}.zbr.jsonl", zeron_bench::mono_now()));
+                std::fs::write(&path, script)?;
+                println!("{}", path.display());
+                Ok(())
+            }
+        },
         Command::Doctor => {
             print!("{}", zeron_bench::doctor());
             Ok(())
