@@ -1308,6 +1308,110 @@ mod tests {
         *state
     }
 
+    /// Doc state after each durable step of the current chain: `[0]` is the
+    /// base, `[i]` the base plus deltas `1..=i`.
+    struct ChainStep {
+        cursor: u64,
+        vv: loro::VersionVector,
+        value: loro::LoroValue,
+    }
+
+    fn chain_step(doc: &loro::LoroDoc, cursor: u64) -> ChainStep {
+        ChainStep {
+            cursor,
+            vv: doc.oplog_vv(),
+            value: doc.get_deep_value(),
+        }
+    }
+
+    fn assert_state_is(state: &ChatState, step: &ChainStep, context: &str) {
+        assert_eq!(state.doc.oplog_vv(), step.vv, "{context}");
+        assert_eq!(state.doc.get_deep_value(), step.value, "{context}");
+        assert_eq!(state.cursor, step.cursor, "{context}");
+    }
+
+    /// A compaction that dies at one of its three stages must leave the chain
+    /// exactly as it was: nothing deleted, nothing replaced.
+    fn crash_compaction(
+        store: &DocsStore,
+        path: &std::path::Path,
+        mode: u64,
+        snapshot: &[u8],
+        cursor: u64,
+    ) {
+        match mode % 3 {
+            // The delta delete fails.
+            0 | 1 => {
+                let (table, event) = if mode % 3 == 0 {
+                    ("snapshot_deltas", "DELETE")
+                } else {
+                    // The delta delete has already run when the base upsert fails.
+                    ("snapshots", "UPDATE")
+                };
+                store
+                    .conn()
+                    .execute_batch(&format!(
+                        "CREATE TRIGGER crash BEFORE {event} ON {table} BEGIN SELECT RAISE(ABORT,'crash'); END"
+                    ))
+                    .unwrap();
+                assert!(
+                    store
+                        .save_verified_snapshot_with_cursor("chat", snapshot, cursor, 2)
+                        .is_err()
+                );
+                store.conn().execute_batch("DROP TRIGGER crash").unwrap();
+            }
+            // Power loss after both statements, before COMMIT: another
+            // connection runs the whole compaction and is dropped.
+            _ => {
+                let conn = Connection::open(path).unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                conn.execute("DELETE FROM snapshot_deltas WHERE doc_id='chat'", [])
+                    .unwrap();
+                conn.execute(
+                    "UPDATE snapshots SET bytes=?1,cursor=?2 WHERE doc_id='chat'",
+                    params![snapshot, cursor as i64],
+                )
+                .unwrap();
+                drop(conn);
+            }
+        }
+    }
+
+    /// Damage delta `seq` (1-based) the way a torn write or bit rot would.
+    fn tear_row(store: &DocsStore, seq: usize, mode: u64) {
+        let conn = store.conn();
+        let sql = match mode % 7 {
+            0 => "UPDATE snapshot_deltas SET bytes=substr(bytes,1,length(bytes)-1) WHERE seq=?1",
+            1 => "UPDATE snapshot_deltas SET bytes=substr(bytes,1,length(bytes)/2) WHERE seq=?1",
+            2 => "UPDATE snapshot_deltas SET bytes=X'' WHERE seq=?1",
+            3 => {
+                // Flip a bit in the checksummed part of the Loro payload.
+                let mut bytes: Vec<u8> = conn
+                    .query_row(
+                        "SELECT bytes FROM snapshot_deltas WHERE seq=?1",
+                        [seq],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                // Bytes 4..16 of Loro's header are unused checksum padding
+                // (flipping them changes nothing); everything else is covered.
+                let target = (bytes.len() / 2).max(16);
+                bytes[target] ^= 0x10;
+                conn.execute(
+                    "UPDATE snapshot_deltas SET bytes=?2 WHERE seq=?1",
+                    params![seq, bytes],
+                )
+                .unwrap();
+                return;
+            }
+            4 => "UPDATE snapshot_deltas SET roots=substr(roots,1,length(roots)-1) WHERE seq=?1",
+            5 => "UPDATE snapshot_deltas SET roots=zeroblob(length(roots)) WHERE seq=?1",
+            _ => "DELETE FROM snapshot_deltas WHERE seq=?1",
+        };
+        conn.execute(sql, [seq]).unwrap();
+    }
+
     #[test]
     fn delta_log_seeded_crash_reopen_equals_full_snapshot() {
         let seeds = std::env::var("PERF_SEEDS")
@@ -1318,6 +1422,7 @@ mod tests {
         let full_dir = tempfile::tempdir().unwrap();
         let mut store = DocsStore::open(dir.path()).unwrap();
         let full = DocsStore::open(full_dir.path()).unwrap();
+        let (mut crashes_in_compaction, mut torn_rows) = (0u64, 0u64);
         for seed in 1..=seeds {
             let mut rng = seed as u64;
             let mut doc = loro::LoroDoc::new();
@@ -1332,6 +1437,7 @@ mod tests {
                 .unwrap();
             let mut saved_vv = doc.oplog_vv();
             let mut cursor = 0;
+            let mut chain = vec![chain_step(&doc, 0)];
             for op in 0..150 {
                 let n = random_next(&mut rng);
                 match n % 6 {
@@ -1382,10 +1488,31 @@ mod tests {
                         )
                         .unwrap();
                     saved_vv = doc.oplog_vv();
+                    chain.push(chain_step(&doc, cursor));
                     let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
                     full.save_verified_snapshot_with_cursor("chat", &snapshot, cursor, 2)
                         .unwrap();
                     if n % 11 == 0 {
+                        // Every compaction first dies at a random stage; the
+                        // chain must survive it intact, then compact for real.
+                        if n % 2 == 0 {
+                            crash_compaction(
+                                &store,
+                                dir.path().join("docs.sqlite3").as_path(),
+                                n / 7,
+                                &snapshot,
+                                cursor,
+                            );
+                            crashes_in_compaction += 1;
+                            let state = store.load_chat_state("chat").unwrap().unwrap();
+                            assert_eq!(state.delta_count, chain.len() - 1, "seed={seed} op={op}");
+                            assert!(!state.needs_compaction);
+                            assert_state_is(
+                                &state,
+                                chain.last().unwrap(),
+                                &format!("seed={seed} op={op} compaction crash"),
+                            );
+                        }
                         store
                             .save_verified_snapshot_with_cursor("chat", &snapshot, cursor, 2)
                             .unwrap();
@@ -1393,23 +1520,79 @@ mod tests {
                             store.load_chat_state("chat").unwrap().unwrap().delta_count,
                             0
                         );
+                        chain = vec![chain_step(&doc, cursor)];
                     }
                 }
                 // A crash discards edits since the last scheduled 1 s save.
                 // Both databases must restore the same VV as well as value.
                 if n % 5 == 0 || op == 149 {
                     drop(store);
+                    // Some crashes also leave a torn/lost delta row behind.
+                    let deltas = chain.len() - 1;
+                    let torn = (deltas > 0 && n % 3 == 0).then(|| 1 + (n / 3) as usize % deltas);
                     store = DocsStore::open(dir.path()).unwrap();
+                    if let Some(seq) = torn {
+                        torn_rows += 1;
+                        tear_row(&store, seq, n / 5);
+                    }
                     let delta = store.load_chat_state("chat").unwrap().unwrap();
-                    let reference = full.load_chat_state("chat").unwrap().unwrap();
-                    assert_same_doc(&delta.doc, &reference.doc);
-                    assert_eq!(delta.cursor, reference.cursor, "seed={seed} op={op}");
-                    assert!(delta.verified);
-                    doc = delta.doc;
+                    if let Some(seq) = torn {
+                        // A deleted row leaves a gap: only the rows after it are
+                        // hidden, and none if it was the last (just a shorter
+                        // chain). Any other damage also hides the row itself.
+                        let usable = seq - 1;
+                        let hidden = if n / 5 % 7 == 6 {
+                            deltas - seq
+                        } else {
+                            deltas - usable
+                        };
+                        let context = format!(
+                            "seed={seed} op={op} torn seq={seq}/{deltas} mode={}",
+                            n / 5 % 7
+                        );
+                        assert_eq!(delta.delta_count, usable, "{context}");
+                        assert_eq!(delta.ignored_deltas, hidden, "{context}");
+                        assert_eq!(delta.needs_compaction, hidden > 0, "{context}");
+                        assert_state_is(&delta, &chain[usable], &context);
+                        // Repair as the engine does: keep the damaged rows,
+                        // then replace the chain with the usable prefix.
+                        if delta.needs_compaction {
+                            let kept = store.quarantine_delta_suffix("chat", usable).unwrap();
+                            assert_eq!(kept, hidden, "{context}");
+                        }
+                        let snapshot = delta.doc.export(loro::ExportMode::Snapshot).unwrap();
+                        store
+                            .save_verified_snapshot_with_cursor("chat", &snapshot, delta.cursor, 2)
+                            .unwrap();
+                        full.save_verified_snapshot_with_cursor("chat", &snapshot, delta.cursor, 2)
+                            .unwrap();
+                        cursor = delta.cursor;
+                        let again = store.load_chat_state("chat").unwrap().unwrap();
+                        assert_eq!(
+                            (again.delta_count, again.ignored_deltas),
+                            (0, 0),
+                            "{context}"
+                        );
+                        assert_state_is(&again, &chain[usable], &context);
+                        doc = again.doc;
+                        chain = vec![chain_step(&doc, cursor)];
+                    } else {
+                        let reference = full.load_chat_state("chat").unwrap().unwrap();
+                        assert_same_doc(&delta.doc, &reference.doc);
+                        assert_eq!(delta.cursor, reference.cursor, "seed={seed} op={op}");
+                        assert!(delta.verified);
+                        assert!(!delta.needs_compaction);
+                        doc = delta.doc;
+                    }
                     doc.set_peer_id(seed as u64).unwrap();
                     saved_vv = doc.oplog_vv();
                 }
             }
+        }
+        // The injected faults actually ran (a refactor must not silence them).
+        if seeds >= 50 {
+            assert!(crashes_in_compaction > 100, "{crashes_in_compaction}");
+            assert!(torn_rows > 100, "{torn_rows}");
         }
     }
 

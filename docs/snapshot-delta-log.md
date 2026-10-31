@@ -97,9 +97,20 @@ written by an older binary that inspected only the base during a downgrade.
 sequences of 150 map/text/list/peer operations, randomized persistence/crash
 points and compactions. Reopening the log must match a separately saved full
 snapshot in both version vector and deep value. `PERF_SEEDS=N` increases the run.
+Every compaction in that test first dies at a random stage (the delta delete
+fails, the base upsert fails after the delete, or an uncommitted transaction is
+dropped) and the chain must reopen exactly as it was. Some crashes also leave a
+random delta row truncated, bit-flipped, emptied, with a zeroed/truncated root
+registry, or deleted (a gap); reopening must restore exactly the prefix before
+it with that prefix's cursor, quarantine the rest, and survive the repair save.
+`seeded_persister_reopen_restores_the_last_successful_flush` drives the real
+`ChatPersistence` (edits, remote imports, cursor rewinds, 256-row threshold
+crossings, shutdown compactions, injected insert/delete failures, crashes and
+outbox-style edits after `restore_base`) and requires a reopen to equal the doc,
+version vector and cursor of the last successful flush.
 Other tests cover interrupted insert/compaction transactions, truncated delta
-rows, migration, old-engine writes, threshold and quiet compaction, failed saves,
-outbox replay, and a transcript present only in a delta during open/salvage.
+rows, migration, the old-engine guard, threshold and quiet compaction, failed
+saves, outbox replay, and a transcript present only in a delta during open/salvage.
 
 `streaming_five_mb_store_write_volume` starts with 2,500,000 seeded ASCII bytes
 in a LoroText, producing a measured 5 MB serialized snapshot (Loro includes state
