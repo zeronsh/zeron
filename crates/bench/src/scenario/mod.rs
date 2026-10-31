@@ -17,6 +17,8 @@ pub mod content;
 mod driver;
 pub mod fixture;
 pub mod idle;
+#[cfg(target_os = "linux")]
+pub mod mcp_process;
 pub mod stream;
 pub mod switch;
 
