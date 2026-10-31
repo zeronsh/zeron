@@ -61,13 +61,10 @@ struct ServiceName {
     #[serde(default)]
     last_seen_ms: i64,
 }
-const MAX_SERVICES_PER_PROJECT: usize = 32;
-const MAX_SERVICES: usize = 2048;
 /// Seen-at is stored as the start of the current hour, so a service that stays
 /// up rewrites the registry at most hourly and a restart still finds it inside
 /// the retention window.
 const SEEN_BUCKET_MS: i64 = 60 * 60 * 1000;
-const SERVICE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 static LABEL_TICK: AtomicU32 = AtomicU32::new(0);
 
 pub fn slug(value: &str) -> String {
@@ -167,122 +164,15 @@ fn verify_used_labels(used: &mut HashSet<String>, names: &Names) {
     }
 }
 
-/// `last_seen_ms == 0` was written before stamps existed. Those names stay
-/// until a scan stamps the services that are actually running; dropping them
-/// at load would mint new hostnames for live previews. Once anything has been
-/// stamped, an unstamped entry is older than the retention window.
-fn registry_has_stamps(names: &Names) -> bool {
-    names.projects.values().any(|project| {
-        project.last_seen_ms > 0
-            || project
-                .services
-                .iter()
-                .any(|service| service.last_seen_ms > 0)
-    })
-}
-
-fn expired(last_seen_ms: i64, now: i64, unstamped_are_stale: bool) -> bool {
-    if last_seen_ms <= 0 {
-        return unstamped_are_stale;
-    }
-    now.saturating_sub(last_seen_ms) > SERVICE_TTL_MS
-}
-
-fn drop_oldest(services: &mut Vec<ServiceName>, cap: usize, routed: &HashSet<String>) -> bool {
-    if services.len() <= cap {
-        return false;
-    }
-    let mut ranked: Vec<usize> = (0..services.len())
-        .filter(|index| !routed.contains(&services[*index].id))
-        .collect();
-    ranked.sort_by(|&left, &right| {
-        services[left]
-            .last_seen_ms
-            .cmp(&services[right].last_seen_ms)
-            .then_with(|| services[left].id.cmp(&services[right].id))
-    });
-    let remove: HashSet<usize> = ranked.into_iter().take(services.len() - cap).collect();
-    if remove.is_empty() {
-        return false;
-    }
-    let mut index = 0;
-    let before = services.len();
-    services.retain(|_| {
-        let drop = remove.contains(&index);
-        index += 1;
-        !drop
-    });
-    services.len() != before
-}
-
-fn drop_over_total(names: &mut Names, routed: &HashSet<String>) -> bool {
-    let total: usize = names
-        .projects
-        .values()
-        .map(|project| project.services.len())
-        .sum();
-    if total <= MAX_SERVICES {
-        return false;
-    }
-    let mut ranked = Vec::new();
-    for (cwd, project) in &names.projects {
-        for service in &project.services {
-            if !routed.contains(&service.id) {
-                ranked.push((service.last_seen_ms, cwd.clone(), service.id.clone()));
-            }
-        }
-    }
-    ranked.sort();
-    let drop_n = (total - MAX_SERVICES).min(ranked.len());
-    let mut drop: HashMap<String, HashSet<String>> = HashMap::new();
-    for (_, cwd, id) in ranked.into_iter().take(drop_n) {
-        drop.entry(cwd).or_default().insert(id);
-    }
-    let mut changed = false;
-    for (cwd, project) in names.projects.iter_mut() {
-        let Some(ids) = drop.get(cwd) else {
-            continue;
-        };
-        let before = project.services.len();
-        project
-            .services
-            .retain(|service| !ids.contains(&service.id));
-        changed |= project.services.len() != before;
-    }
-    changed
-}
-
+// Discovery can omit live services (for example during startup or a failed
+// HTTP probe), so neither age nor absence from a scan proves a name is safe
+// to reuse. Retain service names until liveness can be established reliably.
 fn drop_missing_empty_projects(names: &mut Names) -> bool {
     let before = names.projects.len();
     names
         .projects
         .retain(|cwd, project| !project.services.is_empty() || Path::new(cwd).exists());
     names.projects.len() != before
-}
-
-/// Drops stale names. Routed service ids are kept even when they are the
-/// oldest entries: their hostnames are already in use.
-fn prune_names(names: &mut Names, routed: &HashSet<String>, now: i64) -> bool {
-    let unstamped_are_stale = registry_has_stamps(names);
-    let mut changed = false;
-    for project in names.projects.values_mut() {
-        let before = project.services.len();
-        project.services.retain(|service| {
-            routed.contains(&service.id) || !expired(service.last_seen_ms, now, unstamped_are_stale)
-        });
-        changed |= project.services.len() != before;
-    }
-    changed |= drop_missing_empty_projects(names);
-    // An all-zero registry has not been scanned yet. Capping it would discard
-    // an arbitrary subset and rename whichever of those services is still live.
-    if unstamped_are_stale {
-        for project in names.projects.values_mut() {
-            changed |= drop_oldest(&mut project.services, MAX_SERVICES_PER_PROJECT, routed);
-        }
-        changed |= drop_over_total(names, routed);
-        changed |= drop_missing_empty_projects(names);
-    }
-    changed
 }
 
 fn write_names(file: &Path, names: &Names) -> anyhow::Result<()> {
@@ -312,9 +202,8 @@ impl Catalog {
         if names.device_label.is_empty() {
             names.device_label = slug(&device_name);
         }
-        let now = now_ms();
         let mut used_labels = used_labels_full(&names);
-        if prune_names(&mut names, &HashSet::new(), now) {
+        if drop_missing_empty_projects(&mut names) {
             used_labels = used_labels_full(&names);
             write_names(&file, &names)?;
         }
@@ -644,8 +533,7 @@ impl Catalog {
             };
             next.insert(id, LocalRoute { service, listener });
         }
-        let routed: HashSet<String> = next.keys().cloned().collect();
-        if prune_names(&mut state.names, &routed, now) {
+        if drop_missing_empty_projects(&mut state.names) {
             state.used_labels = used_labels_full(&state.names);
             changed_names = true;
         }
@@ -844,39 +732,16 @@ mod tests {
         assert!(!catalog.watched());
     }
     #[test]
-    fn prune_keeps_recent_and_routed_entries_and_drops_stale_ones() {
+    fn old_names_survive_restart_partial_scans_and_caps() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("my-app");
-        std::fs::create_dir(&root).unwrap();
-        let catalog = Catalog::open(
-            temp.path().join("previews.json"),
-            "device".into(),
-            "MacBook".into(),
-        )
-        .unwrap();
-        let vite = server(5173, 1, "vite");
-        let api = server(3000, 2, "api.js");
+        let file = temp.path().join("names.json");
+        let root = temp.path().join("app");
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        let live = server(5173, 1, "vite");
         catalog
-            .replace_local(vec![
-                (root.clone(), vite.clone()),
-                (root.clone(), api.clone()),
-            ])
+            .replace_local(vec![(root.clone(), live.clone())])
             .unwrap();
-        let before = catalog.snapshot();
-        let vite_host = before
-            .services
-            .iter()
-            .find(|s| s.port == 5173)
-            .unwrap()
-            .hostname
-            .clone();
-        let api_host = before
-            .services
-            .iter()
-            .find(|s| s.port == 3000)
-            .unwrap()
-            .hostname
-            .clone();
+        let original = catalog.snapshot().services[0].clone();
         {
             let mut state = catalog.0.state.lock().unwrap();
             let project = state
@@ -884,233 +749,37 @@ mod tests {
                 .projects
                 .get_mut(&*root.to_string_lossy())
                 .unwrap();
-            for service in &mut project.services {
-                service.last_seen_ms = now_ms() - SERVICE_TTL_MS - 60_000;
+            project.services[0].last_seen_ms = 1;
+            for i in 0..2050 {
+                project.services.push(ServiceName {
+                    id: format!("other-{i}"),
+                    fingerprint: format!("other-{i}"),
+                    label: format!("other-{i}"),
+                    last_seen_ms: 0,
+                });
             }
+            write_names(&file, &state.names).unwrap();
         }
-        // The vite process is still routed, so its name survives the stale stamp.
-        // The api process is not in this scan and is past the window.
-        catalog
-            .replace_local(vec![(root.clone(), vite.clone())])
-            .unwrap();
-        let left = catalog.snapshot();
-        assert_eq!(left.services.len(), 1);
-        assert_eq!(left.services[0].hostname, vite_host);
-        assert_eq!(
-            left.services[0].id,
-            before.services.iter().find(|s| s.port == 5173).unwrap().id
-        );
-        assert!(
-            !service_rows(&catalog)
-                .iter()
-                .any(|(_, label)| label == api_host.split('.').nth(1).unwrap())
-        );
-        // A recent service that is not in this scan stays reserved.
-        catalog
-            .replace_local(vec![
-                (root.clone(), vite.clone()),
-                (root.clone(), api.clone()),
-            ])
-            .unwrap();
-        assert!(
-            catalog
-                .snapshot()
-                .services
-                .iter()
-                .any(|s| s.hostname == api_host)
-        );
-        {
-            let mut state = catalog.0.state.lock().unwrap();
-            let project = state
-                .names
-                .projects
-                .get_mut(&*root.to_string_lossy())
-                .unwrap();
-            let api_name = project
-                .services
-                .iter_mut()
-                .find(|s| s.label != vite_host.split('.').nth(1).unwrap())
-                .unwrap();
-            api_name.last_seen_ms = now_ms() - 24 * 60 * 60 * 1000;
-        }
-        catalog.replace_local(vec![(root.clone(), vite)]).unwrap();
-        assert!(
-            service_rows(&catalog)
-                .iter()
-                .any(|(_, label)| label.contains("api"))
-        );
-        assert_eq!(catalog.snapshot().services[0].hostname, vite_host);
-
-        let mut names = Names {
-            device_label: "box".into(),
-            ..Names::default()
-        };
-        let mut services = Vec::new();
-        for index in 0..34 {
-            services.push(ServiceName {
-                id: format!("s{index:02}"),
-                fingerprint: format!("f{index}"),
-                label: format!("lab{index:02}"),
-                last_seen_ms: 1_000 + index as i64,
-            });
-        }
-        names.projects.insert(
-            "/work/my-app".into(),
-            ProjectName {
-                id: "p".into(),
-                label: "proj".into(),
-                services,
-                last_seen_ms: 50_000,
-            },
-        );
-        names.projects.insert(
-            "/no/such/zeron-preview-empty".into(),
-            ProjectName {
-                id: "g".into(),
-                label: "gone".into(),
-                services: Vec::new(),
-                last_seen_ms: 50_000,
-            },
-        );
-        let kept_dir = temp.path().join("still-here");
-        std::fs::create_dir(&kept_dir).unwrap();
-        names.projects.insert(
-            kept_dir.to_string_lossy().into_owned(),
-            ProjectName {
-                id: "k".into(),
-                label: "kept-empty".into(),
-                services: Vec::new(),
-                last_seen_ms: 50_000,
-            },
-        );
-        let now = SERVICE_TTL_MS + 100_000;
-        for (index, service) in names
-            .projects
-            .get_mut("/work/my-app")
-            .unwrap()
-            .services
-            .iter_mut()
-            .enumerate()
-        {
-            service.last_seen_ms = now - 40_000 + index as i64;
-        }
-        names.projects.get_mut("/work/my-app").unwrap().last_seen_ms = now;
-        let routed = HashSet::from(["s00".to_string()]);
-        assert!(prune_names(&mut names, &routed, now));
-        let left: Vec<_> = names.projects["/work/my-app"]
-            .services
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(left.len(), 32);
-        assert!(
-            left.contains(&"s00"),
-            "a routed service is kept even when it is the oldest"
-        );
-        assert!(!left.contains(&"s01"));
-        assert!(!left.contains(&"s02"));
-        assert!(left.contains(&"s03"));
-        assert!(!names.projects.contains_key("/no/such/zeron-preview-empty"));
-        assert!(names.projects.contains_key(&*kept_dir.to_string_lossy()));
-        // The same oldest service is dropped once nothing routes it.
-        let project = names.projects.get_mut("/work/my-app").unwrap();
-        for service in &mut project.services {
-            if service.id == "s00" {
-                service.last_seen_ms = now - SERVICE_TTL_MS - 1;
-            }
-        }
-        assert!(prune_names(&mut names, &HashSet::new(), now));
-        let left: Vec<_> = names.projects["/work/my-app"]
-            .services
-            .iter()
-            .map(|s| s.id.as_str())
-            .collect();
-        assert_eq!(left.len(), 31);
-        assert!(!left.contains(&"s00"));
+        drop(catalog);
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        catalog.replace_local(Vec::new()).unwrap();
+        catalog.replace_local(vec![(root, live)]).unwrap();
+        let restored = &catalog.snapshot().services[0];
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.hostname, original.hostname);
+        assert_eq!(service_rows(&catalog).len(), 2051);
     }
     #[test]
-    fn used_labels_are_updated_on_insert_and_prune_not_rebuilt_per_scan() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("my-app");
-        std::fs::create_dir(&root).unwrap();
-        let catalog = Catalog::open(
-            temp.path().join("previews.json"),
-            "device".into(),
-            "MacBook".into(),
-        )
-        .unwrap();
-        catalog
-            .replace_local(vec![
-                (root.clone(), server(5173, 1, "vite")),
-                (root.clone(), server(3000, 2, "api.js")),
-            ])
-            .unwrap();
-        {
-            let mut state = catalog.0.state.lock().unwrap();
-            assert_eq!(state.used_labels, used_labels_full(&state.names));
-            // A scan used to rebuild this set from names. A label that is not a
-            // service name survives only when that rebuild does not run.
-            state.used_labels.insert("my-app-docs".into());
-        }
-        catalog
-            .replace_local(vec![
-                (root.clone(), server(5173, 1, "vite")),
-                (root.clone(), server(3000, 2, "api.js")),
-                (root.clone(), server(4000, 3, "docs")),
-            ])
-            .unwrap();
-        assert!(
-            catalog
-                .snapshot()
-                .services
-                .iter()
-                .any(|service| service.hostname == "macbook.my-app-docs-2.localhost"),
-            "allocation must see labels carried from the previous scan"
-        );
-        {
-            let state = catalog.0.state.lock().unwrap();
-            assert_eq!(state.used_labels, used_labels_full(&state.names));
-            assert!(!state.used_labels.contains("my-app-docs"));
-        }
-        {
-            let mut state = catalog.0.state.lock().unwrap();
-            let project = state
-                .names
-                .projects
-                .get_mut(&*root.to_string_lossy())
-                .unwrap();
-            let api = project
-                .services
-                .iter_mut()
-                .find(|service| service.label.contains("api"))
-                .unwrap();
-            api.last_seen_ms = now_ms() - SERVICE_TTL_MS - 60_000;
-        }
-        catalog
-            .replace_local(vec![
-                (root.clone(), server(5173, 1, "vite")),
-                (root.clone(), server(4000, 3, "docs")),
-            ])
-            .unwrap();
-        assert!(
-            !service_rows(&catalog)
-                .iter()
-                .any(|(_, label)| label.contains("api"))
-        );
-        catalog
-            .replace_local(vec![
-                (root.clone(), server(5173, 1, "vite")),
-                (root.clone(), server(3001, 4, "api.js")),
-                (root.clone(), server(4000, 3, "docs")),
-            ])
-            .unwrap();
-        assert!(
-            catalog
-                .snapshot()
-                .services
-                .iter()
-                .any(|service| service.hostname == "macbook.my-app-api.localhost")
-        );
+    fn seen_stamps_are_hourly_and_survive_restart() {
+        let mut stamp = 0;
+        let hour = 500 * SEEN_BUCKET_MS;
+        assert!(touch_seen(&mut stamp, hour + 1));
+        assert_eq!(stamp, hour);
+        let serialized = serde_json::to_vec(&stamp).unwrap();
+        let mut stamp: i64 = serde_json::from_slice(&serialized).unwrap();
+        assert!(!touch_seen(&mut stamp, hour + SEEN_BUCKET_MS - 1));
+        assert!(touch_seen(&mut stamp, hour + SEEN_BUCKET_MS));
+        assert_eq!(stamp, hour + SEEN_BUCKET_MS);
     }
     #[test]
     fn pretty_printed_registry_round_trips_and_later_writes_are_compact() {
@@ -1141,99 +810,39 @@ mod tests {
         assert!(!std::fs::read(&file).unwrap().contains(&b'\n'));
     }
     #[test]
-    fn a_forty_one_thousand_entry_registry_prunes_to_the_cap_and_round_trips() {
+    fn legacy_forty_one_thousand_entries_survive_partial_migration() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("previews.json");
-        let kept_dir = temp.path().join("kept-empty");
-        std::fs::create_dir(&kept_dir).unwrap();
-        let now = now_ms();
+        let root = temp.path().join("app");
         let mut names = Names {
-            device_label: "macbook".into(),
+            device_label: "mac".into(),
             ..Names::default()
         };
-        for project in 0..100 {
-            let mut services = Vec::with_capacity(411);
-            for service in 0..410 {
-                let id = format!("s{project:03}-{service:03}");
-                services.push(ServiceName {
-                    id: id.clone(),
-                    fingerprint: format!("f{project}-{service}"),
-                    label: format!("lab-{id}"),
-                    last_seen_ms: now - service as i64 * SEEN_BUCKET_MS,
-                });
-            }
-            services.push(ServiceName {
-                id: format!("stale-{project:03}"),
-                fingerprint: "stale".into(),
-                label: format!("stale-{project:03}"),
-                last_seen_ms: now - SERVICE_TTL_MS - SEEN_BUCKET_MS,
-            });
-            names.projects.insert(
-                format!("/no/such/preview/p{project:03}"),
-                ProjectName {
-                    id: format!("p{project:03}"),
-                    label: format!("p{project:03}"),
-                    services,
-                    last_seen_ms: now,
-                },
-            );
-        }
+        let services = (0..41_000)
+            .map(|i| ServiceName {
+                id: format!("id-{i}"),
+                fingerprint: format!("fp-{i}"),
+                label: format!("label-{i}"),
+                last_seen_ms: 0,
+            })
+            .collect();
         names.projects.insert(
-            "/no/such/preview-ghost".into(),
+            root.to_string_lossy().into_owned(),
             ProjectName {
-                id: "ghost".into(),
-                label: "ghost".into(),
-                services: Vec::new(),
-                last_seen_ms: now,
+                id: "project".into(),
+                label: "app".into(),
+                services,
+                last_seen_ms: 0,
             },
         );
-        names.projects.insert(
-            kept_dir.to_string_lossy().into_owned(),
-            ProjectName {
-                id: "kept".into(),
-                label: "kept-empty".into(),
-                services: Vec::new(),
-                last_seen_ms: now,
-            },
-        );
-        std::fs::write(&file, serde_json::to_vec(&names).unwrap()).unwrap();
-        let catalog = Catalog::open(&file, "device".into(), "MacBook".into()).unwrap();
-        let rows = service_rows(&catalog);
-        assert_eq!(rows.len(), MAX_SERVICES);
-        let ids: std::collections::BTreeSet<_> = rows.iter().map(|(id, _)| id.clone()).collect();
-        assert!(ids.contains("s000-000"));
-        assert!(ids.contains("s099-019"));
-        assert!(ids.contains("s052-020"));
-        assert!(ids.contains("s099-020"));
-        assert!(!ids.contains("s000-020"));
-        assert!(!ids.contains("s051-020"));
-        assert!(!ids.contains("s000-031"));
-        assert!(!ids.contains("s000-032"));
-        assert!(!ids.iter().any(|id| id.starts_with("stale-")));
-        for (id, label) in &rows {
-            assert_eq!(label, &format!("lab-{id}"));
-        }
-        let state = catalog.0.state.lock().unwrap();
-        assert!(!state.names.projects.contains_key("/no/such/preview-ghost"));
-        assert!(
-            state
-                .names
-                .projects
-                .contains_key(&*kept_dir.to_string_lossy())
-        );
-        assert!(
-            state
-                .names
-                .projects
-                .values()
-                .all(|project| project.services.len() <= MAX_SERVICES_PER_PROJECT)
-        );
-        assert_eq!(state.used_labels, used_labels_full(&state.names));
-        drop(state);
-        let bytes = std::fs::read(&file).unwrap();
-        assert!(!bytes.contains(&b'\n'));
+        std::fs::write(&file, serde_json::to_vec_pretty(&names).unwrap()).unwrap();
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        catalog
+            .replace_local(vec![(root, server(5173, 1, "vite"))])
+            .unwrap();
+        assert_eq!(service_rows(&catalog).len(), 41_001);
         drop(catalog);
-        let catalog = Catalog::open(&file, "device".into(), "MacBook".into()).unwrap();
-        assert_eq!(service_rows(&catalog), rows);
+        let reopened = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        assert_eq!(service_rows(&reopened).len(), 41_001);
     }
 }
