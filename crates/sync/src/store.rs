@@ -126,7 +126,7 @@ pub struct DocsStore {
 }
 
 /// A callback that must return before a snapshot is written.
-pub type SnapshotBarrier = dyn Fn() + Send + Sync;
+pub type SnapshotBarrier = dyn Fn(&str, &[u8]) -> Result<(), StoreError> + Send + Sync;
 
 impl DocsStore {
     /// Open (creating directory, database, and schema as needed).
@@ -274,7 +274,7 @@ impl DocsStore {
         barriers.push(Arc::downgrade(barrier));
     }
 
-    fn run_snapshot_barriers(&self) {
+    fn run_snapshot_barriers(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let live: Vec<_> = self
             .snapshot_barriers
             .lock()
@@ -283,8 +283,9 @@ impl DocsStore {
             .filter_map(Weak::upgrade)
             .collect();
         for barrier in live {
-            barrier();
+            barrier(doc_id, bytes)?;
         }
+        Ok(())
     }
 
     pub fn pending_chat_updates(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
@@ -428,7 +429,7 @@ impl DocsStore {
 
     /// Save (upsert) the snapshot for `doc_id`.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        self.run_snapshot_barriers();
+        self.run_snapshot_barriers(doc_id, bytes)?;
         store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
     }
 
@@ -455,7 +456,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
-        self.run_snapshot_barriers();
+        self.run_snapshot_barriers(doc_id, bytes)?;
         store_blocking(|| self.save_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch))
     }
 
@@ -486,7 +487,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
-        self.run_snapshot_barriers();
+        self.run_snapshot_barriers(doc_id, bytes)?;
         store_blocking(|| {
             self.save_verified_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch)
         })
@@ -1154,8 +1155,9 @@ mod tests {
         let store = DocsStore::open(dir.path()).unwrap();
         let calls = Arc::new(AtomicU64::new(0));
         let counter = calls.clone();
-        let barrier: Arc<SnapshotBarrier> = Arc::new(move || {
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move |_, _| {
             counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         });
         store.add_snapshot_barrier(&barrier);
         store.save_snapshot("a", b"1").unwrap();
