@@ -1336,6 +1336,24 @@ mod tests {
     }
 
     #[test]
+    fn queued_event_is_written_without_a_barrier() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let path = dir.path().join("chat-1.jsonl");
+        journal.enqueue("chat-1", &text("mid-turn")).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if bytes.ends_with(b"\n") && bytes.windows(8).any(|w| w == b"mid-turn") {
+                    break;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "writer did not drain");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn drop_drains_queued_appends() {
         let dir = tempfile::tempdir().unwrap();
         {
