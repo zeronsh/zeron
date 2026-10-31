@@ -426,6 +426,8 @@ mod tests {
     #[test]
     fn sidebar_project_icon_priority_and_missing_fallback() {
         let temp = tempfile::tempdir().unwrap();
+        // Keep fixture root discovery independent of any ancestor checkout.
+        std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
         assert!(load_local_icon(temp.path()).is_none());
         png(&temp.path().join("favicon.png"), 3);
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 3.0);
@@ -447,6 +449,7 @@ mod tests {
     #[test]
     fn sidebar_project_icons_support_svg_and_ico() {
         let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
         std::fs::write(temp.path().join("favicon.svg"), br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#f00"/></svg>"##).unwrap();
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 12.0);
         std::fs::remove_file(temp.path().join("favicon.svg")).unwrap();
