@@ -213,7 +213,8 @@ pub fn run_mcp_proxy(args: Vec<String>) -> anyhow::Result<()> {
             std::process::exit(command.status()?.code().unwrap_or(1));
         }
     }
-    zeron_mcp_proxy::run_cli(args, paths::data_dir())?;
+    // Parsing --data-dir must not migrate the default application profile.
+    zeron_mcp_proxy::run_cli(args, zeron_mcp_proxy::data_dir())?;
     Ok(())
 }
 

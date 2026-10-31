@@ -433,6 +433,18 @@ impl Default for McpPlan {
     }
 }
 
+impl McpPlan {
+    /// Storage is encoded in the host-stamped `<data_dir>/run/mcp/<run_id>`.
+    /// Partial/older plans without that layout must leave MCP launches eager.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        let run = std::path::Path::new(&self.run_dir);
+        let mcp = run.parent()?;
+        let runs = mcp.parent()?;
+        (run.is_absolute() && mcp.file_name()? == "mcp" && runs.file_name()? == "run")
+            .then_some(runs.parent()?)
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
@@ -1220,6 +1232,20 @@ mod tests {
         let printed = format!("{req:?}");
         assert!(printed.contains("mcp_plan"), "{printed}");
         assert!(printed.contains("zeron"), "{printed}");
+    }
+
+    #[test]
+    fn mcp_plan_data_dir_comes_from_the_host_run_layout() {
+        let root = std::env::current_dir().unwrap().join("custom-data");
+        let mut plan = McpPlan {
+            run_dir: root.join("run/mcp/run-1").to_string_lossy().into_owned(),
+            ..McpPlan::default()
+        };
+        assert_eq!(plan.data_dir(), Some(root.as_path()));
+        for invalid in ["", "run/mcp/run-1", "/data/unrelated/run-1"] {
+            plan.run_dir = invalid.into();
+            assert_eq!(plan.data_dir(), None);
+        }
     }
 
     #[test]

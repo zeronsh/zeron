@@ -183,6 +183,9 @@ fn codex_proxy_overrides(
     servers: &serde_json::Map<String, Value>,
     plan: &zeron_proto::McpPlan,
 ) -> Vec<(String, Value)> {
+    let Some(data_dir) = plan.data_dir().and_then(std::path::Path::to_str) else {
+        return Vec::new();
+    };
     let mut names: Vec<&String> = servers.keys().collect();
     names.sort();
     let mut overrides = Vec::new();
@@ -249,7 +252,7 @@ fn codex_proxy_overrides(
         overrides.push((key("command"), plan.proxy_command.clone().into()));
         overrides.push((
             key("args"),
-            json!(codex_proxy_args(name, mode, plan, row, command)),
+            json!(codex_proxy_args(name, mode, plan, row, command, data_dir)),
         ));
     }
     overrides
@@ -361,6 +364,7 @@ fn codex_proxy_args(
     plan: &zeron_proto::McpPlan,
     row: &serde_json::Map<String, Value>,
     command: &str,
+    data_dir: &str,
 ) -> Vec<String> {
     let mode = match mode {
         zeron_proto::McpMode::LazyKeepAlive => "lazy-keep-alive",
@@ -392,6 +396,8 @@ fn codex_proxy_args(
     }
     args.push("--run-dir".to_owned());
     args.push(plan.run_dir.clone());
+    args.push("--data-dir".to_owned());
+    args.push(data_dir.to_owned());
     args.push("--".to_owned());
     args.push(command.to_owned());
     if let Some(items) = row.get("args").and_then(Value::as_array) {
@@ -441,6 +447,7 @@ fn same_mcp_plan(live: &Option<zeron_proto::McpPlan>, next: &Option<zeron_proto:
         worker,
     } = live;
     *proxy_command == next.proxy_command
+        && live.data_dir() == next.data_dir()
         && *idle_minutes == next.idle_minutes
         && *default_mode == next.default_mode
         && modes == &next.modes
@@ -3513,6 +3520,9 @@ mod tests {
         let mut next = stamped.clone();
         next.mcp_plan.as_mut().unwrap().run_dir = "/data/run/mcp/run-2".into();
         assert!(harness.same_runtime(&stamped, &next));
+        next.mcp_plan.as_mut().unwrap().run_dir = "/other-data/run/mcp/run-2".into();
+        assert!(!harness.same_runtime(&stamped, &next));
+        next.mcp_plan.as_mut().unwrap().run_dir = "/data/run/mcp/run-2".into();
         next.mcp_plan
             .as_mut()
             .unwrap()
@@ -3921,6 +3931,8 @@ mod mcp_injection_tests {
                 "/work/notes",
                 "--run-dir",
                 "/data/run/mcp/run-1",
+                "--data-dir",
+                "/data",
                 "--",
                 "npx",
                 "-y",
@@ -3951,6 +3963,8 @@ mod mcp_injection_tests {
                 "/work/playwright",
                 "--run-dir",
                 "/data/run/mcp/run-1",
+                "--data-dir",
+                "/data",
                 "--",
                 "npx",
                 "-y",
@@ -3971,6 +3985,8 @@ mod mcp_injection_tests {
                 "/work/spaced",
                 "--run-dir",
                 "/data/run/mcp/run-1",
+                "--data-dir",
+                "/data",
                 "--",
                 "/opt/My Servers/node",
                 "srv.js",
@@ -3988,6 +4004,16 @@ mod mcp_injection_tests {
                     && !key.contains("approval"),
                 "{key}"
             );
+        }
+    }
+
+    #[test]
+    fn codex_proxy_leaves_incomplete_storage_plans_eager() {
+        let servers = resolved_mcp_servers();
+        let mut plan = sample_plan();
+        for run in ["", "run/mcp/relative", "/unrelated/run"] {
+            plan.run_dir = run.into();
+            assert!(codex_proxy_overrides(&servers, &plan).is_empty());
         }
     }
 

@@ -16,7 +16,8 @@ shim.mkdir(parents=True)
 real.mkdir()
 (shim / 'node').symlink_to(proxy)
 (real / 'node').symlink_to('/usr/bin/true')
-env = {'PATH': f'{shim}:{real}:/usr/bin:/bin', 'ZERON_MCP_SHIM_DIR': str(shim)}
+env = {'ZERON_DATA_DIR': str(root / 'data'), 'CODEX_HOME': str(root / 'codex'),
+       'CLAUDE_CONFIG_DIR': str(root / 'claude'), 'PATH': f'{shim}:{real}:/usr/bin:/bin', 'ZERON_MCP_SHIM_DIR': str(shim)}
 # Warm filesystem/linker pages before timing. Shell descendants take this same path.
 for _ in range(20):
     subprocess.run([str(shim / 'node')], env=env, check=True)

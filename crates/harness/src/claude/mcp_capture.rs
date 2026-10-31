@@ -590,6 +590,16 @@ pub async fn probe_caps(
     if let Some(caps) = store.load_caps(&identity) {
         return Ok(caps);
     }
+    let mut proxy_args = proxy_args.to_vec();
+    proxy_args.extend([
+        "--data-dir".into(),
+        store
+            .root
+            .parent()
+            .ok_or_else(|| invalid("missing probe data dir"))?
+            .to_string_lossy()
+            .into_owned(),
+    ]);
     let mut cmd = Command::new(cli);
     crate::process::owned::configure(&mut cmd);
     crate::compose_child_path(&mut cmd, cli);
@@ -1066,6 +1076,7 @@ for line in sys.stdin:
     elif subtype == 'mcp_status':
         config = json.loads(sys.argv[sys.argv.index('--mcp-config') + 1])['mcpServers']['zeron_caps']
         assert config['env']['ZERON_MCP_CAPS_SENTINEL'] == 'zeron-caps'
+        assert config['args'][-2:] == ['--data-dir', str(root)]
         assert '--strict-mcp-config' in sys.argv
         # Mirror the installed CLI's omission, to exercise the safe fallback.
         del config['env']

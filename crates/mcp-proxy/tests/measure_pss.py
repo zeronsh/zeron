@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(dir=root, prefix="pss-") as directory:
         "protocolVersion": "2025-03-26", "clientInfo": {"name": "pss", "version": "1"}, "capabilities": {}}}
 
     def start():
-        return subprocess.Popen([proxy, "--server", "fake", "--mode", "lazy", "--", fake],
+        return subprocess.Popen([proxy, "--data-dir", directory, "--server", "fake", "--mode", "lazy", "--", fake],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 text=True, env=env)
 

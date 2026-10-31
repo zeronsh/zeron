@@ -39,6 +39,7 @@ fn shell_passthrough_preserves_argv0_non_utf8_env_fds_and_exit_code_even_with_br
                     cmd.arg0(arg0)
                         .arg(OsString::from_vec(vec![b'x', 0xff]))
                         .env("PATH", &path)
+                        .env("ZERON_DATA_DIR", root.path().join("data"))
                         .env("FAKE_EXEC_PROBE", "1")
                         .env("SHIM_SENTINEL", "exact value")
                         .env(shim::DIR_ENV, &shims);
@@ -123,6 +124,7 @@ fn bash_custom_argv0_exec_passes_through_even_when_server_args_match() {
         .env(shim::KEY_ENV, "fresh")
         .env(shim::PARENT_ENV, &parent)
         .env("SHLVL", "1")
+        .env("ZERON_DATA_DIR", root.path().join("data"))
         .env("FAKE_EXEC_PROBE", "1")
         .output()
         .unwrap();
@@ -163,6 +165,7 @@ fn python_venv_keeps_its_prefix_when_the_shim_leads_path() {
             .args(["-c", "import sys; print(sys.prefix); print(sys.executable)"])
             .env("PATH", std::env::join_paths(path).unwrap())
             .env(shim::DIR_ENV, &shims)
+            .env("ZERON_DATA_DIR", root.path().join("data"))
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -196,6 +199,7 @@ fn empty_path_slot_runs_the_cwd_program_without_looping() {
         .current_dir(&cwd)
         .env("PATH", path)
         .env(shim::DIR_ENV, &shims)
+        .env("ZERON_DATA_DIR", root.path().join("data"))
         .env("FAKE_EXEC_PROBE", "1")
         .output()
         .unwrap();
@@ -253,6 +257,7 @@ fn matched_launch_execs_the_real_server_when_proxy_setup_fails() {
             .env(shim::DIR_ENV, &shims)
             .env(shim::KEY_ENV, "fresh")
             .env(shim::PARENT_ENV, &parent)
+            .env("ZERON_DATA_DIR", root.path().join("data"))
             .env("FAKE_EXEC_PROBE", "1")
             .stdin(std::process::Stdio::null());
         if fail_setup {

@@ -83,6 +83,8 @@ impl Peer {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeron-mcp-proxy"));
         cmd.args(["--server", "fake", "--mode", mode, "--run-dir"])
             .arg(dir.join("run"))
+            .arg("--data-dir")
+            .arg(dir)
             .args(proxy_args)
             .arg("--")
             .arg(command)
@@ -102,6 +104,9 @@ impl Peer {
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
+        Self::from_command(cmd)
+    }
+    fn from_command(mut cmd: Command) -> Self {
         let mut child = cmd.spawn().unwrap();
         Self {
             input: child.stdin.take(),
@@ -167,6 +172,57 @@ async fn seed(dir: &Path) {
     assert!(peer.init().await.get("result").is_some());
     eventually(|| pids(&dir.join("spawn")).len() == 1 && !alive(pids(&dir.join("spawn"))[0])).await;
     peer.close().await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_data_dir_contains_writes_with_sanitized_or_conflicting_env() {
+    let root = temp();
+    let data = root.path().join("data");
+    let home = root.path().join("home");
+    let unused = root.path().join("env-data");
+    fs::create_dir(&home).unwrap();
+    let legacy = home.join(".comet-native");
+    fs::create_dir(&legacy).unwrap();
+    fs::write(legacy.join("sentinel"), "do not migrate").unwrap();
+    for env_dir in [None, Some(&unused)] {
+        if data.exists() {
+            fs::remove_dir_all(&data).unwrap();
+        }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeron-mcp-proxy"));
+        cmd.arg("--data-dir")
+            .arg(&data)
+            .args(["--server", "fake", "--run-dir"])
+            .arg(data.join("run/mcp/test"))
+            .arg("--")
+            .arg(env!("CARGO_BIN_EXE_fake-mcp"))
+            .env("HOME", &home)
+            .env_remove("ZERON_DATA_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if let Some(env_dir) = env_dir {
+            cmd.env("ZERON_DATA_DIR", env_dir);
+        }
+        let mut peer = Peer::from_command(cmd);
+        assert!(peer.init().await.get("result").is_some());
+        peer.close().await;
+        assert!(data.join("mcp-cache/v1").is_dir());
+        assert!(data.join("mcp-cache/class-v1").is_dir());
+        assert!(data.join("logs/mcp-proxy.jsonl").is_file());
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_to_string(legacy.join("sentinel")).unwrap(),
+            "do not migrate"
+        );
+        assert!(!home.join(".zeron").exists());
+        assert!(!unused.exists());
+    }
+    let mut names: Vec<_> = fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["data", "home"]);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn miss_captures_all_pages_and_kills_the_whole_tree() {
@@ -516,6 +572,8 @@ async fn keep_alive_starts_before_initialize_and_selftest_is_in_process() {
     peer.close().await;
     let mut child = Command::new(env!("CARGO_BIN_EXE_zeron-mcp-proxy"))
         .arg("--selftest")
+        .arg("--data-dir")
+        .arg(d)
         .env("ZERON_DATA_DIR", d)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

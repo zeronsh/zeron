@@ -115,6 +115,7 @@ impl Config {
                 "--plugin-root" => c.plugin_root = Some(value.into()),
                 "--cwd" => c.cwd = Some(value.into()),
                 "--run-dir" => c.run_dir = Some(value.into()),
+                "--data-dir" => c.data_dir = value.into(),
                 _ => return Err(invalid("unknown mcp-proxy option")),
             }
         }

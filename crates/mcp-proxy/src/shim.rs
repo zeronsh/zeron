@@ -237,24 +237,8 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
             &real.canonicalize().ok()?,
             &argv[1..],
         )?;
-        let mut config = crate::Config::parse(
-            [
-                "--server".into(),
-                row.name.clone(),
-                "--mode".into(),
-                row.mode.clone(),
-                "--idle-min".into(),
-                launch.idle_minutes.to_string(),
-                "--run-dir".into(),
-                launch.run_dir.to_str()?.into(),
-                "--".into(),
-                real.to_str()?.into(),
-            ]
-            .into_iter()
-            .chain(row.args.clone()),
-            launch.data_dir,
-        )
-        .ok()?;
+        let mut config =
+            crate::Config::parse(proxy_args(&launch, row, &real)?, launch.data_dir.clone()).ok()?;
         // H4 cannot name the entry env keys. Hash the effective inherited env,
         // except volatile session markers; persist only the resulting digest.
         config.identity_env = std::env::vars_os()
@@ -295,6 +279,28 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
     }
 }
 
+fn proxy_args(launch: &Launch, row: &Server, real: &Path) -> Option<Vec<String>> {
+    Some(
+        [
+            "--server".into(),
+            row.name.clone(),
+            "--mode".into(),
+            row.mode.clone(),
+            "--idle-min".into(),
+            launch.idle_minutes.to_string(),
+            "--run-dir".into(),
+            launch.run_dir.to_str()?.into(),
+            "--data-dir".into(),
+            launch.data_dir.to_str()?.into(),
+            "--".into(),
+            real.to_str()?.into(),
+        ]
+        .into_iter()
+        .chain(row.args.clone())
+        .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +323,15 @@ mod tests {
                 owner_legacy: false,
             }],
         }
+    }
+    #[test]
+    fn handoff_passes_explicit_data_dir() {
+        let launch = launch();
+        let args = proxy_args(&launch, &launch.servers[0], Path::new("/usr/bin/node")).unwrap();
+        let flag = args.iter().position(|arg| arg == "--data-dir").unwrap();
+        assert_eq!(args[flag + 1], "data");
+        let config = crate::Config::parse(args, "/unused-default".into()).unwrap();
+        assert_eq!(config.data_dir, launch.data_dir);
     }
     fn chosen(
         l: &Launch,

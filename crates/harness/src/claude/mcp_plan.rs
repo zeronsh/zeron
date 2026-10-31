@@ -137,10 +137,7 @@ pub(super) fn prepare(
     let key = inputs.key(exe).ok()?;
     let run_dir = PathBuf::from(&plan.run_dir);
     // The plan's documented layout identifies storage even with a run-specific env.
-    let data_dir = run_dir.parent()?.parent()?.parent()?.to_owned();
-    if !run_dir.is_absolute() || plan.run_dir.is_empty() {
-        return None;
-    }
+    let data_dir = plan.data_dir()?.to_owned();
     let snapshot = SnapshotStore::new(&data_dir).load(&key)?;
     let path = cmd
         .as_std()
@@ -250,6 +247,7 @@ pub(super) fn same_plan(a: &Option<McpPlan>, b: &Option<McpPlan>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => {
             a.proxy_command == b.proxy_command
+                && a.data_dir() == b.data_dir()
                 && a.idle_minutes == b.idle_minutes
                 && a.default_mode == b.default_mode
                 && a.modes == b.modes
@@ -420,10 +418,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn plan_changes_require_relaunch_but_run_directory_does_not() {
-        let a = Some(McpPlan::default());
+        let a = Some(McpPlan {
+            run_dir: "/data/run/mcp/first".into(),
+            ..McpPlan::default()
+        });
         let mut b = a.clone();
-        b.as_mut().unwrap().run_dir = "another".into();
+        b.as_mut().unwrap().run_dir = "/data/run/mcp/another".into();
         assert!(same_plan(&a, &b));
+        b.as_mut().unwrap().run_dir = "/other-data/run/mcp/another".into();
+        assert!(!same_plan(&a, &b));
+        b = a.clone();
         b.as_mut().unwrap().drop_channels = true;
         assert!(!same_plan(&a, &b));
         assert!(!same_plan(&a, &None));

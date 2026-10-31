@@ -44,7 +44,8 @@ def server(**env):
 ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(HOME),
        "CLAUDE_CONFIG_DIR": str(CONFIG), "TMPDIR": str(ROOT / "tmp"),
        "XDG_CONFIG_HOME": str(ROOT / "xdg"), "XDG_DATA_HOME": str(ROOT / "data"),
-       "XDG_CACHE_HOME": str(ROOT / "cache"), "GIT_CONFIG_GLOBAL": "/dev/null",
+       "XDG_CACHE_HOME": str(ROOT / "cache"), "ZERON_DATA_DIR": str(ROOT / "data"),
+       "CODEX_HOME": str(ROOT / "codex"), "GIT_CONFIG_GLOBAL": "/dev/null",
        "ANTHROPIC_API_KEY": "invalid-zeron-zero-token-verification",
        "ANTHROPIC_BASE_URL": "http://127.0.0.1:1",
        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -144,7 +145,7 @@ def probe(name, flags, requests=(), cwd=PROJECT):
 if __name__ == "__main__":
     print(subprocess.check_output([str(CLI), "--version"], env=ENV, text=True).strip())
     probe("baseline", ["--plugin-dir", str(PLUGIN)])
-    caps = {"mcpServers": {"zeron_caps": {"command": str(PROXY), "args": ["--selftest"]}}}
+    caps = {"mcpServers": {"zeron_caps": {"command": str(PROXY), "args": ["--data-dir", str(ROOT / "data"), "--selftest"]}}}
     probe("strict", ["--plugin-dir", str(PLUGIN), "--strict-mcp-config", "--mcp-config", json.dumps(caps)])
     dynamic = {"mcpServers": {"plugin_playwright_playwright": server(
         CAPTURE_ENTRY="${CAPTURE_EXPAND}", FAKE_DUMP_ENV=str(ROOT / "dynamic-env.json"))}}
@@ -155,7 +156,7 @@ if __name__ == "__main__":
     proxy_env = {"CAPTURE_ENTRY": "${CAPTURE_EXPAND}", "FAKE_DUMP_ENV": str(ROOT / "proxy-child-env.json")}
     probe("proxy-env", ["--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": {
         "proxy_fixture": {"command": str(PROXY), "args": ["--server", "proxy_fixture", "--mode", "keep-alive",
-            "--run-dir", str(ROOT / "proxy-run"), "--", sys.executable, str(FAKE), "proxy-env"], "env": proxy_env}}})])
+            "--data-dir", str(ROOT / "data"), "--run-dir", str(ROOT / "proxy-run"), "--", sys.executable, str(FAKE), "proxy-env"], "env": proxy_env}}})])
     probe("override", ["--mcp-config", json.dumps({"mcpServers": {
         "user_fixture": server(CAPTURE_ENTRY="override")}})])
     # An installed plugin becomes @inline only on the fallback launch.

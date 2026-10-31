@@ -102,7 +102,7 @@ Commands (`baseline.json`, `strict.json`):
 ```sh
 $CLI $COMMON --plugin-dir "$P"
 $CLI $COMMON --plugin-dir "$P" --strict-mcp-config --mcp-config \
-  '{"mcpServers":{"zeron_caps":{"command":"<PROXY>","args":["--selftest"]}}}'
+  '{"mcpServers":{"zeron_caps":{"command":"<PROXY>","args":["--data-dir","/fixture/data","--selftest"]}}}'
 ```
 
 Baseline output (all connected):
@@ -134,7 +134,7 @@ ROOT and DATA explicitly. V-2 fails the required complete capture; V-3 passes. A
 
 ```sh
 $CLI $COMMON --strict-mcp-config --mcp-config \
-  '{"mcpServers":{"proxy_fixture":{"command":"<PROXY>","args":["--server","proxy_fixture","--mode","keep-alive","--run-dir","/fixture/proxy-run","--","/usr/bin/python3","/fixture/claude_mcp_fake.py","proxy-env"],"env":{"CAPTURE_ENTRY":"${CAPTURE_EXPAND}","FAKE_DUMP_ENV":"/fixture/proxy-child-env.json"}}}}'
+  '{"mcpServers":{"proxy_fixture":{"command":"<PROXY>","args":["--data-dir","/fixture/data","--server","proxy_fixture","--mode","keep-alive","--run-dir","/fixture/proxy-run","--","/usr/bin/python3","/fixture/claude_mcp_fake.py","proxy-env"],"env":{"CAPTURE_ENTRY":"${CAPTURE_EXPAND}","FAKE_DUMP_ENV":"/fixture/proxy-child-env.json"}}}}'
 ```
 
 The proxied fake child again reports `CAPTURE_ENTRY=expanded-value`,

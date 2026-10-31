@@ -3,8 +3,8 @@
 ```
 zeron mcp-proxy --server NAME --mode lazy|lazy-keep-alive|keep-alive
   [--idle-min 10] [--identity-env K1,K2] [--plugin-root PATH] [--cwd PATH]
-  [--run-dir DATA/run/mcp/RUN] [--no-npx-resolve] -- COMMAND ARGS...
-zeron mcp-proxy --selftest
+  [--data-dir DATA] [--run-dir DATA/run/mcp/RUN] [--no-npx-resolve] -- COMMAND ARGS...
+zeron mcp-proxy --data-dir DATA --selftest
 ```
 
 `--selftest` is an in-process one-tool server for CLI capability probes.
@@ -20,7 +20,9 @@ exe), use the same core inside `zeron`. Windows uses a suspended child assigned
 to a kill-on-close Job before resuming it. Windows and macOS runtime behavior
 still needs native validation; only Linux has been executed here.
 
-`ZERON_DATA_DIR` selects storage (the normal app data directory otherwise):
+`--data-dir` selects storage ahead of `ZERON_DATA_DIR` and the normal app data
+directory. Both harness launchers pass it explicitly, since MCP clients may
+filter the inherited environment:
 
 - `mcp-cache/v1/<sha256>.json`: original initialization and merged catalogs;
   private 0600 files replaced atomically. `<sha256>.lock` serializes each key's

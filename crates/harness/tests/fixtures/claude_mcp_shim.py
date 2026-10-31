@@ -172,7 +172,7 @@ threading.Thread(target=http.serve_forever, daemon=True).start()
 ENV = {'PATH': '/usr/bin:/bin', 'HOME': str(ROOT / 'home'), 'CLAUDE_CONFIG_DIR': str(CONFIG),
     'TMPDIR': str(ROOT / 'tmp'), 'XDG_CONFIG_HOME': str(ROOT / 'xdg'), 'XDG_DATA_HOME': str(DATA),
     'XDG_CACHE_HOME': str(ROOT / 'cache'), 'GIT_CONFIG_GLOBAL': '/dev/null',
-    'ZERON_DATA_DIR': str(DATA), 'ZERON_MCP_PROXY_CHECK_MS': '20',
+    'ZERON_DATA_DIR': str(DATA), 'CODEX_HOME': str(ROOT / 'codex'), 'ZERON_MCP_PROXY_CHECK_MS': '20',
     'ANTHROPIC_API_KEY': 'invalid-zeron-zero-token-verification',
     'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{http.server_port}',
     'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1', 'CLAUDE_CODE_AUTO_CONNECT_IDE': '0',
