@@ -695,3 +695,18 @@ async fn lone_server_request_blocks_idle_and_inflight_cancel_is_remapped() {
     eventually(|| !alive(*pids(&d.join("spawn")).last().unwrap())).await;
     peer.close().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn stray_server_stdout_lines_are_skipped_like_a_direct_client_would() {
+    for mode in ["lazy", "lazy-keep-alive", "keep-alive"] {
+        let dir = temp();
+        let mut peer = Peer::spawn(dir.path(), mode, &[("FAKE_NOISE", "1")]);
+        assert!(peer.init().await.get("result").is_some(), "{mode}");
+        assert_eq!(
+            peer.call(2, "echo").await["result"]["content"][0]["text"],
+            "echo",
+            "{mode}"
+        );
+        peer.close().await;
+    }
+}

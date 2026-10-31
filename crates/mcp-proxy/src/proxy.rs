@@ -92,53 +92,51 @@ fn read_lines<R: AsyncRead + Unpin + Send + 'static>(
     generation: Option<u64>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        let mut skipped = 0u32;
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) if line.trim().is_empty() => continue,
-                Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
-                    Ok(value) if value.is_object() => {
-                        let event = match generation {
+            line.clear();
+            let reason = match reader.read_until(b'\n', &mut line).await {
+                Ok(0) => "server stdout closed".to_owned(),
+                Err(e) => e.to_string(),
+                Ok(_) => {
+                    // Bytes, not str lines: one undecodable byte must not end the stream.
+                    let text = String::from_utf8_lossy(&line);
+                    let text = text.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let event = match serde_json::from_str::<Value>(text) {
+                        Ok(value) if value.is_object() => match generation {
                             Some(g) => Event::Server(g, value),
                             None => Event::Client(value),
-                        };
-                        if tx.send(event).await.is_err() {
-                            break;
+                        },
+                        _ if generation.is_none() => Event::Client(json!({"invalid":true})),
+                        _ => {
+                            // A direct MCP client skips banners and stray output on a
+                            // server's stdout, so the proxy must as well.
+                            skipped += 1;
+                            if skipped <= 5 {
+                                let note: String = text.chars().take(200).collect();
+                                eprintln!("mcp-proxy: ignored non-JSON-RPC stdout line: {note}");
+                            }
+                            continue;
                         }
-                    }
-                    _ if generation.is_none() => {
-                        if tx
-                            .send(Event::Client(json!({"invalid":true})))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    _ => {
-                        let _ = tx
-                            .send(Event::ServerClosed(
-                                generation.unwrap(),
-                                "invalid JSON-RPC from server".into(),
-                            ))
-                            .await;
+                    };
+                    if tx.send(event).await.is_err() {
                         break;
                     }
-                },
-                result => {
-                    let reason = match result {
-                        Err(e) => e.to_string(),
-                        _ => "server stdout closed".into(),
-                    };
-                    let _ = tx
-                        .send(match generation {
-                            Some(g) => Event::ServerClosed(g, reason),
-                            None => Event::ClientClosed,
-                        })
-                        .await;
-                    break;
+                    continue;
                 }
-            }
+            };
+            let _ = tx
+                .send(match generation {
+                    Some(g) => Event::ServerClosed(g, reason),
+                    None => Event::ClientClosed,
+                })
+                .await;
+            break;
         }
     })
 }
