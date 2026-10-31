@@ -7754,6 +7754,31 @@ mod salvage_tests {
     }
 
     #[tokio::test]
+    async fn salvage_retries_after_a_checked_snapshot_is_replaced_by_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = host_for(store.clone());
+        let id = "later-residue";
+        let fat = SessionDoc::init(id).unwrap();
+        fat.push_message(&user_message("original", "recover me"))
+            .unwrap();
+        let bytes = fat.export_snapshot().unwrap();
+        store.save_snapshot_with_cursor(id, &bytes, 0, 2).unwrap();
+        store
+            .save_snapshot(&format!("{id}.pre-chat2"), &bytes)
+            .unwrap();
+        host.salvage_chat_transcript(id).await.unwrap();
+        assert!(store.salvage_checked(id).unwrap());
+        let blank = SessionDoc::init(id).unwrap().export_snapshot().unwrap();
+        store.save_snapshot_with_cursor(id, &blank, 0, 2).unwrap();
+        host.salvage_chat_transcript(id).await.unwrap();
+        let entries = host.open(id).unwrap().doc().read_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "original");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
     async fn salvage_refills_a_blank_journaled_chat_and_the_marker_skips_the_next_boot() {
         let dir = tempfile::tempdir().unwrap();
         let journals = tempfile::tempdir().unwrap();
