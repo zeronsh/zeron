@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
-use super::{MAX_PATH_ARGUMENT_BYTES, capture_git, path_argument, path_batches};
+use super::{MAX_PATH_ARGUMENT_BYTES, capture_git, note_git_spawn, path_argument, path_batches};
 use crate::EngineError;
 use crate::repos::Repos;
 
@@ -383,6 +383,7 @@ async fn snapshot_git(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
+    note_git_spawn(Some(root));
     let mut child = cmd.spawn()?;
     if let Some(input) = stdin
         && let Some(mut pipe) = child.stdin.take()

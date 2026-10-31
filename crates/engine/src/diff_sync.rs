@@ -91,8 +91,8 @@ const MAX_GATE_PATHS: usize = 4096;
 /// A file stamped this recently before a capture may still change within the
 /// timestamp's granularity, so the capture's fingerprint is not trusted.
 const RACY_WINDOW: Duration = Duration::from_secs(2);
-/// Repair ticks an idle, watched checkout may skip in a row before one runs
-/// its gate anyway, as a safety net for events the OS watcher dropped.
+/// Repair ticks between forced full captures, as a safety net for lost
+/// watcher events and inputs the stat gate cannot observe.
 const REPAIR_FORCE_EVERY: u32 = 10;
 /// `git hash-object -t tree /dev/null` — diff base for repos with no commits yet.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -169,6 +169,8 @@ struct CheckoutEntry {
     /// Gate fingerprint of the last successful capture; a matching one skips
     /// the capture. Cleared whenever the entry's state may have moved under it.
     gate: Mutex<Option<GateState>>,
+    sync_lock: tokio::sync::Mutex<()>,
+    force_capture: AtomicBool,
 }
 
 /// Watcher health for one checkout, shared with its watch callbacks, so the
@@ -183,7 +185,7 @@ struct WatchSignals {
     /// The recursive watch on the worktree itself is installed (not just the
     /// git dir of an over-budget tree, whose edits only the repair tick sees).
     covers_worktree: AtomicBool,
-    /// Consecutive repair ticks skipped for this checkout; see [`REPAIR_FORCE_EVERY`].
+    /// Repair ticks since the last forced capture; see [`REPAIR_FORCE_EVERY`].
     quiet_ticks: AtomicU32,
 }
 
@@ -220,13 +222,14 @@ impl CheckoutEntry {
     /// (bar a periodic safety-net pass), otherwise a capture that the gate
     /// cheapens to one `git status` when nothing changed.
     fn repair_kick(&self) {
-        if self.watch_is_quiet() {
-            let skipped = self.signals.quiet_ticks.fetch_add(1, Ordering::AcqRel) + 1;
-            if skipped < REPAIR_FORCE_EVERY {
-                return;
-            }
+        let ticks = self.signals.quiet_ticks.fetch_add(1, Ordering::AcqRel) + 1;
+        if ticks >= REPAIR_FORCE_EVERY {
+            self.signals.quiet_ticks.store(0, Ordering::Release);
+            // A lost watcher can hide changes the stat gate cannot see, too.
+            self.force_capture.store(true, Ordering::Release);
+        } else if self.watch_is_quiet() {
+            return;
         }
-        self.signals.quiet_ticks.store(0, Ordering::Release);
         let _ = self.kick_tx.send(());
     }
 }
@@ -348,8 +351,7 @@ fn interested_chats(inner: &DiffSyncInner) -> HashSet<String> {
     interest.keys().cloned().collect()
 }
 
-/// Every git process the diff-sync paths start (captures, the status gate and
-/// the identity resolves behind reconcile), for idle-cost checks.
+/// Git spawn attempts in diff-sync and Repos, for idle-cost checks.
 static GIT_SPAWNS: AtomicU64 = AtomicU64::new(0);
 
 /// Per working directory, so a test can count only its own fixture's spawns
@@ -371,7 +373,7 @@ pub(crate) fn note_git_spawn(cwd: Option<&Path>) {
     let _ = cwd;
 }
 
-/// Git processes diff sync has started since boot.
+/// Git spawn attempts in diff-sync and Repos since boot.
 pub fn git_spawn_count() -> u64 {
     GIT_SPAWNS.load(Ordering::Relaxed)
 }
@@ -640,7 +642,7 @@ impl CheckoutDiffSync {
             // The watcher kick remains useful if an external writer races this
             // operation after the final capture. The discard rewrote files
             // behind the gate's back: capture for real.
-            *lock(&entry.gate) = None;
+            entry.force_capture.store(true, Ordering::Release);
             sync_entry(&inner, &entry).await;
             let _ = entry.kick_tx.send(());
             result
@@ -663,23 +665,25 @@ struct MemoizedIdentity {
 }
 
 /// Stats that move whenever a cwd's checkout identity could: the worktree's
-/// `.git` entry (replaced by a re-clone or `git init`), a `.git` directly in
-/// the cwd (a nested repository), and the git dir's `HEAD`.
+/// `.git` entry (replaced by a re-clone or `git init`), a `.git` in any
+/// ancestor of the cwd (a nested repository), and the git dir's `HEAD`.
 #[derive(Clone, PartialEq, Eq)]
 struct IdentityStamp {
     root_dot_git: FileStamp,
-    cwd_dot_git: Option<FileStamp>,
+    ancestor_dot_git: Vec<Option<FileStamp>>,
     head: Option<FileStamp>,
 }
 
-/// `(mtime, size, inode)` of one path, without following symlinks. A
+/// `(mtime, size, inode, ctime, mode)` without following symlinks. A
 /// directory's own mtime and size only track churn among its entries (every
 /// index lock inside `.git` moves them), so for one only the inode counts.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileStamp {
     modified: Option<Duration>,
     len: u64,
     ino: u64,
+    changed: Option<(i64, i64)>,
+    mode: u32,
 }
 
 impl FileStamp {
@@ -692,11 +696,20 @@ impl FileStamp {
         };
         #[cfg(not(unix))]
         let ino = 0;
+        #[cfg(unix)]
+        let (changed, mode) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (Some((meta.ctime(), meta.ctime_nsec())), meta.mode())
+        };
+        #[cfg(not(unix))]
+        let (changed, mode) = (None, u32::from(meta.permissions().readonly()));
         if meta.is_dir() {
             return Some(Self {
                 modified: None,
                 len: 0,
                 ino,
+                changed: None,
+                mode,
             });
         }
         Some(Self {
@@ -706,6 +719,8 @@ impl FileStamp {
                 .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()),
             len: meta.len(),
             ino,
+            changed,
+            mode,
         })
     }
 }
@@ -715,7 +730,12 @@ impl IdentityStamp {
     fn read(cwd: &str, identity: &CheckoutIdentity) -> Option<Self> {
         Some(Self {
             root_dot_git: FileStamp::of(&identity.root.join(".git"))?,
-            cwd_dot_git: FileStamp::of(&Path::new(cwd).join(".git")),
+            ancestor_dot_git: std::fs::canonicalize(cwd)
+                .ok()?
+                .ancestors()
+                .take_while(|path| path.starts_with(&identity.root))
+                .map(|path| FileStamp::of(&path.join(".git")))
+                .collect(),
             head: FileStamp::of(&identity.git_dir.join("HEAD")),
         })
     }
@@ -982,6 +1002,8 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         watchers: Mutex::new(Vec::new()),
         signals: Arc::new(WatchSignals::new()),
         gate: Mutex::new(None),
+        sync_lock: tokio::sync::Mutex::new(()),
+        force_capture: AtomicBool::new(false),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -1096,10 +1118,16 @@ async fn entry_task(
 // ---------------------------------------------------------------------------
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
+    // The discard path can publish alongside the debounced entry task.
+    let _guard = entry.sync_lock.lock().await;
+    let force = entry.force_capture.swap(false, Ordering::AcqRel);
     // Events counted before the capture starts are covered by it; later ones
     // leave the entry non-quiet, so the next repair tick re-checks it.
     let events = entry.signals.events.load(Ordering::Acquire);
-    let prior = lock(&entry.gate).clone();
+    let mut prior = lock(&entry.gate).clone();
+    if force && let Some(prior) = &mut prior {
+        prior.trusted = false;
+    }
     let (snapshot, gate) =
         match capture_gated(&inner.repos, &entry.identity.root, None, prior.as_ref()).await {
             Ok(Gated::Captured(snapshot, gate)) => (*snapshot, gate),
@@ -1746,6 +1774,48 @@ async fn capture_gated(
     base_override: Option<&str>,
     prior: Option<&GateState>,
 ) -> Result<Gated, EngineError> {
+    let result = capture_gated_fast(repos, root, base_override, prior).await?;
+    // Unit fixtures compare both paths explicitly and measure their spawns.
+    // In the engine, also check skipped captures against the full oracle.
+    let verify = !cfg!(test)
+        && (cfg!(debug_assertions) || {
+            static SAMPLES: AtomicU64 = AtomicU64::new(0);
+            std::env::var_os("ZERON_PERF_VERIFY").is_some_and(|value| value == "1")
+                && SAMPLES.fetch_add(1, Ordering::Relaxed) % 32 == 0
+        });
+    if verify {
+        return verify_gated(repos, root, base_override, prior, result).await;
+    }
+    Ok(result)
+}
+
+async fn verify_gated(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+    prior: Option<&GateState>,
+    result: Gated,
+) -> Result<Gated, EngineError> {
+    let full = capture_diff_legacy(repos, root, base_override).await?;
+    let matches = match &result {
+        Gated::Captured(snapshot, _) => **snapshot == full,
+        Gated::Unchanged => prior
+            .and_then(|gate| gate.snapshot.as_ref())
+            .is_some_and(|snapshot| **snapshot == full),
+    };
+    if !matches {
+        tracing::error!(checkout = %root.display(), "diff-sync: gate oracle mismatch; resetting fingerprint");
+        return Ok(Gated::Captured(Box::new(full), None));
+    }
+    Ok(result)
+}
+
+async fn capture_gated_fast(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+    prior: Option<&GateState>,
+) -> Result<Gated, EngineError> {
     // Taken before git reads anything: a file stamped at or after this may
     // still change within the timestamp's granularity (racy-git).
     let started = std::time::SystemTime::now();
@@ -1753,13 +1823,26 @@ async fn capture_gated(
         let snapshot = capture_diff_legacy(repos, root, base_override).await?;
         return Ok(Gated::Captured(Box::new(snapshot), None));
     };
+    let inputs = if base_override.is_some() {
+        None
+    } else if let Some(prior) = prior.filter(|prior| prior.inputs.unchanged()) {
+        Some(prior.inputs.clone())
+    } else {
+        GateInputs::read(repos, root).await
+    };
     let gate = if base_override.is_none() {
-        let root = root.to_path_buf();
-        let bytes = status.raw.clone();
-        let paths = status.paths.clone();
-        tokio::task::spawn_blocking(move || GateState::fingerprint(&root, &bytes, &paths, started))
+        if let Some(inputs) = inputs {
+            let root = root.to_path_buf();
+            let bytes = status.raw.clone();
+            let paths = status.paths.clone();
+            tokio::task::spawn_blocking(move || {
+                GateState::fingerprint(&root, &bytes, &paths, started, inputs)
+            })
             .await
             .ok()
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1802,6 +1885,10 @@ async fn capture_gated(
     let parsed = (!meta.truncated)
         .then(|| split_raw_numstat(&meta.stdout))
         .flatten();
+    let parsed = parsed.filter(|(_, nums)| {
+        nums.len() <= MAX_DIFF_METADATA_BYTES
+            && meta.stdout.len() - nums.len() <= MAX_DIFF_METADATA_BYTES
+    });
     let Some((mut files, numstat)) = parsed else {
         let snapshot = capture_diff_legacy(repos, root, base_override).await?;
         return Ok(Gated::Captured(Box::new(snapshot), None));
@@ -1809,17 +1896,43 @@ async fn capture_gated(
     apply_numstat(&mut files, numstat);
     let snapshot = finish_snapshot(
         root,
-        status.branch,
-        status.head,
+        status.branch.clone(),
+        status.head.clone(),
         files,
         tracked,
         false,
         Capture {
-            stdout: status.porcelain_v1,
+            stdout: status.porcelain_v1.clone(),
             truncated: false,
         },
     )
     .await?;
+    let gate = if let Some(gate) = gate {
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let after = GateState::fingerprint(
+                &root,
+                &status.raw,
+                &status.paths,
+                started,
+                gate.inputs.clone(),
+            );
+            (after.fingerprint == gate.fingerprint && gate.inputs.unchanged()).then_some(gate)
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    let gate = gate.map(|mut gate| {
+        if cfg!(debug_assertions)
+            || std::env::var_os("ZERON_PERF_VERIFY").is_some_and(|value| value == "1")
+        {
+            gate.snapshot = Some(Arc::new(snapshot.clone()));
+        }
+        gate
+    });
     Ok(Gated::Captured(Box::new(snapshot), gate))
 }
 
@@ -2113,7 +2226,7 @@ fn parse_status_v2(raw: Vec<u8>) -> Option<StatusV2> {
     let mut branch = None;
     let mut porcelain_v1 = Vec::new();
     let mut paths = Vec::new();
-    let mut records = raw.split(|b| *b == 0).filter(|record| !record.is_empty());
+    let mut records = raw.strip_suffix(&[0])?.split(|b| *b == 0);
     while let Some(record) = records.next() {
         if let Some(oid) = record.strip_prefix(b"# branch.oid ") {
             head = Some(if oid == b"(initial)" {
@@ -2146,7 +2259,7 @@ fn parse_status_v2(raw: Vec<u8>) -> Option<StatusV2> {
                 let xy = &record[2..4];
                 let path = path_after_spaces(record, spaces)?;
                 let origin = if *kind == b'2' {
-                    Some(records.next()?)
+                    Some(records.next().filter(|path| !path.is_empty())?)
                 } else {
                     None
                 };
@@ -2208,58 +2321,263 @@ fn split_raw_numstat(value: &[u8]) -> Option<(Vec<DiffFileSummary>, &[u8])> {
     Some((files, &value[pos..]))
 }
 
+/// Inputs Git reads outside the changed files. Let Git resolve configuration
+/// includes and path expansions; hand-parsing config would miss linked worktrees
+/// and conditional includes. Discovery is reused until a config stamp changes.
+#[derive(Debug, Clone, Default)]
+struct GateInputs {
+    config_paths: Vec<PathBuf>,
+    config_stamps: Vec<(Option<FileStamp>, Option<FileStamp>)>,
+    paths: Vec<PathBuf>,
+    external: bool,
+}
+
+fn input_stamp(path: &Path) -> (Option<FileStamp>, Option<FileStamp>) {
+    (
+        FileStamp::of(path),
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|path| FileStamp::of(&path)),
+    )
+}
+
+impl GateInputs {
+    fn unchanged(&self) -> bool {
+        self.config_paths
+            .iter()
+            .map(|path| input_stamp(path))
+            .eq(self.config_stamps.iter().cloned())
+    }
+
+    async fn read(repos: &Repos, root: &Path) -> Option<Self> {
+        let identity = repos.checkout_identity(root).await.ok()?;
+        let git_dir = identity.git_dir;
+        if !git_dir.is_dir() {
+            return None;
+        }
+        let common_dir = match std::fs::read(git_dir.join("commondir")) {
+            Ok(path) => git_dir.join(path_argument(
+                path.strip_suffix(b"\r\n")
+                    .or_else(|| path.strip_suffix(b"\n"))
+                    .unwrap_or(&path),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
+            Err(_) => return None,
+        };
+        if !common_dir.is_dir() {
+            return None;
+        }
+        let config = capture_git(
+            root,
+            &["config", "--null", "--list", "--show-origin", "--includes"],
+            MAX_DIFF_METADATA_BYTES,
+        )
+        .await
+        .ok()?;
+        if config.truncated {
+            return None;
+        }
+        let mut inputs = Self::default();
+        inputs.config_paths.extend([
+            common_dir.join("config"),
+            git_dir.join("config.worktree"),
+            git_dir.join("HEAD"),
+            git_dir.join("commondir"),
+            root.join(".git"),
+        ]);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
+        if let Some(global) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+            inputs.config_paths.push(PathBuf::from(global));
+        } else {
+            if let Some(home) = &home {
+                inputs.config_paths.push(home.join(".gitconfig"));
+            }
+            if let Some(xdg) = &xdg {
+                inputs.config_paths.push(xdg.join("git/config"));
+            }
+        }
+        if std::env::var_os("GIT_CONFIG_NOSYSTEM").is_none() {
+            inputs.config_paths.push(
+                std::env::var_os("GIT_CONFIG_SYSTEM")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/etc/gitconfig")),
+            );
+        }
+        let mut query_paths = false;
+        let mut configured_attributes = false;
+        let mut configured_excludes = false;
+        let mut records = config.stdout.split(|byte| *byte == 0);
+        while let Some(origin) = records.next().filter(|origin| !origin.is_empty()) {
+            let entry = records.next()?;
+            if let Some(path) = origin.strip_prefix(b"file:") {
+                inputs.config_paths.push(root.join(path_argument(path)));
+            }
+            let key = entry.split(|byte| *byte == b'\n').next()?;
+            configured_attributes |= key == b"core.attributesfile";
+            configured_excludes |= key == b"core.excludesfile";
+            query_paths |= key == b"core.attributesfile"
+                || key == b"core.excludesfile"
+                || key == b"diff.orderfile"
+                || (key.starts_with(b"include") && key.ends_with(b".path"));
+            // A textconv or clean filter may depend on arbitrary external state.
+            inputs.external |= (key.starts_with(b"diff.") && key.ends_with(b".textconv"))
+                || (key.starts_with(b"filter.")
+                    && (key.ends_with(b".clean") || key.ends_with(b".process")));
+        }
+        if query_paths {
+            let paths = capture_git(
+                root,
+                &[
+                    "config",
+                    "--null",
+                    "--includes",
+                    "--show-origin",
+                    "--path",
+                    "--get-regexp",
+                    r"^(core\.(attributesfile|excludesfile)|diff\.orderfile|include.*\.path)$",
+                ],
+                MAX_DIFF_METADATA_BYTES,
+            )
+            .await
+            .ok()?;
+            if paths.truncated {
+                return None;
+            }
+            let mut records = paths.stdout.split(|byte| *byte == 0);
+            while let Some(origin) = records.next().filter(|origin| !origin.is_empty()) {
+                let entry = records.next()?;
+                let split = entry.iter().position(|byte| *byte == b'\n')?;
+                let (key, path) = (&entry[..split], &entry[split + 1..]);
+                let path = PathBuf::from(path_argument(path));
+                if key.starts_with(b"include") {
+                    let origin = root.join(path_argument(origin.strip_prefix(b"file:")?));
+                    inputs.config_paths.push(origin.parent()?.join(path));
+                } else {
+                    inputs.paths.push(root.join(path));
+                }
+            }
+        }
+        if let Some(xdg) = xdg {
+            if !configured_attributes {
+                inputs.paths.push(xdg.join("git/attributes"));
+            }
+            if !configured_excludes {
+                inputs.paths.push(xdg.join("git/ignore"));
+            }
+        }
+        if std::env::var_os("GIT_ATTR_NOSYSTEM").is_none() {
+            inputs.paths.push(PathBuf::from("/etc/gitattributes"));
+        }
+        inputs.paths.extend([
+            common_dir.join("info/attributes"),
+            common_dir.join("info/exclude"),
+            git_dir.join("index"),
+        ]);
+        inputs.config_paths.sort();
+        inputs.config_paths.dedup();
+        inputs.config_stamps = inputs
+            .config_paths
+            .iter()
+            .map(|path| input_stamp(path))
+            .collect();
+        inputs.paths.extend(inputs.config_paths.iter().cloned());
+        Some(inputs)
+    }
+}
+
 /// Fingerprint of a checkout's observable state, from one `git status`.
 #[derive(Debug, Clone)]
 struct GateState {
     fingerprint: [u8; 32],
-    /// False when it cannot vouch for a later skip: a listed file was stamped
-    /// within [`RACY_WINDOW`] (an edit that keeps size and timestamp could hide
-    /// in the same tick), or the list passed [`MAX_GATE_PATHS`].
     trusted: bool,
+    inputs: GateInputs,
+    snapshot: Option<Arc<DiffSnapshot>>,
 }
 
 impl GateState {
-    /// `sha256(status output ‖ (path, mtime_ns, size, inode) per listed path)`.
-    /// Blocking: stats every path.
+    /// Blocking: stat changed files and the attributes/ignore files on their
+    /// ancestor paths, including files ignored by status itself.
     fn fingerprint(
         root: &Path,
         status: &[u8],
         paths: &[Vec<u8>],
         started: std::time::SystemTime,
+        inputs: GateInputs,
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(status);
-        let mut trusted = paths.len() <= MAX_GATE_PATHS;
+        // Other platforms do not expose a change time through std::fs, so a
+        // writer restoring mtime cannot be ruled out there.
+        let mut trusted = cfg!(unix) && paths.len() <= MAX_GATE_PATHS && !inputs.external;
+        let mut stamps: HashSet<PathBuf> = inputs.paths.iter().cloned().collect();
+        stamps.extend([root.join(".gitattributes"), root.join(".gitignore")]);
+        let mut ancestors = HashSet::new();
         for path in paths.iter().take(MAX_GATE_PATHS) {
+            let path = root.join(path_argument(path));
+            let mut parent = path.parent();
+            while let Some(dir) = parent.filter(|dir| dir.starts_with(root)) {
+                if !ancestors.insert(dir.to_path_buf()) {
+                    break;
+                }
+                stamps.extend([dir.join(".gitattributes"), dir.join(".gitignore")]);
+                parent = dir.parent();
+            }
+            // Submodule contents and HEAD can change without moving the
+            // directory's stat or its porcelain entry. Never skip those.
+            trusted &= !path.is_dir();
+            stamps.insert(path);
+        }
+        let mut stamps: Vec<PathBuf> = stamps.into_iter().collect();
+        stamps.sort();
+        for path in stamps {
             hasher.update([0u8]);
-            hasher.update(path);
-            match std::fs::symlink_metadata(root.join(path_argument(path))) {
-                Ok(meta) => {
-                    let modified = meta
-                        .modified()
-                        .ok()
-                        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok());
-                    let settled = meta
-                        .modified()
-                        .ok()
-                        .and_then(|at| started.duration_since(at).ok())
-                        .is_some_and(|age| age >= RACY_WINDOW);
-                    trusted &= settled;
-                    hasher.update([1u8]);
-                    hasher.update(modified.unwrap_or_default().as_nanos().to_le_bytes());
-                    hasher.update(meta.len().to_le_bytes());
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt as _;
-                        hasher.update(meta.ino().to_le_bytes());
+            hasher.update(path.as_os_str().as_encoded_bytes());
+            let stamp = input_stamp(&path);
+            for stamp in [&stamp.0, &stamp.1] {
+                hasher.update([u8::from(stamp.is_some())]);
+                if let Some(stamp) = stamp {
+                    hasher.update(stamp.modified.unwrap_or_default().as_nanos().to_le_bytes());
+                    hasher.update(stamp.len.to_le_bytes());
+                    hasher.update(stamp.ino.to_le_bytes());
+                    hasher.update(stamp.mode.to_le_bytes());
+                    if let Some((seconds, nanos)) = stamp.changed {
+                        hasher.update(seconds.to_le_bytes());
+                        hasher.update(nanos.to_le_bytes());
                     }
                 }
-                Err(_) => hasher.update([0u8]),
+            }
+            if let Some(stamp) = stamp.1.as_ref().or(stamp.0.as_ref()) {
+                // Directory stamps deliberately retain only identity and mode.
+                if stamp.modified.is_none() {
+                    continue;
+                }
+                if let Some((seconds, nanos)) = stamp.changed {
+                    trusted &= u64::try_from(seconds)
+                        .ok()
+                        .and_then(|seconds| {
+                            started
+                                .duration_since(
+                                    std::time::UNIX_EPOCH + Duration::new(seconds, nanos as u32),
+                                )
+                                .ok()
+                        })
+                        .is_some_and(|age| age >= RACY_WINDOW);
+                }
+                trusted &= stamp
+                    .modified
+                    .and_then(|at| started.duration_since(std::time::UNIX_EPOCH + at).ok())
+                    .is_some_and(|age| age >= RACY_WINDOW);
             }
         }
         Self {
             fingerprint: hasher.finalize().into(),
             trusted,
+            inputs,
+            snapshot: None,
         }
     }
 }
@@ -2353,6 +2671,7 @@ async fn run_git_for_path_batch(
     fixed_args: &[OsString],
     paths: &[Vec<u8>],
 ) -> Result<(), EngineError> {
+    note_git_spawn(Some(root));
     let mut command = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -2954,6 +3273,32 @@ mod git_gating_tests {
         write(&dir, "renamed name.txt", b"q1\nq2\nq3\nq4\nq5\nq6\nq7\n");
         std::fs::rename(dir.join("dir/c.txt"), dir.join("dir/moved.txt")).unwrap();
 
+        let dir = fresh("copies");
+        git(&dir, &["config", "status.renames", "copies"]);
+        write(&dir, "copied.txt", b"one\ntwo\n");
+        write(&dir, "b.txt", b"source changed\n");
+        git(&dir, &["add", "."]);
+
+        let dir = fresh("submodule");
+        let module = tmp.join("module-source");
+        base_repo(&module);
+        git(
+            &dir,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                module.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&dir, &["commit", "-qm", "submodule"]);
+        write(&dir, "sub/a.txt", b"dirty module\n");
+        write(&dir, "sub/untracked", b"new\n");
+        git(&dir, &["config", "diff.submodule", "diff"]);
+
         let dir = fresh("detached");
         git(&dir, &["checkout", "-q", "--detach", "HEAD~1"]);
         write(&dir, "b.txt", b"edited while detached\n");
@@ -3000,6 +3345,19 @@ mod git_gating_tests {
             std::fs::write(
                 dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff.txt")),
                 "x\n",
+            )
+            .unwrap();
+            git(&dir, &["add", "."]);
+            git(&dir, &["commit", "-qm", "non-utf8 origin"]);
+            std::fs::rename(
+                dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff.txt")),
+                dir.join("renamed.txt"),
+            )
+            .unwrap();
+            git(&dir, &["add", "."]);
+            std::fs::write(
+                dir.join(std::ffi::OsStr::from_bytes(b"new-\xff.txt")),
+                "new\n",
             )
             .unwrap();
         }
@@ -3132,7 +3490,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
     }
 
     #[tokio::test]
-    async fn gated_capture_spawns_three_git_processes_against_six() {
+    async fn gated_capture_counts_discovery_and_three_capture_processes() {
         let tmp = scratch();
         let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
         let repos = repos(&tmp_path);
@@ -3147,7 +3505,20 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
         let before = git_spawns_under(&dir);
         capture_diff_against(&repos, &dir, None).await.unwrap();
         let gated = git_spawns_under(&dir) - before;
-        assert_eq!((legacy, gated), (6, 3));
+        assert_eq!((legacy, gated), (6, 5));
+        let Gated::Captured(_, Some(gate)) = capture_gated(&repos, &dir, None, None).await.unwrap()
+        else {
+            panic!("gate");
+        };
+        let before = git_spawns_under(&dir);
+        capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap();
+        assert_eq!(
+            git_spawns_under(&dir) - before,
+            3,
+            "warm capture reuses config discovery"
+        );
     }
 
     fn backdate(path: &Path, age: Duration) {
@@ -3167,6 +3538,11 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
         let hour = Duration::from_secs(3600);
         backdate(&dir.join("a.txt"), hour);
         backdate(&dir.join("u.txt"), hour);
+        backdate(&dir.join(".git/config"), hour);
+        backdate(&dir.join(".git/HEAD"), hour);
+        backdate(&dir.join(".git/index"), hour);
+        backdate(&dir.join(".git/info/exclude"), hour);
+        tokio::time::sleep(super::RACY_WINDOW).await;
 
         let Gated::Captured(first, Some(gate)) =
             capture_gated(&repos, &dir, None, None).await.unwrap()
@@ -3191,6 +3567,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
             .unwrap()
             .set_modified(stamp)
             .unwrap();
+        tokio::time::sleep(super::RACY_WINDOW).await;
         let Gated::Captured(second, next) = capture_gated(&repos, &dir, None, Some(&gate))
             .await
             .unwrap()
@@ -3242,8 +3619,354 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
         let paths: Vec<Vec<u8>> = (0..super::MAX_GATE_PATHS + 1)
             .map(|i| format!("f{i}").into_bytes())
             .collect();
-        let gate = GateState::fingerprint(tmp.path(), b"status", &paths, SystemTime::now());
+        let gate = GateState::fingerprint(
+            tmp.path(),
+            b"status",
+            &paths,
+            SystemTime::now(),
+            super::GateInputs::default(),
+        );
         assert!(!gate.trusted);
+    }
+
+    async fn trusted_capture(repos: &Repos, dir: &Path) -> (Box<super::DiffSnapshot>, GateState) {
+        let inputs = super::GateInputs::read(repos, dir).await.unwrap();
+        let hour = Duration::from_secs(3600);
+        for path in inputs
+            .paths
+            .iter()
+            .chain([dir.join("a.txt"), dir.join(".gitattributes")].iter())
+        {
+            if path.starts_with(dir.parent().unwrap()) && path.is_file() {
+                backdate(path, hour);
+            }
+        }
+        tokio::time::sleep(super::RACY_WINDOW).await;
+        let Gated::Captured(snapshot, Some(gate)) =
+            capture_gated(repos, dir, None, None).await.unwrap()
+        else {
+            panic!("gate");
+        };
+        assert!(gate.trusted);
+        assert!(matches!(
+            capture_gated(repos, dir, None, Some(&gate)).await.unwrap(),
+            Gated::Unchanged
+        ));
+        (snapshot, gate)
+    }
+
+    #[tokio::test]
+    async fn attributes_and_config_invalidate_even_when_status_is_identical() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        for name in [
+            ".gitattributes",
+            ".git/info/attributes",
+            "global-attributes",
+        ] {
+            let dir = tmp.path().join(name.replace('/', "-"));
+            base_repo(&dir);
+            // Keep attributes themselves out of status; Git still reads them.
+            write(
+                &dir,
+                ".git/info/exclude",
+                b".gitattributes\nglobal-attributes\n",
+            );
+            write(&dir, "a.txt", b"changed\n");
+            write(&dir, name, b"a.txt text\n");
+            if name == "global-attributes" {
+                git(
+                    &dir,
+                    &[
+                        "config",
+                        "core.attributesFile",
+                        dir.join(name).to_str().unwrap(),
+                    ],
+                );
+            }
+            let (first, gate) = trusted_capture(&repos, &dir).await;
+            let status = super::capture_status(&dir).await.unwrap().raw;
+            write(&dir, name, b"a.txt -diff\n");
+            assert_eq!(status, super::capture_status(&dir).await.unwrap().raw);
+            let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap()
+            else {
+                panic!("attributes must invalidate");
+            };
+            assert_ne!(first.patch, next.patch, "{name}");
+            assert_eq!(
+                *next,
+                capture_diff_legacy(&repos, &dir, None).await.unwrap()
+            );
+        }
+        let dir = tmp.path().join("config");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        let (first, gate) = trusted_capture(&repos, &dir).await;
+        let status = super::capture_status(&dir).await.unwrap().raw;
+        git(&dir, &["config", "diff.noprefix", "true"]);
+        assert_eq!(status, super::capture_status(&dir).await.unwrap().raw);
+        let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("config must invalidate");
+        };
+        assert_ne!(first.patch, next.patch);
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_tracks_common_and_included_config_and_excludes() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let main = tmp.path().join("main");
+        let dir = tmp.path().join("linked");
+        base_repo(&main);
+        let included = tmp.path().join("included.config");
+        write(
+            tmp.path(),
+            "included.config",
+            b"[core]\n attributesFile = ../attributes\n excludesFile = ../excludes\n",
+        );
+        // Includes are relative to the config file; core paths are relative to cwd.
+        git(
+            &main,
+            &["config", "include.path", included.to_str().unwrap()],
+        );
+        git(
+            &main,
+            &["worktree", "add", "-qb", "linked", dir.to_str().unwrap()],
+        );
+        write(&dir, "a.txt", b"changed\n");
+        write(tmp.path(), "attributes", b"a.txt text\n");
+        write(tmp.path(), "excludes", b"nothing\n");
+        let (_, gate) = trusted_capture(&repos, &dir).await;
+        let identity = repos.checkout_identity(&dir).await.unwrap();
+        for path in [
+            main.join(".git/config"),
+            main.join(".git/info/attributes"),
+            main.join(".git/info/exclude"),
+            included,
+            tmp.path().join("attributes"),
+            tmp.path().join("excludes"),
+            identity.git_dir.join("config.worktree"),
+        ] {
+            let absolute = |p: &Path| {
+                std::fs::canonicalize(p.parent().unwrap())
+                    .unwrap()
+                    .join(p.file_name().unwrap())
+            };
+            assert!(
+                gate.inputs
+                    .paths
+                    .iter()
+                    .any(|p| absolute(p) == absolute(&path)),
+                "missing {path:?}"
+            );
+        }
+        write(tmp.path(), "attributes", b"a.txt -diff\n");
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+        let (_, gate) = trusted_capture(&repos, &dir).await;
+        write(&main, ".git/info/exclude", b"new-file\n");
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+        let (_, gate) = trusted_capture(&repos, &dir).await;
+        write(tmp.path(), "excludes", b"new-file\n");
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_mtime_and_mode_changes_invalidate_the_gate() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dir = tmp.path().join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        let (first, gate) = trusted_capture(&repos, &dir).await;
+        let at = std::fs::metadata(dir.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        write(&dir, "a.txt", b"CHANGED\n");
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("a.txt"))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("ctime invalidates");
+        };
+        assert_ne!(first.patch, next.patch);
+        let (_, gate) = trusted_capture(&repos, &dir).await;
+        std::fs::set_permissions(dir.join("a.txt"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+    }
+
+    #[tokio::test]
+    async fn submodule_diffs_never_vouch_for_a_stat_skip() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dirs = fixtures(tmp.path());
+        let dir = &dirs
+            .iter()
+            .find(|(name, _)| *name == "submodule")
+            .unwrap()
+            .1;
+        let Gated::Captured(first, Some(gate)) =
+            capture_gated(&repos, dir, None, None).await.unwrap()
+        else {
+            panic!("gate");
+        };
+        assert!(!gate.trusted);
+        let status = super::capture_status(dir).await.unwrap().raw;
+        write(dir, "sub/a.txt", b"another dirty module\n");
+        assert_eq!(status, super::capture_status(dir).await.unwrap().raw);
+        let Gated::Captured(next, _) = capture_gated(&repos, dir, None, Some(&gate)).await.unwrap()
+        else {
+            panic!("submodule recapture");
+        };
+        assert_ne!(first.patch, next.patch);
+    }
+
+    #[tokio::test]
+    async fn staged_only_changes_and_identical_tree_head_moves_recapture() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dir = tmp.path().join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        let (_, gate) = trusted_capture(&repos, &dir).await;
+        git(&dir, &["add", "a.txt"]);
+        let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("index-only edit");
+        };
+        assert_eq!(
+            *next,
+            capture_diff_legacy(&repos, &dir, None).await.unwrap()
+        );
+        git(&dir, &["reset", "-q", "HEAD"]);
+        let (first, gate) = trusted_capture(&repos, &dir).await;
+        let tree = git(&dir, &["rev-parse", "HEAD^{tree}"]);
+        git(&dir, &["commit", "--allow-empty", "-qm", "same tree"]);
+        assert_eq!(tree, git(&dir, &["rev-parse", "HEAD^{tree}"]));
+        let Gated::Captured(next, _) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("HEAD-only move");
+        };
+        assert_eq!(first.patch, next.patch);
+        assert_ne!(first.head_sha, next.head_sha);
+        assert_ne!(first.checksum, next.checksum);
+    }
+
+    #[tokio::test]
+    async fn intermediate_nested_repo_invalidates_the_identity_stamp() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dir = tmp.path().join("outer");
+        base_repo(&dir);
+        let cwd = dir.join("nested/deep");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let identity = repos.checkout_identity(&cwd).await.unwrap();
+        let before = super::IdentityStamp::read(cwd.to_str().unwrap(), &identity).unwrap();
+        base_repo(cwd.parent().unwrap());
+        let after = super::IdentityStamp::read(cwd.to_str().unwrap(), &identity).unwrap();
+        assert!(before != after);
+        assert_ne!(identity.id, repos.checkout_identity(&cwd).await.unwrap().id);
+    }
+
+    #[tokio::test]
+    async fn oracle_repairs_a_stale_skip_and_resets_the_gate() {
+        let tmp = scratch();
+        let repos = repos(tmp.path());
+        let dir = tmp.path().join("repo");
+        base_repo(&dir);
+        let Gated::Captured(_, Some(gate)) = capture_gated(&repos, &dir, None, None).await.unwrap()
+        else {
+            panic!("gate");
+        };
+        write(&dir, "a.txt", b"oracle sees the change\n");
+        let Gated::Captured(snapshot, next) =
+            super::verify_gated(&repos, &dir, None, Some(&gate), Gated::Unchanged)
+                .await
+                .unwrap()
+        else {
+            panic!("oracle must repair the skip");
+        };
+        assert!(next.is_none());
+        assert_eq!(
+            *snapshot,
+            capture_diff_legacy(&repos, &dir, None).await.unwrap()
+        );
+    }
+
+    #[test]
+    fn every_tenth_repair_forces_a_capture_even_with_an_unchanged_gate() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let entry = super::CheckoutEntry {
+            identity: crate::repos::CheckoutIdentity {
+                id: "id".into(),
+                root: PathBuf::new(),
+                git_dir: PathBuf::new(),
+            },
+            chats: std::sync::Mutex::new(Vec::new()),
+            checksum: std::sync::Mutex::new(None),
+            orphaned_since: std::sync::Mutex::new(None),
+            skipped_while_orphaned: std::sync::atomic::AtomicBool::new(false),
+            kick_tx: tx,
+            watchers: std::sync::Mutex::new(Vec::new()),
+            signals: Arc::new(super::WatchSignals::new()),
+            gate: std::sync::Mutex::new(None),
+            sync_lock: tokio::sync::Mutex::new(()),
+            force_capture: std::sync::atomic::AtomicBool::new(false),
+        };
+        for _ in 1..super::REPAIR_FORCE_EVERY {
+            entry.repair_kick();
+            assert!(
+                !entry
+                    .force_capture
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            rx.try_recv().unwrap();
+        }
+        entry.repair_kick();
+        rx.try_recv().unwrap();
+        assert!(
+            entry
+                .force_capture
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 
     async fn settled_spawns(dir: &Path) -> u64 {
@@ -3303,6 +4026,12 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
         }
 
         let idle = settled_spawns(&dir).await;
+        for entry in super::lock(&sync.inner.entries).values() {
+            entry
+                .signals
+                .quiet_ticks
+                .store(0, std::sync::atomic::Ordering::Release);
+        }
         assert!(idle > 0, "the initial capture spawned git");
         for _ in 0..3 {
             sync.repair_now().await;
@@ -3312,6 +4041,17 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
             git_spawns_under(&dir),
             idle,
             "an idle, watched checkout costs no git at the repair tick"
+        );
+
+        for _ in 3..9 {
+            sync.repair_now().await;
+        }
+        assert_eq!(git_spawns_under(&dir), idle);
+        sync.repair_now().await;
+        assert_eq!(
+            settled_spawns(&dir).await,
+            idle + 3,
+            "tick ten forces a warm full capture"
         );
 
         // An edit still reaches the diff through the watcher.
