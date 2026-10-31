@@ -239,6 +239,8 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
         )?;
         let mut config =
             crate::Config::parse(proxy_args(&launch, row, &real)?, launch.data_dir.clone()).ok()?;
+        // Only policy-classified heavy runtime rows reach this proxy path.
+        config.server_class = Some("heavy-runtime");
         // H4 cannot name the entry env keys. Hash the effective inherited env,
         // except volatile session markers; persist only the resulting digest.
         config.identity_env = std::env::vars_os()

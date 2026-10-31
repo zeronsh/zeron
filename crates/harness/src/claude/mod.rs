@@ -58,6 +58,7 @@ pub mod mcp_capture;
 mod mcp_plan;
 mod normalize;
 pub mod refresh_lock;
+mod scheduled;
 mod wire;
 
 use std::path::PathBuf;
@@ -815,6 +816,11 @@ impl Harness for ClaudeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    fn hibernation_safe(&self, request: &RunRequest, data_dir: &std::path::Path) -> bool {
+        self.executable_path()
+            .is_some_and(|exe| mcp_plan::hibernation_safe(&exe, request, data_dir))
+    }
+
     /// The `interrupt` control request ends the turn and the CLI keeps
     /// reading stdin; background agents and shells run on.
     fn stops_turn_in_place(&self) -> bool {
@@ -1353,6 +1359,7 @@ async fn run_session(session: Session) {
     // The session's background shells, for the host's list (see
     // [`background`]), and the stops asked of them.
     let mut shells = background::BackgroundShells::default();
+    let mut scheduled = scheduled::ScheduledWork::default();
     let mut task_stops_sent = 0u64;
 
     'main: loop {
@@ -1371,6 +1378,8 @@ async fn run_session(session: Session) {
             }
             shells = background::BackgroundShells::default();
             turn.set_background_processes(Vec::new());
+            scheduled = scheduled::ScheduledWork::default();
+            turn.set_scheduled_until(0);
             let mut fresh = launched.clone();
             fresh.resume = None;
             match ClaudeHarness::launch(&exe, &fresh, title_only) {
@@ -1474,6 +1483,9 @@ async fn run_session(session: Session) {
                     }
                     // Every frame: a shell's command, start and output file
                     // arrive on different ones.
+                    if scheduled.observe(&frame, crate::unix_ms()) {
+                        turn.set_scheduled_until(scheduled.hold_until());
+                    }
                     let listed = shells.observe(&frame);
                     if listed {
                         turn.set_background_processes(shells.tasks());

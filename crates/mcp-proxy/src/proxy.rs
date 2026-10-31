@@ -144,7 +144,16 @@ fn read_lines<R: AsyncRead + Unpin + Send + 'static>(
 }
 impl Proxy {
     fn event(&self, event: &str, fields: Value) {
-        let mut v = json!({"event":event,"server":self.config.server,"at":cache::now_ms()});
+        let server_class = if self
+            .cache
+            .as_ref()
+            .is_some_and(|entry| cache::channel_capability(&entry.initialize) == Some(true))
+        {
+            "channel"
+        } else {
+            self.config.server_class.unwrap_or("unknown")
+        };
+        let mut v = json!({"event":event,"server":self.config.server,"server_class":server_class,"at":cache::now_ms()});
         if let Some(fields) = fields.as_object() {
             v.as_object_mut().unwrap().extend(fields.clone());
         }
@@ -231,7 +240,7 @@ impl Proxy {
         };
         self.event(
             "start",
-            json!({"ms":self.started.elapsed().as_millis(),"reason":reason}),
+            json!({"startup_ms":self.started.elapsed().as_millis(),"ms":self.started.elapsed().as_millis(),"reason":reason}),
         );
         if !self.passthrough {
             self.child_out(rpc::request(
@@ -682,6 +691,7 @@ impl Proxy {
                     .await;
             };
             if channel {
+                self.config.server_class = Some("channel");
                 self.stop_after_capture = false;
                 let _ = crate::discovery::record_discovery(
                     &self.config,

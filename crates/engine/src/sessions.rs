@@ -148,7 +148,63 @@ impl Drop for VoiceCall {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum HibernateReason {
+    Idle,
+    Pressure,
+    Manual,
+}
+impl HibernateReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Pressure => "pressure",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// A background task that just ended is about to wake the agent with its
+/// result. Retiring the runtime inside that gap loses the wake, so a parked
+/// runtime must have seen no background change for this long.
+const BACKGROUND_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A parked agent that produced output of its own (a wake turn thinking
+/// before its first visible event, which the parked gate drops) is mid-turn
+/// however idle the row reads. Hibernation waits this long after its last
+/// such event.
+const PARKED_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
+
+type ParkedActivity = Arc<Mutex<Option<tokio::time::Instant>>>;
+
+fn parked_quiet(last: &ParkedActivity) -> bool {
+    lock(last).is_none_or(|at| at.elapsed() >= PARKED_QUIET)
+}
+
+fn session_idle_window(
+    env: Option<&str>,
+    voice: bool,
+    minutes: u64,
+) -> Option<std::time::Duration> {
+    let millis = env.and_then(|v| v.parse::<u64>().ok()).unwrap_or_else(|| {
+        if voice {
+            5 * 60 * 1000
+        } else {
+            minutes.saturating_mul(60_000)
+        }
+    });
+    (millis != 0).then(|| std::time::Duration::from_millis(millis))
+}
+
 struct RunHandle {
+    /// When the last stream event arrived while parked, past the tail-flush
+    /// gate: the agent has started a turn of its own.
+    parked_activity: ParkedActivity,
+    hibernate: Arc<tokio::sync::Notify>,
+    hibernate_reason: Option<(HibernateReason, tokio::time::Instant)>,
+    idle_since: Option<tokio::time::Instant>,
+    /// The actual host-prepared launch, for Claude's fresh plugin/channel check.
+    hibernation_launch: Option<RunRequest>,
     voice: Option<zeron_harness::codex::realtime::RealtimeHandle>,
     voice_active: Arc<VoiceActivity>,
     run_id: String,
@@ -279,6 +335,8 @@ struct Inner {
     doc_host: Mutex<Option<DocHost>>,
     /// chat_id → live run.
     runs: Mutex<HashMap<String, RunHandle>>,
+    boot_sweep: tokio::sync::OnceCell<()>,
+    maintenance_started: OnceLock<()>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
@@ -334,7 +392,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
-        Self {
+        let engine = Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
                 device_id,
@@ -349,6 +407,8 @@ impl SessionsEngine {
                 registry,
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
+                boot_sweep: tokio::sync::OnceCell::new(),
+                maintenance_started: OnceLock::new(),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
@@ -363,7 +423,70 @@ impl SessionsEngine {
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
             }),
+        };
+        engine.start_maintenance();
+        engine
+    }
+
+    fn start_maintenance(&self) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && self.inner.maintenance_started.set(()).is_ok()
+        {
+            let weak = Arc::downgrade(&self.inner);
+            runtime.spawn(async move {
+                if let Some(inner) = weak.upgrade() {
+                    inner.sweep_boot().await;
+                }
+                let mut pressure = crate::memory_pressure::Pressure::default();
+                let mut telemetry = crate::memory_pressure::ProxyTelemetry::default();
+                loop {
+                    tokio::time::sleep(crate::memory_pressure::SAMPLE_INTERVAL).await;
+                    let Some(inner) = weak.upgrade() else {
+                        break;
+                    };
+                    if inner
+                        .shutting_down
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    let log = inner
+                        .registry
+                        .data_dir()
+                        .unwrap_or_else(zeron_mcp_proxy::data_dir)
+                        .join("logs/mcp-proxy.jsonl");
+                    let sampled = tokio::task::spawn_blocking(move || {
+                        telemetry.emit(&log);
+                        (crate::memory_pressure::sample(), telemetry)
+                    })
+                    .await;
+                    let high = match sampled {
+                        Ok((sample, reader)) => {
+                            telemetry = reader;
+                            sample.unwrap_or(false)
+                        }
+                        Err(_) => {
+                            telemetry = Default::default();
+                            false
+                        }
+                    };
+                    if pressure.observe(high) {
+                        inner.hibernate_pressure();
+                    }
+                }
+            });
         }
+    }
+
+    /// Request clean teardown of a safely parked runtime. The driver rechecks
+    /// all guards when it consumes the notification; the RPC reports acceptance.
+    pub fn hibernate(&self, chat_id: &str) -> bool {
+        self.inner.hibernate(chat_id, HibernateReason::Manual)
+    }
+
+    pub fn hibernate_idle(&self) -> usize {
+        let chats: Vec<_> = lock(&self.inner.runs).keys().cloned().collect();
+        chats.iter().filter(|chat| self.hibernate(chat)).count()
     }
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
@@ -670,7 +793,14 @@ impl SessionsEngine {
         Arc<VoiceActivity>,
     )> {
         let mut runs = lock(&self.inner.runs);
-        let run = runs.get_mut(chat_id)?;
+        // A runtime being retired has no voice left to bridge.
+        let run = runs
+            .get_mut(chat_id)
+            .filter(|run| !run.retiring.load(std::sync::atomic::Ordering::Acquire))?;
+        // The call registers on `voice_active` only after the connect awaits
+        // its lease. Until then the idle runtime would read as free to
+        // hibernate, so the attach counts as activity.
+        *lock(&run.parked_activity) = Some(tokio::time::Instant::now());
         Some((
             run.voice.clone()?,
             run.voice.as_ref()?.events.subscribe(),
@@ -739,6 +869,9 @@ impl SessionsEngine {
         stops_seen: Option<u64>,
         idle: bool,
     ) -> Result<String, EngineError> {
+        let sent_at = tokio::time::Instant::now();
+        self.start_maintenance();
+        self.inner.sweep_boot().await;
         // Project-less chats store a home-relative cwd (the creating device
         // can't know the host's home); expand it here, on the host, where the
         // run spawns, creating a new chat's scratch folder.
@@ -1047,6 +1180,13 @@ impl SessionsEngine {
                 rx
             })
         };
+        let hibernate = Arc::new(tokio::sync::Notify::new());
+        let parked_activity = ParkedActivity::default();
+        let session_idle = session_idle_window(
+            std::env::var("ZERON_SESSION_IDLE_MS").ok().as_deref(),
+            zeron_proto::voice::is_orchestrator_chat(chat_id),
+            u64::from(self.inner.registry.mcp_prefs().session_idle_minutes),
+        );
         let interrupt_token = CancellationToken::new();
         let turn = TurnControl::default();
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1103,6 +1243,11 @@ impl SessionsEngine {
         runs.insert(
             chat_id.to_string(),
             RunHandle {
+                parked_activity: parked_activity.clone(),
+                hibernate: hibernate.clone(),
+                hibernate_reason: None,
+                idle_since: idle.then(tokio::time::Instant::now),
+                hibernation_launch: None,
                 voice: (harness_id == HarnessId::Codex).then_some(voice_handle),
                 voice_active: voice_active.clone(),
                 run_id: run_id.clone(),
@@ -1161,6 +1306,10 @@ impl SessionsEngine {
             engine_rx,
             cancel_rx,
             RunResumeState {
+                session_idle,
+                parked_activity,
+                hibernate,
+                sent_at,
                 idle,
                 voice_active,
                 user_message_id: user_id,
@@ -1920,6 +2069,137 @@ impl SessionsEngine {
 }
 
 impl Inner {
+    fn run_dir(&self, run_id: &str) -> std::path::PathBuf {
+        self.registry
+            .data_dir()
+            .unwrap_or_else(zeron_mcp_proxy::data_dir)
+            .join("run/mcp")
+            .join(run_id)
+    }
+
+    async fn sweep_boot(&self) {
+        self.boot_sweep
+            .get_or_init(|| async {
+                let root = self
+                    .registry
+                    .data_dir()
+                    .unwrap_or_else(zeron_mcp_proxy::data_dir)
+                    .join("run/mcp");
+                if let Err(error) = crate::memory_pressure::cleanup_boot(&root).await {
+                    tracing::warn!(%error, "MCP boot group sweep failed");
+                }
+            })
+            .await;
+    }
+
+    // Called with runs locked; lock order is runs → ledger → statuses. Both
+    // timer and Notify teardown recheck this predicate immediately before claim.
+    fn hibernation_eligible(&self, chat: &str, run: &RunHandle) -> bool {
+        run.idle_since.is_some()
+            && !run.retiring.load(std::sync::atomic::Ordering::Acquire)
+            && !run.voice_active.live()
+            && !run.turn.background_live()
+            && run.turn.background_settled(BACKGROUND_SETTLE)
+            && parked_quiet(&run.parked_activity)
+            && (run.runtime_config.harness_id != HarnessId::ClaudeCode
+                || run.hibernation_launch.as_ref().is_some_and(|launch| {
+                    run.runtime_config.harness.hibernation_safe(
+                        launch,
+                        &self
+                            .registry
+                            .data_dir()
+                            .unwrap_or_else(zeron_mcp_proxy::data_dir),
+                    )
+                }))
+            && lock(&run.pending_inputs).is_empty()
+            && lock(&self.statuses)
+                .get(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle && s.running_subagents == 0)
+    }
+
+    fn hibernate(&self, chat: &str, reason: HibernateReason) -> bool {
+        let mut runs = lock(&self.runs);
+        let Some(run) = runs.get_mut(chat) else {
+            return false;
+        };
+        let pending = lock(&run.routed_steers);
+        if !pending.is_empty() || !self.hibernation_eligible(chat, run) {
+            return false;
+        }
+        run.hibernate_reason = Some((reason, run.idle_since.unwrap()));
+        run.hibernate.notify_one();
+        true
+    }
+
+    fn claim_hibernation(
+        &self,
+        chat: &str,
+        run_id: &str,
+    ) -> Option<(HibernateReason, u64, CancellationToken)> {
+        let mut runs = lock(&self.runs);
+        let run = runs.get_mut(chat).filter(|h| h.run_id == run_id)?;
+        let pending = lock(&run.routed_steers);
+        let (reason, parked_at) = run.hibernate_reason.take()?;
+        if !pending.is_empty()
+            || run.idle_since != Some(parked_at)
+            || (matches!(reason, HibernateReason::Pressure)
+                && parked_at.elapsed() < crate::memory_pressure::IDLE_FLOOR)
+            || !self.hibernation_eligible(chat, run)
+        {
+            return None;
+        }
+        // Sends that already reserved a mailbox slot mark themselves after_stop
+        // under this very ledger lock. Exit's existing orphan replay owns them.
+        run.retiring
+            .store(true, std::sync::atomic::Ordering::Release);
+        Some((
+            reason,
+            run.idle_since?.elapsed().as_secs(),
+            run.interrupt_token.clone(),
+        ))
+    }
+
+    async fn remember_hibernation_launch(
+        &self,
+        chat: &str,
+        run_id: &str,
+        harness: Arc<dyn Harness>,
+        launch: &RunRequest,
+    ) {
+        let prepared = launch.clone();
+        let launch = launch.clone();
+        let data = self
+            .registry
+            .data_dir()
+            .unwrap_or_else(zeron_mcp_proxy::data_dir);
+        if harness.id() == HarnessId::ClaudeCode {
+            // Bind Claude's capture before launch. Final eligibility rechecks
+            // the snapshot and per-plugin records, including late discoveries.
+            let _ =
+                tokio::task::spawn_blocking(move || harness.hibernation_safe(&launch, &data)).await;
+        }
+        if let Some(run) = lock(&self.runs)
+            .get_mut(chat)
+            .filter(|h| h.run_id == run_id)
+        {
+            run.hibernation_launch = Some(prepared);
+        }
+    }
+
+    fn hibernate_pressure(&self) {
+        let candidates = lock(&self.runs)
+            .iter()
+            .filter_map(|(chat, run)| {
+                let pending = lock(&run.routed_steers);
+                (pending.is_empty() && self.hibernation_eligible(chat, run))
+                    .then(|| (chat.clone(), run.idle_since.unwrap().elapsed()))
+            })
+            .collect::<Vec<_>>();
+        if let Some(chat) = crate::memory_pressure::oldest(candidates) {
+            self.hibernate(&chat, HibernateReason::Pressure);
+        }
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// Sanitize before ANY journal/publish path, including nested subagent events.
     async fn prepare_generated_image(
@@ -2136,6 +2416,22 @@ impl Inner {
         outcome: Option<DoneStatus>,
     ) {
         let now = Utc::now();
+        let runtime = if let Some(run) = lock(&self.runs).get_mut(chat_id) {
+            if status == SessionStatus::Idle {
+                run.idle_since.get_or_insert_with(tokio::time::Instant::now);
+                Some(zeron_proto::RuntimeState::Parked)
+            } else {
+                run.idle_since = None;
+                Some(zeron_proto::RuntimeState::Live)
+            }
+        } else if lock(&self.harness_sessions)
+            .get(chat_id)
+            .is_some_and(|s| !s.session_id.is_empty())
+        {
+            Some(zeron_proto::RuntimeState::Hibernated)
+        } else {
+            None
+        };
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
@@ -2167,6 +2463,7 @@ impl Inner {
                 entry.last_completed_turn = Some(turn);
             }
             entry.status = status;
+            entry.runtime = runtime;
             if let Some(outcome) = outcome {
                 entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
                     status: outcome,
@@ -2742,6 +3039,47 @@ impl Inner {
 }
 
 // ── run task ────────────────────────────────────────────────────────────────
+
+/// Early-return/panic paths also sweep; the ordinary run-end path awaits it.
+struct RunCleanup {
+    path: std::path::PathBuf,
+    cleaned: bool,
+}
+impl RunCleanup {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            cleaned: false,
+        }
+    }
+    async fn cleanup(&mut self) {
+        if let Err(error) = zeron_mcp_proxy::cleanup_run_dir(&self.path).await {
+            tracing::warn!(%error, path = %self.path.display(), "MCP run group sweep failed");
+        } else {
+            self.cleaned = true;
+            // The run is over: its capability evidence, capture binding and
+            // shim leftovers have no reader, and a directory per run would
+            // otherwise pile up and lengthen every boot sweep.
+            let _ = tokio::fs::remove_dir_all(&self.path).await;
+        }
+    }
+}
+impl Drop for RunCleanup {
+    fn drop(&mut self) {
+        if !self.cleaned
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let path = self.path.clone();
+            runtime.spawn(async move {
+                if let Err(error) = zeron_mcp_proxy::cleanup_run_dir(&path).await {
+                    tracing::warn!(%error, "MCP fallback group sweep failed");
+                } else {
+                    let _ = tokio::fs::remove_dir_all(&path).await;
+                }
+            });
+        }
+    }
+}
 
 /// Which provider session a side chat's prompt goes to.
 #[derive(Clone, Copy)]
@@ -3489,6 +3827,10 @@ fn finish_segment<'a>(
 /// engine-injected resumes retry — a caller-specified resume fails loudly),
 /// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
+    session_idle: Option<std::time::Duration>,
+    parked_activity: ParkedActivity,
+    hibernate: Arc<tokio::sync::Notify>,
+    sent_at: tokio::time::Instant,
     idle: bool,
     voice_active: Arc<VoiceActivity>,
     user_message_id: String,
@@ -3582,6 +3924,8 @@ async fn drive_run(
     turn: TurnControl,
     side_chats_only: bool,
 ) {
+    let mut run_cleanup = RunCleanup::new(inner.run_dir(&run_id));
+    let mut wake_pending = request.resume.is_some();
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
@@ -3763,6 +4107,9 @@ async fn drive_run(
                     zeron_proto::ORIGIN_ENV.into(),
                     zeron_proto::chat_origin(&chat_id),
                 );
+                wire_request
+                    .env
+                    .insert("ZERON_RUN_ID".into(), run_id.clone());
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner
@@ -3770,8 +4117,21 @@ async fn drive_run(
                     .prepare_run(harness_id, &mut wire_request)
                     .await
                 {
-                    Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
-                    Ok(()) => harness.run(wire_request, controls).await,
+                    Ok(()) => {
+                        inner
+                            .remember_hibernation_launch(
+                                &chat_id,
+                                &run_id,
+                                harness.clone(),
+                                &wire_request,
+                            )
+                            .await;
+                        if resume_state.idle {
+                            harness.start_idle(wire_request, controls).await
+                        } else {
+                            harness.run(wire_request, controls).await
+                        }
+                    }
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
             } else {
@@ -3991,34 +4351,8 @@ async fn drive_run(
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The runtime's background processes, published on the session row.
     let mut background_processes = turn.watch_background_processes();
-    // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
-    // steerable harness parks here instead of ending the run — the child and
-    // its steering mailbox stay warm, and the next user message (dispatch
-    // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. `Some(when)` = idle since then; the 30-min reaper below ends
-    // a session nobody comes back to (zeron SESSION_IDLE_MS). A voice
-    // orchestrator holds Codex and its MCP servers (~200 MB) for calls only,
-    // so it goes after 5 minutes. A call holds the reaper off, and the window
-    // restarts at hang-up. `ZERON_SESSION_IDLE_MS` overrides both (tests).
-    let session_idle = std::env::var("ZERON_SESSION_IDLE_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(
-            if zeron_proto::voice::is_orchestrator_chat(&chat_id) {
-                5 * 60
-            } else {
-                30 * 60
-            },
-        ));
-    // A live subagent stretches the window, but never unbounded: every
-    // driver's subagent terminal is a best-effort vendor signal (claude's
-    // untagged task_notification, grok's subagent_finished, codex thread
-    // closure), and one lost signal would otherwise pin the child — and this
-    // loop's registry heartbeat — until the chat is archived. A subagent
-    // silent this long (4h by default) is presumed lost; the reap stamps its
-    // chip failed.
-    let subagent_silence = session_idle * 8;
+    // Zero disables the idle timer; manual and pressure requests remain available.
+    let session_idle = resume_state.session_idle;
     let mut idle_since: Option<tokio::time::Instant> =
         resume_state.idle.then(tokio::time::Instant::now);
     // A parked runtime whose agent reports background work (see
@@ -4099,7 +4433,6 @@ async fn drive_run(
     // Last tagged subagent event. A background subagent outlives the turn that
     // spawned it, and its traffic never un-parks the chat, so the idle reaper
     // measures from here as well as from the park.
-    let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
     let mut final_completed_turn = None;
     let mut final_outcome = None;
@@ -4137,80 +4470,41 @@ async fn drive_run(
                 // A hang-up restarts the idle window, however long the call.
                 _ = resume_state.voice_active.ended.notified() => {
                     if idle_since.is_some() {
-                        idle_since = Some(tokio::time::Instant::now());
+                        let now = tokio::time::Instant::now();
+                        idle_since = Some(now);
+                        if let Some(run) = lock(&inner.runs).get_mut(&chat_id) {
+                            run.idle_since = Some(now);
+                        }
                     }
                     continue;
                 }
-                // An accepted update must not wait behind a warm between-turn
-                // child for the full idle-reaper window. The completed turn is
-                // already durable, so retire the parked process cleanly and let
-                // the queued exclusive lease proceed.
+                // Provider updates retire parked processes to release the execution lease.
                 _ = tokio::time::sleep_until(tokio::time::Instant::now()),
-                    if idle_since.is_some()
-                        && !resume_state.voice_active.live()
-                        && inner.registry.update_pending(harness_id)
-                        && !turn.background_live()
-                        && (subagents.is_empty()
-                            || last_subagent_activity.is_none_or(|at| at.elapsed() >= subagent_silence)) =>
-                {
-                    if let Some(token) = lock(&inner.runs)
-                        .get(&chat_id)
-                        .filter(|h| h.run_id == run_id)
-                        .map(|h| h.interrupt_token.clone())
-                    {
-                        token.cancel();
+                    if idle_since.is_some() && inner.registry.update_pending(harness_id)
+                        && !resume_state.voice_active.live() && !turn.background_live()
+                        && subagents.is_empty() && !inner.has_pending_steers(&chat_id, &run_id) => {
+                    if let Some(run) = lock(&inner.runs).get(&chat_id).filter(|h| h.run_id == run_id) {
+                        run.interrupt_token.cancel();
                     }
                     break SessionStatus::Idle;
                 }
-                // Idle reaper (zeron SESSION_IDLE_MS): a parked persistent session
-                // nobody returned to within its window releases its child. The turn
-                // was finalized at Done, so this end is clean — no aborted stamp.
-                // A live background subagent is somebody still using the child:
-                // the window counts from its last activity, and stretches to
-                // `subagent_silence` while its sink is open.
+                // The same eligibility check is used for pressure, manual and idle.
                 _ = tokio::time::sleep_until(
-                    {
-                        let window = if subagents.is_empty() { session_idle } else { subagent_silence };
-                        let base = idle_since
-                            .map(|at| at.max(last_subagent_activity.unwrap_or(at)) + window);
-                        match (base, reap_deferred_until) {
-                            (Some(base), Some(deferred)) => base.max(deferred),
-                            (base, deferred) => base.or(deferred).unwrap_or_else(tokio::time::Instant::now),
-                        }
-                    }
-                ), if idle_since.is_some() && !resume_state.voice_active.live() => {
-                    // A call that began after this wait was armed holds it off.
-                    if resume_state.voice_active.live() {
-                        continue;
-                    }
-                    // The driver's own report of background work (Claude's
-                    // background agents and shells) is authoritative — it
-                    // lists every task the process still runs — so it holds
-                    // the runtime for as long as that work lives.
+                    idle_since.zip(session_idle).map(|(at, window)| at + window)
+                        .map(|at| at.max(reap_deferred_until.unwrap_or(at)))
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if idle_since.is_some() && session_idle.is_some() => {
                     if turn.background_live() {
-                        tracing::info!(chat = %chat_id, "idle reaper deferred: the agent reports background work");
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
                         held_for_background = true;
+                    } else if std::mem::take(&mut held_for_background) {
+                        // A background completion can wake the agent's next turn.
+                        reap_deferred_until = session_idle.map(|window| tokio::time::Instant::now() + window);
                         continue;
+                    } else if subagents.is_empty() && inner.hibernate(&chat_id, HibernateReason::Idle) {
+                        // The Notify arm rechecks under the steering ledger lock.
                     }
-                    if std::mem::take(&mut held_for_background) {
-                        // The work just ended: a full idle window from here.
-                        reap_deferred_until = Some(tokio::time::Instant::now() + session_idle);
-                        continue;
-                    }
-                    tracing::info!(
-                        chat = %chat_id,
-                        live_subagents = subagents.len(),
-                        "reaping idle persistent session"
-                    );
-                    if let Some(token) = lock(&inner.runs)
-                        .get(&chat_id)
-                        .filter(|h| h.run_id == run_id)
-                        .map(|h| h.interrupt_token.clone())
-                    {
-                        token.cancel();
-                    }
-                    break SessionStatus::Idle;
+                    reap_deferred_until = session_idle.map(|window| tokio::time::Instant::now() + window);
+                    continue;
                 }
                 // Engine-made events are final: a `show_image` image is
                 // already in uploads, outside the generated-image intake root.
@@ -4251,6 +4545,22 @@ async fn drive_run(
                         session_id: None,
                     },
                 },
+                _ = resume_state.hibernate.notified() => {
+                    if idle_since.is_none() || !subagents.is_empty() { continue; }
+                    if let Some((reason, idle_s, token)) = inner.claim_hibernation(&chat_id, &run_id) {
+                        let dir = run_cleanup.path.clone();
+                        let pss_freed_mib = tokio::task::spawn_blocking(move || {
+                            crate::memory_pressure::run_pss_mib(&dir)
+                        }).await.ok().flatten();
+                        tracing::info!(event = "session_hibernated", harness = ?harness_id,
+                            reason = reason.as_str(), idle_s, pss_freed_mib, chat = %chat_id,
+                            "session_hibernated");
+                        token.cancel();
+                        break SessionStatus::Idle;
+                    }
+                    continue;
+                }
+
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
                     #[cfg(test)]
                     FLUSH_TICKS.with(|t| t.set(t.get() + 1));
@@ -4339,6 +4649,11 @@ async fn drive_run(
                 }
             };
 
+            if std::mem::take(&mut wake_pending) {
+                tracing::info!(event = "session_woken", harness = ?harness_id,
+                    latency_ms = resume_state.sent_at.elapsed().as_millis() as u64,
+                    prewarmed = false, chat = %chat_id, "session_woken");
+            }
             prepared_events.extend(
                 inner
                     .prepare_generated_image(&chat_id, raw_event, &mut seen_images)
@@ -4365,7 +4680,7 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
-            last_subagent_activity = Some(tokio::time::Instant::now());
+
             // Background subagents can outlive the turn and be the only
             // traffic for minutes: keep the row (and its count) inside the
             // UI's staleness window while any is live.
@@ -4541,6 +4856,12 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        // Output after the park's tail flush means the agent is running a turn
+        // the parked gate has yet to recognise (it drops reasoning and results
+        // until text or a tool call opens the segment).
+        if idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
+            *lock(&resume_state.parked_activity) = Some(tokio::time::Instant::now());
+        }
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
@@ -5073,6 +5394,23 @@ async fn drive_run(
         }
     };
 
+    // Dropping the stream releases the adapter receiver; its task retains the
+    // execution lease until the harness has reaped its child. Sweep afterwards.
+    if let Some(run) = lock(&inner.runs)
+        .get(&chat_id)
+        .filter(|h| h.run_id == run_id)
+    {
+        run.interrupt_token.cancel();
+    }
+    drop(stream);
+    if let Some(lease) = &_execution_lease {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while Arc::strong_count(lease) > 1 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    run_cleanup.cleanup().await;
+
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
     for (parent_id, sink) in subagents.drain() {
@@ -5175,6 +5513,1095 @@ async fn drive_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hibernation_window_precedence_and_zero() {
+        let minutes = |m: u64| Some(std::time::Duration::from_secs(m * 60));
+        assert_eq!(session_idle_window(None, false, 10), minutes(10));
+        assert_eq!(session_idle_window(None, false, 3), minutes(3));
+        assert_eq!(session_idle_window(None, true, 10), minutes(5));
+        assert_eq!(
+            session_idle_window(Some("17"), true, 10),
+            Some(std::time::Duration::from_millis(17))
+        );
+        assert_eq!(session_idle_window(Some("0"), true, 10), None);
+        assert_eq!(session_idle_window(None, false, 0), None);
+        assert_eq!(session_idle_window(Some("bad"), false, 10), minutes(10));
+    }
+
+    struct HibernationFixture {
+        launches: Arc<Mutex<Vec<RunRequest>>>,
+        conversation: Arc<Mutex<Vec<String>>>,
+        channel: bool,
+        harness_id: HarnessId,
+        claude_exe: Option<std::path::PathBuf>,
+        plugin_discovery: Option<zeron_mcp_proxy::discovery::Discovery>,
+        hold_turn: bool,
+        finish: Arc<tokio::sync::Notify>,
+        /// Wakes the parked child into a turn of its own: reasoning, no text.
+        think: Arc<tokio::sync::Notify>,
+        /// The provider has lost the conversation a resume asks for.
+        lose_session: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Harness for HibernationFixture {
+        fn id(&self) -> HarnessId {
+            self.harness_id
+        }
+        fn display_name(&self) -> &str {
+            "hibernation fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[]
+        }
+        fn hibernation_safe(&self, request: &RunRequest, data: &std::path::Path) -> bool {
+            self.claude_exe.as_ref().map_or(!self.channel, |exe| {
+                zeron_harness::ClaudeHarness::new()
+                    .with_executable(exe)
+                    .hibernation_safe(request, data)
+            })
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            mut controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            lock(&self.launches).push(request.clone());
+            if request.resume.is_some()
+                && self
+                    .lose_session
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let id = request.resume.clone().unwrap_or_default();
+                return Ok(futures::stream::iter([Ok(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some(format!(
+                        "Claude exited unexpectedly (exit code 1): No conversation found with session ID: {id}"
+                    )),
+                    session_id: None,
+                })])
+                .boxed());
+            }
+            if let Some(discovery) = self.plugin_discovery {
+                record_plugin_discovery(&request.mcp_plan.as_ref().unwrap().run_dir, discovery);
+            }
+            if request.resume.is_none() {
+                lock(&self.conversation).clear();
+            } else {
+                assert_eq!(request.resume.as_deref(), Some("hibernation-session"));
+            }
+            lock(&self.conversation).push(request.prompt);
+            let conversation = self.conversation.clone();
+            let hold = self.hold_turn;
+            let harness_id = self.harness_id;
+            let finish = self.finish.clone();
+            let think = self.think.clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                // Retain the lease until the fake child has actually stopped.
+                let _lease = controls.execution_lease.take();
+                let _ = tx.send(Ok(AgentEvent::SessionStarted {
+                    harness: harness_id,
+                    model: "fake".into(),
+                    tools: vec![],
+                    cwd: request.cwd,
+                    session_id: "hibernation-session".into(),
+                    assistant_message_id: "a".into(),
+                }));
+                if hold {
+                    tokio::select! {
+                        _ = finish.notified() => {},
+                        _ = controls.interrupt.cancelled() => return,
+                    }
+                }
+                let _ = tx.send(Ok(text(&lock(&conversation).join(","))));
+                let _ = tx.send(Ok(done(DoneStatus::Completed)));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = controls.interrupt.cancelled() => break,
+                        _ = think.notified() => {
+                            tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+                            let _ = tx.send(Ok(AgentEvent::ReasoningDelta { text: "hmm".into() }));
+                        }
+                        next = controls.steering.recv() => {
+                            let Some(next) = next else { break; };
+                            lock(&conversation).push(next.prompt);
+                            let _ = tx.send(Ok(AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: None }));
+                            let _ = tx.send(Ok(text(&lock(&conversation).join(","))));
+                            let _ = tx.send(Ok(done(DoneStatus::Completed)));
+                        }
+                    }
+                }
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+    struct HibernationTest {
+        _dir: tempfile::TempDir,
+        core: crate::EngineCore,
+        fixture: Arc<HibernationFixture>,
+        request: RunRequest,
+    }
+    impl HibernationTest {
+        async fn new(channel: bool, hold_turn: bool) -> Self {
+            Self::with_window(channel, hold_turn, 10).await
+        }
+        async fn with_window(channel: bool, hold_turn: bool, minutes: u32) -> Self {
+            let id = if channel {
+                HarnessId::ClaudeCode
+            } else {
+                HarnessId::Mock
+            };
+            Self::configured(channel, hold_turn, minutes, id, None, None).await
+        }
+        async fn configured(
+            channel: bool,
+            hold_turn: bool,
+            minutes: u32,
+            harness_id: HarnessId,
+            rows: Option<Vec<serde_json::Value>>,
+            plugin_discovery: Option<zeron_mcp_proxy::discovery::Discovery>,
+        ) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let registry = Arc::new(HarnessRegistry::new());
+            let claude_exe = rows.as_ref().map(|_| {
+                let exe = dir.path().join(if cfg!(windows) { "claude.exe" } else { "claude" });
+                std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                exe
+            });
+            let fixture = Arc::new(HibernationFixture {
+                launches: Default::default(),
+                conversation: Default::default(),
+                channel,
+                harness_id,
+                claude_exe,
+                plugin_discovery,
+                hold_turn,
+                finish: Default::default(),
+                think: Default::default(),
+                lose_session: Default::default(),
+            });
+            registry.register(fixture.clone());
+            let core = crate::EngineCore::assemble_with_profile(
+                crate::EngineProfile::local(dir.path()).unwrap(),
+                registry,
+                harness_id,
+                None,
+            )
+            .unwrap();
+            core.workspace
+                .create_chat("sleep", None, Some(&core.device_id), None, None)
+                .unwrap();
+            let mut prefs = core.registry.mcp_prefs();
+            prefs.session_idle_minutes = minutes;
+            core.registry.set_mcp_prefs(prefs);
+            let mut request = request();
+            request.cwd = dir.path().to_string_lossy().into_owned();
+            if let Some(rows) = rows {
+                use zeron_harness::claude::mcp_capture::{
+                    ClaudeMcpSnapshot, FingerprintInputs, SnapshotStore,
+                };
+                let config = dir.path().join("claude-config");
+                std::fs::create_dir_all(&config).unwrap();
+                request.env.insert(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    config.to_string_lossy().into_owned(),
+                );
+                request
+                    .env
+                    .insert("HOME".into(), dir.path().to_string_lossy().into_owned());
+                let key = FingerprintInputs::for_run(Some(dir.path()), &request.env)
+                    .unwrap()
+                    .key(fixture.claude_exe.as_ref().unwrap())
+                    .unwrap();
+                SnapshotStore::new(&core.registry.data_dir().unwrap())
+                    .save(&ClaudeMcpSnapshot::new(
+                        key,
+                        rows.into_iter()
+                            .map(|row| serde_json::from_value(row).unwrap())
+                            .collect(),
+                    ))
+                    .unwrap();
+            }
+            core.sessions
+                .dispatch("sleep", harness_id, request.clone(), None)
+                .await
+                .unwrap();
+            let test = Self {
+                _dir: dir,
+                core,
+                fixture,
+                request,
+            };
+            test.wait(if hold_turn {
+                zeron_proto::RuntimeState::Live
+            } else {
+                zeron_proto::RuntimeState::Parked
+            })
+            .await;
+            test
+        }
+        async fn wait(&self, state: zeron_proto::RuntimeState) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if self
+                        .core
+                        .sessions
+                        .session_status("sleep")
+                        .is_some_and(|s| s.runtime == Some(state))
+                        && !lock(&self.fixture.launches).is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("runtime transition");
+        }
+        async fn rejects(&self) {
+            self.rejects_now().await;
+            // The automatic idle deadline must honor the same exclusion too.
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(601)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(self.core.sessions.has_run("sleep"));
+            tokio::time::resume();
+        }
+        /// Every request path refuses, now. For guards that expire with the
+        /// clock, which an idle deadline ten virtual minutes on rightly outlasts.
+        async fn rejects_now(&self) {
+            // Make parked runs old enough for pressure selection as well.
+            if let Some(at) = &mut lock(&self.core.sessions.inner.runs)
+                .get_mut("sleep")
+                .unwrap()
+                .idle_since
+            {
+                *at = tokio::time::Instant::now() - std::time::Duration::from_secs(300);
+            }
+            assert!(!self.core.sessions.hibernate("sleep"));
+            self.core.sessions.inner.hibernate_pressure();
+            // Exercise the final Notify guard independently of the RPC picker.
+            {
+                let mut runs = lock(&self.core.sessions.inner.runs);
+                let run = runs.get_mut("sleep").unwrap();
+                run.hibernate_reason = Some((
+                    HibernateReason::Manual,
+                    run.idle_since.unwrap_or_else(tokio::time::Instant::now),
+                ));
+                run.hibernate.notify_one();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
+        }
+    }
+
+    #[tokio::test]
+    async fn hibernation_idle_timer_uses_pref_and_zero_disables_it() {
+        let t = HibernationTest::with_window(false, false, 1).await;
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(t.core.sessions.has_run("sleep"));
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+        let t = HibernationTest::with_window(false, false, 0).await;
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(601)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(t.core.sessions.has_run("sleep"));
+        tokio::time::resume();
+        t.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hibernation_never_interrupts_an_active_turn() {
+        let t = HibernationTest::new(false, true).await;
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_pending_input() {
+        let t = HibernationTest::new(false, false).await;
+        let (tx, _rx) = oneshot::channel();
+        lock(&lock(&t.core.sessions.inner.runs)["sleep"].pending_inputs).insert("input".into(), tx);
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_an_approval() {
+        let t = HibernationTest::new(false, false).await;
+        t.core
+            .sessions
+            .set_status("sleep", SessionStatus::AwaitingInput, false);
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_background_processes() {
+        let t = HibernationTest::new(false, false).await;
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .turn
+            .set_background(1);
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_scheduled_work() {
+        // A ScheduleWakeup or cron timer lives in the agent process; the task
+        // roster does not list it.
+        let t = HibernationTest::new(false, false).await;
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .turn
+            .set_scheduled_until(
+                ahead
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            );
+        t.rejects().await;
+        // Fired or cancelled: the runtime is free again.
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .turn
+            .set_scheduled_until(0);
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_a_wake_turn_that_has_only_reasoned_so_far() {
+        // The parked gate drops reasoning until text or a tool call opens the
+        // segment, so the row still reads Idle while the agent is mid-turn.
+        let t = HibernationTest::new(false, false).await;
+        t.fixture.think.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity).is_none() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("reasoning while parked is recorded");
+        t.rejects_now().await;
+        // Quiet again: the usual rules apply.
+        *lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity) = None;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_waits_for_the_wake_a_finished_background_task_causes() {
+        let t = HibernationTest::new(false, false).await;
+        let turn = lock(&t.core.sessions.inner.runs)["sleep"].turn.clone();
+        turn.set_background(1);
+        turn.set_background(0);
+        // The roster just emptied: the agent's notification turn is on its way.
+        t.rejects_now().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_a_voice_call() {
+        let t = HibernationTest::new(false, false).await;
+        let call = lock(&t.core.sessions.inner.runs)["sleep"]
+            .voice_active
+            .call();
+        t.rejects().await;
+        drop(call);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_active_subagents() {
+        let t = HibernationTest::new(false, false).await;
+        t.core.sessions.inner.set_running_subagents("sleep", 1);
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_a_channel_server() {
+        let t = HibernationTest::new(true, false).await;
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    fn record_plugin_discovery(run: &str, discovery: zeron_mcp_proxy::discovery::Discovery) {
+        let mut config = zeron_mcp_proxy::Config::parse(
+            [
+                "--server",
+                "plugin:fixture:server",
+                "--",
+                "node",
+                "server.js",
+            ]
+            .map(str::to_owned),
+            std::path::PathBuf::from(run)
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        config.run_dir = Some(run.into());
+        zeron_mcp_proxy::discovery::record_run_discovery(&config, discovery).unwrap();
+    }
+    fn plugin_rows() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"name":"plugin:fixture:server", "status":"connected",
+            "scope":"dynamic", "source":"plugin", "transport":"stdio",
+            "config":{"command":"node","args":["server.js"]}}),
+        ]
+    }
+    #[tokio::test]
+    async fn hibernation_codex_ignores_channel_guards() {
+        // Neither a negative driver report nor a proxy-wide marker applies to Codex.
+        let t = HibernationTest::configured(true, false, 10, HarnessId::Codex, None, None).await;
+        let dir = {
+            let runs = lock(&t.core.sessions.inner.runs);
+            t.core.sessions.inner.run_dir(&runs["sleep"].run_id)
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("channel-live"), "irrelevant-to-codex").unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_non_plugin_servers_include_absolute_native_servers() {
+        let rows = ["user", "project", "local", "dynamic"]
+            .into_iter()
+            .map(|scope| {
+                serde_json::json!({"name":format!("non-plugin-{scope}"), "status":"connected",
+                "source":scope,"scope":scope,"transport":"stdio",
+                "config":{"command":"/absolute/reins","args":["mcp"]},
+                "capabilities":{"experimental":{"claude/channel":{}}}})
+            })
+            .collect();
+        let t =
+            HibernationTest::configured(false, false, 10, HarnessId::ClaudeCode, Some(rows), None)
+                .await;
+        let dir = {
+            let runs = lock(&t.core.sessions.inner.runs);
+            t.core.sessions.inner.run_dir(&runs["sleep"].run_id)
+        };
+        std::fs::write(dir.join("channel-live"), "non-plugin-advertisement").unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_plugin_unknown_stays_awake() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            None,
+        )
+        .await;
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_plugin_confirmed_non_channel_hibernates() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            Some(zeron_mcp_proxy::discovery::Discovery::NonChannel),
+        )
+        .await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_honors_a_plugin_channel_discovered_after_launch() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            Some(zeron_mcp_proxy::discovery::Discovery::NonChannel),
+        )
+        .await;
+        let run = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+        record_plugin_discovery(
+            t.core.sessions.inner.run_dir(&run).to_str().unwrap(),
+            zeron_mcp_proxy::discovery::Discovery::Channel,
+        );
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_a_pending_message() {
+        let t = HibernationTest::new(false, false).await;
+        lock(&lock(&t.core.sessions.inner.runs)["sleep"].routed_steers).push_back(RoutedSteer {
+            prompt: "pending".into(),
+            message_id: "pending".into(),
+            fork_history: false,
+            after_stop: false,
+            request: Some(Box::new(t.request.clone())),
+        });
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_rpcs_accept_only_safely_parked_runs() {
+        use zeron_rpc::{RpcReply, RpcService, methods};
+        let t = HibernationTest::new(false, false).await;
+        let rpc = t.core.rpc_service();
+        let reply = rpc
+            .handle(
+                methods::HIBERNATE_CHAT,
+                serde_json::json!({"chatId":"missing"}),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply, RpcReply::Value(value) if value["hibernating"] == false));
+        let reply = rpc
+            .handle(
+                methods::HIBERNATE_CHAT,
+                serde_json::json!({"chatId":"sleep"}),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply, RpcReply::Value(value) if value["hibernating"] == true));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, t.request.clone(), None)
+            .await
+            .unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let reply = rpc
+            .handle(methods::HIBERNATE_IDLE, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(reply, RpcReply::Value(value) if value["hibernating"] == 1));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hibernation_boot_sweep_finishes_before_the_first_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = crate::EngineProfile::local(dir.path()).unwrap();
+        let run = profile.device_root().join("run/mcp/orphan");
+        let mut child = crate::memory_pressure::fake_group(&run);
+        let marker = run.join(child.id().unwrap().to_string());
+        let core = crate::EngineCore::assemble_with_profile(
+            profile,
+            Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        // Even a rejected launch waits for the boot barrier before resolving a harness.
+        assert!(
+            core.sessions
+                .dispatch("none", HarnessId::Mock, request(), None)
+                .await
+                .is_err()
+        );
+        assert!(!marker.exists());
+        assert!(!run.exists(), "a dead engine's run directory is removed");
+        assert!(!child.wait().await.unwrap().success());
+        core.sessions.shutdown().await;
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hibernation_run_end_sweeps_proxy_process_groups() {
+        let t = HibernationTest::new(false, false).await;
+        let dir = {
+            let runs = lock(&t.core.sessions.inner.runs);
+            t.core.sessions.inner.run_dir(&runs["sleep"].run_id)
+        };
+        let mut child = crate::memory_pressure::fake_group(&dir);
+        let marker = dir.join(child.id().unwrap().to_string());
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        assert!(!child.wait().await.unwrap().success());
+        assert!(!marker.exists());
+        // Nothing reads the run's evidence once it ends: the directory goes too.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("run directory removed after its sweep");
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_pressure_uses_lru_skips_held_runs_and_obeys_floor() {
+        let t = HibernationTest::new(false, false).await;
+        for chat in ["oldest-held", "eligible", "young"] {
+            t.core
+                .sessions
+                .dispatch(chat, HarnessId::Mock, t.request.clone(), None)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if ["oldest-held", "eligible", "young"].iter().all(|chat| {
+                    t.core
+                        .sessions
+                        .session_status(chat)
+                        .is_some_and(|s| s.runtime == Some(zeron_proto::RuntimeState::Parked))
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        {
+            let mut runs = lock(&t.core.sessions.inner.runs);
+            let now = tokio::time::Instant::now();
+            runs.get_mut("oldest-held").unwrap().idle_since =
+                Some(now - std::time::Duration::from_secs(900));
+            runs["oldest-held"].turn.set_background(1);
+            runs.get_mut("eligible").unwrap().idle_since =
+                Some(now - std::time::Duration::from_secs(500));
+            runs.get_mut("sleep").unwrap().idle_since =
+                Some(now - std::time::Duration::from_secs(200));
+        }
+        t.core.sessions.inner.hibernate_pressure();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while t.core.sessions.has_run("eligible") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(t.core.sessions.has_run("oldest-held"));
+        assert!(t.core.sessions.has_run("sleep"));
+        assert!(t.core.sessions.has_run("young"));
+        t.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hibernation_preserves_transcript_and_resumes_the_conversation() {
+        let t = HibernationTest::new(false, false).await;
+        let handle = t.core.sessions.doc_handle("sleep").unwrap();
+        let before = handle.doc().export_snapshot().unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        assert_eq!(handle.doc().export_snapshot().unwrap(), before);
+        let mut next = t.request.clone();
+        next.prompt = "second".into();
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, next, None)
+            .await
+            .unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        assert_eq!(lock(&t.fixture.launches).len(), 2);
+        assert_eq!(
+            lock(&t.fixture.launches)[1].resume.as_deref(),
+            Some("hibernation-session")
+        );
+        assert_eq!(*lock(&t.fixture.conversation), ["first", "second"]);
+        let entries = handle.doc().read_entries().unwrap();
+        assert!(entries.iter().any(|e| {
+            e.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "first,second"))
+        }));
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_wake_keeps_model_access_cwd_and_env() {
+        let t = HibernationTest::new(false, false).await;
+        // The chat's own configuration, as the client sends it with each message.
+        let mut configured = t.request.clone();
+        configured.model = Some("model-under-test".into());
+        configured.reasoning = Some(zeron_proto::ReasoningLevel::Low);
+        configured.sandbox = SandboxLevel::ReadOnly;
+        configured.auto_approve = false;
+        configured.plan = true;
+        configured
+            .env
+            .insert("PROJECT_FLAG".into(), "kept".into());
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, configured.clone(), None)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&t.fixture.launches).len() < 2
+                && !lock(&t.fixture.conversation).contains(&configured.prompt)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The configuration changed, so the parked runtime was replaced in
+        // place; hibernate the one that took it, then wake it with the same.
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let before = lock(&t.fixture.launches).len();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        let mut wake = configured.clone();
+        wake.prompt = "wake".into();
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, wake, None)
+            .await
+            .unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let launches = lock(&t.fixture.launches).clone();
+        assert_eq!(launches.len(), before + 1, "the wake is one fresh launch");
+        let woke = launches.last().unwrap();
+        assert_eq!(woke.resume.as_deref(), Some("hibernation-session"));
+        assert_eq!(woke.model.as_deref(), Some("model-under-test"));
+        assert_eq!(woke.reasoning, Some(zeron_proto::ReasoningLevel::Low));
+        assert_eq!(woke.sandbox, SandboxLevel::ReadOnly);
+        assert!(!woke.auto_approve);
+        assert!(woke.plan);
+        assert_eq!(woke.cwd, configured.cwd);
+        assert_eq!(woke.env.get("PROJECT_FLAG").map(String::as_str), Some("kept"));
+        // The wake is a new run: its own stamp, not the retired runtime's.
+        let first_run = launches[before - 1].env.get("ZERON_RUN_ID");
+        assert_ne!(woke.env.get("ZERON_RUN_ID"), first_run);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_wake_after_the_provider_lost_the_session_says_so() {
+        let t = HibernationTest::new(false, false).await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.fixture
+            .lose_session
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut wake = t.request.clone();
+        wake.prompt = "after the loss".into();
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, wake, Some("wake-msg".into()))
+            .await
+            .unwrap();
+        // The rejected resume is retried once, fresh, never silently as a
+        // continuation: the reply opens with the notice.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&t.fixture.launches).len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the rejected wake is retried");
+        {
+            let launches = lock(&t.fixture.launches);
+            assert_eq!(launches[1].resume.as_deref(), Some("hibernation-session"));
+            assert_eq!(launches[2].resume, None, "the retry starts a new session");
+            assert_eq!(launches[2].prompt, "after the loss");
+        }
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let (events, _) = t.core.sessions.subscribe("sleep", 0).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                AgentEvent::Error { message } if message == FRESH_START_NOTICE
+            )),
+            "{events:#?}"
+        );
+        // The dead id is not tried again.
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.fixture
+            .lose_session
+            .store(false, std::sync::atomic::Ordering::Release);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_cannot_retire_a_runtime_a_voice_call_is_attaching_to() {
+        let t = HibernationTest::configured(false, false, 10, HarnessId::Codex, None, None).await;
+        // The bridge is taken first; the call guard only exists once the
+        // connect has its lease. A manual request in between must not win.
+        assert!(t.core.sessions.take_voice_bridge("sleep").is_some());
+        assert!(!t.core.sessions.hibernate("sleep"));
+        // A runtime already claimed has nothing left to attach to.
+        *lock(&lock(&t.core.sessions.inner.runs)["sleep"].parked_activity) = None;
+        let run_id = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+        assert!(t.core.sessions.hibernate("sleep"));
+        assert!(
+            t.core
+                .sessions
+                .inner
+                .claim_hibernation("sleep", &run_id)
+                .is_some()
+        );
+        assert!(t.core.sessions.take_voice_bridge("sleep").is_none());
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_racing_engine_shutdown_leaves_no_runtime_or_working_row() {
+        let t = HibernationTest::new(false, false).await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.core.sessions.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while t.core.sessions.has_run("sleep") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the run ends once");
+        let row = t.core.sessions.session_status("sleep").unwrap();
+        assert_eq!(row.status, SessionStatus::Idle);
+        assert_eq!(row.runtime, Some(zeron_proto::RuntimeState::Hibernated));
+    }
+    #[tokio::test]
+    async fn hibernation_racing_a_stop_or_archive_ends_the_run_once() {
+        // Archiving a chat terminates its runtime; the two claims serialize on
+        // the steering ledger and exactly one tears the run down.
+        let t = HibernationTest::new(false, false).await;
+        let (hibernated, terminated) = tokio::join!(
+            async { t.core.sessions.hibernate("sleep") },
+            t.core.sessions.terminate("sleep")
+        );
+        assert!(terminated.unwrap());
+        let _ = hibernated;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while t.core.sessions.has_run("sleep") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the run ends");
+        // Nothing queued behind it fires a second teardown or a phantom launch.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!t.core.sessions.has_run("sleep"));
+        assert_eq!(lock(&t.fixture.launches).len(), 1);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_rejects_a_notification_from_an_older_park() {
+        let t = HibernationTest::new(false, false).await;
+        let run_id = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+        assert!(t.core.sessions.hibernate("sleep"));
+        // A turn has started and completed since the request was queued.
+        t.core
+            .sessions
+            .set_status("sleep", SessionStatus::Working, false);
+        t.core
+            .sessions
+            .set_status("sleep", SessionStatus::Idle, false);
+        assert!(
+            t.core
+                .sessions
+                .inner
+                .claim_hibernation("sleep", &run_id)
+                .is_none()
+        );
+        tokio::task::yield_now().await;
+        assert!(t.core.sessions.has_run("sleep"));
+        t.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hibernation_replays_a_message_reserved_before_retirement() {
+        let t = HibernationTest::new(false, false).await;
+        let (run_id, sender, ledger, retiring) = {
+            let runs = lock(&t.core.sessions.inner.runs);
+            let run = &runs["sleep"];
+            (
+                run.run_id.clone(),
+                run.steer_tx.clone(),
+                run.routed_steers.clone(),
+                run.retiring.clone(),
+            )
+        };
+        // Incoming dispatch has selected the live runtime and reserved capacity,
+        // but has not yet committed acceptance under its ledger lock.
+        let permit = sender.reserve().await.unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        let (_, _, token) = t
+            .core
+            .sessions
+            .inner
+            .claim_hibernation("sleep", &run_id)
+            .unwrap();
+        let mut request = t.request.clone();
+        request.prompt = "orphaned-after-claim".into();
+        {
+            let mut pending = lock(&ledger);
+            pending.push_back(RoutedSteer {
+                prompt: request.prompt.clone(),
+                message_id: "orphan-race".into(),
+                fork_history: false,
+                after_stop: retiring.load(std::sync::atomic::Ordering::Acquire),
+                request: Some(Box::new(request.clone())),
+            });
+            permit.send(SteerMessage {
+                prompt: request.prompt.clone(),
+                message_id: Some("orphan-race".into()),
+                attachments: vec![],
+                config: None,
+            });
+        }
+        t.core
+            .sessions
+            .doc_handle("sleep")
+            .unwrap()
+            .write_user_message("orphan-race", &request.prompt, now_ms())
+            .unwrap();
+        t.core
+            .sessions
+            .set_status("sleep", SessionStatus::Working, false);
+        // The fake child exits without consuming its mailbox; exit must replay
+        // the ledger entry through native resume, rather than silently losing it.
+        token.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !lock(&t.fixture.conversation).contains(&request.prompt) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("orphan replay must reach the resumed harness");
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        assert_eq!(lock(&t.fixture.launches).len(), 2);
+        assert_eq!(
+            lock(&t.fixture.launches)[1].resume.as_deref(),
+            Some("hibernation-session")
+        );
+        assert_eq!(
+            t.core
+                .sessions
+                .doc_handle("sleep")
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap()
+                .iter()
+                .filter(|e| e.id == "orphan-race")
+                .count(),
+            1
+        );
+        t.core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hibernation_racing_an_incoming_message_never_loses_it() {
+        let t = HibernationTest::new(false, false).await;
+        for i in 0..12 {
+            if !t.core.sessions.has_run("sleep") {
+                let mut wake = t.request.clone();
+                wake.prompt = format!("wake-{i}");
+                t.core
+                    .sessions
+                    .dispatch("sleep", HarnessId::Mock, wake, None)
+                    .await
+                    .unwrap();
+                t.wait(zeron_proto::RuntimeState::Parked).await;
+            }
+            let mut next = t.request.clone();
+            next.prompt = format!("race-{i}");
+            let expected = next.prompt.clone();
+            // Exercise both a queued Notify and a retirement already claimed
+            // under the ledger lock before the next dispatch reaches routing.
+            if i % 3 == 2 {
+                let run_id = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+                assert!(t.core.sessions.hibernate("sleep"));
+                let (_, _, token) = t
+                    .core
+                    .sessions
+                    .inner
+                    .claim_hibernation("sleep", &run_id)
+                    .unwrap();
+                token.cancel();
+            }
+            let sleep = async {
+                t.core.sessions.hibernate("sleep");
+            };
+            let send = t.core.sessions.dispatch(
+                "sleep",
+                HarnessId::Mock,
+                next,
+                Some(format!("race-id-{i}")),
+            );
+            if i % 2 == 0 {
+                let (_, result) = tokio::join!(sleep, send);
+                result.unwrap();
+            } else {
+                let (result, _) = tokio::join!(send, sleep);
+                result.unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !lock(&t.fixture.conversation).contains(&expected)
+                    || !t
+                        .core
+                        .sessions
+                        .session_status("sleep")
+                        .is_some_and(|s| s.status == SessionStatus::Idle)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("accepted prompt must reach a harness");
+            // Retirement may settle after the completed answer; wait for its handle to leave.
+            let retiring = lock(&t.core.sessions.inner.runs)
+                .get("sleep")
+                .is_some_and(|h| h.retiring.load(std::sync::atomic::Ordering::Acquire));
+            if retiring {
+                t.wait(zeron_proto::RuntimeState::Hibernated).await;
+            }
+        }
+        let entries = t
+            .core
+            .sessions
+            .doc_handle("sleep")
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap();
+        for i in 0..12 {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|e| e.id == format!("race-id-{i}"))
+                    .count(),
+                1
+            );
+        }
+        t.core.sessions.shutdown().await;
+    }
 
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {

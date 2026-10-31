@@ -98,7 +98,7 @@ impl Process {
     fn mark(&self, pgid: u32) -> io::Result<()> {
         if let Some(dir) = &self.run_dir {
             fs::create_dir_all(dir)?;
-            let value = serde_json::json!({"pgid":pgid,"start":start_id(pgid)});
+            let value = serde_json::json!({"pgid":pgid,"start":start_id(pgid),"boot":boot_id()});
             cache::atomic_write(&dir.join(pgid.to_string()), value.to_string().as_bytes())?;
         }
         Ok(())
@@ -274,6 +274,9 @@ fn group_alive(group: u32) -> bool {
 fn group_alive(_: u32) -> bool {
     false
 }
+/// What distinguishes this process from a later one that reuses its pid: the
+/// start tick on Linux, the start time `ps` prints elsewhere. Empty when it
+/// cannot be read (no such process, or no way to read it on this platform).
 fn start_id(pid: u32) -> String {
     #[cfg(target_os = "linux")]
     {
@@ -286,11 +289,34 @@ fn start_id(pid: u32) -> String {
             })
             .unwrap_or_default();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        return std::process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+    }
+    #[cfg(not(unix))]
     {
         let _ = pid;
         String::new()
     }
+}
+/// The kernel's id of this boot. A pid and its start tick can repeat across a
+/// reboot; this cannot. Empty where the platform has none (`start_id` already
+/// carries an absolute time there).
+fn boot_id() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        return fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+    }
+    #[cfg(not(target_os = "linux"))]
+    String::new()
 }
 fn signal_group(group: u32, force: bool) {
     #[cfg(unix)]
@@ -334,12 +360,22 @@ pub async fn cleanup_run_dir(dir: &Path) -> io::Result<()> {
         if value["pgid"] != group {
             continue;
         }
-        let current = start_id(group);
-        if !current.is_empty()
-            && value["start"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s != current)
+        // The marker is only a claim that this pgid was ours. A group is
+        // signalled when its leader is provably the process we recorded, or
+        // when the leader is gone (a pid cannot be reused while its group has
+        // members, so whatever remains is that group). Anything that cannot be
+        // told apart from a stranger's process is dropped unsignalled.
+        let boot = boot_id();
+        if value["boot"]
+            .as_str()
+            .is_some_and(|b| !b.is_empty() && !boot.is_empty() && b != boot)
         {
+            fs::remove_file(entry.path())?;
+            continue;
+        }
+        let current = start_id(group);
+        let recorded = value["start"].as_str().unwrap_or_default();
+        if !current.is_empty() && recorded != current {
             fs::remove_file(entry.path())?;
             continue;
         }
@@ -432,5 +468,110 @@ mod windows {
                 TerminateJobObject(self.0.as_raw_handle(), 1);
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn leader(dir: &Path) -> (std::process::Child, PathBuf) {
+        use std::os::unix::process::CommandExt;
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let marker = dir.join(child.id().to_string());
+        (child, marker)
+    }
+    fn mark(marker: &Path, pgid: u32, start: &str, boot: Option<&str>) {
+        let mut value = serde_json::json!({"pgid":pgid,"start":start});
+        if let Some(boot) = boot {
+            value["boot"] = boot.into();
+        }
+        fs::write(marker, value.to_string()).unwrap();
+    }
+    fn alive(child: &mut std::process::Child) -> bool {
+        child.try_wait().unwrap().is_none()
+    }
+
+    #[tokio::test]
+    async fn sweep_kills_the_group_it_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = leader(dir.path());
+        mark(&marker, child.id(), &start_id(child.id()), Some(&boot_id()));
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn sweep_spares_a_process_that_reused_the_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = leader(dir.path());
+        mark(&marker, child.id(), "1", Some(&boot_id()));
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(alive(&mut child), "a different start tick is a stranger");
+        assert!(!marker.exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_spares_a_marker_from_another_boot() {
+        // Same pid, same start tick: only the boot id tells the machines apart.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = leader(dir.path());
+        mark(
+            &marker,
+            child.id(),
+            &start_id(child.id()),
+            Some("00000000-0000-0000-0000-000000000000"),
+        );
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(alive(&mut child));
+        assert!(!marker.exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_spares_a_live_leader_the_marker_cannot_identify() {
+        // A marker with no start id (written where none can be read, or when
+        // the process had just exited) proves nothing about a live process.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = leader(dir.path());
+        mark(&marker, child.id(), "", Some(&boot_id()));
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(alive(&mut child));
+        assert!(!marker.exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_still_reaps_markers_from_before_boot_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = leader(dir.path());
+        mark(&marker, child.id(), &start_id(child.id()), None);
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(!child.wait().unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn sweep_ignores_unrelated_files_and_malformed_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, _) = leader(dir.path());
+        // A numeric name whose body claims another group, one that is not
+        // JSON, and a plain file.
+        mark(&dir.path().join(child.id().to_string()), 1, "x", None);
+        fs::write(dir.path().join("4242"), "garbage").unwrap();
+        fs::write(dir.path().join("hibernate-capture"), "digest").unwrap();
+        cleanup_run_dir(dir.path()).await.unwrap();
+        assert!(alive(&mut child));
+        assert!(dir.path().join("hibernate-capture").exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }
