@@ -2,7 +2,10 @@
 //! This server does not forward requests. Run Claude in a loopback-only network
 //! namespace as well; an endpoint override alone cannot constrain all traffic.
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -10,9 +13,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+#[derive(Clone, Debug)]
+pub struct ModelRequest {
+    pub method: String,
+    pub path: String,
+    pub t_ns: u64,
+}
+
 pub struct ClaudeModel {
     pub addr: SocketAddr,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+    hold: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
@@ -22,14 +33,17 @@ impl ClaudeModel {
         let addr = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let hold = Arc::new(AtomicBool::new(false));
+        let held = hold.clone();
         let task = tokio::spawn(async move {
             while let Ok((stream, peer)) = listener.accept().await {
                 if !peer.ip().is_loopback() {
                     continue;
                 }
                 let recorded = recorded.clone();
+                let held = held.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = serve(stream, recorded).await {
+                    if let Err(err) = serve(stream, recorded, held).await {
                         eprintln!("model fixture: {err:#}");
                     }
                 });
@@ -38,6 +52,7 @@ impl ClaudeModel {
         Ok(Self {
             addr,
             requests,
+            hold,
             task,
         })
     }
@@ -46,7 +61,20 @@ impl ClaudeModel {
         format!("http://{}", self.addr)
     }
     pub fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.path.clone())
+            .collect()
+    }
+
+    pub fn events(&self) -> Vec<ModelRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub fn hold_responses(&self, held: bool) {
+        self.hold.store(held, Ordering::Relaxed);
     }
 }
 
@@ -56,7 +84,11 @@ impl Drop for ClaudeModel {
     }
 }
 
-async fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<String>>>) -> Result<()> {
+async fn serve(
+    mut stream: TcpStream,
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+    hold: Arc<AtomicBool>,
+) -> Result<()> {
     let mut buf = Vec::new();
     let header_end = loop {
         ensure!(buf.len() < 65536, "model request headers too large");
@@ -70,11 +102,20 @@ async fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<String>>>) -> Resu
     let mut lines = headers.lines();
     let first = lines.next().context("empty request")?;
     let mut fields = first.split_whitespace();
-    ensure!(fields.next() == Some("POST"), "model request is not POST");
+    let method = fields
+        .next()
+        .context("model request missing method")?
+        .to_string();
     let path = fields
         .next()
         .context("model request missing path")?
         .to_string();
+    requests.lock().unwrap().push(ModelRequest {
+        method: method.clone(),
+        path: path.clone(),
+        t_ns: crate::mono_now(),
+    });
+    ensure!(method == "POST", "model request is not POST");
     let length: usize = lines
         .filter_map(|line| line.split_once(':'))
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -87,7 +128,9 @@ async fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<String>>>) -> Resu
         ensure!(stream.read_buf(&mut buf).await? != 0, "short model request");
     }
     let payload: Value = serde_json::from_slice(&buf[header_end..header_end + length])?;
-    requests.lock().unwrap().push(path.clone());
+    while hold.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let endpoint = path.split('?').next().unwrap_or("");
     let (content_type, body) = if endpoint == "/v1/messages/count_tokens" {
         ("application/json", json!({"input_tokens":0}).to_string())

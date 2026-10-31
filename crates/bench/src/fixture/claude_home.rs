@@ -8,15 +8,20 @@ use serde_json::json;
 
 const SERVER: &str = r#"'use strict';
 const readline = require('readline');
+const fs = require('fs');
 // Touch every page so the resident footprint resembles a Node MCP server.
 const ballast = Buffer.alloc(175 * 1024 * 1024, 1);
+if (process.env.ZB_MCP_EVENT_FILE) fs.appendFileSync(process.env.ZB_MCP_EVENT_FILE, JSON.stringify({pid:process.pid, event:'spawn', t_ns:process.hrtime.bigint().toString()})+'\n');
 readline.createInterface({input: process.stdin}).on('line', line => {
   let msg;
   try { msg = JSON.parse(line); } catch (_) { return; }
   if (msg.id === undefined) return;
   let result;
-  if (msg.method === 'initialize') result = {protocolVersion: '2024-11-05', capabilities: {tools: {}}, serverInfo: {name: 'zb-synthetic', version: '1'}};
-  else if (msg.method === 'tools/list') result = {tools: [{name: 'echo', description: 'Offline benchmark echo', inputSchema: {type: 'object', properties: {}}}]};
+  if (msg.method === 'initialize') result = {protocolVersion: msg.params?.protocolVersion || '2024-11-05', capabilities: {tools: {}}, serverInfo: {name: 'zb-synthetic', version: '1'}};
+  else if (msg.method === 'tools/list') {
+    if (process.env.ZB_MCP_EVENT_FILE) fs.appendFileSync(process.env.ZB_MCP_EVENT_FILE, JSON.stringify({pid:process.pid, event:'tools/list', t_ns:process.hrtime.bigint().toString()})+'\n');
+    result = {tools: [{name: 'echo', description: 'Offline benchmark echo', inputSchema: {type: 'object', properties: {}}}]};
+  }
   else if (msg.method === 'tools/call' && msg.params?.name === 'echo') result = {content: [{type: 'text', text: 'ok'}]};
   else { process.stdout.write(JSON.stringify({jsonrpc:'2.0', id:msg.id, error:{code:-32601, message:'unknown method'}})+'\n'); return; }
   process.stdout.write(JSON.stringify({jsonrpc:'2.0', id:msg.id, result})+'\n');
@@ -49,8 +54,9 @@ pub fn setup(root: &Path) -> Result<PathBuf> {
         super::fixture_dir(&root, &["cache", "claude-home", "plugin", ".claude-plugin"])?;
     let marketplace = super::fixture_dir(&root, &["cache", "claude-home", ".claude-plugin"])?;
     let plugins = super::fixture_dir(&root, &["cache", "claude-home", "plugins"])?;
-    let entry = json!({"type":"stdio", "command":"node", "args":[server, "entry"]});
-    let plugin_server = json!({"type":"stdio", "command":"node", "args":[server, "plugin"]});
+    let event_file = dir.join("server-events.jsonl");
+    let entry = json!({"type":"stdio", "command":"node", "args":[server, "entry"], "env":{"ZB_MCP_EVENT_FILE":event_file}});
+    let plugin_server = json!({"type":"stdio", "command":"node", "args":[server, "plugin"], "env":{"ZB_MCP_EVENT_FILE":event_file}});
     write_new(&server, SERVER.as_bytes())?;
     write_new(
         &dir.join(".claude.json"),

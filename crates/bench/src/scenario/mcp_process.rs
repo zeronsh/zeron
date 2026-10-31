@@ -11,6 +11,7 @@ use anyhow::{Context, Result, ensure};
 #[derive(Debug, PartialEq, Eq)]
 pub struct McpProcesses {
     pub servers: usize,
+    pub server_pids: Vec<u32>,
     pub roots: Vec<u32>,
     pub pss_kib: u64,
 }
@@ -63,7 +64,7 @@ pub fn measure(
     let canonical_proxy = proxy.map(fs::canonicalize).transpose()?;
     let canonical_runtime = fs::canonicalize(runtime)?;
     let mut seeds = BTreeSet::new();
-    let mut servers = 0;
+    let mut server_pids = Vec::new();
     for &pid in parents
         .keys()
         .filter(|&&p| p != claude_pid && is_descendant(p))
@@ -78,7 +79,7 @@ pub fn measure(
                 .split(|b| *b == 0)
                 .any(|arg| arg == script.as_os_str().as_bytes());
         if server {
-            servers += 1;
+            server_pids.push(pid);
             seeds.insert(pid);
         }
         if let Some(proxy) = &canonical_proxy
@@ -130,10 +131,153 @@ pub fn measure(
         pss_kib += value;
     }
     Ok(McpProcesses {
-        servers,
+        servers: server_pids.len(),
+        server_pids,
         roots: roots.into_iter().collect(),
         pss_kib,
     })
+}
+
+/// Capture a live descendant set before teardown so reparented children can
+/// still be checked after the engine exits.
+pub fn descendant_pids(root: u32) -> Result<Vec<u32>> {
+    let mut pending = vec![root];
+    let mut found = BTreeSet::new();
+    while let Some(pid) = pending.pop() {
+        if !found.insert(pid) {
+            continue;
+        }
+        let tasks = match fs::read_dir(format!("/proc/{pid}/task")) {
+            Ok(tasks) => tasks,
+            Err(err) if pid != root && err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("read process {pid} tasks")),
+        };
+        for task in tasks {
+            let task = task?;
+            match fs::read_to_string(task.path().join("children")) {
+                Ok(children) => pending.extend(
+                    children
+                        .split_whitespace()
+                        .filter_map(|v| v.parse::<u32>().ok()),
+                ),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    found.remove(&root);
+    Ok(found.into_iter().collect())
+}
+
+/// Sum one live process and its descendants; never count a vanished process as zero.
+pub fn tree_pss_kib(root: u32) -> Result<u64> {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    let mut pss = 0u64;
+    while let Some(pid) = pending.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        let base = format!("/proc/{pid}");
+        let rollup = fs::read_to_string(format!("{base}/smaps_rollup"))
+            .with_context(|| format!("read process {pid} PSS"))?;
+        let value: u64 = rollup
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Pss:")
+                    .and_then(|s| s.split_whitespace().next())
+            })
+            .context("missing Pss")?
+            .parse()?;
+        pss += value;
+        for task in fs::read_dir(format!("{base}/task"))? {
+            let task = task?;
+            match fs::read_to_string(task.path().join("children")) {
+                Ok(children) => pending.extend(
+                    children
+                        .split_whitespace()
+                        .filter_map(|v| v.parse::<u32>().ok()),
+                ),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    Ok(pss)
+}
+
+/// Real Claude descendants of an engine, selected by executable identity.
+pub fn claude_descendants(engine: u32, executable: &Path) -> Result<Vec<u32>> {
+    let executable = fs::canonicalize(executable)?;
+    let mut parents = BTreeMap::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        if fields.next() == Some("Z") {
+            continue;
+        }
+        if let Some(ppid) = fields.next().and_then(|p| p.parse::<u32>().ok()) {
+            parents.insert(pid, ppid);
+        }
+    }
+    ensure!(parents.contains_key(&engine), "engine exited");
+    let mut result = Vec::new();
+    for &pid in parents.keys() {
+        if fs::read_link(format!("/proc/{pid}/exe")).ok().as_deref() != Some(executable.as_path()) {
+            continue;
+        }
+        let mut current = pid;
+        for _ in 0..256 {
+            let Some(&parent) = parents.get(&current) else {
+                break;
+            };
+            if parent == engine {
+                result.push(pid);
+                break;
+            }
+            if parent == 0 || parent == current {
+                break;
+            }
+            current = parent;
+        }
+    }
+    Ok(result)
+}
+
+/// Approximate the kernel process start tick on CLOCK_MONOTONIC (one tick resolution).
+pub fn started_mono_ns(pid: u32) -> Result<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let fields = stat.rsplit_once(')').context("malformed stat")?.1;
+    let ticks: u64 = fields
+        .split_whitespace()
+        .nth(19)
+        .context("missing start tick")?
+        .parse()?;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    ensure!(hz > 0, "invalid kernel clock tick rate");
+    let mut boot = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    ensure!(
+        unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut boot) } == 0,
+        "CLOCK_BOOTTIME unavailable"
+    );
+    let boot_now = (boot.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(boot.tv_nsec as u64);
+    let offset = boot_now.saturating_sub(crate::mono_now());
+    Ok(((ticks as u128 * 1_000_000_000) / hz as u128).min(u64::MAX as u128) as u64)
+        .map(|t| t.saturating_sub(offset))
 }
 
 #[cfg(test)]
@@ -141,6 +285,13 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn process_start_is_in_the_monotonic_clock_domain() {
+        let start = started_mono_ns(std::process::id()).unwrap();
+        let now = crate::mono_now();
+        assert!(start <= now && now - start < 60_000_000_000);
+    }
 
     #[test]
     fn counts_synthetic_server_and_its_resident_memory() {
@@ -172,6 +323,7 @@ mod tests {
             if sample.servers == 1 && sample.pss_kib >= 150 * 1024 {
                 assert_eq!(sample.roots, [child.id()]);
                 assert!(sample.pss_kib < 250 * 1024);
+                assert!(tree_pss_kib(child.id()).unwrap() >= 150 * 1024);
                 break;
             }
             assert!(

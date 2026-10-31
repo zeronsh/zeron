@@ -67,13 +67,13 @@ enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
-    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch; `S-stream:K=2,watch=one` sets options).
+    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch, S-mcp; `S-stream:K=2,watch=one` sets options).
     Ab {
         /// Baseline revision.
         a: String,
         /// Candidate revision.
         b: String,
-        /// `stream`, `boot`, `idle` or `switch` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
+        /// `stream`, `boot`, `idle`, `switch` or `mcp` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
         #[arg(long)]
         scenario: String,
         /// `quick` (2 pairs), `standard` (5), or `full` (7).
@@ -173,6 +173,14 @@ fn main() -> ExitCode {
     #[cfg(unix)]
     {
         let cli = Cli::parse();
+        match maybe_reexec_native_mcp(&cli.command) {
+            Ok(Some(code)) => return code,
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("zeron-bench: {err:#}");
+                return ExitCode::from(1);
+            }
+        }
         // `exec-counted` forks, so it runs before a runtime exists.
         match cli.command {
             Command::ExecCounted { command } => exec_counted(command),
@@ -328,6 +336,97 @@ async fn async_main(command: Command) -> Result<()> {
             print!("{report}");
             Ok(())
         }
+    }
+}
+
+/// Build outside the namespace, then re-exec the complete native MCP run in
+/// private network and mount namespaces. All external model routes are absent,
+/// and Claude's hard-coded /tmp socket path resolves into scratch.
+#[cfg(unix)]
+fn maybe_reexec_native_mcp(command: &Command) -> Result<Option<ExitCode>> {
+    use anyhow::ensure;
+    use std::os::unix::fs::MetadataExt;
+    let (revs, scenario, root, repo, inject, no_build): (
+        Vec<&str>,
+        &str,
+        &Option<PathBuf>,
+        &Option<PathBuf>,
+        bool,
+        bool,
+    ) = match command {
+        Command::Ab {
+            a,
+            b,
+            scenario,
+            zb_root,
+            repo,
+            inject,
+            no_build,
+            ..
+        } => (
+            vec![a, b],
+            scenario,
+            zb_root,
+            repo,
+            inject.is_some(),
+            *no_build,
+        ),
+        Command::Control {
+            rev,
+            scenario,
+            zb_root,
+            repo,
+            inject,
+            no_build,
+            ..
+        } => (
+            vec![rev],
+            scenario,
+            zb_root,
+            repo,
+            inject.is_some(),
+            *no_build,
+        ),
+        _ => return Ok(None),
+    };
+    if inject || zeron_bench::scenario::ScenarioArg::parse(scenario)?.name != "mcp" {
+        return Ok(None);
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("S-mcp requires Linux namespaces");
+    #[cfg(target_os = "linux")]
+    {
+        let scratch = std::fs::canonicalize(
+            std::env::var_os("TMPDIR").context("S-mcp requires a scratch TMPDIR")?,
+        )?;
+        let root_path = std::fs::canonicalize(resolve_root(root.clone())?)?;
+        ensure!(
+            scratch.starts_with(&root_path) && scratch != root_path,
+            "TMPDIR must be inside the benchmark root"
+        );
+        let mapped = std::fs::metadata("/tmp")?;
+        let target = std::fs::metadata(&scratch)?;
+        let interfaces = std::fs::read_to_string("/proc/net/dev")?;
+        let names: Vec<_> = interfaces
+            .lines()
+            .skip(2)
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+            .collect();
+        if names == ["lo"] && (mapped.dev(), mapped.ino()) == (target.dev(), target.ino()) {
+            return Ok(None);
+        }
+        if !no_build {
+            for rev in revs {
+                build_rev(rev, root.clone(), repo.clone())?;
+            }
+        }
+        let status = std::process::Command::new("/usr/bin/unshare")
+            .args(["-Urnm", "--", "/bin/sh", "-c", "mount --make-rprivate / && mount --bind \"$TMPDIR\" /tmp && ip link set lo up && exec \"$@\"", "zeron-bench"])
+            .arg(std::env::current_exe()?).args(std::env::args_os().skip(1))
+            .status().context("start isolated S-mcp namespace")?;
+        Ok(Some(ExitCode::from(
+            status.code().unwrap_or(1).clamp(0, 255) as u8,
+        )))
     }
 }
 
