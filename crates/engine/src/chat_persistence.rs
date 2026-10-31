@@ -249,6 +249,25 @@ impl ChatPersistence {
                             > MIN_DELTA_BYTES.max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
                 });
                 if full {
+                    if write.needs_compaction {
+                        // The chain being replaced has rows that failed
+                        // validation. Keep a copy first; the repair must
+                        // not proceed even if the copy cannot be made (a
+                        // full disk would fail the save too), but must say so.
+                        match self
+                            .store
+                            .quarantine_delta_suffix(&self.chat_id, write.delta_count)
+                        {
+                            Ok(rows) => tracing::error!(
+                                chat = %self.chat_id, rows,
+                                "damaged snapshot delta rows quarantined; replacing the chain"
+                            ),
+                            Err(error) => tracing::error!(
+                                chat = %self.chat_id, %error,
+                                "could not quarantine damaged snapshot delta rows"
+                            ),
+                        }
+                    }
                     self.save_full(&doc, cursor)?;
                     write.delta_count = 0;
                     write.delta_bytes = 0;
@@ -452,6 +471,19 @@ mod tests {
         repaired.doc().commit();
         next.applied(4, false);
         assert_eq!(assert_state(&store, &repaired, 4).delta_count, 0);
+        // The damaged chain was copied aside before the repair replaced it.
+        let quarantined: Vec<(i64, Vec<u8>)> = db
+            .prepare(
+                "SELECT seq,bytes FROM snapshot_delta_quarantine WHERE doc_id='whale' ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(quarantined.len(), 2);
+        assert_eq!(quarantined[0], (1, vec![0]));
+        assert_eq!(quarantined[1].0, 2);
     }
 
     #[test]

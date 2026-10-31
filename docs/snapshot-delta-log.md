@@ -33,7 +33,12 @@ then releases the connection before importing. It checks sequence continuity,
 Loro checksums, root registry decoding and causal import completion. A damaged row ends the usable
 prefix, including its cursor; later rows cannot advance past it. If importing
 that row partially changed Loro, recovery reconstructs the known-good prefix.
-The engine replaces a damaged chain before appending again. SQLite WAL
+This is logged at error level (row, reason, rows ignored), never silently. The
+engine replaces a damaged chain before appending again, but first copies every
+row after the usable prefix into `snapshot_delta_quarantine` (migration 11,
+removed with the chat) so the repair never destroys the only copy of a damaged
+suffix. The reopened chat's cursor is the last intact row's, so room history
+refills what the dropped rows held. SQLite WAL
 transactions already make interrupted inserts/compactions atomic; checksum
 checks additionally contain truncated/copied payloads. An unreadable base
 remains an error, as before.

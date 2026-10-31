@@ -138,6 +138,18 @@ const MIGRATIONS: &[&str] = &[
      WHEN EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id=OLD.doc_id) BEGIN
         SELECT RAISE(ABORT, 'snapshot has an unmerged delta log: run the newer engine to compact it');
      END;",
+    // Rows that failed validation are copied here before the repair
+    // compaction deletes the chain, so a damaged suffix is never destroyed
+    // without a trace. Removed with the chat.
+    "CREATE TABLE snapshot_delta_quarantine (
+        doc_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        quarantined_at INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        cursor INTEGER NOT NULL,
+        roots BLOB NOT NULL,
+        PRIMARY KEY(doc_id, quarantined_at, seq)
+    ) STRICT;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -203,6 +215,8 @@ pub struct ChatState {
     pub delta_bytes: usize,
     /// A damaged suffix was ignored; replace the base before appending again.
     pub needs_compaction: bool,
+    /// Rows beyond the usable prefix (the damaged row and everything after it).
+    pub ignored_deltas: usize,
 }
 
 /// A callback that must return before a snapshot is written.
@@ -509,19 +523,33 @@ impl DocsStore {
                 delta_count: 0,
                 delta_bytes: 0,
                 needs_compaction: false,
+                ignored_deltas: 0,
             };
             for (seq, bytes, roots, cursor) in &rows {
-                let valid = *seq == state.delta_count + 1
-                    && import_snapshot_delta(&state.doc, bytes, roots).is_ok();
-                if !valid {
-                    tracing::warn!(
+                let verdict = if *seq != state.delta_count + 1 {
+                    Err(format!(
+                        "sequence gap: expected {}, found {seq}",
+                        state.delta_count + 1
+                    ))
+                } else {
+                    import_snapshot_delta(&state.doc, bytes, roots).map_err(|e| e.to_string())
+                };
+                if let Err(reason) = verdict {
+                    state.needs_compaction = true;
+                    state.ignored_deltas = rows.len() - state.delta_count;
+                    // Not silent: the chat reopens at the last intact row's
+                    // content and cursor (room history refills the cursor gap),
+                    // and the rows are quarantined before the repair save.
+                    tracing::error!(
                         doc = doc_id,
                         seq,
-                        "ignoring damaged snapshot delta and suffix"
+                        reason,
+                        usable = state.delta_count,
+                        ignored = state.ignored_deltas,
+                        "damaged snapshot delta log; opening at the last intact row"
                     );
                     // An import error/pending update may have partially mutated
                     // Loro. Reconstruct only the known-good prefix.
-                    state.needs_compaction = true;
                     state.doc = import_base()?;
                     for (_, bytes, roots, _) in rows.iter().take(state.delta_count) {
                         import_snapshot_delta(&state.doc, bytes, roots)?;
@@ -596,6 +624,19 @@ impl DocsStore {
     /// indexes, pages, WAL amplification and the independent publication outbox.
     pub fn snapshot_payload_bytes_written(&self) -> u64 {
         self.snapshot_payload_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Copy delta rows after the usable prefix (`seq > keep`) into the
+    /// quarantine table. Called before the repair save deletes the chain.
+    pub fn quarantine_delta_suffix(&self, doc_id: &str, keep: usize) -> Result<usize, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().execute(
+                "INSERT OR IGNORE INTO snapshot_delta_quarantine(doc_id,seq,quarantined_at,bytes,cursor,roots)
+                 SELECT doc_id,seq,?3,bytes,cursor,roots FROM snapshot_deltas
+                 WHERE doc_id=?1 AND seq>?2",
+                params![doc_id, keep as i64, now_ms()],
+            )?)
+        })
     }
 
     /// Latest full base snapshot for `doc_id`, if any. Chat readers must use
@@ -801,6 +842,10 @@ impl DocsStore {
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM snapshot_deltas WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
+        tx.execute(
+            "DELETE FROM snapshot_delta_quarantine WHERE doc_id = ?1",
             params![doc_id],
         )?;
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
@@ -1488,6 +1533,77 @@ mod tests {
         assert_same_doc(&state.doc, &expected);
         assert_eq!(state.cursor, 1);
         assert_eq!(state.delta_count, 1);
+        assert!(state.needs_compaction);
+        assert_eq!(state.ignored_deltas, 2, "the torn row and its dependent");
+        // The repair keeps the rows it is about to delete, and a chat delete
+        // removes them with everything else.
+        assert_eq!(store.quarantine_delta_suffix("chat", 1).unwrap(), 2);
+        let quarantined = |store: &DocsStore| -> i64 {
+            store
+                .conn()
+                .query_row(
+                    "SELECT count(*) FROM snapshot_delta_quarantine WHERE doc_id='chat'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(quarantined(&store), 2);
+        let snapshot = state.doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &snapshot, state.cursor, 2)
+            .unwrap();
+        assert_eq!(quarantined(&store), 2, "survives the repair save");
+        let again = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!((again.delta_count, again.ignored_deltas), (0, 0));
+        assert!(!again.needs_compaction);
+        store.delete_snapshot("chat").unwrap();
+        assert_eq!(quarantined(&store), 0);
+    }
+
+    #[test]
+    fn delta_log_sequence_gap_ends_the_usable_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let mut vv = doc.oplog_vv();
+        let mut after_first = None;
+        for cursor in 1..=4 {
+            doc.get_text("text").insert(0, "abc").unwrap();
+            doc.commit();
+            store
+                .append_snapshot_delta(
+                    "chat",
+                    &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                    cursor,
+                    &DocsStore::snapshot_roots(&doc).unwrap(),
+                )
+                .unwrap();
+            vv = doc.oplog_vv();
+            if cursor == 1 {
+                after_first = Some(doc.get_deep_value());
+            }
+        }
+        // A lost middle row: rows 3 and 4 are intact but unreachable.
+        store
+            .conn()
+            .execute("DELETE FROM snapshot_deltas WHERE seq=2", [])
+            .unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(
+            (state.delta_count, state.ignored_deltas, state.cursor),
+            (1, 2, 1)
+        );
+        assert!(state.needs_compaction);
+        assert_eq!(Some(state.doc.get_deep_value()), after_first);
     }
 
     #[test]
@@ -1620,7 +1736,7 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at INTEGER NOT NULL) STRICT").unwrap();
-            for (index, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 2).enumerate() {
+            for (index, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 3).enumerate() {
                 conn.execute_batch(sql).unwrap();
                 conn.execute("INSERT INTO schema_migrations VALUES(?1,0)", [index + 1])
                     .unwrap();
