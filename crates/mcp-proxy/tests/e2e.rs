@@ -741,3 +741,21 @@ async fn slow_client_survives_a_notification_flood() {
     );
     peer.close().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_negotiating_an_older_protocol_still_hits_the_cache() {
+    let dir = temp();
+    let d = dir.path();
+    for session in 0..2 {
+        let mut peer = Peer::spawn(d, "lazy", &[("FAKE_PROTOCOL", "2024-11-05")]);
+        let init = peer.init().await;
+        assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+        peer.close().await;
+        eventually(|| {
+            let spawned = pids(&d.join("spawn"));
+            spawned.len() == 1 && !alive(spawned[0])
+        })
+        .await;
+        assert_eq!(pids(&d.join("spawn")).len(), 1, "session {session}");
+    }
+}

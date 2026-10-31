@@ -139,12 +139,14 @@ impl Entry {
             discovery_failed: false,
         }
     }
-    pub fn valid(&self, key: &str, protocol: &Value) -> bool {
+    /// The key already covers the protocol version the client asked for. The version
+    /// stored in `initialize` is what the server negotiated, which may legitimately
+    /// differ (an older server answers with its own), so it is not compared here.
+    pub fn valid(&self, key: &str) -> bool {
         let age = now_ms().saturating_sub(self.cached_at);
         self.key == key
             && !self.discovery_failed
             && self.cache_scope.as_deref() != Some("private")
-            && self.initialize["protocolVersion"] == *protocol
             && age
                 < self
                     .ttl_ms
@@ -429,18 +431,18 @@ mod tests {
     fn validity_ttl_protocol_and_discovery_marker() {
         let dir = dir();
         let mut entry = Entry::new("key".into(), "demo".into(), json!({"protocolVersion":"v"}));
-        assert!(entry.valid("key", &json!("v")));
-        assert!(!entry.valid("key", &json!("other")));
+        assert!(entry.valid("key"));
+        assert!(!entry.valid("other"));
         entry.ttl_ms = Some(0);
-        assert!(!entry.valid("key", &json!("v")));
+        assert!(!entry.valid("key"));
         entry.ttl_ms = None;
         entry.cached_at = now_ms() - 31 * 24 * 60 * 60 * 1000;
-        assert!(!entry.valid("key", &json!("v")));
+        assert!(!entry.valid("key"));
         entry.cached_at = now_ms();
         entry.discovery_failed = true;
         save(dir.path(), &entry).unwrap();
         let disk = read(dir.path(), "key").unwrap();
         assert!(disk.discovery_failed);
-        assert!(!disk.valid("key", &json!("v")));
+        assert!(!disk.valid("key"));
     }
 }

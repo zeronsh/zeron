@@ -393,9 +393,7 @@ impl Proxy {
             if disk.as_ref().is_some_and(|e| e.discovery_failed) {
                 self.passthrough = true;
                 self.event("cache", json!({"status":"discovery-failed-passthrough"}));
-            } else if let Some(entry) =
-                disk.filter(|e| e.valid(&self.key, &message["params"]["protocolVersion"]))
-            {
+            } else if let Some(entry) = disk.filter(|e| e.valid(&self.key)) {
                 self.cache = Some(entry);
                 self.state = State::ServingCold;
                 self.event("cache", json!({"status":"hit"}));
