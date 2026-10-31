@@ -89,32 +89,51 @@ pub fn experimental_map_declares_channel(
 }
 
 pub fn classify(fact: &McpServerFact) -> McpClass {
-    if fact.channel {
-        return McpClass::Channel;
-    }
     if is_remote(fact) {
         return McpClass::Remote;
     }
-    if fact.npx_resolved || heavy_runtime_command(&fact.command) {
+    if fact.channel {
+        return McpClass::Channel;
+    }
+    if fact.transport.trim().eq_ignore_ascii_case("stdio")
+        && !fact.command.trim().is_empty()
+        && (fact.npx_resolved || heavy_runtime_command(&fact.command))
+    {
         return McpClass::HeavyRuntime;
     }
     McpClass::NativeSmall
 }
 
-/// User choices win, including an explicit Eager on a worker's channel server.
-/// `MainOnly` is a choice, not a mode: workers drop that server and a main
-/// chat keeps the class default.
+/// Apply user choices only within the transport and channel safety boundaries.
 pub fn disposition(fact: &McpServerFact, ctx: PolicyContext) -> McpDisposition {
+    let class = classify(fact);
+    if class == McpClass::Remote {
+        return McpDisposition::Untouched;
+    }
+    if class == McpClass::Channel {
+        return if ctx.worker
+            || !ctx.channel_owner
+            || matches!(ctx.choice, Some(McpServerChoice::Off))
+        {
+            McpDisposition::Mode(McpMode::Off)
+        } else {
+            McpDisposition::Mode(McpMode::Eager)
+        };
+    }
     if let Some(choice) = ctx.choice
         && let Some(mode) = choice.explicit_mode(ctx.worker)
     {
+        if matches!(mode, McpMode::Lazy | McpMode::LazyKeepAlive)
+            && (!fact.transport.trim().eq_ignore_ascii_case("stdio")
+                || fact.command.trim().is_empty())
+        {
+            return McpDisposition::Untouched;
+        }
         return McpDisposition::Mode(mode);
     }
-    match classify(fact) {
-        McpClass::Remote | McpClass::NativeSmall => McpDisposition::Untouched,
+    match class {
         McpClass::HeavyRuntime => McpDisposition::Mode(McpMode::Lazy),
-        McpClass::Channel if ctx.worker || !ctx.channel_owner => McpDisposition::Mode(McpMode::Off),
-        McpClass::Channel => McpDisposition::Mode(McpMode::Eager),
+        _ => McpDisposition::Untouched,
     }
 }
 
@@ -264,13 +283,12 @@ mod tests {
             disposition(&row, ctx(false, false, None)),
             McpDisposition::Mode(McpMode::Off)
         );
-        // A channel that also speaks HTTP is still a channel: the poller
-        // must not start in every chat just because the transport is remote.
+        // Remote transports remain untouched, even if they report a channel.
         let remote = fact("fake-channel", "http", "", false, true, "claude.ai");
-        assert_eq!(classify(&remote), McpClass::Channel);
+        assert_eq!(classify(&remote), McpClass::Remote);
         assert_eq!(
             disposition(&remote, ctx(false, false, None)),
-            McpDisposition::Mode(McpMode::Off)
+            McpDisposition::Untouched
         );
     }
 
@@ -323,12 +341,12 @@ mod tests {
         );
         assert_eq!(
             disposition(&remote, ctx(false, false, Some(McpServerChoice::Lazy))),
-            McpDisposition::Mode(McpMode::Lazy)
+            McpDisposition::Untouched
         );
-        // An explicit Eager on a worker channel is the user's choice.
+        // A worker cannot acquire a channel through an override.
         assert_eq!(
             disposition(&channel, ctx(true, false, Some(McpServerChoice::Eager))),
-            McpDisposition::Mode(McpMode::Eager)
+            McpDisposition::Mode(McpMode::Off)
         );
         assert_eq!(
             disposition(
@@ -337,6 +355,35 @@ mod tests {
             ),
             McpDisposition::Mode(McpMode::LazyKeepAlive)
         );
+    }
+
+    #[test]
+    fn mcp_policy_unknown_transport_and_channel_overrides_are_safe() {
+        for transport in ["", "unknown"] {
+            let row = fact("srv", transport, "node", true, false, "");
+            assert_eq!(classify(&row), McpClass::NativeSmall);
+            assert_eq!(
+                disposition(&row, ctx(false, true, Some(McpServerChoice::Lazy))),
+                McpDisposition::Untouched
+            );
+        }
+        let row = fact("srv", "stdio", "", true, false, "");
+        assert_eq!(classify(&row), McpClass::NativeSmall);
+        let channel = fact("channel", "stdio", "node", false, true, "");
+        for choice in [
+            McpServerChoice::Lazy,
+            McpServerChoice::LazyKeepAlive,
+            McpServerChoice::Eager,
+        ] {
+            assert_eq!(
+                disposition(&channel, ctx(false, true, Some(choice))),
+                McpDisposition::Mode(McpMode::Eager)
+            );
+            assert_eq!(
+                disposition(&channel, ctx(false, false, Some(choice))),
+                McpDisposition::Mode(McpMode::Off)
+            );
+        }
     }
 
     fn native_small() -> McpServerFact {
