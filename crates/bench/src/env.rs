@@ -855,7 +855,7 @@ fn login_name() -> String {
         .unwrap_or_else(|| "bench".into())
 }
 
-fn passwd_home() -> Option<PathBuf> {
+pub(crate) fn passwd_home() -> Option<PathBuf> {
     passwd_strings()
         .map(|(_, home)| home)
         .filter(|home| !home.as_os_str().is_empty())
@@ -900,7 +900,7 @@ fn default_replay_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("zb-replay"))
 }
 
-fn sanitize(label: &str) -> String {
+pub(crate) fn sanitize(label: &str) -> String {
     let mut out = String::with_capacity(label.len());
     for c in label.chars() {
         if c.is_ascii_alphanumeric() {
@@ -924,7 +924,7 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn utc_compact(unix: u64) -> String {
+pub(crate) fn utc_compact(unix: u64) -> String {
     let secs = unix as i64;
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400) as u32;

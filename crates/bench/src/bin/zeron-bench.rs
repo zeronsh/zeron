@@ -18,7 +18,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "zeron-bench", about = "Isolated launcher for the Zeron engine")]
+#[command(
+    name = "zeron-bench",
+    about = "Isolated launcher and A/B harness for the Zeron engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -46,6 +49,76 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
         command: Vec<OsString>,
     },
+    /// Build `zeron-engine` for a git revision into `bins/<sha12>/`, reusing a matching sha256.
+    Build {
+        /// Git revision (`upstream/main`, a branch, or a commit).
+        rev: String,
+        /// Bench root. Defaults to `ZB_ROOT` or `~/Documents/dev/tmp/zeron-perf`.
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        /// Git worktree used to resolve the revision. Defaults to the current checkout.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Compare two revisions. This unit runs an injected `--scenario` (`--inject`); live scenarios are later.
+    Ab {
+        /// Baseline revision.
+        a: String,
+        /// Candidate revision.
+        b: String,
+        /// Scenario name. `S-build` is refused. Other names need `--inject` until their runners land.
+        #[arg(long)]
+        scenario: String,
+        /// `quick` (2 pairs), `standard` (5), or `full` (7).
+        #[arg(long)]
+        tier: String,
+        /// Bench root. Defaults to `ZB_ROOT` or `~/Documents/dev/tmp/zeron-perf`.
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        /// Git worktree used to build revisions.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Base seed for trial seeds.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// JSON file of injected per-side trials.
+        #[arg(long)]
+        inject: Option<PathBuf>,
+        /// Do not build. The revisions are labels only.
+        #[arg(long)]
+        no_build: bool,
+        /// Sample host CPU for 5s and record it. Off by default for injected runs.
+        #[arg(long)]
+        preflight: bool,
+    },
+    /// Self-pair control: two copies of one revision, stored as the noise floor.
+    Control {
+        /// Revision to run against itself.
+        rev: String,
+        /// Scenario name. `S-build` is refused.
+        #[arg(long)]
+        scenario: String,
+        /// `quick`, `standard`, or `full`.
+        #[arg(long)]
+        tier: String,
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long)]
+        inject: Option<PathBuf>,
+        #[arg(long)]
+        no_build: bool,
+        #[arg(long)]
+        preflight: bool,
+    },
+    /// Rewrite `summary.json` and `report.md` for an existing run directory.
+    Report {
+        /// `runs/<id>` directory.
+        run: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -60,6 +133,13 @@ fn main() -> ExitCode {
         // `exec-counted` forks, so it runs before a runtime exists.
         match cli.command {
             Command::ExecCounted { command } => exec_counted(command),
+            Command::Build { rev, zb_root, repo } => match build_rev(&rev, zb_root, repo) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("zeron-bench: {err:#}");
+                    ExitCode::from(1)
+                }
+            },
             other => match run(other) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
@@ -92,7 +172,116 @@ async fn async_main(command: Command) -> Result<()> {
             print!("{}", zeron_bench::doctor());
             Ok(())
         }
-        Command::ExecCounted { .. } => unreachable!("exec-counted is handled before the runtime"),
+        Command::ExecCounted { .. } | Command::Build { .. } => {
+            unreachable!("handled before the runtime")
+        }
+        Command::Ab {
+            a,
+            b,
+            scenario,
+            tier,
+            zb_root,
+            repo,
+            seed,
+            inject,
+            no_build,
+            preflight,
+        } => ab_command(
+            a, b, scenario, tier, zb_root, repo, seed, inject, no_build, preflight, false,
+        ),
+        Command::Control {
+            rev,
+            scenario,
+            tier,
+            zb_root,
+            repo,
+            seed,
+            inject,
+            no_build,
+            preflight,
+        } => ab_command(
+            rev.clone(),
+            rev,
+            scenario,
+            tier,
+            zb_root,
+            repo,
+            seed,
+            inject,
+            no_build,
+            preflight,
+            true,
+        ),
+        Command::Report { run } => {
+            let report = zeron_bench::ab::regenerate_report(&run)?;
+            print!("{report}");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn build_rev(rev: &str, zb_root: Option<PathBuf>, repo: Option<PathBuf>) -> Result<()> {
+    let zb_root = resolve_root(zb_root)?;
+    let repo = resolve_repo(repo)?;
+    zeron_bench::ab::cli_build(rev, zb_root, repo)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ab_command(
+    a: String,
+    b: String,
+    scenario: String,
+    tier: String,
+    zb_root: Option<PathBuf>,
+    repo: Option<PathBuf>,
+    seed: u64,
+    inject: Option<PathBuf>,
+    no_build: bool,
+    preflight: bool,
+    control: bool,
+) -> Result<()> {
+    let tier = zeron_bench::ab::Tier::parse(&tier)?;
+    let result = zeron_bench::ab::run_ab(&zeron_bench::ab::AbOptions {
+        a,
+        b,
+        scenario,
+        tier,
+        zb_root: resolve_root(zb_root)?,
+        repo: resolve_repo(repo)?,
+        seed,
+        inject,
+        no_build,
+        control,
+        preflight,
+        run_id: None,
+        fingerprint: None,
+        now_unix: None,
+    })?;
+    println!("run={}", result.run_dir.display());
+    print!("{}", result.report);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn resolve_root(zb_root: Option<PathBuf>) -> Result<PathBuf> {
+    let root = match zb_root {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => std::env::current_dir()?.join(path),
+        None => zeron_bench::default_zb_root(),
+    };
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create bench root {}", root.display()))?;
+    Ok(root)
+}
+
+#[cfg(unix)]
+fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
+    match repo {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Ok(std::env::current_dir()?.join(path)),
+        None => std::env::current_dir().context("current directory"),
     }
 }
 
