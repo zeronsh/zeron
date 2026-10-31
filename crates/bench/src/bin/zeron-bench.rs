@@ -41,6 +41,11 @@ enum Command {
         #[arg(long)]
         zb_root: Option<PathBuf>,
     },
+    /// Generate fixtures.
+    Fixture {
+        #[command(subcommand)]
+        command: FixtureCommand,
+    },
     /// Report scope, smaps, perf, RAPL, and the live engine.
     Doctor,
     /// Run `command` under user-space perf counters. Does not change its environment.
@@ -121,6 +126,42 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum FixtureCommand {
+    #[command(hide = true)]
+    SnapshotWorker { source: PathBuf, output: PathBuf },
+    Gen {
+        name: String,
+        #[arg(long)]
+        engine: Option<PathBuf>,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        from_real_profile: bool,
+        /// Source revision of the supplied engine, when known.
+        #[arg(long)]
+        fixture_revision: Option<String>,
+        /// Replay cadence for T fixtures (default: opus).
+        #[arg(long)]
+        cadence: Option<String>,
+    },
+    VerifyReal {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
+    },
+    Verify {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
+    },
+    Convert {
+        input: PathBuf,
+        #[arg(long, default_value = "opus")]
+        cadence: String,
+    },
+}
+
 fn main() -> ExitCode {
     #[cfg(not(unix))]
     {
@@ -168,6 +209,64 @@ async fn async_main(command: Command) -> Result<()> {
             hold,
             zb_root,
         } => launch_hold(engine, hold, zb_root).await,
+        Command::Fixture { command } => match command {
+            FixtureCommand::SnapshotWorker { source, output } => {
+                zeron_bench::fixture::real::copy_mounted(&source, &output)
+            }
+            FixtureCommand::Gen {
+                name,
+                engine,
+                seed,
+                from_real_profile,
+                fixture_revision,
+                cadence,
+            } => {
+                let path = if name == "P-real" && from_real_profile {
+                    zeron_bench::fixture::real::snapshot()?
+                } else {
+                    anyhow::ensure!(!from_real_profile, "--from-real-profile requires P-real");
+                    let engine = engine.context("--engine is required for synthetic profiles")?;
+                    zeron_bench::fixture::profile::generate(
+                        &name,
+                        &engine,
+                        seed,
+                        fixture_revision.as_deref(),
+                        cadence.as_deref(),
+                    )
+                    .await?
+                };
+                println!("{}", path.display());
+                Ok(())
+            }
+            FixtureCommand::VerifyReal { path, engine } => {
+                let count = zeron_bench::fixture::real::verify(&path, &engine).await?;
+                println!("{count} chats");
+                Ok(())
+            }
+            FixtureCommand::Verify { path, engine } => {
+                zeron_bench::fixture::multi::verify(&path, &engine).await?;
+                println!("200 chats, 20 aborted");
+                Ok(())
+            }
+            FixtureCommand::Convert { input, cadence } => {
+                let source = std::fs::read_to_string(&input)?;
+                let script = zeron_bench::fixture::scripts::convert(&source, &cadence)?;
+                let root = zeron_bench::fixture::safe_root()?;
+                let dir = zeron_bench::fixture::fixture_dir(&root, &["fixtures", "private"])?;
+                use std::io::Write;
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+                let path = dir.join(format!("converted-{}.zbr.jsonl", zeron_bench::mono_now()));
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                file.write_all(script.as_bytes())?;
+                println!("{}", path.display());
+                Ok(())
+            }
+        },
         Command::Doctor => {
             print!("{}", zeron_bench::doctor());
             Ok(())
