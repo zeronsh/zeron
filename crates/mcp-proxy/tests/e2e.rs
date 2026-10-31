@@ -1043,3 +1043,27 @@ async fn sweep_never_kills_a_group_whose_pid_was_reused() {
     zeron_mcp_proxy::cleanup_run_dir(&run).await.unwrap();
     assert!(!bystander.wait().unwrap().success());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_call_reaches_the_server_before_the_metadata_refresh() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    fs::remove_file(d.join("requests")).unwrap();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    peer.init().await;
+    peer.call(2, "echo").await;
+    eventually(|| {
+        fs::read_to_string(d.join("requests")).is_ok_and(|log| log.contains("\"tools/list\""))
+    })
+    .await;
+    let methods: Vec<_> = fs::read_to_string(d.join("requests"))
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["method"].as_str().map(str::to_owned))
+        .collect();
+    let at = |name: &str| methods.iter().position(|m| m == name).unwrap();
+    assert!(at("tools/call") < at("tools/list"), "{methods:?}");
+    peer.close().await;
+}

@@ -717,11 +717,12 @@ impl Proxy {
             }
             self.state = State::Warm;
             self.failed = None;
-            self.capture(result)?;
-            // Non-discovery starts needn't delay calls for metadata refresh.
+            // Non-discovery starts needn't delay calls for metadata refresh: the queued
+            // requests go to the server ahead of the refresh's own listing requests.
             if !self.discovery {
                 self.flush()?;
             }
+            self.capture(result)?;
             return Ok(());
         }
         if self
