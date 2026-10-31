@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::content::{Cadence, TurnOpts, build_turn};
 use super::driver::{Ui, percentile};
-use super::fixture::{self, ChatInfo, FixtureSpec, sha256_hex, text_of};
+use super::fixture::{self, ChatInfo, Profile, base_matches};
 use super::{TrialCtx, Workload, load_params};
 use crate::ab::Tier;
 use crate::mono_now;
@@ -49,19 +49,20 @@ pub struct Switch {
 }
 
 impl Switch {
+    /// Up to 4 chats each of 100 KB, 1 MB and 5 MB (P20 has three 5 MB chats, so
+    /// 11 targets), size order interleaved.
+    fn targets(&self, fx: &fixture::Fixture) -> Vec<ChatInfo> {
+        let mut targets = Vec::new();
+        for class in ["100k", "1m", "5m"] {
+            targets.extend(fx.class(class, false).into_iter().skip(usize::from(class == "100k") * 2).take(4));
+        }
+        interleave(&targets)
+    }
+
     pub fn from_params(tier: Tier, overrides: &[(String, String)]) -> Result<Self> {
         let p: SwitchParams = load_params(CONFIG, tier, overrides)?;
-        ensure!(p.switches >= 12, "switches must cover the 12 target chats once");
+        ensure!(p.switches >= 11, "switches must cover the target chats once");
         Ok(Self { p, tier })
-    }
-}
-
-/// Size class of a target chat, by its configured bytes.
-fn class_of(chat: &ChatInfo) -> &'static str {
-    match chat.bytes_target {
-        0..=200_000 => "100k",
-        200_001..=2_000_000 => "1m",
-        _ => "5m",
     }
 }
 
@@ -69,7 +70,7 @@ fn class_of(chat: &ChatInfo) -> &'static str {
 pub fn interleave(targets: &[ChatInfo]) -> Vec<ChatInfo> {
     let mut by_class: BTreeMap<&'static str, Vec<ChatInfo>> = BTreeMap::new();
     for chat in targets {
-        by_class.entry(class_of(chat)).or_default().push(chat.clone());
+        by_class.entry(chat.class).or_default().push(chat.clone());
     }
     let rounds = by_class.values().map(Vec::len).max().unwrap_or(0);
     let mut out = Vec::new();
@@ -115,16 +116,15 @@ impl Workload for Switch {
         )
     }
 
-    fn fixture_spec(&self) -> FixtureSpec {
-        fixture::p20_switch(20)
+    fn profile(&self) -> Profile {
+        Profile::P20
     }
 
     async fn run(&self, ctx: &mut TrialCtx) -> Result<()> {
         let p = &self.p;
         let fx = ctx.fixture.clone();
-        let targets: Vec<ChatInfo> = fx.chats_tagged("target").cloned().collect();
-        let order = interleave(&targets);
-        ensure!(order.len() == 12, "fixture has {} target chats, want 12", order.len());
+        let order = self.targets(&fx);
+        ensure!(order.len() >= 9, "fixture has only {} target chats", order.len());
         let client = ctx.connect().await?;
         let mut ui = Ui::new(client.clone(), ctx.stats.clone());
         ui.open_global().await?;
@@ -135,7 +135,8 @@ impl Workload for Switch {
             let dir = ctx.trial.root.join("scripts");
             std::fs::create_dir_all(&dir)?;
             let total_ms = p.switches as u64 * (p.dwell_ms + 1500) + 30_000;
-            let bg: Vec<ChatInfo> = fx.chats_tagged("bg").take(p.streaming).cloned().collect();
+            // Streamers: small chats that are not switch targets.
+            let bg: Vec<ChatInfo> = fx.class("100k", true).into_iter().rev().take(p.streaming).collect();
             ensure!(bg.len() == p.streaming, "not enough background chats");
             for chat in &bg {
                 let built = build_turn(&TurnOpts {
@@ -153,7 +154,7 @@ impl Workload for Switch {
                 fixture::queue_play(
                     &client,
                     &chat.id,
-                    fx.space_path(chat),
+                    &fx.space_path(chat),
                     &fixture::message_uuid(chat.n, 7200),
                     &path,
                     1.0,
@@ -179,7 +180,7 @@ impl Workload for Switch {
             }
             let t0 = mono_now();
             let opened = ui
-                .open_chat(&chat.id, fx.space_path(chat))
+                .open_chat(&chat.id, &fx.space_path(chat))
                 .await
                 .with_context(|| format!("switch {s} to chat {}", chat.n))?;
             open_all_ms.push(opened.t_done.saturating_sub(t0) as f64 / 1e6);
@@ -187,28 +188,21 @@ impl Workload for Switch {
             watch
                 .wait_for(Duration::from_secs(120), "the full reset", |st| st.full.is_some())
                 .await?;
-            let (first, full, entries, text) = watch.with(|st| {
-                (st.first, st.full, st.view.entries.len(), text_of(&st.view))
-            });
-            let class = class_of(chat);
+            let (first, full, matched) =
+                watch.with(|st| (st.first, st.full, base_matches(chat, &st.view)));
+            let class = chat.class;
             if let (Some((t1, b1)), Some((t2, b2))) = (first, full) {
                 first_ms.entry(class).or_default().push(t1.saturating_sub(t0) as f64 / 1e6);
                 full_ms.entry(class).or_default().push(t2.saturating_sub(t0) as f64 / 1e6);
                 first_bytes.entry(class).or_default().push(b1 as f64);
                 full_bytes.entry(class).or_default().push(b2 as f64);
             }
-            if entries != chat.entries || sha256_hex(&text) != chat.text_sha256 {
-                mismatches.push(format!(
-                    "switch {s} chat {}: {entries} entries (want {}), text {} B (want {})",
-                    chat.n,
-                    chat.entries,
-                    text.len(),
-                    chat.text_bytes
-                ));
+            if !matched.0 {
+                mismatches.push(format!("switch {s} chat {}: {}", chat.n, matched.1));
             }
             previous = Some(chat.id.clone());
             tokio::time::sleep(Duration::from_millis(p.dwell_ms)).await;
-            if s + 1 == 12 {
+            if s + 1 == order.len() {
                 ctx.marks.insert("after12".into(), mono_now());
             }
         }
@@ -252,31 +246,26 @@ mod tests {
 
     #[test]
     fn targets_interleave_by_size_class() {
-        let spec = fixture::p20_switch(1);
-        let chats: Vec<ChatInfo> = spec
-            .chats
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.tag == "target")
-            .map(|(n, c)| ChatInfo {
-                n,
-                id: fixture::chat_uuid(n),
-                chat8: fixture::chat_uuid(n)[..8].into(),
-                space: c.space,
-                tag: c.tag.clone(),
-                bytes_target: c.bytes,
-                turns: 1,
-                entries: 2,
-                transcript_bytes: 0,
-                text_bytes: 0,
-                text_sha256: String::new(),
-                crash_residue: false,
-            })
-            .collect();
-        let order = interleave(&chats);
-        assert_eq!(order.len(), 12);
-        let classes: Vec<_> = order.iter().take(6).map(class_of).collect();
-        assert_eq!(classes, ["100k", "1m", "5m", "100k", "1m", "5m"]);
+        let chat = |n: usize, class: &'static str| ChatInfo {
+            n,
+            id: fixture::chat_uuid(n),
+            chat8: String::new(),
+            space: 0,
+            class,
+            transcript_bytes: 10,
+            text: None,
+            crash_residue: false,
+            shutdown_residue: false,
+        };
+        let chats = vec![
+            chat(0, "100k"),
+            chat(1, "100k"),
+            chat(2, "1m"),
+            chat(3, "1m"),
+            chat(4, "5m"),
+        ];
+        let order: Vec<_> = interleave(&chats).iter().map(|c| c.n).collect();
+        assert_eq!(order, [0, 2, 4, 1, 3]);
     }
 
     #[test]

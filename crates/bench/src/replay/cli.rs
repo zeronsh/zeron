@@ -92,13 +92,16 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
 }
 /// The engine hands the chat id to the CLI only inside the inline
 /// `--mcp-config` (the `zeron` server's env), not in the CLI's own environment.
+/// Returns its last eight characters: fixture chat ids share their first group,
+/// and markers must tell chats apart.
 fn chat_from_mcp_config(args: &[String]) -> Option<String> {
     let raw = arg_value(args, "--mcp-config")?;
     let config: Value = serde_json::from_str(&raw).ok()?;
     config["mcpServers"]
         .as_object()?
         .values()
-        .find_map(|server| server["env"]["ZERON_CHAT_ID"].as_str().map(str::to_owned))
+        .find_map(|server| server["env"]["ZERON_CHAT_ID"].as_str())
+        .map(|id| id.chars().skip(id.chars().count().saturating_sub(8)).collect())
 }
 
 fn log_spawn(args: &[String]) -> Result<()> {
@@ -506,10 +509,10 @@ mod chat_tests {
         let args = vec![
             "--print".to_string(),
             "--mcp-config".to_string(),
-            r#"{"mcpServers":{"zeron":{"command":"z","env":{"ZERON_CHAT_ID":"b7000001-0000"}}}}"#
+            r#"{"mcpServers":{"zeron":{"command":"z","env":{"ZERON_CHAT_ID":"b4000002-0000-4000-8000-0000000000b4"}}}}"#
                 .to_string(),
         ];
-        assert_eq!(chat_from_mcp_config(&args).as_deref(), Some("b7000001-0000"));
+        assert_eq!(chat_from_mcp_config(&args).as_deref(), Some("000000b4"));
         assert_eq!(chat_from_mcp_config(&["--print".to_string()]), None);
         let empty = vec!["--mcp-config".to_string(), r#"{"mcpServers":{}}"#.to_string()];
         assert_eq!(chat_from_mcp_config(&empty), None);

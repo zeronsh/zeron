@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use super::content::{Cadence, TurnOpts, build_turn};
 use super::driver::{Canary, Ui, Watch};
 use super::fixture::{
-    self, ChatInfo, FixtureSpec, bad_status, last_turn_text, parse_size, sha256_hex, text_of,
-    turn_settled,
+    self, ChatInfo, Profile, base_matches, bad_status, last_turn_has_error_part, last_turn_text,
+    parse_size, sha256_hex, text_of, turn_settled,
 };
 use super::{TrialCtx, Workload, load_params};
 use crate::ab::Tier;
@@ -63,6 +63,27 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// The K target chats: the base size class of P20 (`100k`: 8 chats, `1m`: 6, `5m`: 3).
+    fn targets(&self, fx: &fixture::Fixture) -> Result<Vec<ChatInfo>> {
+        let class = match self.p.base.as_str() {
+            "100k" => "100k",
+            "1m" => "1m",
+            "5m" => "5m",
+            other => bail!("base {other} is not a P20 size class (100k, 1m, 5m)"),
+        };
+        // Prefer chats whose base text is fully known; fall back to the subagent pair.
+        let mut chats = fx.class(class, true);
+        chats.extend(fx.class(class, false).into_iter().filter(|c| c.text.is_none()));
+        ensure!(
+            chats.len() >= self.p.k,
+            "P20 has {} chats of class {class}, K={} needs more",
+            chats.len(),
+            self.p.k
+        );
+        chats.truncate(self.p.k);
+        Ok(chats)
+    }
+
     pub fn from_params(tier: Tier, overrides: &[(String, String)]) -> Result<Self> {
         let p: StreamParams = load_params(CONFIG, tier, overrides)?;
         ensure!(p.k >= 1, "K must be at least 1");
@@ -73,6 +94,7 @@ impl Stream {
     }
 }
 
+/// The chat's transcript is the base, the warm-up and exactly the scripted turn.
 fn verify(
     chat: &ChatInfo,
     view: &crate::transcript::ChatView,
@@ -82,32 +104,30 @@ fn verify(
     if let Some(bad) = bad_status(view) {
         return (false, bad);
     }
-    let full = text_of(view);
-    let warm = fixture::WARM_TEXT.len();
-    if full.len() != chat.text_bytes + warm + expected.len() {
+    let turn = last_turn_text(view);
+    if turn.len() != expected.len() || sha256_hex(&turn) != expected_sha {
         return (
             false,
             format!(
-                "text is {} bytes, expected {} base + {warm} warm-up + {} streamed",
-                full.len(),
-                chat.text_bytes,
+                "streamed text is {} B, script is {} B, or its hash differs",
+                turn.len(),
                 expected.len()
             ),
         );
     }
-    if sha256_hex(&full[..chat.text_bytes]) != chat.text_sha256 {
-        return (false, "base transcript differs from the manifest".into());
+    if last_turn_has_error_part(view) {
+        return (false, "error part in the measured turn".into());
     }
-    if sha256_hex(&full[chat.text_bytes + warm..]) != expected_sha {
-        return (false, "streamed text hash differs from the script".into());
-    }
-    let errors = view.entries.iter().any(|e| {
-        e.get("parts")
-            .and_then(Value::as_array)
-            .is_some_and(|parts| parts.iter().any(|p| p.get("kind").and_then(Value::as_str) == Some("error")))
-    });
-    if errors {
-        return (false, "error part in the transcript".into());
+    // Whatever came before the streamed turn: the base plus the warm-up text.
+    if let Some((len, sha)) = &chat.text {
+        let full = text_of(view);
+        let warm = fixture::WARM_TEXT.len();
+        let base_ok = full.len() == len + warm + expected.len()
+            && sha256_hex(&full[..*len]) == *sha
+            && &full[*len..*len + warm] == fixture::WARM_TEXT;
+        if !base_ok {
+            return (false, "base transcript or warm-up text changed".into());
+        }
     }
     (true, String::new())
 }
@@ -134,22 +154,20 @@ impl Workload for Stream {
         )
     }
 
-    fn fixture_spec(&self) -> FixtureSpec {
-        let bytes = parse_size(&self.p.base).unwrap_or(1_000_000);
-        fixture::p20(&format!("P20-k{}-{}", self.p.k, self.p.base), 20, self.p.k, bytes)
+    fn profile(&self) -> Profile {
+        Profile::P20
     }
 
     async fn run(&self, ctx: &mut TrialCtx) -> Result<()> {
         let p = &self.p;
         let fx = ctx.fixture.clone();
-        let targets: Vec<ChatInfo> = fx.chats_tagged("target").cloned().collect();
-        ensure!(targets.len() == p.k, "fixture has {} target chats, want {}", targets.len(), p.k);
+        let targets = self.targets(&fx)?;
         let client = ctx.connect().await?;
         let mut ui = Ui::new(client.clone(), ctx.stats.clone());
         ui.open_global().await.context("open the global streams")?;
         let watched_n = if p.watch == "all" { p.k } else { 1 };
         for chat in &targets[..watched_n] {
-            ui.open_chat(&chat.id, fx.space_path(chat))
+            ui.open_chat(&chat.id, &fx.space_path(chat))
                 .await
                 .with_context(|| format!("open chat {}", chat.n))?;
         }
@@ -157,12 +175,8 @@ impl Workload for Stream {
             ui.watch(&chat.id)?
                 .wait_for(Duration::from_secs(120), "the full reset", |s| s.full.is_some())
                 .await?;
-            let (ok, detail) = ui.watch(&chat.id)?.with(|s| {
-                let text = text_of(&s.view);
-                let ok = sha256_hex(&text) == chat.text_sha256 && text.len() == chat.text_bytes;
-                (ok, format!("{} bytes, {} entries (manifest {} / {})", text.len(), s.view.entries.len(), chat.text_bytes, chat.entries))
-            });
-            ctx.check(&format!("base_matches_manifest:{}", chat.n), ok, if ok { String::new() } else { detail });
+            let (ok, detail) = ui.watch(&chat.id)?.with(|s| base_matches(chat, &s.view));
+            ctx.check(&format!("base_matches_manifest:{}", chat.n), ok, detail);
         }
 
         // Warm the sessions first (a resumed, parked Claude per chat, as in a
@@ -171,7 +185,7 @@ impl Workload for Stream {
             let mut temp = Vec::new();
             for chat in &targets {
                 let msg = fixture::message_uuid(chat.n, 6900);
-                fixture::queue_prompt(&client, &chat.id, fx.space_path(chat), &msg, fixture::WARM_PROMPT)
+                fixture::queue_prompt(&client, &chat.id, &fx.space_path(chat), &msg, fixture::WARM_PROMPT)
                     .await?;
                 if ui.watches.contains_key(&chat.id) {
                     continue;
@@ -182,9 +196,8 @@ impl Workload for Stream {
                 temp.push(Watch::spawn(chat.id.clone(), sub, ctx.stats.clone()));
             }
             for chat in &targets {
-                let want = chat.text_bytes + fixture::WARM_TEXT.len();
                 let done = |s: &super::driver::ChatState| {
-                    turn_settled(&s.view) && text_of(&s.view).len() >= want
+                    turn_settled(&s.view) && last_turn_text(&s.view) == fixture::WARM_TEXT
                 };
                 match ui.watches.get(&chat.id) {
                     Some(w) => w.wait_for(Duration::from_secs(90), "the warm-up turn", done).await?,
@@ -226,7 +239,7 @@ impl Workload for Stream {
         let t0 = mono_now();
         let queued = targets.iter().zip(&turns).map(|(chat, (path, _))| {
             let client = client.clone();
-            let cwd = fx.space_path(chat).to_path_buf();
+            let cwd = fx.space_path(chat);
             let id = chat.id.clone();
             let msg = fixture::message_uuid(chat.n, 7000);
             let path = path.clone();
@@ -344,11 +357,16 @@ mod tests {
     }
 
     #[test]
-    fn fixture_has_k_targets_of_the_base_size() {
-        let s = Stream::from_params(Tier::Quick, &[("base".into(), "5m".into())]).unwrap();
-        let spec = s.fixture_spec();
-        let targets: Vec<_> = spec.chats.iter().filter(|c| c.tag == "target").collect();
-        assert_eq!(targets.len(), 4);
-        assert!(targets.iter().all(|c| c.bytes == 5_000_000));
+    fn base_must_be_a_p20_class() {
+        assert!(Stream::from_params(Tier::Quick, &[("base".into(), "3m".into())]).is_ok());
+        let s = Stream::from_params(Tier::Quick, &[("base".into(), "3m".into())]).unwrap();
+        let fx = fixture::Fixture {
+            dir: "/x".into(),
+            profile: Profile::P20,
+            id: "P20-test".into(),
+            fixture_revision: None,
+            chats: Vec::new(),
+        };
+        assert!(s.targets(&fx).is_err());
     }
 }

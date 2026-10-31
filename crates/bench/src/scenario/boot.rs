@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::driver::Watch;
-use super::fixture::{self, FixtureSpec};
+use super::fixture::Profile;
 use super::{TrialCtx, Workload, load_params};
 use crate::ab::Tier;
 use crate::mono_now;
@@ -29,9 +29,6 @@ const POLL: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct BootParams {
-    pub chats: usize,
-    pub cap_bytes: usize,
-    pub outliers: usize,
     pub max_wait_s: u64,
     pub hold_s: u64,
     pub ui: bool,
@@ -40,9 +37,6 @@ pub struct BootParams {
 impl Default for BootParams {
     fn default() -> Self {
         Self {
-            chats: 200,
-            cap_bytes: 8_000_000,
-            outliers: 2,
             max_wait_s: 120,
             hold_s: 30,
             ui: false,
@@ -105,7 +99,7 @@ impl Workload for Boot {
 
     fn variant(&self) -> Value {
         json!({
-            "chats": self.p.chats, "cap_bytes": self.p.cap_bytes, "outliers": self.p.outliers,
+            "profile": "P200",
             "max_wait_s": self.p.max_wait_s, "hold_s": self.p.hold_s, "ui": self.p.ui,
             "tier": self.tier.as_str(),
         })
@@ -113,21 +107,20 @@ impl Workload for Boot {
 
     fn variant_key(&self) -> String {
         format!(
-            "p{}{}-{}",
-            self.p.chats,
+            "p200{}-{}",
             if self.p.ui { "-ui" } else { "" },
             self.tier.as_str()
         )
     }
 
-    fn fixture_spec(&self) -> FixtureSpec {
-        fixture::p200(200, self.p.chats, self.p.cap_bytes, self.p.outliers)
+    fn profile(&self) -> Profile {
+        Profile::P200
     }
 
     async fn run(&self, ctx: &mut TrialCtx) -> Result<()> {
         let p = &self.p;
         let fx = ctx.fixture.clone();
-        let want = fx.manifest.chats.len();
+        let want = fx.chats.len();
         // CPU burned before the launcher returned (the cgroup counts since scope start).
         if let Some(us) = ctx.boot_cpu_us {
             ctx.metric("cpu_s_to_ready", us as f64 / 1e6);
@@ -162,8 +155,8 @@ impl Workload for Boot {
         if p.ui {
             let mut u = super::driver::Ui::new(client.clone(), ctx.stats.clone());
             u.open_global().await?;
-            if let Some(chat) = fx.chats_tagged("bg").next() {
-                let t = u.open_chat(&chat.id, fx.space_path(chat)).await?;
+            if let Some(chat) = fx.class("100k", true).first() {
+                let t = u.open_chat(&chat.id, &fx.space_path(chat)).await?;
                 u.watch(&chat.id)?
                     .wait_for(Duration::from_secs(120), "first frame", |s| s.first.is_some())
                     .await?;
@@ -217,7 +210,7 @@ impl Workload for Boot {
         ctx.close_window().await?;
 
         // Recovery: residue chats come up aborted, never still streaming.
-        let victims: Vec<_> = fx.manifest.chats.iter().filter(|c| c.crash_residue).take(3).cloned().collect();
+        let victims: Vec<_> = fx.chats.iter().filter(|c| c.crash_residue).take(3).cloned().collect();
         let mut aborted = 0;
         for chat in &victims {
             let sub = client
@@ -280,10 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn variant_key_names_size_and_tier() {
-        let b = Boot::from_params(Tier::Quick, &[("chats".into(), "20".into())]).unwrap();
-        assert_eq!(b.variant_key(), "p20-quick");
+    fn variant_key_names_profile_and_tier() {
+        let b = Boot::from_params(Tier::Quick, &[]).unwrap();
+        assert_eq!(b.variant_key(), "p200-quick");
         assert_eq!(b.p.hold_s, 10);
-        assert_eq!(b.fixture_spec().chats.len(), 20);
+        assert_eq!(b.profile(), Profile::P200);
     }
 }

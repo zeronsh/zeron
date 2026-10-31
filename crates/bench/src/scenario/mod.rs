@@ -42,7 +42,7 @@ use crate::sample::{
 use crate::{Engine, Trial, launch, mono_now};
 
 pub use driver::{Canary, Probe, RpcStats, Ui, Watch, percentile};
-pub use fixture::{Fixture, FixtureSpec};
+pub use fixture::{Fixture, Profile};
 
 /// What every trial of one `ab`/`control` run shares.
 #[derive(Clone, Debug)]
@@ -57,6 +57,8 @@ pub struct RunEnv {
     pub engine_b: PathBuf,
     /// Builds fixtures that are not cached yet (side A by default).
     pub fixture_engine: PathBuf,
+    /// Full sha of the pinned fixture revision (the older side of the pair).
+    pub fixture_rev: String,
     /// A trial whose machine-wide outside CPU (percent of one core) exceeds
     /// this is flagged noisy.
     pub noisy_outside_cpu_pct: f64,
@@ -73,6 +75,7 @@ impl RunEnv {
         engine_a: PathBuf,
         engine_b: PathBuf,
         bench_bin: PathBuf,
+        fixture_rev: String,
     ) -> Result<Self> {
         let replay_bin = bench_bin
             .parent()
@@ -98,6 +101,7 @@ impl RunEnv {
             bench_bin,
             replay_bin,
             fixture_engine: engine_a.clone(),
+            fixture_rev,
             engine_a,
             engine_b,
             noisy_outside_cpu_pct: env_f64("ZB_NOISY_OUTSIDE_CPU_PCT", 300.0),
@@ -189,16 +193,10 @@ pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
     let tier = env.tier;
     let env = Arc::new(env);
     let scenario: Box<dyn Scenario> = match arg.name.as_str() {
-        "stream" => Box::new(Live::new(
-            stream::Stream::from_params(tier, &arg.overrides)?,
-            env,
-        )),
-        "boot" => Box::new(Live::new(boot::Boot::from_params(tier, &arg.overrides)?, env)),
-        "idle" => Box::new(Live::new(idle::Idle::from_params(tier, &arg.overrides)?, env)),
-        "switch" => Box::new(Live::new(
-            switch::Switch::from_params(tier, &arg.overrides)?,
-            env,
-        )),
+        "stream" => Box::new(Live::new(stream::Stream::from_params(tier, &arg.overrides)?, env)?),
+        "boot" => Box::new(Live::new(boot::Boot::from_params(tier, &arg.overrides)?, env)?),
+        "idle" => Box::new(Live::new(idle::Idle::from_params(tier, &arg.overrides)?, env)?),
+        "switch" => Box::new(Live::new(switch::Switch::from_params(tier, &arg.overrides)?, env)?),
         _ => return Ok(None),
     };
     Ok(Some(scenario))
@@ -240,7 +238,7 @@ pub trait Workload {
     const ID: &'static str;
     fn variant(&self) -> Value;
     fn variant_key(&self) -> String;
-    fn fixture_spec(&self) -> FixtureSpec;
+    fn profile(&self) -> Profile;
     /// Sampler rate: 4 Hz during activity, 1 Hz for idle windows.
     fn sampler_hz(&self) -> f64 {
         4.0
@@ -446,28 +444,31 @@ fn read_perf(trial: &Trial) -> (Option<f64>, Option<f64>) {
 pub struct Live<W: Workload> {
     w: W,
     env: Arc<RunEnv>,
+    fx: Arc<Fixture>,
     variant: Value,
     key: String,
     fixture_id: String,
 }
 
 impl<W: Workload> Live<W> {
-    pub fn new(w: W, env: Arc<RunEnv>) -> Self {
+    pub fn new(w: W, env: Arc<RunEnv>) -> Result<Self> {
         let variant = w.variant();
         let key = w.variant_key();
-        let fixture_id = w.fixture_spec().id();
-        Self {
+        let fx = fixture::resolve(&env, w.profile())?;
+        let fixture_id = fx.id.clone();
+        Ok(Self {
             w,
             env,
+            fx,
             variant,
             key,
             fixture_id,
-        }
+        })
     }
 
     async fn attempt(&self, planned: &PlannedTrial, attempt: u32) -> Result<TrialBody> {
         let env = &self.env;
-        let fx = fixture::ensure(env, &self.w.fixture_spec()).await?;
+        let fx = Arc::clone(&self.fx);
         let index = planned.order_index + attempt * 500;
         let mut trial = Trial::at(&env.zb_root, &env.run_id, index, planned.side.as_str())?;
         trial.replay_bin = env.replay_bin.clone();

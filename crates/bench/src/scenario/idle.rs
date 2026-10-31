@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::driver::{Ui, Watch};
-use super::fixture::{self, FixtureSpec, last_turn_text, sha256_hex, text_of, turn_settled};
+use super::fixture::{self, Profile, base_matches, last_turn_text, turn_settled};
 use super::{TrialCtx, Workload, load_params};
 use crate::ab::Tier;
 
@@ -75,8 +75,8 @@ impl Workload for Idle {
         format!("{}-{}", self.p.variant, self.tier.as_str())
     }
 
-    fn fixture_spec(&self) -> FixtureSpec {
-        fixture::p20("P20", 20, 0, 0)
+    fn profile(&self) -> Profile {
+        Profile::P20
     }
 
     fn sampler_hz(&self) -> f64 {
@@ -104,8 +104,8 @@ impl Workload for Idle {
             let mut u = Ui::new(client, ctx.stats.clone());
             u.open_global().await?;
             // The chat a user would have open: a small background chat.
-            let chat = fx.chats_tagged("bg").next().context("fixture has no chat")?.clone();
-            u.open_chat(&chat.id, fx.space_path(&chat)).await?;
+            let chat = fx.class("100k", true).first().context("fixture has no chat")?.clone();
+            u.open_chat(&chat.id, &fx.space_path(&chat)).await?;
             u.watch(&chat.id)?
                 .wait_for(Duration::from_secs(60), "the full reset", |s| s.full.is_some())
                 .await?;
@@ -116,10 +116,11 @@ impl Workload for Idle {
             // Sessions that finished a turn stay alive (the idle reaper is 30 min).
             let client = ctx.connect().await?;
             let parked: Vec<_> = fx
-                .chats_tagged("bg")
+                .class("100k", true)
+                .into_iter()
                 .skip(1)
+                .chain(fx.class("1m", true))
                 .take(p.parked_chats)
-                .cloned()
                 .collect();
             ensure!(parked.len() == p.parked_chats, "not enough chats to park");
             for chat in &parked {
@@ -147,7 +148,7 @@ impl Workload for Idle {
                 fixture::queue_play(
                     &client,
                     &chat.id,
-                    fx.space_path(chat),
+                    &fx.space_path(chat),
                     &fixture::message_uuid(chat.n, 7100),
                     &path,
                     0.0,
@@ -176,15 +177,13 @@ impl Workload for Idle {
 
         if let (Some(u), Some(chat), Some(before)) = (&ui, &open_chat, frames_before) {
             let w = u.watch(&chat.id)?;
-            let (frames, ok, err) = w.with(|s| {
-                let text = text_of(&s.view);
-                (
-                    s.frames,
-                    sha256_hex(&text) == chat.text_sha256,
-                    s.error.clone(),
-                )
-            });
-            ctx.check("open_chat_unchanged", ok && err.is_none(), err.unwrap_or_default());
+            let (frames, (ok, detail), err) =
+                w.with(|s| (s.frames, base_matches(chat, &s.view), s.error.clone()));
+            ctx.check(
+                "open_chat_unchanged",
+                ok && err.is_none(),
+                err.unwrap_or(detail),
+            );
             ctx.check(
                 "no_transcript_frames_while_idle",
                 frames == before,

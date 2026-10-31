@@ -100,8 +100,8 @@ enum Command {
     Control {
         /// Revision to run against itself.
         rev: String,
-        /// Scenario name. `S-build` is refused.
-        #[arg(long)]
+        /// Scenario name, or `all` (the default) for S-stream, S-boot, S-idle and S-switch. `S-build` is refused.
+        #[arg(long, default_value = "all")]
         scenario: String,
         /// `quick`, `standard`, or `full`.
         #[arg(long)]
@@ -357,24 +357,36 @@ fn ab_command(
     control: bool,
 ) -> Result<()> {
     let tier = zeron_bench::ab::Tier::parse(&tier)?;
-    let result = zeron_bench::ab::run_ab(&zeron_bench::ab::AbOptions {
-        a,
-        b,
-        scenario,
-        tier,
-        zb_root: resolve_root(zb_root)?,
-        repo: resolve_repo(repo)?,
-        seed,
-        inject,
-        no_build,
-        control,
-        preflight,
-        run_id: None,
-        fingerprint: None,
-        now_unix: None,
-    })?;
-    println!("run={}", result.run_dir.display());
-    print!("{}", result.report);
+    let zb_root = resolve_root(zb_root)?;
+    let repo = resolve_repo(repo)?;
+    let names: Vec<String> = if scenario.eq_ignore_ascii_case("all") {
+        zeron_bench::scenario::SCENARIOS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![scenario]
+    };
+    for name in names {
+        let result = zeron_bench::ab::run_ab(&zeron_bench::ab::AbOptions {
+            a: a.clone(),
+            b: b.clone(),
+            scenario: name,
+            tier,
+            zb_root: zb_root.clone(),
+            repo: repo.clone(),
+            seed,
+            inject: inject.clone(),
+            no_build,
+            control,
+            preflight,
+            run_id: None,
+            fingerprint: None,
+            now_unix: None,
+        })?;
+        println!("run={}", result.run_dir.display());
+        print!("{}", result.report);
+    }
     Ok(())
 }
 
