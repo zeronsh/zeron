@@ -282,6 +282,13 @@ async fn scoped_fake_engine_reaches_ready_and_leaves_nothing() {
     assert!(launched.t_listen >= launched.t_spawn);
     assert!(launched.t_ready >= launched.t_listen);
     assert!(pid_alive(launched.pid));
+    let cmdline = fs::read(format!("/proc/{}/cmdline", launched.pid)).unwrap_or_default();
+    let cmdline = String::from_utf8_lossy(&cmdline);
+    assert!(
+        cmdline.contains("fake-engine.py"),
+        "pid {} is not the fake engine: {cmdline}",
+        launched.pid
+    );
     assert_ne!(trial.port, 27654);
 
     let active = systemctl_value(&unit, "ActiveState");
@@ -313,6 +320,19 @@ async fn scoped_fake_engine_reaches_ready_and_leaves_nothing() {
     assert_eq!(report.containment, "scope");
     assert!(report.stop_engine_answered, "{report:?}");
     assert_eq!(report.how, zeron_bench::StopHow::Rpc);
+    let perf = fs::read_to_string(trial.root.join("perf.json"))
+        .unwrap_or_else(|err| panic!("perf.json missing after stop: {err}"));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&perf).unwrap_or_else(|_| panic!("{perf}"));
+    assert!(
+        parsed
+            .get("instructions_u")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "{perf}"
+    );
+    assert!(parsed.get("cycles_u").is_some(), "{perf}");
+    assert!(parsed.get("task_clock_ns").is_some(), "{perf}");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut load = String::new();
@@ -369,7 +389,7 @@ fn unit_dir_exists(unit: &str) -> bool {
 }
 
 #[test]
-fn exec_counted_replaces_itself_with_the_command() {
+fn exec_counted_propagates_the_command_status() {
     let bin = env!("CARGO_BIN_EXE_zeron-bench");
     let status = Command::new(bin)
         .args(["exec-counted", "--", "/usr/bin/true"])

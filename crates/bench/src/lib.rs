@@ -10,6 +10,8 @@
 mod env;
 #[cfg(unix)]
 mod launch;
+#[cfg(unix)]
+mod sample;
 
 #[cfg(unix)]
 pub use env::{
@@ -18,3 +20,8 @@ pub use env::{
 };
 #[cfg(unix)]
 pub use launch::{DoctorReport, Engine, ShutdownReport, StopHow, doctor, launch};
+#[cfg(unix)]
+pub use sample::{
+    PerfTotals, RaplSample, energy_delta_uj, energy_j_net, read_package_at, run_counted,
+    sample_package,
+};

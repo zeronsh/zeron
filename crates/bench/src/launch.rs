@@ -4,7 +4,7 @@
 //! … zeron-bench exec-counted -- <engine>`. `systemd-run` keeps the bench's
 //! environment so it can reach the user bus; `env -i` is what the engine
 //! actually execs, so the allowlist from [`crate::engine_env`] is the whole
-//! environment. `exec-counted` is a passthrough until the perf unit wraps it.
+//! environment. `exec-counted` counts the engine and writes `perf.json`.
 //!
 //! If `systemd-run` cannot talk to the user bus, the engine is put in its
 //! own process group instead. [`ShutdownReport::containment`] is `"scope"`
@@ -65,7 +65,7 @@ pub struct ShutdownReport {
 /// Dropping an [`Engine`] without [`Engine::stop`] kills the scope or the
 /// process group. It does not call `StopEngine` (Drop cannot wait on RPC).
 pub struct Engine {
-    /// Engine pid (after `exec-counted` replaces itself).
+    /// Engine pid. `exec-counted` is its parent and forwards signals to it.
     pub pid: u32,
     /// systemd unit name without `.scope`, or `None` for the process-group fallback.
     pub scope: Option<String>,
@@ -209,6 +209,18 @@ impl Engine {
             return;
         }
         let _ = tokio::task::spawn_blocking(move || {
+            // On the process-group path this child is `exec-counted`. It
+            // writes `perf.json` after the engine exits. A child that has
+            // already exited is collected on the first `try_wait`.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() >= deadline => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         })
@@ -494,7 +506,8 @@ fn spawn_pgroup(
 ) -> Result<Spawned> {
     use std::os::unix::process::CommandExt;
     // Same argv shape as the scope path, without systemd. `exec-counted`
-    // replaces itself, so the process-group leader's pid stays the engine's.
+    // stays up to read the counters. Its child, the engine, leads its own
+    // process group so a group signal still reaches the tree.
     let stdout = File::create(stdout_path)?;
     let stderr = File::create(stderr_path)?;
     let mut cmd = Command::new(&trial.bench_bin);
@@ -573,7 +586,8 @@ async fn wait_ready(
                 let pid = pid
                     .or_else(|| engine_pid(spawned, &trial.bench_bin))
                     .or_else(|| {
-                        // Process-group spawn: the child is the engine.
+                        // `/proc/.../children` was unreadable. The wrapper still
+                        // forwards signals to the command.
                         spawned.scope.is_none().then(|| spawned.child.id())
                     });
                 let Some(pid) = pid else {
@@ -592,7 +606,7 @@ async fn wait_ready(
 
 fn engine_pid(spawned: &Spawned, bin_hint: &Path) -> Option<u32> {
     if spawned.scope.is_none() {
-        return Some(spawned.child.id());
+        return counted_child(spawned.child.id());
     }
     let cgroup = spawned.cgroup.as_ref()?;
     let text = fs::read_to_string(cgroup.join("cgroup.procs")).ok()?;
@@ -605,15 +619,20 @@ fn engine_pid(spawned: &Spawned, bin_hint: &Path) -> Option<u32> {
     for pid in &pids {
         let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
         if !hint.is_empty() && cmd.windows(hint.len()).any(|w| w == hint.as_bytes()) {
-            return Some(*pid);
+            // This pid is `zeron-bench exec-counted`. The engine is its child.
+            return counted_child(*pid);
         }
     }
-    // `env`/`exec-counted`/`engine` share one pid once they exec. A single
-    // proc in the scope is that pid even before the final exec.
-    if pids.len() == 1 {
-        return Some(pids[0]);
-    }
     None
+}
+
+/// Direct child of `exec-counted`. The wrapper forks once, then `execve`s.
+fn counted_child(pid: u32) -> Option<u32> {
+    let text = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+    text.split_whitespace().find_map(|field| {
+        let child: u32 = field.parse().ok()?;
+        (child > 1).then_some(child)
+    })
 }
 
 async fn request_stop(port: u16, data: &Path) -> bool {
