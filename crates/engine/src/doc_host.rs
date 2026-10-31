@@ -248,6 +248,8 @@ pub struct DocHostConfig {
 
 struct DocHostInner {
     store: Arc<DocsStore>,
+    /// Writes every local commit's outbox row off the committing thread.
+    outbox: Arc<crate::outbox_writer::OutboxWriter>,
     config: DocHostConfig,
     /// Set-once (first wins), cleared by `shutdown_workers`: sessions and
     /// doc-host reference each other through Arcs, so a retired runtime's
@@ -670,6 +672,26 @@ pub struct ChatDocHandle {
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
+}
+
+impl crate::outbox_writer::OutboxSink for ChatDocHandle {
+    /// The outbox writer has attempted this update's row. Runs under the client
+    /// lock, as the local-update hook used to: the join's store+drain holds the
+    /// same lock, so the update is either in the outbox that drain reads or
+    /// enqueued here after the client exists, never dropped between.
+    fn outbox_written(&self, batch_id: String, bytes: Vec<u8>, durable: bool) {
+        let client_guard = lock(&self.chat2);
+        if !durable {
+            self.publication_failed.store(true, Ordering::Release);
+            lock(&self.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
+            tracing::error!(chat = %self.chat_id, "chat2: durable outbox write failed");
+        }
+        if let Some(client) = &*client_guard {
+            // The row is already written (or held back as non-durable): do
+            // not INSERT it a second time.
+            client.enqueue_batch_journaled(batch_id, bytes, durable);
+        }
+    }
 }
 
 /// A running agent explicitly owns a writer lease until its final cleanup.
@@ -1137,6 +1159,7 @@ impl DocHost {
     pub fn new(store: Arc<DocsStore>, config: DocHostConfig) -> Self {
         let host = Self {
             inner: Arc::new(DocHostInner {
+                outbox: Arc::new(crate::outbox_writer::OutboxWriter::new(store.clone())),
                 store,
                 config,
                 sessions: Mutex::new(None),
@@ -1930,7 +1953,7 @@ impl DocHost {
                     self.inner.store.initialize_chat_outbox(chat_id, &updates)?;
                 }
                 let weak_push = Arc::downgrade(&handle);
-                let publication_store = self.inner.store.clone();
+                let outbox = self.inner.outbox.clone();
                 let publication_chat = chat_id.to_string();
                 // Concurrent commits can run their hooks out of order; this
                 // device's ops still go out in commit order (OwnOpsOrder).
@@ -1939,21 +1962,17 @@ impl DocHost {
                     .doc()
                     .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
                         if let Some(handle) = weak_push.upgrade() {
-                            // The buffer push happens WHILE HOLDING the client
-                            // lock (verify pass: releasing it between the None
-                            // check and the push let the join's store+drain
-                            // slip between, orphaning the update forever).
-                            let client_guard = lock(&handle.chat2);
-                            for bytes in lock(&own_order).order(handle.doc.doc(), bytes) {
+                            // No I/O here: the commit may be a stream task. The
+                            // outbox writer inserts the row, then hands the
+                            // update to `ChatDocHandle::outbox_written`, which
+                            // pushes it to the client under the client lock
+                            // (the join's store+drain takes the same lock).
+                            // Ordering and submitting share one lock so two
+                            // hooks cannot swap their updates on the queue.
+                            let mut order = lock(&own_order);
+                            for bytes in order.order(handle.doc.doc(), bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
-                                if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, &bytes) {
-                                    handle.publication_failed.store(true, Ordering::Release);
-                                    lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
-                                    tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
-                                }
-                                if let Some(client) = &*client_guard {
-                                    client.enqueue_batch(batch_id, bytes);
-                                }
+                                outbox.submit(&publication_chat, weak_push.clone(), batch_id, bytes);
                             }
                         }
                         true
@@ -2256,11 +2275,7 @@ impl DocHost {
                         && !handle.sync_protected()
                         && (now_ms() - handle.last_access.load(Ordering::Relaxed) >= SYNC_IDLE_MS
                             || (handle.sync_background.load(Ordering::Acquire) && caught_up))
-                        && !host
-                            .inner
-                            .store
-                            .has_pending_chat_updates(&handle.chat_id)
-                            .unwrap_or(true);
+                        && !host.outbox_pending(&handle.chat_id).unwrap_or(true);
                     if idle {
                         handle.sync_requested.store(false, Ordering::Release);
                         stopping_ids.insert(handle.chat_id.clone());
@@ -2318,7 +2333,7 @@ impl DocHost {
                         let focus = h.last_focus.load(Ordering::Acquire);
                         let caught_up = lock(&h.chat2).as_ref().is_some_and(|c| c.caught_up());
                         if !contended && !caught_up { continue; }
-                        let pending = host.inner.store.has_pending_chat_updates(&h.chat_id).unwrap_or(true);
+                        let pending = host.outbox_pending(&h.chat_id).unwrap_or(true);
                         let age = now - h.sync_last_started.load(Ordering::Acquire);
                         let service_complete = (caught_up && age >= SYNC_QUANTUM_MS) || age >= SYNC_CATCH_UP_QUANTUM_MS;
                         let eligible = if !protected {
@@ -2569,7 +2584,8 @@ impl DocHost {
                             // load but before installation. The same lock is
                             // held by the local-update subscription.
                             for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
-                                client.enqueue_batch(id, bytes);
+                                // Read from the outbox, so already journaled.
+                                client.enqueue_batch_journaled(id, bytes, true);
                             }
                             let pending: Vec<(String, Vec<u8>)> =
                                 lock(&handle.chat2_pending_local).clone();
@@ -3728,6 +3744,8 @@ impl DocHost {
             resolution: None,
         };
         handle.doc.queue_command(&entry)?;
+        // The command is accepted only once its outbox row is written.
+        self.inner.outbox.flush();
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
@@ -4971,6 +4989,7 @@ impl DocHost {
             tracing::info!(chat = %chat_id, old = %old.id, new = %reissue.id,
                 "retry re-issues a dead send attempt");
             handle.doc.queue_command(&reissue)?;
+            self.inner.outbox.flush();
             let transfers = command_transfers(&reissue);
             self.spawn_command_delivery(chat_id, reissue, transfers);
         }
@@ -6317,8 +6336,20 @@ impl DocHost {
         Ok(())
     }
 
+    /// Whether `chat` has outgoing updates not yet acknowledged: still queued
+    /// for the outbox writer, or in the outbox. The writer is asked first, so
+    /// an update that finishes in between is seen by the store read.
+    pub(crate) fn outbox_pending(&self, chat: &str) -> Result<bool, zeron_sync::StoreError> {
+        if self.inner.outbox.has_in_flight(chat) {
+            return Ok(true);
+        }
+        self.inner.store.has_pending_chat_updates(chat)
+    }
+
     /// Persist every open doc now (shutdown path; bypasses the debounce).
     pub fn flush_all(&self) {
+        // Rows for every commit so far, before any snapshot or shutdown.
+        self.inner.outbox.flush();
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
             self.save_snapshot(&handle);

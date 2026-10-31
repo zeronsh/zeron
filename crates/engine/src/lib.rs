@@ -37,6 +37,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+mod outbox_writer;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;

@@ -4,7 +4,8 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -112,9 +113,17 @@ pub struct DocsStore {
     /// visible on the next read, and reads do not take the writer mutex.
     reader: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
+    /// Write transactions the outbox has taken: one per [`Self::enqueue_chat_updates`]
+    /// batch, one per [`Self::enqueue_chat_update`] row.
+    outbox_write_txs: AtomicU64,
+    /// Run before any snapshot row is written; see [`Self::add_snapshot_barrier`].
+    snapshot_barriers: Mutex<Vec<Weak<SnapshotBarrier>>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
     pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
+
+/// A callback that must return before a snapshot is written.
+pub type SnapshotBarrier = dyn Fn() + Send + Sync;
 
 impl DocsStore {
     /// Open (creating directory, database, and schema as needed).
@@ -143,6 +152,8 @@ impl DocsStore {
             conn: Mutex::new(conn),
             reader: Mutex::new(reader),
             failed_publications: Mutex::new(HashSet::new()),
+            outbox_write_txs: AtomicU64::new(0),
+            snapshot_barriers: Mutex::new(Vec::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -163,6 +174,7 @@ impl DocsStore {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
+        self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
         let result = self.conn().execute(
             "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
             params![doc_id, batch_id, bytes],
@@ -175,6 +187,69 @@ impl DocsStore {
         }
         result?;
         Ok(())
+    }
+
+    /// Insert several `(doc_id, batch_id, bytes)` rows in ONE transaction, in
+    /// slice order (so `ordinal` follows it). All or nothing. A failure is NOT
+    /// recorded as a failed publication: the caller retries the rows one by
+    /// one with [`Self::enqueue_chat_update`], which records exactly the docs
+    /// whose own row cannot be written.
+    pub fn enqueue_chat_updates(&self, items: &[(&str, &str, &[u8])]) -> Result<(), StoreError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        store_blocking(|| self.enqueue_chat_updates_blocking(items))
+    }
+
+    fn enqueue_chat_updates_blocking(
+        &self,
+        items: &[(&str, &str, &[u8])],
+    ) -> Result<(), StoreError> {
+        self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+            )?;
+            for (doc_id, batch_id, bytes) in items {
+                insert.execute(params![doc_id, batch_id, bytes])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Outbox write transactions taken so far (a batch counts once).
+    pub fn outbox_write_transactions(&self) -> u64 {
+        self.outbox_write_txs.load(Ordering::Relaxed)
+    }
+
+    /// Register a callback that runs, outside the connection lock, before every
+    /// snapshot write. The engine uses it to flush its outbox writer: a
+    /// snapshot may only land once the outbox rows for the operations it
+    /// contains (or the record that such a row failed) are already on disk.
+    /// The store keeps only a weak reference; dropping the `Arc` unregisters.
+    pub fn add_snapshot_barrier(&self, barrier: &Arc<SnapshotBarrier>) {
+        let mut barriers = self
+            .snapshot_barriers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        barriers.retain(|b| b.strong_count() > 0);
+        barriers.push(Arc::downgrade(barrier));
+    }
+
+    fn run_snapshot_barriers(&self) {
+        let live: Vec<_> = self
+            .snapshot_barriers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for barrier in live {
+            barrier();
+        }
     }
 
     pub fn pending_chat_updates(&self, doc_id: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
@@ -318,6 +393,7 @@ impl DocsStore {
 
     /// Save (upsert) the snapshot for `doc_id`.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.run_snapshot_barriers();
         store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
     }
 
@@ -344,6 +420,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
+        self.run_snapshot_barriers();
         store_blocking(|| self.save_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch))
     }
 
@@ -374,6 +451,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
+        self.run_snapshot_barriers();
         store_blocking(|| {
             self.save_verified_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch)
         })
@@ -951,6 +1029,76 @@ mod tests {
         assert!(journal.eq_ignore_ascii_case("wal"));
         assert!(reader.is_readonly(rusqlite::DatabaseName::Main).unwrap());
         assert!(!writer.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+    }
+
+    #[test]
+    fn batched_outbox_insert_is_one_ordered_idempotent_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let before = store.outbox_write_transactions();
+        store
+            .enqueue_chat_updates(&[
+                ("a", "a1", b"1"),
+                ("b", "b1", b"2"),
+                ("a", "a2", b"3"),
+                ("a", "a1", b"1"),
+            ])
+            .unwrap();
+        assert_eq!(store.outbox_write_transactions() - before, 1);
+        let ids = |doc| -> Vec<String> {
+            store
+                .pending_chat_updates(doc)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        assert_eq!(ids("a"), vec!["a1", "a2"], "slice order, duplicate ignored");
+        assert_eq!(ids("b"), vec!["b1"]);
+        store.enqueue_chat_updates(&[]).unwrap();
+        assert_eq!(store.outbox_write_transactions() - before, 1);
+    }
+
+    #[test]
+    fn a_failed_batch_leaves_no_rows_and_no_failed_publication_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.initialize_chat_outbox("good", &[]).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_one BEFORE INSERT ON chat_outbox WHEN NEW.batch_id='poison' BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+        assert!(
+            store
+                .enqueue_chat_updates(&[("good", "g1", b"1"), ("bad", "poison", b"2")])
+                .is_err()
+        );
+        assert!(store.pending_chat_updates("good").unwrap().is_empty());
+        // Not marked failed: a later snapshot of "good" keeps its marker.
+        store.save_snapshot("good", b"snapshot").unwrap();
+        assert!(store.chat_outbox_initialized("good").unwrap());
+        // Row by row, only the poisoned doc is marked.
+        store.enqueue_chat_update("good", "g1", b"1").unwrap();
+        assert!(store.enqueue_chat_update("bad", "poison", b"2").is_err());
+        assert_eq!(store.pending_chat_updates("good").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn snapshot_barriers_run_before_each_snapshot_write_and_unregister_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        store.add_snapshot_barrier(&barrier);
+        store.save_snapshot("a", b"1").unwrap();
+        store.save_snapshot_with_cursor("a", b"2", 1, 2).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("a", b"3", 1, 2)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        drop(barrier);
+        store.save_snapshot("a", b"4").unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
