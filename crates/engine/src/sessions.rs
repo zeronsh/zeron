@@ -5584,6 +5584,9 @@ mod tests {
                 Some("main".into()),
             )
             .unwrap();
+        core.workspace
+            .create_chat("second", None, Some(&core.device_id), None, Some("/work".into()))
+            .unwrap();
         core.workspace.claim_chat("early", None).unwrap();
 
         let mut prefs = core.registry.mcp_prefs();
