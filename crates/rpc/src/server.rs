@@ -124,8 +124,19 @@ async fn handle_request(
             .await;
         }
         Ok(RpcReply::RawStream(mut stream)) => {
-            // Items are already serialized: splice each into its frame. The
-            // checkout-PR readiness frame above is a `Stream` concern.
+            // The readiness handshake is a property of the method, regardless
+            // of whether the service supplies parsed or raw stream items.
+            if method == crate::methods::WATCH_CHECKOUT_CHANGE_REQUEST
+                && send(ServerFrame {
+                    id,
+                    ok: Some(serde_json::json!({ "stream": true })),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
             while let Some(item) = stream.next().await {
                 if out.send(crate::item_frame(id, &item)).await.is_err() {
                     return; // connection gone

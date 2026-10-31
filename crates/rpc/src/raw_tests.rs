@@ -71,6 +71,24 @@ fn pretty_raw_keeps_numbers_duplicates_and_string_escapes() {
     assert!(!frame.contains(['\n', '\r']));
 }
 
+#[tokio::test]
+async fn raw_checkout_stream_sends_readiness_before_items() {
+    struct Service;
+    #[async_trait]
+    impl RpcService for Service {
+        async fn handle(&self, _: &str, _: Value) -> Result<RpcReply, RpcError> {
+            Ok(RpcReply::RawStream(futures::stream::pending().boxed()))
+        }
+    }
+    let client = memory_client(Arc::new(Service));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        client.subscribe_checked_raw(methods::WATCH_CHECKOUT_CHANGE_REQUEST, Value::Null),
+    )
+    .await;
+    assert!(result.expect("readiness timed out").is_ok());
+}
+
 #[test]
 fn envelope_reads_every_frame_shape_like_server_frame() {
     let lines = [
