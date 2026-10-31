@@ -231,24 +231,24 @@ impl ChatPersistence {
                 hook();
             }
             let vv_now = doc.doc().oplog_vv();
+            let unsaved = generation != self.saved.load(Ordering::Acquire);
             let result = (|| -> Result<(), String> {
-                let delta = if !compact {
-                    write
-                        .saved_vv
-                        .as_ref()
-                        .map(|vv| doc.doc().export(loro::ExportMode::updates(vv)))
-                        .transpose()
-                        .map_err(|e| e.to_string())?
-                } else {
-                    None
-                };
+                let delta = write
+                    .saved_vv
+                    .as_ref()
+                    .map(|vv| doc.doc().export(loro::ExportMode::updates(vv)))
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
                 let roots = DocsStore::snapshot_roots(doc.doc()).map_err(|e| e.to_string())?;
-                let full = delta.as_ref().is_none_or(|bytes| {
-                    write.delta_count + 1 > MAX_DELTAS
-                        || write.delta_bytes + bytes.len() + roots.len()
-                            > MIN_DELTA_BYTES.max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
-                });
-                if full {
+                let want_full = compact
+                    || delta.as_ref().is_none_or(|bytes| {
+                        write.delta_count + 1 > MAX_DELTAS
+                            || write.delta_bytes + bytes.len() + roots.len()
+                                > MIN_DELTA_BYTES
+                                    .max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
+                    });
+                let mut full_saved = false;
+                if want_full {
                     if write.needs_compaction {
                         // The chain being replaced has rows that failed
                         // validation. Keep a copy first; the repair must
@@ -268,12 +268,32 @@ impl ChatPersistence {
                             ),
                         }
                     }
-                    self.save_full(&doc, cursor)?;
-                    write.delta_count = 0;
-                    write.delta_bytes = 0;
-                    write.needs_compaction = false;
-                } else {
-                    let bytes = delta.unwrap();
+                    match self.save_full(&doc, cursor) {
+                        Ok(()) => {
+                            write.delta_count = 0;
+                            write.delta_bytes = 0;
+                            write.needs_compaction = false;
+                            full_saved = true;
+                        }
+                        // A failed compaction (a large write: disk full, a
+                        // busy timeout) must not cost the unsaved edits when
+                        // the small delta can still land. The chain is
+                        // allowed to overshoot its limits only until the
+                        // next successful compaction, and by at most 2x.
+                        Err(error)
+                            if unsaved
+                                && !write.needs_compaction
+                                && write.delta_count < 2 * MAX_DELTAS
+                                && delta.is_some() =>
+                        {
+                            tracing::warn!(chat = %self.chat_id, %error,
+                                "snapshot compaction failed; appending a delta instead");
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !full_saved {
+                    let bytes = delta.expect("a delta chain always has a saved version");
                     self.store
                         .append_snapshot_delta(&self.chat_id, &bytes, cursor, &roots)
                         .map_err(|e| e.to_string())?;
@@ -519,6 +539,37 @@ mod tests {
         p.applied(3, false);
         assert_eq!(assert_state(&store, &doc, 3).delta_count, 1);
         assert!(p.is_clean());
+    }
+
+    #[test]
+    fn failed_compaction_still_lands_unsaved_edits_as_a_delta() {
+        let (dir, doc, store, p) = fixture();
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        p.applied(1, false);
+        doc.doc().get_text("text").insert(0, "first").unwrap();
+        doc.doc().commit();
+        p.applied(2, false);
+        // The edit below cannot be appended, so it is unsaved at shutdown.
+        db.execute_batch("CREATE TRIGGER fail_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'busy'); END").unwrap();
+        doc.doc().get_text("text").insert(0, "second").unwrap();
+        doc.doc().commit();
+        p.applied(3, false);
+        assert!(!p.is_clean());
+        // Shutdown compaction fails too (it must delete the existing row).
+        db.execute_batch(
+            "DROP TRIGGER fail_delta;
+             CREATE TRIGGER fail_compact BEFORE DELETE ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'disk full'); END",
+        )
+        .unwrap();
+        p.flush_sync();
+        assert!(p.is_clean(), "the delta fallback made the edit durable");
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 2);
+        // A clean chain whose compaction fails stays as it is.
+        p.flush_sync();
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 2);
+        db.execute_batch("DROP TRIGGER fail_compact").unwrap();
+        p.flush_sync();
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 0);
     }
 
     #[tokio::test(start_paused = true)]

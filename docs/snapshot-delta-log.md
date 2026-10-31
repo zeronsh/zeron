@@ -24,7 +24,10 @@ version from the imported disk state **before** replaying any publication outbox
 Compaction runs after 30 seconds without save activity, on shutdown/eviction, or
 when the next delta would exceed 256 rows or
 `max(512 KiB, base_snapshot_bytes / 2)` total delta bytes. A clean chain still
-compacts on shutdown. Legacy s2 documents and the thin client's writer retain
+compacts on shutdown. If a compaction save fails (disk full, busy timeout) while
+edits are unsaved, the engine appends the small pending delta instead, so a
+failed shutdown/eviction compaction never loses what a delta could save; the
+chain may overshoot its limits by at most 2x until a compaction succeeds. Legacy s2 documents and the thin client's writer retain
 full saves; their readers, local import, salvage and inspection examples understand
 the new log. All full-save APIs invalidate existing deltas atomically.
 
