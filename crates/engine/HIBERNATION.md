@@ -34,6 +34,9 @@ minutes. Durable jobs from a previous process are not re-detected after a resume
 A parked runtime must also have seen no background task start or end for 30
 seconds (`BACKGROUND_SETTLE`): a task that just ended is about to wake the agent
 with its result, and the pressure and manual paths have no deferred window.
+Likewise a parked runtime that emitted any stream event more than a second after
+its park (`PARKED_QUIET`, 30 seconds): a wake turn that has only reasoned so far
+still reads Idle, because the parked gate drops everything but text and tool calls.
 
 Channel servers remain eager and otherwise unchanged. Only Claude Code has
 channel delivery, so Codex and all other harnesses hibernate under the ordinary

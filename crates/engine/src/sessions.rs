@@ -169,6 +169,22 @@ impl HibernateReason {
 /// runtime must have seen no background change for this long.
 const BACKGROUND_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A parked agent that produced output of its own (a wake turn thinking
+/// before its first visible event, which the parked gate drops) is mid-turn
+/// however idle the row reads. Hibernation waits this long after its last
+/// such event.
+const PARKED_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn parked_quiet(last: &std::sync::atomic::AtomicU64) -> bool {
+    let at = last.load(std::sync::atomic::Ordering::Acquire);
+    at == 0
+        || std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64)
+            .saturating_sub(at)
+            >= PARKED_QUIET.as_millis() as u64
+}
+
 fn session_idle_window(
     env: Option<&str>,
     voice: bool,
@@ -185,6 +201,9 @@ fn session_idle_window(
 }
 
 struct RunHandle {
+    /// Unix ms of the last stream event that arrived while parked, past the
+    /// tail-flush gate (0 = none): the agent has started a turn of its own.
+    parked_activity: Arc<std::sync::atomic::AtomicU64>,
     hibernate: Arc<tokio::sync::Notify>,
     hibernate_reason: Option<(HibernateReason, tokio::time::Instant)>,
     idle_since: Option<tokio::time::Instant>,
@@ -1159,6 +1178,7 @@ impl SessionsEngine {
             })
         };
         let hibernate = Arc::new(tokio::sync::Notify::new());
+        let parked_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let session_idle = session_idle_window(
             std::env::var("ZERON_SESSION_IDLE_MS").ok().as_deref(),
             zeron_proto::voice::is_orchestrator_chat(chat_id),
@@ -1220,6 +1240,7 @@ impl SessionsEngine {
         runs.insert(
             chat_id.to_string(),
             RunHandle {
+                parked_activity: parked_activity.clone(),
                 hibernate: hibernate.clone(),
                 hibernate_reason: None,
                 idle_since: idle.then(tokio::time::Instant::now),
@@ -1283,6 +1304,7 @@ impl SessionsEngine {
             cancel_rx,
             RunResumeState {
                 session_idle,
+                parked_activity,
                 hibernate,
                 sent_at,
                 idle,
@@ -2075,6 +2097,7 @@ impl Inner {
             && !run.voice_active.live()
             && !run.turn.background_live()
             && run.turn.background_settled(BACKGROUND_SETTLE)
+            && parked_quiet(&run.parked_activity)
             && (run.runtime_config.harness_id != HarnessId::ClaudeCode
                 || run.hibernation_launch.as_ref().is_some_and(|launch| {
                     run.runtime_config.harness.hibernation_safe(
@@ -3802,6 +3825,7 @@ fn finish_segment<'a>(
 /// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
     session_idle: Option<std::time::Duration>,
+    parked_activity: Arc<std::sync::atomic::AtomicU64>,
     hibernate: Arc<tokio::sync::Notify>,
     sent_at: tokio::time::Instant,
     idle: bool,
@@ -4829,6 +4853,17 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        // Output after the park's tail flush means the agent is running a turn
+        // the parked gate has yet to recognise (it drops reasoning and results
+        // until text or a tool call opens the segment).
+        if idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
+            resume_state.parked_activity.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(1, |d| d.as_millis() as u64),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
@@ -5505,6 +5540,8 @@ mod tests {
         plugin_discovery: Option<zeron_mcp_proxy::discovery::Discovery>,
         hold_turn: bool,
         finish: Arc<tokio::sync::Notify>,
+        /// Wakes the parked child into a turn of its own: reasoning, no text.
+        think: Arc<tokio::sync::Notify>,
     }
     #[async_trait::async_trait]
     impl Harness for HibernationFixture {
@@ -5555,6 +5592,7 @@ mod tests {
             let hold = self.hold_turn;
             let harness_id = self.harness_id;
             let finish = self.finish.clone();
+            let think = self.think.clone();
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
                 // Retain the lease until the fake child has actually stopped.
@@ -5579,6 +5617,10 @@ mod tests {
                     tokio::select! {
                         biased;
                         _ = controls.interrupt.cancelled() => break,
+                        _ = think.notified() => {
+                            tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+                            let _ = tx.send(Ok(AgentEvent::ReasoningDelta { text: "hmm".into() }));
+                        }
                         next = controls.steering.recv() => {
                             let Some(next) = next else { break; };
                             lock(&conversation).push(next.prompt);
@@ -5642,6 +5684,7 @@ mod tests {
                 plugin_discovery,
                 hold_turn,
                 finish: Default::default(),
+                think: Default::default(),
             });
             registry.register(fixture.clone());
             let core = crate::EngineCore::assemble_with_profile(
@@ -5828,6 +5871,32 @@ mod tests {
         lock(&t.core.sessions.inner.runs)["sleep"]
             .turn
             .set_scheduled_until(0);
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_a_wake_turn_that_has_only_reasoned_so_far() {
+        // The parked gate drops reasoning until text or a tool call opens the
+        // segment, so the row still reads Idle while the agent is mid-turn.
+        let t = HibernationTest::new(false, false).await;
+        t.fixture.think.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&t.core.sessions.inner.runs)["sleep"]
+                .parked_activity
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("reasoning while parked is recorded");
+        t.rejects().await;
+        // Quiet again: the usual rules apply.
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .parked_activity
+            .store(0, std::sync::atomic::Ordering::Release);
         assert!(t.core.sessions.hibernate("sleep"));
         t.wait(zeron_proto::RuntimeState::Hibernated).await;
         t.core.sessions.shutdown().await;

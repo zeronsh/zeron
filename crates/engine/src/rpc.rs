@@ -2197,9 +2197,10 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
-            // Background processes run in the chat host's runtime.
+            // Sessions and their runtimes live on the chat's host.
             | methods::HIBERNATE_CHAT
             | methods::HIBERNATE_IDLE
+            // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
             // Checkout diffs are produced on the device holding the checkout.
