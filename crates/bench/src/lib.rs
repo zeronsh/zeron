@@ -23,3 +23,5 @@ pub use launch::{DoctorReport, Engine, ShutdownReport, StopHow, doctor, launch};
 pub mod probe;
 #[cfg(unix)]
 pub mod replay;
+pub mod rpc;
+pub mod transcript;

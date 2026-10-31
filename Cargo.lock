@@ -13609,6 +13609,7 @@ version = "0.2.130"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "libc",
  "rand_chacha 0.9.0",
  "serde",
