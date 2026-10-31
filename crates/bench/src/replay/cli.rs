@@ -101,7 +101,11 @@ fn chat_from_mcp_config(args: &[String]) -> Option<String> {
         .as_object()?
         .values()
         .find_map(|server| server["env"]["ZERON_CHAT_ID"].as_str())
-        .map(|id| id.chars().skip(id.chars().count().saturating_sub(8)).collect())
+        .map(|id| {
+            id.chars()
+                .skip(id.chars().count().saturating_sub(8))
+                .collect()
+        })
 }
 
 fn log_spawn(args: &[String]) -> Result<()> {
@@ -514,7 +518,10 @@ mod chat_tests {
         ];
         assert_eq!(chat_from_mcp_config(&args).as_deref(), Some("000000b4"));
         assert_eq!(chat_from_mcp_config(&["--print".to_string()]), None);
-        let empty = vec!["--mcp-config".to_string(), r#"{"mcpServers":{}}"#.to_string()];
+        let empty = vec![
+            "--mcp-config".to_string(),
+            r#"{"mcpServers":{}}"#.to_string(),
+        ];
         assert_eq!(chat_from_mcp_config(&empty), None);
     }
 }

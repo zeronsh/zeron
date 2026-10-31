@@ -86,7 +86,9 @@ fn panic_in_logs(ctx: &TrialCtx) -> Option<String> {
     }
     for file in files {
         if let Ok(bytes) = std::fs::read(&file)
-            && String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("panicked at")
+            && String::from_utf8_lossy(&bytes)
+                .to_ascii_lowercase()
+                .contains("panicked at")
         {
             return Some(file.display().to_string());
         }
@@ -148,7 +150,11 @@ impl Workload for Boot {
         if let Some(t) = t_chats {
             ctx.metric("t_chats_ms", ctx.ms_since_spawn(t));
         }
-        ctx.check("chats_listed", listed == want, format!("{listed} of {want} chats"));
+        ctx.check(
+            "chats_listed",
+            listed == want,
+            format!("{listed} of {want} chats"),
+        );
         drop(sub);
 
         let mut ui = None;
@@ -158,10 +164,15 @@ impl Workload for Boot {
             if let Some(chat) = fx.class("100k", true).first() {
                 let t = u.open_chat(&chat.id, &fx.space_path(chat)).await?;
                 u.watch(&chat.id)?
-                    .wait_for(Duration::from_secs(120), "first frame", |s| s.first.is_some())
+                    .wait_for(Duration::from_secs(120), "first frame", |s| {
+                        s.first.is_some()
+                    })
                     .await?;
                 if let Some((t_first, _)) = u.watch(&chat.id)?.with(|s| s.first) {
-                    ctx.metric("t_first_frame_ms", t_first.saturating_sub(t.t_start) as f64 / 1e6);
+                    ctx.metric(
+                        "t_first_frame_ms",
+                        t_first.saturating_sub(t.t_start) as f64 / 1e6,
+                    );
                 }
             }
             ui = Some(u);
@@ -210,15 +221,26 @@ impl Workload for Boot {
         ctx.close_window().await?;
 
         // Recovery: residue chats come up aborted, never still streaming.
-        let victims: Vec<_> = fx.chats.iter().filter(|c| c.crash_residue).take(3).cloned().collect();
+        let victims: Vec<_> = fx
+            .chats
+            .iter()
+            .filter(|c| c.crash_residue)
+            .take(3)
+            .cloned()
+            .collect();
         let mut aborted = 0;
         for chat in &victims {
             let sub = client
-                .subscribe("WatchDocMessages", json!({"chatId": chat.id, "openingTail": true}))
+                .subscribe(
+                    "WatchDocMessages",
+                    json!({"chatId": chat.id, "openingTail": true}),
+                )
                 .await?;
             let watch = Watch::spawn(chat.id.clone(), sub, ctx.stats.clone());
             watch
-                .wait_for(Duration::from_secs(60), "the full reset", |s| s.full.is_some())
+                .wait_for(Duration::from_secs(60), "the full reset", |s| {
+                    s.full.is_some()
+                })
                 .await?;
             let (streaming, stamped) = watch.with(|s| {
                 let mut streaming = false;
@@ -241,20 +263,27 @@ impl Workload for Boot {
             ctx.check(
                 &format!("residue_not_streaming:{}", chat.n),
                 !streaming,
-                "a crash-residue chat still reports streaming",
+                format!("streaming={streaming}"),
             );
         }
         if !victims.is_empty() {
             ctx.check(
                 "residue_stamped_aborted",
                 aborted == victims.len(),
-                format!("{aborted} of {} sampled residue chats are stamped aborted", victims.len()),
+                format!(
+                    "{aborted} of {} sampled residue chats are stamped aborted",
+                    victims.len()
+                ),
             );
         }
         ctx.metric("residue_chats_aborted", aborted as f64);
         ctx.metric("chats_listed", listed as f64);
         let panic = panic_in_logs(ctx);
-        ctx.check("no_panic_in_logs", panic.is_none(), panic.unwrap_or_default());
+        ctx.check(
+            "no_panic_in_logs",
+            panic.is_none(),
+            panic.unwrap_or_default(),
+        );
         drop(ui);
         Ok(())
     }

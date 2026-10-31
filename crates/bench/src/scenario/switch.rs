@@ -54,14 +54,22 @@ impl Switch {
     fn targets(&self, fx: &fixture::Fixture) -> Vec<ChatInfo> {
         let mut targets = Vec::new();
         for class in ["100k", "1m", "5m"] {
-            targets.extend(fx.class(class, false).into_iter().skip(usize::from(class == "100k") * 2).take(4));
+            targets.extend(
+                fx.class(class, false)
+                    .into_iter()
+                    .skip(usize::from(class == "100k") * 2)
+                    .take(4),
+            );
         }
         interleave(&targets)
     }
 
     pub fn from_params(tier: Tier, overrides: &[(String, String)]) -> Result<Self> {
         let p: SwitchParams = load_params(CONFIG, tier, overrides)?;
-        ensure!(p.switches >= 11, "switches must cover the target chats once");
+        ensure!(
+            p.switches >= 11,
+            "switches must cover the target chats once"
+        );
         Ok(Self { p, tier })
     }
 }
@@ -90,7 +98,10 @@ fn dist(ctx: &mut TrialCtx, name: &str, values: &[f64]) {
     }
     ctx.metric(&format!("{name}.p50"), percentile(values, 50.0));
     ctx.metric(&format!("{name}.p90"), percentile(values, 90.0));
-    ctx.metric(&format!("{name}.max"), values.iter().copied().fold(0.0, f64::max));
+    ctx.metric(
+        &format!("{name}.max"),
+        values.iter().copied().fold(0.0, f64::max),
+    );
 }
 
 impl Workload for Switch {
@@ -124,7 +135,11 @@ impl Workload for Switch {
         let p = &self.p;
         let fx = ctx.fixture.clone();
         let order = self.targets(&fx);
-        ensure!(order.len() >= 9, "fixture has only {} target chats", order.len());
+        ensure!(
+            order.len() >= 9,
+            "fixture has only {} target chats",
+            order.len()
+        );
         let client = ctx.connect().await?;
         let mut ui = Ui::new(client.clone(), ctx.stats.clone());
         ui.open_global().await?;
@@ -136,7 +151,12 @@ impl Workload for Switch {
             std::fs::create_dir_all(&dir)?;
             let total_ms = p.switches as u64 * (p.dwell_ms + 1500) + 30_000;
             // Streamers: small chats that are not switch targets.
-            let bg: Vec<ChatInfo> = fx.class("100k", true).into_iter().rev().take(p.streaming).collect();
+            let bg: Vec<ChatInfo> = fx
+                .class("100k", true)
+                .into_iter()
+                .rev()
+                .take(p.streaming)
+                .collect();
             ensure!(bg.len() == p.streaming, "not enough background chats");
             for chat in &bg {
                 let built = build_turn(&TurnOpts {
@@ -186,14 +206,22 @@ impl Workload for Switch {
             open_all_ms.push(opened.t_done.saturating_sub(t0) as f64 / 1e6);
             let watch = ui.watch(&chat.id)?;
             watch
-                .wait_for(Duration::from_secs(120), "the full reset", |st| st.full.is_some())
+                .wait_for(Duration::from_secs(120), "the full reset", |st| {
+                    st.full.is_some()
+                })
                 .await?;
             let (first, full, matched) =
                 watch.with(|st| (st.first, st.full, base_matches(chat, &st.view)));
             let class = chat.class;
             if let (Some((t1, b1)), Some((t2, b2))) = (first, full) {
-                first_ms.entry(class).or_default().push(t1.saturating_sub(t0) as f64 / 1e6);
-                full_ms.entry(class).or_default().push(t2.saturating_sub(t0) as f64 / 1e6);
+                first_ms
+                    .entry(class)
+                    .or_default()
+                    .push(t1.saturating_sub(t0) as f64 / 1e6);
+                full_ms
+                    .entry(class)
+                    .or_default()
+                    .push(t2.saturating_sub(t0) as f64 / 1e6);
                 first_bytes.entry(class).or_default().push(b1 as f64);
                 full_bytes.entry(class).or_default().push(b2 as f64);
             }
@@ -212,7 +240,12 @@ impl Workload for Switch {
         ctx.check(
             "resets_match_manifest",
             mismatches.is_empty(),
-            mismatches.iter().take(3).cloned().collect::<Vec<_>>().join("; "),
+            mismatches
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; "),
         );
         let mut all_first = Vec::new();
         let mut all_full = Vec::new();
@@ -225,10 +258,16 @@ impl Workload for Switch {
             dist(ctx, &format!("t_full_reset_ms.{class}"), values);
         }
         for (class, values) in &first_bytes {
-            ctx.metric(&format!("first_bytes.{class}"), values.iter().sum::<f64>() / values.len() as f64);
+            ctx.metric(
+                &format!("first_bytes.{class}"),
+                values.iter().sum::<f64>() / values.len() as f64,
+            );
         }
         for (class, values) in &full_bytes {
-            ctx.metric(&format!("full_bytes.{class}"), values.iter().sum::<f64>() / values.len() as f64);
+            ctx.metric(
+                &format!("full_bytes.{class}"),
+                values.iter().sum::<f64>() / values.len() as f64,
+            );
         }
         dist(ctx, "t_first_frame_ms", &all_first);
         dist(ctx, "t_full_reset_ms", &all_full);

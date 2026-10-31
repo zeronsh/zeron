@@ -193,10 +193,22 @@ pub fn build(name: &str, env: RunEnv) -> Result<Option<Box<dyn Scenario>>> {
     let tier = env.tier;
     let env = Arc::new(env);
     let scenario: Box<dyn Scenario> = match arg.name.as_str() {
-        "stream" => Box::new(Live::new(stream::Stream::from_params(tier, &arg.overrides)?, env)?),
-        "boot" => Box::new(Live::new(boot::Boot::from_params(tier, &arg.overrides)?, env)?),
-        "idle" => Box::new(Live::new(idle::Idle::from_params(tier, &arg.overrides)?, env)?),
-        "switch" => Box::new(Live::new(switch::Switch::from_params(tier, &arg.overrides)?, env)?),
+        "stream" => Box::new(Live::new(
+            stream::Stream::from_params(tier, &arg.overrides)?,
+            env,
+        )?),
+        "boot" => Box::new(Live::new(
+            boot::Boot::from_params(tier, &arg.overrides)?,
+            env,
+        )?),
+        "idle" => Box::new(Live::new(
+            idle::Idle::from_params(tier, &arg.overrides)?,
+            env,
+        )?),
+        "switch" => Box::new(Live::new(
+            switch::Switch::from_params(tier, &arg.overrides)?,
+            env,
+        )?),
         _ => return Ok(None),
     };
     Ok(Some(scenario))
@@ -351,13 +363,18 @@ impl TrialCtx {
     }
 
     pub fn set_sampler_hz(&self, hz: f64) -> Result<()> {
-        self.sampler.as_ref().context("sampler not running")?.set_hz(hz)
+        self.sampler
+            .as_ref()
+            .context("sampler not running")?
+            .set_hz(hz)
     }
 
     async fn read_counters(&mut self) -> Option<Counters> {
         let client = match &self.client {
             Some(c) => c.clone(),
-            None => Client::connect(self.trial.port, &self.trial.data).await.ok()?,
+            None => Client::connect(self.trial.port, &self.trial.data)
+                .await
+                .ok()?,
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(10),
@@ -474,7 +491,9 @@ impl<W: Workload> Live<W> {
         trial.replay_bin = env.replay_bin.clone();
         trial.bench_bin = env.bench_bin.clone();
         trial.probe_sock = env.short_sock(&env.run_id, index)?;
-        trial.extra.push(("ZERON_HARNESS".into(), "claude-code".into()));
+        trial
+            .extra
+            .push(("ZERON_HARNESS".into(), "claude-code".into()));
         trial.extra.push((
             "ZB_REPLAY_STATE_DIR".into(),
             trial.root.join("replay-state").into_os_string(),
@@ -489,7 +508,9 @@ impl<W: Workload> Live<W> {
         let engine = launch(env.engine(planned.side), &trial)
             .await
             .context("launch the engine")?;
-        let outcome = self.measure(planned, trial.clone(), fx, probe, engine).await;
+        let outcome = self
+            .measure(planned, trial.clone(), fx, probe, engine)
+            .await;
         // Heavy per-trial state goes; logs and samples stay.
         archive_and_clean(&trial, outcome.is_ok());
         outcome
@@ -562,11 +583,23 @@ impl<W: Workload> Live<W> {
             .context("join sampler")??;
         let stop = engine.stop().await;
         let stopped_ns = mono_now();
+        // SIGTERM is still a clean exit (the engine handles it); SIGKILL is not.
         let exit_note = match &stop {
-            Ok(report) if matches!(report.how, crate::StopHow::Rpc) => None,
+            Ok(report) if !matches!(report.how, crate::StopHow::Sigkill) => None,
             Ok(report) => Some(format!("engine needed {:?} to stop", report.how)),
             Err(err) => Some(format!("stop failed: {err:#}")),
         };
+        if let Ok(report) = &stop {
+            ctx.metric("shutdown_ms", report.shutdown.as_secs_f64() * 1e3);
+            ctx.metric(
+                "stop_via_rpc",
+                if matches!(report.how, crate::StopHow::Rpc) {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+        }
         let containment = stop
             .as_ref()
             .map(|r| r.containment)
@@ -614,7 +647,11 @@ impl<W: Workload> Live<W> {
                     && *t <= window.end_ns
                 {
                     // zb-replay stands in for the `claude` process.
-                    let prog = if prog == "zb-replay" { "claude" } else { prog.as_str() };
+                    let prog = if prog == "zb-replay" {
+                        "claude"
+                    } else {
+                        prog.as_str()
+                    };
                     *shim.entry(prog.to_string()).or_insert(0u64) += 1;
                 }
             }
@@ -646,7 +683,10 @@ impl<W: Workload> Live<W> {
         }
         for (name, t) in ctx.marks.clone() {
             if let Some(tick) = set.ticks.iter().rev().find(|tick| tick.t_ns <= t) {
-                ctx.metric(&format!("pss_at_{name}_mib"), tick.rollup.pss_kib as f64 / 1024.0);
+                ctx.metric(
+                    &format!("pss_at_{name}_mib"),
+                    tick.rollup.pss_kib as f64 / 1024.0,
+                );
             }
         }
         if let (Some(a), Some(b)) = (
@@ -668,7 +708,10 @@ impl<W: Workload> Live<W> {
             && min > 0.0
         {
             ctx.metric("cpu_ms_per_min.tree", m.sampled.cpu_s.tree * 1000.0 / min);
-            ctx.metric("cpu_ms_per_min.engine", m.sampled.cpu_s.engine * 1000.0 / min);
+            ctx.metric(
+                "cpu_ms_per_min.engine",
+                m.sampled.cpu_s.engine * 1000.0 / min,
+            );
             ctx.metric("write_bytes_per_min", m.sampled.write_bytes as f64 / min);
             let git = m.sampled.spawns.get("git").copied().unwrap_or(0);
             ctx.metric("spawns_git_per_min", git as f64 / min);
@@ -905,7 +948,11 @@ impl<W: Workload> Scenario for Live<W> {
             eprintln!(
                 "zeron-bench: trial not clean ({}); {}",
                 body.invalid_reason.as_deref().unwrap_or("check failed"),
-                if attempt == 0 { "re-running once" } else { "keeping it" }
+                if attempt == 0 {
+                    "re-running once"
+                } else {
+                    "keeping it"
+                }
             );
             last = Some(body);
         }

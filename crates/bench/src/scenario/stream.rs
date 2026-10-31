@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::content::{Cadence, TurnOpts, build_turn};
 use super::driver::{Canary, Ui, Watch};
 use super::fixture::{
-    self, ChatInfo, Profile, base_matches, bad_status, last_turn_has_error_part, last_turn_text,
+    self, ChatInfo, Profile, bad_status, base_matches, last_turn_has_error_part, last_turn_text,
     parse_size, sha256_hex, text_of, turn_settled,
 };
 use super::{TrialCtx, Workload, load_params};
@@ -73,7 +73,11 @@ impl Stream {
         };
         // Prefer chats whose base text is fully known; fall back to the subagent pair.
         let mut chats = fx.class(class, true);
-        chats.extend(fx.class(class, false).into_iter().filter(|c| c.text.is_none()));
+        chats.extend(
+            fx.class(class, false)
+                .into_iter()
+                .filter(|c| c.text.is_none()),
+        );
         ensure!(
             chats.len() >= self.p.k,
             "P20 has {} chats of class {class}, K={} needs more",
@@ -87,8 +91,14 @@ impl Stream {
     pub fn from_params(tier: Tier, overrides: &[(String, String)]) -> Result<Self> {
         let p: StreamParams = load_params(CONFIG, tier, overrides)?;
         ensure!(p.k >= 1, "K must be at least 1");
-        ensure!(matches!(p.watch.as_str(), "all" | "one"), "watch is all or one");
-        ensure!(Cadence::parse(&p.cadence).is_some(), "cadence is opus or haiku");
+        ensure!(
+            matches!(p.watch.as_str(), "all" | "one"),
+            "watch is all or one"
+        );
+        ensure!(
+            Cadence::parse(&p.cadence).is_some(),
+            "cadence is opus or haiku"
+        );
         parse_size(&p.base)?;
         Ok(Self { p, tier })
     }
@@ -173,7 +183,9 @@ impl Workload for Stream {
         }
         for chat in &targets[..watched_n] {
             ui.watch(&chat.id)?
-                .wait_for(Duration::from_secs(120), "the full reset", |s| s.full.is_some())
+                .wait_for(Duration::from_secs(120), "the full reset", |s| {
+                    s.full.is_some()
+                })
                 .await?;
             let (ok, detail) = ui.watch(&chat.id)?.with(|s| base_matches(chat, &s.view));
             ctx.check(&format!("base_matches_manifest:{}", chat.n), ok, detail);
@@ -185,13 +197,22 @@ impl Workload for Stream {
             let mut temp = Vec::new();
             for chat in &targets {
                 let msg = fixture::message_uuid(chat.n, 6900);
-                fixture::queue_prompt(&client, &chat.id, &fx.space_path(chat), &msg, fixture::WARM_PROMPT)
-                    .await?;
+                fixture::queue_prompt(
+                    &client,
+                    &chat.id,
+                    &fx.space_path(chat),
+                    &msg,
+                    fixture::WARM_PROMPT,
+                )
+                .await?;
                 if ui.watches.contains_key(&chat.id) {
                     continue;
                 }
                 let sub = client
-                    .subscribe("WatchDocMessages", json!({"chatId": chat.id, "openingTail": true}))
+                    .subscribe(
+                        "WatchDocMessages",
+                        json!({"chatId": chat.id, "openingTail": true}),
+                    )
                     .await?;
                 temp.push(Watch::spawn(chat.id.clone(), sub, ctx.stats.clone()));
             }
@@ -200,10 +221,17 @@ impl Workload for Stream {
                     turn_settled(&s.view) && last_turn_text(&s.view) == fixture::WARM_TEXT
                 };
                 match ui.watches.get(&chat.id) {
-                    Some(w) => w.wait_for(Duration::from_secs(90), "the warm-up turn", done).await?,
+                    Some(w) => {
+                        w.wait_for(Duration::from_secs(90), "the warm-up turn", done)
+                            .await?
+                    }
                     None => {
-                        let w = temp.iter().find(|w| w.chat == chat.id).context("temp watch")?;
-                        w.wait_for(Duration::from_secs(90), "the warm-up turn", done).await?;
+                        let w = temp
+                            .iter()
+                            .find(|w| w.chat == chat.id)
+                            .context("temp watch")?;
+                        w.wait_for(Duration::from_secs(90), "the warm-up turn", done)
+                            .await?;
                     }
                 }
             }
@@ -245,7 +273,9 @@ impl Workload for Stream {
             let path = path.clone();
             async move { fixture::queue_play(&client, &id, &cwd, &msg, &path, 1.0).await }
         });
-        futures::future::try_join_all(queued).await.context("queue the turns")?;
+        futures::future::try_join_all(queued)
+            .await
+            .context("queue the turns")?;
         let budget = Duration::from_millis(duration_ms * 2) + Duration::from_secs(90);
         for (chat, (_, built)) in targets.iter().zip(&turns).take(watched_n) {
             let expected = built.text.len();
@@ -263,7 +293,11 @@ impl Workload for Stream {
         tokio::time::sleep(Duration::from_secs(p.tail_s)).await;
         ctx.close_window().await?;
         let (w0, w1) = ctx.window_ns();
-        ctx.rtt_ms = canary.between(w0, w1).into_iter().map(|n| n as f64 / 1e6).collect();
+        ctx.rtt_ms = canary
+            .between(w0, w1)
+            .into_iter()
+            .map(|n| n as f64 / 1e6)
+            .collect();
         drop(canary);
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -286,8 +320,14 @@ impl Workload for Stream {
                 (ok, detail, seqs, s.markers.clone())
             });
             if !ok {
-                let dump = watch.with(|s| serde_json::to_vec_pretty(&s.view.entries).unwrap_or_default());
-                let _ = std::fs::write(ctx.trial.root.join(format!("failed-transcript-{}.json", chat.n)), dump);
+                let dump =
+                    watch.with(|s| serde_json::to_vec_pretty(&s.view.entries).unwrap_or_default());
+                let _ = std::fs::write(
+                    ctx.trial
+                        .root
+                        .join(format!("failed-transcript-{}.json", chat.n)),
+                    dump,
+                );
             }
             ctx.check(&format!("transcript_sha:{}", chat.n), ok, detail);
             let want: BTreeSet<u64> = (1..=built.markers as u64).collect();
@@ -312,21 +352,35 @@ impl Workload for Stream {
         // Chats nobody watched are verified from a fresh stream, after the window.
         for (chat, (_, built)) in targets.iter().zip(&turns).skip(watched_n) {
             let sub = client
-                .subscribe("WatchDocMessages", json!({"chatId": chat.id, "openingTail": true}))
+                .subscribe(
+                    "WatchDocMessages",
+                    json!({"chatId": chat.id, "openingTail": true}),
+                )
                 .await?;
             let watch = Watch::spawn(chat.id.clone(), sub, ctx.stats.clone());
             watch
-                .wait_for(Duration::from_secs(120), "the full reset", |s| s.full.is_some())
+                .wait_for(Duration::from_secs(120), "the full reset", |s| {
+                    s.full.is_some()
+                })
                 .await?;
-            let (ok, detail) = watch.with(|s| verify(chat, &s.view, &built.text, &built.text_sha256));
+            let (ok, detail) =
+                watch.with(|s| verify(chat, &s.view, &built.text, &built.text_sha256));
             ctx.check(&format!("transcript_sha:{}", chat.n), ok, detail);
             if ok {
                 complete += 1;
             }
         }
-        ctx.check("status_complete", complete == p.k, format!("{complete} of {} chats verified", p.k));
+        ctx.check(
+            "status_complete",
+            complete == p.k,
+            format!("{complete} of {} chats verified", p.k),
+        );
         if lat.is_empty() && watched_n > 0 {
-            bail!("no latency samples: probe saw {} marks, watchers saw {} markers", marks.len(), seen_markers);
+            bail!(
+                "no latency samples: probe saw {} marks, watchers saw {} markers",
+                marks.len(),
+                seen_markers
+            );
         }
         ctx.stream_lat_ms = lat;
         ctx.metric("streamed_text_bytes", text_total as f64);
@@ -346,7 +400,11 @@ mod tests {
 
     #[test]
     fn params_merge_tier_then_overrides() {
-        let s = Stream::from_params(Tier::Quick, &[("K".into(), "2".into()), ("watch".into(), "one".into())]).unwrap();
+        let s = Stream::from_params(
+            Tier::Quick,
+            &[("K".into(), "2".into()), ("watch".into(), "one".into())],
+        )
+        .unwrap();
         assert_eq!(s.p.k, 2);
         assert_eq!(s.p.watch, "one");
         assert_eq!(s.p.turn_ms, 45_000);

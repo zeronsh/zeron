@@ -50,24 +50,137 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "stream", "engine", "session", "journal", "commit", "snapshot", "transcript", "message",
-    "chunk", "buffer", "channel", "worker", "scheduler", "runtime", "handler", "checkpoint",
-    "document", "revision", "delta", "frame", "parser", "encoder", "socket", "request", "reply",
-    "debounce", "watcher", "index", "cache", "queue", "pipeline", "adapter", "harness", "sandbox",
-    "workspace", "project", "branch", "diff", "patch", "merge", "build", "target", "release",
-    "profile", "memory", "latency", "throughput", "allocation", "thread", "task", "future",
-    "timeout", "retry", "backoff", "invariant", "boundary", "interface", "module", "crate",
-    "dependency", "feature", "config", "schema", "migration", "storage", "database", "table",
-    "column", "record", "lookup", "iterator", "closure", "lifetime", "borrow", "trait", "struct",
-    "variant", "pattern", "result", "error", "context", "state", "event", "listener", "observer",
-    "render", "layout", "widget", "theme", "token", "prompt", "model", "tool", "output", "input",
-    "format", "decode", "validate", "normalize", "resolve", "dispatch", "forward", "persist",
-    "restore", "recover", "flush", "compact", "rotate", "archive", "monitor", "measure", "report",
+    "stream",
+    "engine",
+    "session",
+    "journal",
+    "commit",
+    "snapshot",
+    "transcript",
+    "message",
+    "chunk",
+    "buffer",
+    "channel",
+    "worker",
+    "scheduler",
+    "runtime",
+    "handler",
+    "checkpoint",
+    "document",
+    "revision",
+    "delta",
+    "frame",
+    "parser",
+    "encoder",
+    "socket",
+    "request",
+    "reply",
+    "debounce",
+    "watcher",
+    "index",
+    "cache",
+    "queue",
+    "pipeline",
+    "adapter",
+    "harness",
+    "sandbox",
+    "workspace",
+    "project",
+    "branch",
+    "diff",
+    "patch",
+    "merge",
+    "build",
+    "target",
+    "release",
+    "profile",
+    "memory",
+    "latency",
+    "throughput",
+    "allocation",
+    "thread",
+    "task",
+    "future",
+    "timeout",
+    "retry",
+    "backoff",
+    "invariant",
+    "boundary",
+    "interface",
+    "module",
+    "crate",
+    "dependency",
+    "feature",
+    "config",
+    "schema",
+    "migration",
+    "storage",
+    "database",
+    "table",
+    "column",
+    "record",
+    "lookup",
+    "iterator",
+    "closure",
+    "lifetime",
+    "borrow",
+    "trait",
+    "struct",
+    "variant",
+    "pattern",
+    "result",
+    "error",
+    "context",
+    "state",
+    "event",
+    "listener",
+    "observer",
+    "render",
+    "layout",
+    "widget",
+    "theme",
+    "token",
+    "prompt",
+    "model",
+    "tool",
+    "output",
+    "input",
+    "format",
+    "decode",
+    "validate",
+    "normalize",
+    "resolve",
+    "dispatch",
+    "forward",
+    "persist",
+    "restore",
+    "recover",
+    "flush",
+    "compact",
+    "rotate",
+    "archive",
+    "monitor",
+    "measure",
+    "report",
 ];
 
 const VERBS: &[&str] = &[
-    "keeps", "folds", "emits", "drains", "applies", "records", "rebuilds", "publishes",
-    "validates", "forwards", "coalesces", "persists", "tracks", "serves", "replays", "resolves",
+    "keeps",
+    "folds",
+    "emits",
+    "drains",
+    "applies",
+    "records",
+    "rebuilds",
+    "publishes",
+    "validates",
+    "forwards",
+    "coalesces",
+    "persists",
+    "tracks",
+    "serves",
+    "replays",
+    "resolves",
 ];
 
 const GLUE: &[&str] = &[
@@ -360,8 +473,8 @@ impl Builder {
             let dt = self.interval();
             self.deltas += 1;
             self.text_deltas += 1;
-            let marked = self.opts.marker_every > 0
-                && self.text_deltas % self.opts.marker_every == 0;
+            let marked =
+                self.opts.marker_every > 0 && self.text_deltas % self.opts.marker_every == 0;
             // zb-replay renders the marker; the script carries the plain chunk,
             // while `text` holds what the engine will end up with.
             self.text.push_str(&chunk);
@@ -419,9 +532,8 @@ impl Builder {
                     "content": markdown(&mut self.rng, 300)}),
             ),
         };
-        let index = self.block_start(
-            json!({"type":"tool_use","id":"$TOOL_ID","name":name,"input":{}}),
-        );
+        let index =
+            self.block_start(json!({"type":"tool_use","id":"$TOOL_ID","name":name,"input":{}}));
         let raw = input.to_string();
         let mut start = 0;
         while start < raw.len() {
@@ -498,7 +610,9 @@ pub fn build_turn(opts: &TurnOpts) -> BuiltTurn {
         source.push_str(&step.to_string());
         source.push('\n');
     }
-    source.push_str("{\"dt\":0,\"zb\":\"turn_end\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n");
+    source.push_str(
+        "{\"dt\":0,\"zb\":\"turn_end\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}\n",
+    );
     BuiltTurn {
         source,
         text: b.text,

@@ -323,11 +323,13 @@ pub fn last_turn_text(view: &ChatView) -> String {
 /// An `error` part in the entries after the last user entry.
 pub fn last_turn_has_error_part(view: &ChatView) -> bool {
     view.entries[last_user(view)..].iter().any(|e| {
-        e.get("parts").and_then(Value::as_array).is_some_and(|parts| {
-            parts
-                .iter()
-                .any(|p| p.get("kind").and_then(Value::as_str) == Some("error"))
-        })
+        e.get("parts")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|p| p.get("kind").and_then(Value::as_str) == Some("error"))
+            })
     })
 }
 
@@ -396,7 +398,10 @@ pub fn base_matches(chat: &ChatInfo, view: &ChatView) -> (bool, String) {
         if text.len() != *len || &sha256_hex(&text) != sha {
             return (
                 false,
-                format!("text is {} B (script {len} B) or its hash differs", text.len()),
+                format!(
+                    "text is {} B (script {len} B) or its hash differs",
+                    text.len()
+                ),
             );
         }
     }

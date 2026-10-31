@@ -89,7 +89,10 @@ impl Workload for Idle {
         }
         vec![
             ("ZB_REPLAY_MODE".into(), "ballast".into()),
-            ("ZB_REPLAY_BALLAST_MIB".into(), self.p.ballast_mib.to_string()),
+            (
+                "ZB_REPLAY_BALLAST_MIB".into(),
+                self.p.ballast_mib.to_string(),
+            ),
             ("ZB_REPLAY_CHILDREN".into(), self.p.children.clone()),
         ]
     }
@@ -104,10 +107,16 @@ impl Workload for Idle {
             let mut u = Ui::new(client, ctx.stats.clone());
             u.open_global().await?;
             // The chat a user would have open: a small background chat.
-            let chat = fx.class("100k", true).first().context("fixture has no chat")?.clone();
+            let chat = fx
+                .class("100k", true)
+                .first()
+                .context("fixture has no chat")?
+                .clone();
             u.open_chat(&chat.id, &fx.space_path(&chat)).await?;
             u.watch(&chat.id)?
-                .wait_for(Duration::from_secs(60), "the full reset", |s| s.full.is_some())
+                .wait_for(Duration::from_secs(60), "the full reset", |s| {
+                    s.full.is_some()
+                })
                 .await?;
             open_chat = Some(chat);
             ui = Some(u);
@@ -125,11 +134,16 @@ impl Workload for Idle {
             ensure!(parked.len() == p.parked_chats, "not enough chats to park");
             for chat in &parked {
                 let sub = client
-                    .subscribe("WatchDocMessages", json!({"chatId": chat.id, "openingTail": true}))
+                    .subscribe(
+                        "WatchDocMessages",
+                        json!({"chatId": chat.id, "openingTail": true}),
+                    )
                     .await?;
                 let watch = Watch::spawn(chat.id.clone(), sub, ctx.stats.clone());
                 watch
-                    .wait_for(Duration::from_secs(60), "the full reset", |s| s.full.is_some())
+                    .wait_for(Duration::from_secs(60), "the full reset", |s| {
+                        s.full.is_some()
+                    })
                     .await?;
                 let dir = ctx.trial.root.join("scripts");
                 std::fs::create_dir_all(&dir)?;
@@ -170,7 +184,11 @@ impl Workload for Idle {
         ctx.open_window().await?;
         let frames_before = ui
             .as_ref()
-            .and_then(|u| open_chat.as_ref().map(|c| u.watch(&c.id).map(|w| w.with(|s| s.frames))))
+            .and_then(|u| {
+                open_chat
+                    .as_ref()
+                    .map(|c| u.watch(&c.id).map(|w| w.with(|s| s.frames)))
+            })
             .transpose()?;
         tokio::time::sleep(Duration::from_secs(p.window_s)).await;
         ctx.close_window().await?;
@@ -187,12 +205,22 @@ impl Workload for Idle {
             ctx.check(
                 "no_transcript_frames_while_idle",
                 frames == before,
-                format!("{} transcript frames arrived during the window", frames - before),
+                format!(
+                    "{} transcript frames arrived during the window",
+                    frames - before
+                ),
             );
         }
         let minutes = ctx.window_s() / 60.0;
         ctx.metric("window_min", minutes);
-        ctx.metric("parked_sessions", if p.variant == "parked" { p.parked_chats as f64 } else { 0.0 });
+        ctx.metric(
+            "parked_sessions",
+            if p.variant == "parked" {
+                p.parked_chats as f64
+            } else {
+                0.0
+            },
+        );
         drop(ui);
         Ok(())
     }
@@ -209,8 +237,14 @@ mod tests {
         assert_eq!(idle.p.window_s % 60, 0);
         assert_eq!(idle.variant_key(), "ui-quick");
         assert!(Idle::from_params(Tier::Quick, &[("variant".into(), "nope".into())]).is_err());
-        let parked = Idle::from_params(Tier::Standard, &[("variant".into(), "parked".into())]).unwrap();
-        assert!(parked.engine_env().iter().any(|(k, v)| k == "ZB_REPLAY_BALLAST_MIB" && v == "300"));
+        let parked =
+            Idle::from_params(Tier::Standard, &[("variant".into(), "parked".into())]).unwrap();
+        assert!(
+            parked
+                .engine_env()
+                .iter()
+                .any(|(k, v)| k == "ZB_REPLAY_BALLAST_MIB" && v == "300")
+        );
         assert_eq!(parked.p.window_s, 300);
     }
 }

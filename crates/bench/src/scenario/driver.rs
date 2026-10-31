@@ -113,7 +113,8 @@ impl Watch {
                     st.first = Some((item.t_recv_ns, item.bytes));
                 }
                 let is_reset = item.value.get("reset").is_some();
-                let pending = item.value.get("historyPending").and_then(Value::as_bool) == Some(true);
+                let pending =
+                    item.value.get("historyPending").and_then(Value::as_bool) == Some(true);
                 if is_reset {
                     st.resets += 1;
                     if !pending && st.full.is_none() {
@@ -159,7 +160,10 @@ impl Watch {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                bail!("chat {}: timed out after {timeout:?} waiting for {what}", self.chat);
+                bail!(
+                    "chat {}: timed out after {timeout:?} waiting for {what}",
+                    self.chat
+                );
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
@@ -253,7 +257,9 @@ impl Ui {
     }
 
     pub fn watch(&self, id: &str) -> Result<&Watch> {
-        self.watches.get(id).with_context(|| format!("chat {id} is not open"))
+        self.watches
+            .get(id)
+            .with_context(|| format!("chat {id} is not open"))
     }
 }
 
@@ -438,7 +444,8 @@ mod tests {
     fn marker_values_are_found_in_nested_deltas() {
         let mut scan = MarkerScan::default();
         let mut out = Vec::new();
-        let frame = serde_json::json!({"append":[{"entry":"e","part":"p","text":"x [[zb:b7000001:4]]"}]});
+        let frame =
+            serde_json::json!({"append":[{"entry":"e","part":"p","text":"x [[zb:b7000001:4]]"}]});
         scan_value(&mut scan, &frame, 9, &mut out);
         scan_value(&mut scan, &frame, 10, &mut out);
         assert_eq!(out, vec![("b7000001".to_string(), 4, 9)]);
