@@ -710,3 +710,34 @@ async fn stray_server_stdout_lines_are_skipped_like_a_direct_client_would() {
         peer.close().await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_client_survives_a_notification_flood() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[("FAKE_FLOOD_ON", "flood"), ("FAKE_FLOOD", "6000")],
+    );
+    peer.init().await;
+    peer.send(zeron_mcp_proxy::rpc::request(
+        2,
+        "tools/call",
+        json!({"name":"flood"}),
+    ))
+    .await;
+    // The pipe fills while nobody reads; the proxy must buffer, not give up.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let response = peer.response(json!(2)).await;
+    assert_eq!(response["result"]["isError"], false);
+    assert!(
+        peer.seen
+            .iter()
+            .filter(|v| v["method"] == "notifications/message")
+            .count()
+            >= 6000
+    );
+    peer.close().await;
+}

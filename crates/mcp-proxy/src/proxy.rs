@@ -50,9 +50,9 @@ struct Proxy {
     resolved: Option<crate::npx::Resolution>,
     state: State,
     process: Option<Process>,
-    child_tx: Option<mpsc::Sender<Value>>,
+    child_tx: Option<mpsc::UnboundedSender<Value>>,
     events: mpsc::Sender<Event>,
-    output: mpsc::Sender<Value>,
+    output: mpsc::UnboundedSender<Value>,
     generation: u64,
     next_id: u64,
     initialize: Option<Value>,
@@ -78,8 +78,10 @@ struct Proxy {
     last_progress: Option<Instant>,
     stderr: Arc<Mutex<Vec<u8>>>,
 }
-fn send(tx: &mpsc::Sender<Value>, value: Value) -> io::Result<()> {
-    tx.try_send(value).map_err(|e| {
+/// Relay queues are unbounded: a slow peer must delay messages, never end the session
+/// (a full bounded queue would have killed the proxy and the server with it).
+fn send(tx: &mpsc::UnboundedSender<Value>, value: Value) -> io::Result<()> {
+    tx.send(value).map_err(|e| {
         io::Error::new(
             io::ErrorKind::BrokenPipe,
             format!("MCP output unavailable: {e}"),
@@ -206,7 +208,7 @@ impl Proxy {
         ));
         process.stderr_task(self.stderr.clone());
         let mut stdin = process.stdin.take().unwrap();
-        let (tx, mut rx) = mpsc::channel::<Value>(256);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
         let events = self.events.clone();
         process.tasks.push(tokio::spawn(async move {
             while let Some(value) = rx.recv().await {
@@ -770,7 +772,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let (tx, mut rx) = mpsc::channel(256);
-    let (output, mut out_rx) = mpsc::channel::<Value>(256);
+    let (output, mut out_rx) = mpsc::unbounded_channel::<Value>();
     let reader = read_lines(tokio::io::stdin(), tx.clone(), None);
     let close = tx.clone();
     let writer = tokio::spawn(async move {
