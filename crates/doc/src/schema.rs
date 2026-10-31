@@ -597,6 +597,20 @@ impl SessionDoc {
             .collect())
     }
 
+    /// Read only message metadata to detect a remote streaming turn.
+    pub fn has_streaming_assistant(&self) -> bool {
+        use loro::{Container, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        (0..messages.len()).any(|index| {
+            let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index) else {
+                return false;
+            };
+            let entry = map.get_value().to_json_value();
+            entry.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                && entry.get("status").and_then(|v| v.as_str()) == Some("streaming")
+        })
+    }
+
     /// Read a bounded suffix directly from the containers, without expanding
     /// the full messages tree. For first paint only: the full watch must follow.
     /// Limits count parts rather than joined messages (one turn can have tens
@@ -1888,6 +1902,73 @@ pub fn materialize_tail(
     })
 }
 
+/// Materialize only the entries belonging to the last joined groups.
+pub fn materialize_tail_fast(
+    doc: &SessionDoc,
+    now: i64,
+    tail_count: usize,
+) -> Result<SessionTail, DocError> {
+    use loro::{Container, ValueOrContainer};
+    if doc.doc.get_pending_txn_len() != 0 {
+        return materialize_tail(doc, now, tail_count);
+    }
+    let version = doc.doc.state_vv();
+    let list = doc.doc.get_list("messages");
+    let mut roots: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in 0..list.len() {
+        let Some(ValueOrContainer::Container(Container::Map(map))) = list.get(index) else {
+            return materialize_tail(doc, now, tail_count);
+        };
+        let scalar = map.get_value().to_json_value();
+        // Salvaged identities can depend on the whole entry; retain the oracle
+        // for unusual or incomplete entries.
+        let Some(id) = scalar.get("id").and_then(|v| v.as_str()) else {
+            return materialize_tail(doc, now, tail_count);
+        };
+        let continuation = scalar.get("continuationOf").and_then(|v| v.as_str());
+        if let Some(root) = continuation {
+            if let Some(&group) = roots.get(root) {
+                groups[group].push(index);
+            } else {
+                groups.push(vec![index]);
+            }
+        } else {
+            roots.insert(id.to_owned(), groups.len());
+            groups.push(vec![index]);
+        }
+    }
+    let total = groups.len();
+    let count = if tail_count == 0 {
+        TAIL_MESSAGE_COUNT
+    } else {
+        tail_count
+    };
+    let mut indices: Vec<_> = groups[total.saturating_sub(count)..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    indices.sort_unstable();
+    let entries = indices
+        .into_iter()
+        .filter_map(|index| {
+            list.get(index)
+                .and_then(|v| decode_entry_json(v.get_deep_value().to_json_value()).ok())
+        })
+        .collect();
+    if doc.doc.get_pending_txn_len() != 0 || doc.doc.state_vv() != version {
+        return materialize_tail(doc, now, tail_count);
+    }
+    Ok(SessionTail {
+        chat_id: doc.chat_id().unwrap_or_default(),
+        schema_version: SESSION_SCHEMA_VERSION,
+        messages: join_continuation_entries(entries),
+        total_messages: total,
+        updated_at: now,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2734,6 +2815,27 @@ mod tests {
         assert_eq!(tail.messages.len(), 2);
         assert_eq!(tail.messages[1].id, "m4");
         assert_eq!(tail.chat_id, "chat-1");
+    }
+
+    #[test]
+    fn fast_tail_matches_oracle_on_seeded_docs() {
+        for seed in 0..12 {
+            let doc = SessionDoc::init(&format!("tail-{seed}")).unwrap();
+            for i in 0usize..90 {
+                let mut entry = user_entry(&format!("m{i}"), &format!("{seed}-{i}"));
+                if i % 7 == 0 {
+                    entry.continuation_of = Some(format!("m{}", i.saturating_sub(3)));
+                }
+                doc.push_message(&entry).unwrap();
+            }
+            for count in [0, 1, 2, 10, 64, 200] {
+                assert_eq!(
+                    materialize_tail_fast(&doc, 42, count).unwrap(),
+                    materialize_tail(&doc, 42, count).unwrap(),
+                    "seed {seed}, count {count}"
+                );
+            }
+        }
     }
 
     /// 2026-08-10 incident: entries/parts missing strict fields must salvage

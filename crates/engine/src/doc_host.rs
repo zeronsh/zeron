@@ -20,8 +20,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
+use std::time::Duration;
 
 use base64::Engine as _;
+use loro::ToJson as _;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::watch;
@@ -47,6 +49,32 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+const TAIL_INTERVAL: Duration = Duration::from_secs(5);
+const STREAM_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+struct SyncCadence {
+    tail_attempt: Option<tokio::time::Instant>,
+    tail_hash: Option<[u8; 32]>,
+    stream_since_checkpoint: Option<tokio::time::Instant>,
+    session_streaming: Option<bool>,
+}
+
+fn checkpoint_due(streaming: bool, rows: u64, bytes: u64, stale: bool) -> bool {
+    if streaming {
+        rows > 2000 || bytes > 4 * 1024 * 1024 || stale
+    } else {
+        rows > 200 || bytes > 512 * 1024
+    }
+}
+
+fn checkpoint_stale(since: Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    since.is_some_and(|since| now.duration_since(since) >= STREAM_CHECKPOINT_INTERVAL)
+}
+
+fn cadence_streaming(writers: usize, session_streaming: Option<bool>) -> bool {
+    writers > 0 && session_streaming.unwrap_or(true)
+}
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
@@ -645,6 +673,9 @@ pub struct ChatDocHandle {
     /// A threshold checkpoint POST is in flight (review H1: the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
     checkpointing: Arc<AtomicBool>,
+    sync_cadence: Mutex<SyncCadence>,
+    writer_wake: Arc<tokio::sync::Notify>,
+    turn_end_pending: Arc<AtomicBool>,
     /// Set when a chat2 seed replaced this handle's lineage on disk: every
     /// further snapshot save from this handle is a stale FAT doc that would
     /// clobber the thin one — retired handles never persist again (unless no
@@ -747,6 +778,8 @@ impl Drop for DispatchGuard {
 pub struct DocWriter {
     doc: Arc<SessionDoc>,
     writers: Arc<AtomicUsize>,
+    wake: Arc<tokio::sync::Notify>,
+    turn_end_pending: Arc<AtomicBool>,
 }
 impl std::ops::Deref for DocWriter {
     type Target = SessionDoc;
@@ -756,12 +789,16 @@ impl std::ops::Deref for DocWriter {
 }
 impl Drop for DocWriter {
     fn drop(&mut self) {
-        self.writers.fetch_sub(1, Ordering::AcqRel);
+        if self.writers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.turn_end_pending.store(true, Ordering::Release);
+        }
+        self.wake.notify_one();
     }
 }
 impl Drop for ChatDocHandle {
     fn drop(&mut self) {
         lock(&self.sync_cancel).cancel();
+        self.writer_wake.notify_one();
     }
 }
 
@@ -877,10 +914,15 @@ impl ChatDocHandle {
     }
 
     pub fn writer(&self) -> DocWriter {
-        self.writers.fetch_add(1, Ordering::AcqRel);
+        if self.writers.fetch_add(1, Ordering::AcqRel) == 0 {
+            lock(&self.sync_cadence).stream_since_checkpoint = Some(tokio::time::Instant::now());
+        }
+        self.writer_wake.notify_one();
         DocWriter {
             doc: self.doc.clone(),
             writers: self.writers.clone(),
+            wake: self.writer_wake.clone(),
+            turn_end_pending: self.turn_end_pending.clone(),
         }
     }
 
@@ -1484,6 +1526,7 @@ impl DocHost {
                 host.drain_queue(&handle).await;
             });
         }
+        self.spawn_sync_status_watcher(statuses.clone());
         self.spawn_queue_flush_watcher(statuses);
     }
 
@@ -1499,6 +1542,38 @@ impl DocHost {
                 let handles: Vec<_> = lock(&host.inner.handles).values().cloned().collect();
                 for handle in handles {
                     host.drain_queue(&handle).await;
+                }
+            }
+        });
+    }
+
+    fn spawn_sync_status_watcher(&self, mut statuses: watch::Receiver<Vec<zeron_proto::Session>>) {
+        let host = self.clone();
+        self.spawn_worker(async move {
+            while statuses.changed().await.is_ok() {
+                let snapshot = statuses.borrow_and_update().clone();
+                let handles: Vec<_> = lock(&host.inner.handles).values().cloned().collect();
+                for handle in handles {
+                    if let Some(session) = snapshot
+                        .iter()
+                        .find(|s| s.chat_id == handle.chat_id && s.device_id == handle.device_id)
+                    {
+                        let active = matches!(
+                            session.status,
+                            zeron_proto::SessionStatus::Working
+                                | zeron_proto::SessionStatus::AwaitingInput
+                        );
+                        let mut cadence = lock(&handle.sync_cadence);
+                        let previous = cadence.session_streaming.replace(active);
+                        if previous != Some(active) {
+                            if active {
+                                cadence.stream_since_checkpoint = Some(tokio::time::Instant::now());
+                            } else if previous == Some(true) {
+                                handle.turn_end_pending.store(true, Ordering::Release);
+                            }
+                            handle.writer_wake.notify_one();
+                        }
+                    }
                 }
             }
         });
@@ -1992,6 +2067,11 @@ impl DocHost {
         let weak_doc = Arc::downgrade(&doc);
         let (callback_publish, callback_dispatch) = (publish_bits.clone(), dispatch_bits.clone());
         let (callback_cache, callback_commands) = (commands_cache.clone(), commands_tx.clone());
+        let writer_wake = Arc::new(tokio::sync::Notify::new());
+        let turn_end_pending = Arc::new(AtomicBool::new(false));
+        let writers = Arc::new(AtomicUsize::new(0));
+        let status_writers = writers.clone();
+        let (status_wake, status_end) = (writer_wake.clone(), turn_end_pending.clone());
         let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
             // This callback runs before the change worker can publish. The
             // import origin belongs to the event, so concurrent local commits
@@ -2008,6 +2088,17 @@ impl DocHost {
             // Bits and cache first, wakes last: a consumer that wakes must
             // find its bit set and the ledger cache already stale.
             let mask = zeron_doc::ChangeMask::of_event(&diff);
+            // A remote writer has no local DocWriter to drop. A status change
+            // on a message map provides the same immediate turn-end wake.
+            if status_writers.load(Ordering::Acquire) == 0 && diff.events.iter().any(|change| {
+                matches!(change.path.first(), Some((_, loro::Index::Key(key))) if key.as_str() == "messages")
+                    && matches!(&change.diff, loro::event::Diff::Map(delta)
+                        if !delta.updated.contains_key("role") && delta.updated.get("status").is_some_and(|value|
+                            value.as_ref().is_some_and(|v| v.get_deep_value().to_json_value().as_str().is_some_and(|status| status != "streaming"))))
+            }) {
+                status_end.store(true, Ordering::Release);
+                status_wake.notify_one();
+            }
             callback_publish.set(mask);
             callback_dispatch.set(mask);
             if mask.contains(zeron_doc::ChangeMask::COMMANDS) {
@@ -2057,6 +2148,9 @@ impl DocHost {
             room_gen,
             retired: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
+            sync_cadence: Mutex::new(SyncCadence::default()),
+            writer_wake,
+            turn_end_pending,
             chat2: Mutex::new(None),
             sync_started: AtomicBool::new(false),
             sync_requested: AtomicBool::new(false),
@@ -2067,7 +2161,7 @@ impl DocHost {
             sync_wake_version: AtomicI64::new(0),
             sync_wake_ticket: AtomicU64::new(0),
             sync_cancel: Mutex::new(CancellationToken::new()),
-            writers: Arc::new(AtomicUsize::new(0)),
+            writers,
             persistence,
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
@@ -3285,7 +3379,7 @@ impl DocHost {
     ///   instead of replaying the log (the alert-shaped growth bound);
     /// - tail sidecar: publish the last-64 transcript JSON for thin/instant
     ///   readers (the iOS fallback path).
-    async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>) {
+    async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>, turn_end: bool) {
         if handle.retired.load(Ordering::Relaxed) {
             return;
         }
@@ -3293,55 +3387,89 @@ impl DocHost {
             Some(client) => client.stats(),
             None => return,
         };
+        let streaming = cadence_streaming(
+            handle.writers.load(Ordering::Acquire),
+            lock(&handle.sync_cadence).session_streaming,
+        );
+        let now = tokio::time::Instant::now();
+        let stale =
+            streaming && checkpoint_stale(lock(&handle.sync_cadence).stream_since_checkpoint, now);
+        if checkpoint_due(streaming, stats.row_count, stats.row_bytes, stale) {
+            self.spawn_chat2_checkpoint(handle, "threshold");
+        }
+        let tail_streaming = if streaming {
+            true
+        } else {
+            let doc = handle.doc.clone();
+            tokio::task::spawn_blocking(move || doc.has_streaming_assistant())
+                .await
+                .unwrap_or(false)
+        };
+        self.chat2_tail_maintenance(handle, tail_streaming && !turn_end)
+            .await;
+    }
+
+    async fn chat2_tail_maintenance(&self, handle: &Arc<ChatDocHandle>, streaming: bool) {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
-        let chat_id = handle.chat_id.clone();
-        // A whale's last 64 joined messages can still contain its entire
-        // history. Materialization/encoding must not occupy a network worker.
+        let now = tokio::time::Instant::now();
+        if streaming
+            && lock(&handle.sync_cadence)
+                .tail_attempt
+                .is_some_and(|last| now.duration_since(last) < TAIL_INTERVAL)
+        {
+            return;
+        }
         let doc = handle.doc.clone();
-        let body = tokio::task::spawn_blocking(move || {
-            let tail =
-                zeron_doc::materialize_tail(&doc, now_ms(), zeron_doc::TAIL_MESSAGE_COUNT).ok()?;
-            serde_json::to_vec(&tail).ok()
+        let encoded = tokio::task::spawn_blocking(move || {
+            let mut tail =
+                zeron_doc::materialize_tail_fast(&doc, 0, zeron_doc::TAIL_MESSAGE_COUNT).ok()?;
+            // updatedAt is transport metadata, not a transcript change.
+            let canonical = serde_json::to_vec(&tail).ok()?;
+            let hash: [u8; 32] = Sha256::digest(&canonical).into();
+            tail.updated_at = now_ms();
+            Some((hash, serde_json::to_vec(&tail).ok()?))
         })
         .await
         .ok()
         .flatten();
-        if let Some(body) = body {
-            let http = self.inner.http.clone();
-            let edge_tail = edge.clone();
-            let chat = chat_id.clone();
-            self.spawn_worker(async move {
-                let Ok(bearer) = edge_tail.bearer().await else {
-                    return;
-                };
-                let url = format!(
-                    "{}/chat2/{}/tail",
-                    edge_tail.url.trim_end_matches('/'),
-                    chat
-                );
-                let Ok(_permit) = zeron_sync::budget::shared()
-                    .http(zeron_sync::budget::Priority::Background)
-                    .await
-                else {
-                    return;
-                };
-                let _ = http
-                    .put(&url)
-                    .bearer_auth(&bearer)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await;
-            });
+        let Some((hash, body)) = encoded else { return };
+        {
+            let cadence = lock(&handle.sync_cadence);
+            if cadence.tail_hash == Some(hash) {
+                return;
+            }
         }
-        // Threshold checkpoint (rowBytes > 512KB || rows > 200), one in
-        // flight at a time (review H1).
-        if stats.row_bytes <= 512 * 1024 && stats.row_count <= 200 {
+        let Ok(bearer) = edge.bearer().await else {
             return;
+        };
+        let url = format!(
+            "{}/chat2/{}/tail",
+            edge.url.trim_end_matches('/'),
+            handle.chat_id
+        );
+        let Ok(_permit) = zeron_sync::budget::shared()
+            .http(zeron_sync::budget::Priority::Background)
+            .await
+        else {
+            return;
+        };
+        lock(&handle.sync_cadence).tail_attempt = Some(tokio::time::Instant::now());
+        if self
+            .inner
+            .http
+            .put(&url)
+            .bearer_auth(&bearer)
+            .timeout(Duration::from_secs(15))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            lock(&handle.sync_cadence).tail_hash = Some(hash);
         }
-        self.spawn_chat2_checkpoint(handle, "threshold");
     }
 
     /// POST a full checkpoint for a chat2 room (one in flight per handle).
@@ -3428,10 +3556,13 @@ impl DocHost {
                         }
                     }
 
-                    if let Some(handle) = weak_note.upgrade()
-                        && let Some(client) = &*lock(&handle.chat2)
-                    {
-                        client.note_checkpoint(seq_covered, size);
+                    if let Some(handle) = weak_note.upgrade() {
+                        if handle.writers.load(Ordering::Acquire) > 0 {
+                            lock(&handle.sync_cadence).stream_since_checkpoint = Some(tokio::time::Instant::now());
+                        }
+                        if let Some(client) = &*lock(&handle.chat2) {
+                            client.note_checkpoint(seq_covered, size);
+                        }
                     }
                 }
                 Ok(res) => {
@@ -7093,6 +7224,7 @@ mod queued_message_prompt_tests {
 /// A streaming turn commits to `messages` only, so it no longer pays for the
 /// ledger. Each holds only a weak handle so a dropped host tears it down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
+    host.spawn_worker(sync_maintenance_task(host.clone(), weak.clone()));
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
     // for interrupt/question controls so that wait cannot block recovery.
     let control_host = host.clone();
@@ -7152,11 +7284,35 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 if handle.persistence.is_none() { host.save_snapshot(&handle); }
                 // chat2 host duties ride the same quiesce tick (C3):
                 // threshold checkpoints + the tail sidecar publish.
-                host.chat2_maintenance(&handle).await;
+                handle.writer_wake.notify_one();
                 // Post-quiesce eviction pass: sizes just refreshed.
                 host.evict_over_budget();
             }
         }
+    }
+}
+
+async fn sync_maintenance_task(host: DocHost, weak: Weak<ChatDocHandle>) {
+    let wake = match weak.upgrade() {
+        Some(handle) => handle.writer_wake.clone(),
+        None => return,
+    };
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let streaming = weak.upgrade().is_some_and(|handle| {
+            cadence_streaming(
+                handle.writers.load(Ordering::Acquire),
+                lock(&handle.sync_cadence).session_streaming,
+            )
+        });
+        tokio::select! {
+            _ = wake.notified() => {},
+            _ = tick.tick(), if streaming => {},
+        }
+        let Some(handle) = weak.upgrade() else { break };
+        let turn_end = handle.turn_end_pending.swap(false, Ordering::AcqRel);
+        host.chat2_maintenance(&handle, turn_end).await;
     }
 }
 
@@ -7214,6 +7370,202 @@ async fn control_task(
 mod publication_eviction_tests {
     use super::*;
 
+    #[test]
+    fn chat2_checkpoint_regimes() {
+        assert!(cadence_streaming(1, Some(true)));
+        assert!(!cadence_streaming(1, Some(false)), "parked writer is idle");
+        assert!(cadence_streaming(1, None), "writer without session status");
+        assert!(!cadence_streaming(0, Some(true)));
+        assert!(!checkpoint_due(true, 2000, 4 * 1024 * 1024, false));
+        assert!(checkpoint_due(true, 2001, 0, false));
+        assert!(checkpoint_due(true, 0, 4 * 1024 * 1024 + 1, false));
+        assert!(!checkpoint_due(false, 200, 512 * 1024, false));
+        assert!(checkpoint_due(false, 201, 0, false));
+        assert!(checkpoint_due(false, 0, 512 * 1024 + 1, false));
+        assert!(checkpoint_due(true, 0, 0, true));
+        assert!(!checkpoint_due(false, 0, 0, true));
+        let now = tokio::time::Instant::now();
+        assert!(!checkpoint_stale(Some(now), now + Duration::from_secs(599)));
+        assert!(checkpoint_stale(Some(now), now + Duration::from_secs(600)));
+    }
+
+    #[tokio::test]
+    async fn chat2_remote_status_completion_wakes_maintenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("status-wake").unwrap();
+        host.shutdown_workers().await;
+        let writer = zeron_doc::SegmentWriter::begin(handle.doc(), "a", "remote", 1).unwrap();
+        assert!(!handle.turn_end_pending.load(Ordering::Acquire));
+        writer.finish(&[], MessageStatus::Complete).unwrap();
+        assert!(handle.turn_end_pending.load(Ordering::Acquire));
+        handle.turn_end_pending.store(false, Ordering::Release);
+        let _active = handle.writer();
+        let segment = zeron_doc::SegmentWriter::begin(handle.doc(), "b", "host", 2).unwrap();
+        segment.finish(&[], MessageStatus::Complete).unwrap();
+        assert!(!handle.turn_end_pending.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn chat2_parked_writer_uses_idle_cadence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("parked-cadence").unwrap();
+        let _writer = handle.writer();
+        let (tx, rx) = watch::channel(Vec::new());
+        host.spawn_sync_status_watcher(rx);
+        let mut session = zeron_proto::Session {
+            last_turn_outcome: None,
+            terminal_activity: None,
+            last_completed_turn: None,
+            chat_id: handle.chat_id.clone(),
+            device_id: handle.device_id.clone(),
+            status: zeron_proto::SessionStatus::Working,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            running_subagents: 0,
+            background_tasks: vec![],
+        };
+        tx.send_replace(vec![session.clone()]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&handle.sync_cadence).session_streaming != Some(true) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        session.status = zeron_proto::SessionStatus::Idle;
+        tx.send_replace(vec![session]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lock(&handle.sync_cadence).session_streaming != Some(false) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!cadence_streaming(
+            handle.writers.load(Ordering::Acquire),
+            lock(&handle.sync_cadence).session_streaming
+        ));
+        host.shutdown_workers().await;
+    }
+
+    #[test]
+    fn chat2_ten_minute_cadence_simulation() {
+        // One changed flush every 120 ms; maintenance runs every second.
+        let (mut old_rows, mut new_rows) = (0u64, 0u64);
+        let (mut old_checkpoints, mut new_checkpoints) = (0, 0);
+        let mut last_commit = 0;
+        let mut last_tail_second = 0;
+        let mut new_puts = 0;
+        for second in 1..=600 {
+            let commits = second * 1000 / 120;
+            let rows = commits - last_commit;
+            last_commit = commits;
+            old_rows += rows;
+            new_rows += rows;
+            if checkpoint_due(false, old_rows, 0, false) {
+                old_checkpoints += 1;
+                old_rows = 0;
+            }
+            if checkpoint_due(true, new_rows, 0, false) {
+                new_checkpoints += 1;
+                new_rows = 0;
+            }
+            if new_puts == 0 || second - last_tail_second >= 5 {
+                new_puts += 1;
+                last_tail_second = second;
+            }
+        }
+        // A changed tail and the lower threshold apply at turn end.
+        if last_tail_second < 600 {
+            new_puts += 1;
+        }
+        if checkpoint_due(false, new_rows, 0, false) {
+            new_checkpoints += 1;
+        }
+        eprintln!(
+            "10-minute simulation: PUTs 600 -> {new_puts}; checkpoints {old_checkpoints} -> {new_checkpoints}"
+        );
+        assert_eq!((new_puts, old_checkpoints, new_checkpoints), (121, 24, 3));
+    }
+
+    #[tokio::test]
+    async fn chat2_tail_cadence_uses_fake_edge() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = SYNC_TEST_LOCK.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let puts = Arc::new(AtomicUsize::new(0));
+        let received = puts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .unwrap_or("0")
+                            .parse()
+                            .unwrap();
+                        if request.len() >= end + 4 + len {
+                            if headers.starts_with("put /chat2/")
+                                && headers
+                                    .lines()
+                                    .next()
+                                    .is_some_and(|line| line.contains("/tail "))
+                            {
+                                received.fetch_add(1, Ordering::SeqCst);
+                                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                            } else {
+                                let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: Some(EdgeConfig::with_static_token(&url, "test")),
+            },
+        );
+        let handle = host.open_local("tail-cadence").unwrap();
+        host.shutdown_workers().await;
+        handle.write_user_message("one", "first", 1).unwrap();
+        host.chat2_tail_maintenance(&handle, true).await;
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        handle.write_user_message("two", "second", 2).unwrap();
+        host.chat2_tail_maintenance(&handle, true).await;
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        lock(&handle.sync_cadence).tail_attempt = Some(tokio::time::Instant::now() - TAIL_INTERVAL);
+        host.chat2_tail_maintenance(&handle, true).await;
+        host.chat2_tail_maintenance(&handle, false).await;
+        assert_eq!(puts.load(Ordering::SeqCst), 2, "unchanged turn end");
+        handle.write_user_message("three", "final", 3).unwrap();
+        host.chat2_tail_maintenance(&handle, false).await;
+        host.chat2_tail_maintenance(&handle, false).await;
+        assert_eq!(puts.load(Ordering::SeqCst), 3, "one changed turn-end PUT");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn wakeup_handoff_waits_for_snapshot_persistence() {
         let dir = tempfile::tempdir().unwrap();
@@ -7261,6 +7613,33 @@ mod publication_eviction_tests {
         let body = handle.doc.doc().get_text("body");
         body.insert(body.len_unicode(), text).unwrap();
         handle.doc.doc().commit();
+    }
+
+    #[tokio::test]
+    async fn streaming_rows_per_commit() {
+        let _guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("stream-rows").unwrap();
+        let mut writer = zeron_doc::SegmentWriter::begin(handle.doc(), "a", "host", 1).unwrap();
+        host.inner.outbox.flush();
+        let before = store.pending_chat_updates("stream-rows").unwrap().len();
+        let mut text = String::new();
+        for _ in 0..100 {
+            text.push('x');
+            writer
+                .sync(&[MessagePart::Text {
+                    id: "p".into(),
+                    text: text.clone(),
+                }])
+                .unwrap();
+        }
+        host.inner.outbox.flush();
+        let rows = store.pending_chat_updates("stream-rows").unwrap().len() - before;
+        eprintln!("streaming rows per commit: {rows}/100");
+        assert_eq!(rows, 100);
+        host.shutdown_workers().await;
     }
 
     /// Outbox rows replay into a fresh doc in ordinal order with no gaps.
