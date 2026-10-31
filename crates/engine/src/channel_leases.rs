@@ -1,29 +1,24 @@
-//! One live owner per channel-capable MCP server.
-//!
-//! A channel server polls an external inbox. Two chats polling the same
-//! server steal updates from each other, so the engine grants the server to
-//! one non-worker chat. The identity is the server's name plus its config
-//! hash ([`zeron_harness::mcp_policy::channel_identity`]), not a provider.
+//! Reserved channel ownership setting and a test-only lease prototype.
+//! Channel ownership has no effect in v1.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-/// Stand-in identity for Automatic mode before any channel server has been
-/// named. Snapshots arrive in a later unit; until then the first non-worker
-/// launch claims this so the second chat still drops channel servers.
-pub(crate) const LAUNCH_LEASE: &str = "\0launch";
+#[cfg(test)]
+const LAUNCH_LEASE: &str = "\0launch";
 
-/// Settings → "channel delivers to".
+/// Reserved setting; v1 leaves channel servers unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelOwnerSetting {
-    /// The first non-worker launch while the lease is free.
+    /// Automatic ownership if implemented in a future version.
     Automatic,
-    /// Nobody holds it. Every chat drops channel servers.
+    /// Reserved off value.
     Off,
-    /// This chat, and only this chat. A worker id grants nobody.
+    /// Reserved chat-specific value.
     Chat(String),
 }
 
@@ -56,11 +51,13 @@ impl<'de> Deserialize<'de> for ChannelOwnerSetting {
 }
 
 /// `identity → chat id` for channel servers currently granted.
+#[cfg(test)]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ChannelLeases {
     held: HashMap<String, String>,
 }
 
+#[cfg(test)]
 impl ChannelLeases {
     pub(crate) fn holder(&self, identity: &str) -> Option<&str> {
         self.held.get(identity).map(String::as_str)
@@ -81,11 +78,16 @@ impl ChannelLeases {
         match setting {
             ChannelOwnerSetting::Off => true,
             ChannelOwnerSetting::Chat(owner) => {
-                if !worker && chat_id == owner {
-                    self.held.insert(identity.to_owned(), chat_id.to_owned());
-                    false
-                } else {
-                    true
+                if worker || chat_id != owner {
+                    return true;
+                }
+                match self.held.get(identity) {
+                    Some(current) if current != chat_id => true,
+                    Some(_) => false,
+                    None => {
+                        self.held.insert(identity.to_owned(), chat_id.to_owned());
+                        false
+                    }
                 }
             }
             ChannelOwnerSetting::Automatic => {
@@ -131,17 +133,9 @@ impl ChannelLeases {
         }
     }
 
-    /// The user changed the setting. Off clears every grant. A pinned chat
-    /// keeps only leases it already holds. Automatic keeps current holders.
-    pub(crate) fn apply_setting(&mut self, setting: &ChannelOwnerSetting) {
-        match setting {
-            ChannelOwnerSetting::Off => self.held.clear(),
-            ChannelOwnerSetting::Chat(id) => {
-                self.held.retain(|_, owner| owner == id);
-            }
-            ChannelOwnerSetting::Automatic => {}
-        }
-    }
+    /// A setting change cannot revoke a running process. Retain its lease
+    /// until it exits, so a new owner cannot start a competing poller.
+    pub(crate) fn apply_setting(&mut self, _setting: &ChannelOwnerSetting) {}
 }
 
 #[cfg(test)]
@@ -193,15 +187,19 @@ mod tests {
 
         assert!(!leases.drop_channels_for_launch(&id, "pinned", false, &pin));
         leases.apply_setting(&ChannelOwnerSetting::Off);
-        assert!(leases.holder(&id).is_none());
+        assert_eq!(leases.holder(&id), Some("pinned"));
         assert!(leases.drop_channels_for_launch(&id, "pinned", false, &ChannelOwnerSetting::Off));
-        assert!(leases.holder(&id).is_none());
+        let other_pin = ChannelOwnerSetting::Chat("other".into());
+        assert!(leases.drop_channels_for_launch(&id, "other", false, &other_pin));
+        leases.release("pinned", &other_pin, None);
+        assert!(!leases.drop_channels_for_launch(&id, "other", false, &other_pin));
+        leases.release("other", &pin, None);
 
         assert!(!leases.drop_channels_for_launch(&id, "pinned", false, &pin));
         assert!(!leases.drop_channels_for_launch(LAUNCH_LEASE, "other", false, &auto));
         leases.apply_setting(&pin);
         assert_eq!(leases.holder(&id), Some("pinned"));
-        assert!(leases.holder(LAUNCH_LEASE).is_none());
+        assert_eq!(leases.holder(LAUNCH_LEASE), Some("other"));
         leases.apply_setting(&auto);
         assert_eq!(leases.holder(&id), Some("pinned"));
     }

@@ -413,7 +413,7 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
     /// Live, parked, hibernated, or starting. Absent on older peers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub runtime: Option<RuntimeState>,
 }
 
@@ -1689,11 +1689,14 @@ mod tests {
         let mut live = session.clone();
         live.runtime = Some(RuntimeState::Parked);
         let value = serde_json::to_value(&live).unwrap();
-        assert_eq!(value["runtime"], "parked");
+        assert!(value.get("runtime").is_none());
         assert_eq!(
-            serde_json::from_value::<Session>(value).unwrap().runtime,
-            Some(RuntimeState::Parked)
+            serde_json::from_value::<Session>(value.clone()).unwrap().runtime,
+            None
         );
+        let mut injected = value;
+        injected["runtime"] = serde_json::json!("live");
+        assert_eq!(serde_json::from_value::<Session>(injected).unwrap().runtime, None);
     }
 
     #[test]

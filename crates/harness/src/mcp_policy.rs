@@ -62,8 +62,7 @@ pub struct McpServerFact {
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyContext {
     pub worker: bool,
-    /// This chat holds the channel lease, or it is the pinned owner.
-    /// Ignored for workers: a worker never keeps a channel server.
+    /// Reserved for future channel ownership; has no effect in v1.
     pub channel_owner: bool,
     pub choice: Option<McpServerChoice>,
 }
@@ -89,32 +88,41 @@ pub fn experimental_map_declares_channel(
 }
 
 pub fn classify(fact: &McpServerFact) -> McpClass {
-    if fact.channel {
-        return McpClass::Channel;
-    }
     if is_remote(fact) {
         return McpClass::Remote;
     }
-    if fact.npx_resolved || heavy_runtime_command(&fact.command) {
+    if fact.channel {
+        return McpClass::Channel;
+    }
+    if fact.transport.trim().eq_ignore_ascii_case("stdio")
+        && !fact.command.trim().is_empty()
+        && (fact.npx_resolved || heavy_runtime_command(&fact.command))
+    {
         return McpClass::HeavyRuntime;
     }
     McpClass::NativeSmall
 }
 
-/// User choices win, including an explicit Eager on a worker's channel server.
-/// `MainOnly` is a choice, not a mode: workers drop that server and a main
-/// chat keeps the class default.
+/// Apply user choices only within the transport and channel safety boundaries.
 pub fn disposition(fact: &McpServerFact, ctx: PolicyContext) -> McpDisposition {
+    let class = classify(fact);
+    // v1 preserves every channel server as configured, regardless of chat
+    // role, ownership or user override. Remote servers are also untouched.
+    if matches!(class, McpClass::Remote | McpClass::Channel) {
+        return McpDisposition::Untouched;
+    }
     if let Some(choice) = ctx.choice
         && let Some(mode) = choice.explicit_mode(ctx.worker)
     {
+        if matches!(mode, McpMode::Lazy | McpMode::LazyKeepAlive) && class != McpClass::HeavyRuntime
+        {
+            return McpDisposition::Untouched;
+        }
         return McpDisposition::Mode(mode);
     }
-    match classify(fact) {
-        McpClass::Remote | McpClass::NativeSmall => McpDisposition::Untouched,
+    match class {
         McpClass::HeavyRuntime => McpDisposition::Mode(McpMode::Lazy),
-        McpClass::Channel if ctx.worker || !ctx.channel_owner => McpDisposition::Mode(McpMode::Off),
-        McpClass::Channel => McpDisposition::Mode(McpMode::Eager),
+        _ => McpDisposition::Untouched,
     }
 }
 
@@ -253,25 +261,29 @@ mod tests {
     }
 
     #[test]
-    fn mcp_policy_channel_servers_are_eager_for_the_owner_only() {
-        let row = fact("fake-channel", "stdio", "fake-channel", false, true, "user");
-        assert_eq!(classify(&row), McpClass::Channel);
-        assert_eq!(
-            disposition(&row, ctx(false, true, None)),
-            McpDisposition::Mode(McpMode::Eager)
-        );
-        assert_eq!(
-            disposition(&row, ctx(false, false, None)),
-            McpDisposition::Mode(McpMode::Off)
-        );
-        // A channel that also speaks HTTP is still a channel: the poller
-        // must not start in every chat just because the transport is remote.
-        let remote = fact("fake-channel", "http", "", false, true, "claude.ai");
-        assert_eq!(classify(&remote), McpClass::Channel);
-        assert_eq!(
-            disposition(&remote, ctx(false, false, None)),
-            McpDisposition::Mode(McpMode::Off)
-        );
+    fn mcp_policy_channels_are_untouched_for_all_chats_and_overrides() {
+        let choices = [
+            None,
+            Some(McpServerChoice::Off),
+            Some(McpServerChoice::Eager),
+            Some(McpServerChoice::Lazy),
+            Some(McpServerChoice::LazyKeepAlive),
+            Some(McpServerChoice::MainOnly),
+        ];
+        for (transport, scope) in [("stdio", "user"), ("http", "claude.ai")] {
+            let channel = fact("fake-channel", transport, "node", false, true, scope);
+            for worker in [false, true] {
+                for owner in [false, true] {
+                    for choice in choices {
+                        assert_eq!(
+                            disposition(&channel, ctx(worker, owner, choice)),
+                            McpDisposition::Untouched,
+                            "{transport} {worker} {owner} {choice:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -285,17 +297,14 @@ mod tests {
             McpDisposition::Mode(McpMode::Lazy)
         );
         assert_eq!(disposition(&native, worker), McpDisposition::Untouched);
-        assert_eq!(
-            disposition(&channel, worker),
-            McpDisposition::Mode(McpMode::Off)
-        );
+        assert_eq!(disposition(&channel, worker), McpDisposition::Untouched);
         assert_eq!(
             disposition(&heavy, ctx(true, false, Some(McpServerChoice::MainOnly))),
             McpDisposition::Mode(McpMode::Off)
         );
         assert_eq!(
             disposition(&channel, ctx(true, true, Some(McpServerChoice::MainOnly))),
-            McpDisposition::Mode(McpMode::Off)
+            McpDisposition::Untouched
         );
         // Main-only on a main chat keeps the class default.
         assert_eq!(
@@ -323,20 +332,33 @@ mod tests {
         );
         assert_eq!(
             disposition(&remote, ctx(false, false, Some(McpServerChoice::Lazy))),
-            McpDisposition::Mode(McpMode::Lazy)
+            McpDisposition::Untouched
         );
-        // An explicit Eager on a worker channel is the user's choice.
         assert_eq!(
             disposition(&channel, ctx(true, false, Some(McpServerChoice::Eager))),
-            McpDisposition::Mode(McpMode::Eager)
+            McpDisposition::Untouched
         );
         assert_eq!(
             disposition(
                 &native_small(),
                 ctx(false, false, Some(McpServerChoice::LazyKeepAlive))
             ),
-            McpDisposition::Mode(McpMode::LazyKeepAlive)
+            McpDisposition::Untouched
         );
+    }
+
+    #[test]
+    fn mcp_policy_unknown_transport_and_channel_overrides_are_safe() {
+        for transport in ["", "unknown"] {
+            let row = fact("srv", transport, "node", true, false, "");
+            assert_eq!(classify(&row), McpClass::NativeSmall);
+            assert_eq!(
+                disposition(&row, ctx(false, true, Some(McpServerChoice::Lazy))),
+                McpDisposition::Untouched
+            );
+        }
+        let row = fact("srv", "stdio", "", true, false, "");
+        assert_eq!(classify(&row), McpClass::NativeSmall);
     }
 
     fn native_small() -> McpServerFact {

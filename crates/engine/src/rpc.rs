@@ -2635,7 +2635,6 @@ impl RpcService for EngineRpc {
             methods::SET_MCP_SETTINGS => {
                 let prefs: crate::registry::McpPrefs = parse_params(params)?;
                 self.registry.set_mcp_prefs(prefs);
-                self.sessions.apply_channel_owner();
                 RpcReply::value(&self.registry.mcp_settings())
             }
             methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {

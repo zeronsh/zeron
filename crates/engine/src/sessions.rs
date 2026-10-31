@@ -279,8 +279,6 @@ struct Inner {
     doc_host: Mutex<Option<DocHost>>,
     /// chat_id → live run.
     runs: Mutex<HashMap<String, RunHandle>>,
-    /// One owner per channel-capable MCP server. Granted at the MCP stamp.
-    channel_leases: Mutex<crate::channel_leases::ChannelLeases>,
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
@@ -351,7 +349,6 @@ impl SessionsEngine {
                 registry,
                 doc_host: Mutex::new(None),
                 runs: Mutex::new(HashMap::new()),
-                channel_leases: Mutex::new(crate::channel_leases::ChannelLeases::default()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
@@ -371,12 +368,6 @@ impl SessionsEngine {
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
         self.inner.voice.clone()
-    }
-
-    /// The settings RPC changed who may hold a channel lease.
-    pub(crate) fn apply_channel_owner(&self) {
-        let setting = self.inner.registry.mcp_prefs().channel_owner;
-        lock(&self.inner.channel_leases).apply_setting(&setting);
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -2300,8 +2291,8 @@ impl Inner {
 
     /// A side chat, a chat an agent spawned, or a row claimed before its
     /// parent was recorded. No workspace (a bare test) is not a worker.
-    /// Unknown parent counts as a worker so a poller is not granted until
-    /// the row shows a main chat.
+    /// Unknown parents and missing rows use the worker policy until the row
+    /// shows a main chat.
     fn chat_is_worker(&self, chat_id: &str) -> bool {
         let Some(ws) = self.workspace() else {
             return false;
@@ -2312,14 +2303,13 @@ impl Inner {
         ws.chat(chat_id)
             .ok()
             .flatten()
-            .is_some_and(|chat| chat.parent_chat_id.is_some())
+            .is_none_or(|chat| chat.parent_chat_id.is_some())
     }
 
     /// Stamp the lazy-MCP plan for the process this run is about to start.
     /// `ZERON_MCP_LAZY=0`, or `mcp.lazy` off, clears any plan already on the
-    /// request and grants no channel lease. Dispatch stamps before routing and
-    /// before saving RuntimeConfig, so preference/lease changes restart a CLI.
-    /// Title runs call the harness directly and never get here.
+    /// request. Dispatch stamps before routing and before saving RuntimeConfig,
+    /// so preference changes restart a CLI. Title runs call the harness directly.
     fn stamp_mcp_plan(
         &self,
         request: &mut RunRequest,
@@ -2350,15 +2340,6 @@ impl Inner {
             return;
         }
         let worker = self.chat_is_worker(chat_id);
-        let drop_channels = {
-            let mut leases = lock(&self.channel_leases);
-            leases.drop_channels_for_launch(
-                crate::channel_leases::LAUNCH_LEASE,
-                chat_id,
-                worker,
-                &prefs.channel_owner,
-            )
-        };
         let proxy_command = std::env::current_exe()
             .ok()
             .and_then(|path| path.to_str().map(str::to_owned))
@@ -2374,52 +2355,9 @@ impl Inner {
             idle_minutes: prefs.idle_minutes,
             default_mode: zeron_proto::McpMode::Lazy,
             modes: self.registry.server_modes(harness_id, worker),
-            drop_channels,
+            drop_channels: false,
             worker,
         });
-    }
-
-    fn channel_lease_holder(&self, identity: &str) -> Option<String> {
-        lock(&self.channel_leases)
-            .holder(identity)
-            .map(str::to_owned)
-    }
-
-    /// Run end. Automatic hands the lease to the most recently active other
-    /// non-worker still in `runs` (a parked runtime can inherit; this does
-    /// not kill it). The locks are dropped before the workspace is read.
-    fn release_channel_lease(&self, chat_id: &str) {
-        let successor = self.channel_lease_successor(chat_id);
-        let setting = self.registry.mcp_prefs().channel_owner;
-        lock(&self.channel_leases).release(chat_id, &setting, successor.as_deref());
-    }
-
-    fn channel_lease_successor(&self, ended: &str) -> Option<String> {
-        let candidates: Vec<String> = {
-            let runs = lock(&self.runs);
-            runs.keys()
-                .filter(|id| id.as_str() != ended)
-                .cloned()
-                .collect()
-        };
-        let ranked = {
-            let statuses = lock(&self.statuses);
-            candidates
-                .into_iter()
-                .map(|id| {
-                    let updated = statuses
-                        .get(&id)
-                        .map(|session| session.updated_at)
-                        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH);
-                    (id, updated)
-                })
-                .collect::<Vec<_>>()
-        };
-        let rows = ranked
-            .into_iter()
-            .map(|(id, updated)| (id.clone(), updated, self.chat_is_worker(&id)))
-            .collect();
-        rank_channel_successor(rows)
     }
 
     /// Sidebar freshness: push a message-persist preview into the chat's workspace row.
@@ -2795,29 +2733,12 @@ impl Inner {
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
-        let removed = {
-            let mut runs = lock(&self.runs);
-            if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
-                runs.remove(chat_id);
-                true
-            } else {
-                false
-            }
-        };
-        if removed {
-            self.release_channel_lease(chat_id);
+        let mut runs = lock(&self.runs);
+        if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
+            runs.remove(chat_id);
+
         }
     }
-}
-
-/// Newest non-worker. Equal timestamps break toward the greater chat id so
-/// the choice does not depend on map order.
-fn rank_channel_successor(
-    mut rows: Vec<(String, chrono::DateTime<chrono::Utc>, bool)>,
-) -> Option<String> {
-    rows.retain(|(_, _, worker)| !*worker);
-    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
-    rows.into_iter().next().map(|(id, _, _)| id)
 }
 
 // ── run task ────────────────────────────────────────────────────────────────
@@ -5607,6 +5528,9 @@ mod tests {
                 Some("main".into()),
             )
             .unwrap();
+        core.workspace
+            .create_chat("second", None, Some(&core.device_id), None, Some("/work".into()))
+            .unwrap();
         core.workspace.claim_chat("early", None).unwrap();
 
         let mut prefs = core.registry.mcp_prefs();
@@ -5624,7 +5548,7 @@ mod tests {
         assert!(!inner.chat_is_worker("main"));
         assert!(inner.chat_is_worker("side"));
         assert!(inner.chat_is_worker("early"));
-        assert!(!inner.chat_is_worker("missing"));
+        assert!(inner.chat_is_worker("missing"));
 
         let mut request = request();
         request.mcp_plan = Some(zeron_proto::McpPlan::default());
@@ -5636,11 +5560,6 @@ mod tests {
             Some("0"),
         );
         assert!(request.mcp_plan.is_none());
-        assert!(
-            inner
-                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
-                .is_none()
-        );
 
         let mut prefs = core.registry.mcp_prefs();
         prefs.lazy = false;
@@ -5674,60 +5593,36 @@ mod tests {
             "{}",
             plan.run_dir
         );
-        assert_eq!(
-            inner
-                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
-                .as_deref(),
-            Some("main")
-        );
 
         inner.apply_mcp_plan(&mut request, "side", "run-2", HarnessId::Codex, None);
         let plan = request.mcp_plan.clone().unwrap();
         assert!(plan.worker);
-        assert!(plan.drop_channels);
+        assert!(!plan.drop_channels);
         assert_eq!(plan.modes.get("notes"), Some(&zeron_proto::McpMode::Off));
         assert_eq!(
             plan.modes.get("playwright"),
             Some(&zeron_proto::McpMode::Eager)
         );
-        assert_eq!(
-            inner
-                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
-                .as_deref(),
-            Some("main")
-        );
 
         inner.apply_mcp_plan(&mut request, "second", "run-3", HarnessId::Codex, None);
         let plan = request.mcp_plan.unwrap();
         assert!(!plan.worker);
-        assert!(plan.drop_channels);
+        assert!(!plan.drop_channels);
 
-        inner.release_channel_lease("main");
-        assert!(
-            inner
-                .channel_lease_holder(crate::channel_leases::LAUNCH_LEASE)
-                .is_none()
-        );
-
-        let epoch = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
-        let later = epoch + chrono::Duration::seconds(5);
-        assert_eq!(
-            rank_channel_successor(vec![
-                ("old".into(), epoch, false),
-                ("worker".into(), later, true),
-                ("new".into(), later, false),
-            ])
-            .as_deref(),
-            Some("new")
-        );
-        assert_eq!(
-            rank_channel_successor(vec![
-                ("b".into(), epoch, false),
-                ("a".into(), epoch, false),
-            ])
-            .as_deref(),
-            Some("b")
-        );
+        for owner in [
+            crate::channel_leases::ChannelOwnerSetting::Automatic,
+            crate::channel_leases::ChannelOwnerSetting::Off,
+            crate::channel_leases::ChannelOwnerSetting::Chat("main".into()),
+        ] {
+            let mut prefs = core.registry.mcp_prefs();
+            prefs.channel_owner = owner;
+            core.registry.set_mcp_prefs(prefs);
+            for chat in ["main", "second", "side", "missing"] {
+                let mut next = self::request();
+                inner.apply_mcp_plan(&mut next, chat, "run-settings", HarnessId::Codex, None);
+                assert!(!next.mcp_plan.unwrap().drop_channels, "{chat}");
+            }
+        }
 
         core.sessions.shutdown().await;
     }
