@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicU32},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 use tokio::sync::watch;
 use zeron_proto::{PREVIEW_PROXY_PORT, PreviewService, PreviewSnapshot};
@@ -32,6 +32,8 @@ struct State {
     /// Project and service labels. Built once at load and updated on insert
     /// and prune, so a scan does not walk the registry to rebuild it.
     used_labels: HashSet<String>,
+    last_complete_scan: Option<Instant>,
+    last_prune_bucket: Option<i64>,
 }
 #[derive(Clone)]
 pub struct LocalRoute {
@@ -44,6 +46,8 @@ struct Names {
     #[serde(default)]
     peer_labels: BTreeMap<String, String>,
     projects: BTreeMap<String, ProjectName>,
+    #[serde(default)]
+    scan_clock_ms: i64,
 }
 #[derive(Serialize, Deserialize)]
 struct ProjectName {
@@ -66,6 +70,7 @@ struct ServiceName {
 /// Seen-at is stored as the start of the current hour, so a service that stays
 /// up rewrites the registry at most hourly, including across restarts.
 const SEEN_BUCKET_MS: i64 = 60 * 60 * 1000;
+const SERVICE_TTL_MS: i64 = 30 * 24 * SEEN_BUCKET_MS;
 static LABEL_TICK: AtomicU32 = AtomicU32::new(0);
 
 pub fn slug(value: &str) -> String {
@@ -165,15 +170,23 @@ fn verify_used_labels(used: &mut HashSet<String>, names: &Names) {
     }
 }
 
-// Discovery can omit live services (for example during startup or a failed
-// HTTP probe), so neither age nor absence from a scan proves a name is safe
-// to reuse. Retain service names until liveness can be established reliably.
-fn drop_missing_empty_projects(names: &mut Names) -> bool {
+// A complete scan clock excludes downtime, failed scans, and partial scans.
+// The extra hour compensates for rounding last-seen stamps down to an hour.
+fn prune_names(names: &mut Names, routed: &HashSet<String>, now: i64) -> bool {
+    let mut changed = false;
+    for project in names.projects.values_mut() {
+        let before = project.services.len();
+        project.services.retain(|service| {
+            routed.contains(&service.id)
+                || now.saturating_sub(service.last_seen_ms) <= SERVICE_TTL_MS + SEEN_BUCKET_MS
+        });
+        changed |= before != project.services.len();
+    }
     let before = names.projects.len();
     names
         .projects
         .retain(|cwd, project| !project.services.is_empty() || Path::new(cwd).exists());
-    names.projects.len() != before
+    changed || before != names.projects.len()
 }
 
 fn write_names(file: &Path, names: &Names) -> anyhow::Result<()> {
@@ -203,11 +216,31 @@ impl Catalog {
         if names.device_label.is_empty() {
             names.device_label = slug(&device_name);
         }
-        let mut used_labels = used_labels_full(&names);
-        if drop_missing_empty_projects(&mut names) {
-            used_labels = used_labels_full(&names);
+        // Upgrade every legacy zero stamp independently. A registry written
+        // before the scan clock existed has no evidence of completed scans,
+        // so give all its entries a fresh retention window.
+        let now = now_ms().max(1);
+        let reset = names.scan_clock_ms <= 0;
+        if reset {
+            names.scan_clock_ms = now;
+        }
+        let mut migrated = reset;
+        for project in names.projects.values_mut() {
+            if reset || project.last_seen_ms <= 0 {
+                project.last_seen_ms = names.scan_clock_ms.max(now);
+                migrated = true;
+            }
+            for service in &mut project.services {
+                if reset || service.last_seen_ms <= 0 {
+                    service.last_seen_ms = names.scan_clock_ms.max(now);
+                    migrated = true;
+                }
+            }
+        }
+        if migrated {
             write_names(&file, &names)?;
         }
+        let mut used_labels = used_labels_full(&names);
         verify_used_labels(&mut used_labels, &names);
         let (changes, _) = watch::channel(PreviewSnapshot::default());
         let (internal_changes, _) = watch::channel(PreviewSnapshot::default());
@@ -222,6 +255,8 @@ impl Catalog {
                 proxy_port: PREVIEW_PROXY_PORT,
                 error: None,
                 used_labels,
+                last_complete_scan: None,
+                last_prune_bucket: None,
             }),
             changes,
             internal_changes,
@@ -396,7 +431,17 @@ impl Catalog {
         }
     }
     /// Input has already passed origin attribution and an HTTP handshake probe.
-    pub fn replace_local(&self, mut observations: Vec<(PathBuf, Listener)>) -> anyhow::Result<()> {
+    pub fn replace_local(&self, observations: Vec<(PathBuf, Listener)>) -> anyhow::Result<()> {
+        self.replace_local_scanned(observations, false)
+    }
+    pub(crate) fn scan_incomplete(&self) {
+        self.0.state.lock().unwrap().last_complete_scan = None;
+    }
+    pub(crate) fn replace_local_scanned(
+        &self,
+        mut observations: Vec<(PathBuf, Listener)>,
+        complete: bool,
+    ) -> anyhow::Result<()> {
         observations.sort_by_key(|(root, l)| {
             (
                 root.clone(),
@@ -408,10 +453,29 @@ impl Catalog {
             )
         });
         let mut state = self.0.state.lock().unwrap();
-        let now = now_ms();
+        let complete = complete && observations.len() <= 256;
+        let instant = Instant::now();
+        let mut changed_names = false;
+        if complete {
+            if let Some(previous) = state.last_complete_scan {
+                // Large scheduling gaps do not count as evidence of scans.
+                let elapsed = instant
+                    .saturating_duration_since(previous)
+                    .min(std::time::Duration::from_secs(10));
+                let before = seen_bucket(state.names.scan_clock_ms);
+                state.names.scan_clock_ms = state
+                    .names
+                    .scan_clock_ms
+                    .saturating_add(elapsed.as_millis() as i64);
+                changed_names |= seen_bucket(state.names.scan_clock_ms) != before;
+            }
+            state.last_complete_scan = Some(instant);
+        } else {
+            state.last_complete_scan = None;
+        }
+        let now = state.names.scan_clock_ms;
         let mut next = HashMap::new();
         let mut seen_listeners = HashSet::new();
-        let mut changed_names = false;
         for (root, listener) in observations.into_iter().take(256) {
             if !seen_listeners.insert((root.clone(), listener.address.port())) {
                 continue;
@@ -547,9 +611,14 @@ impl Catalog {
             };
             next.insert(id, LocalRoute { service, listener });
         }
-        if drop_missing_empty_projects(&mut state.names) {
-            state.used_labels = used_labels_full(&state.names);
-            changed_names = true;
+        if complete && state.last_prune_bucket != Some(seen_bucket(now)) {
+            // Old routes remain visible until persistence and publication succeed.
+            let routed = next.keys().chain(state.routes.keys()).cloned().collect();
+            if prune_names(&mut state.names, &routed, now) {
+                state.used_labels = used_labels_full(&state.names);
+                changed_names = true;
+            }
+            state.last_prune_bucket = Some(seen_bucket(now));
         }
         if changed_names {
             self.persist(&state.names)?;
@@ -740,10 +809,13 @@ mod tests {
         )
         .unwrap();
         assert!(!catalog.watched());
+        let internal = catalog.subscribe_internal();
+        assert!(!catalog.watched());
         let receiver = catalog.subscribe();
         assert!(catalog.watched());
         drop(receiver);
         assert!(!catalog.watched());
+        drop(internal);
     }
     #[test]
     fn old_names_survive_restart_partial_scans_and_caps() {
@@ -782,6 +854,98 @@ mod tests {
         assert_eq!(restored.id, original.id);
         assert_eq!(restored.hostname, original.hostname);
         assert_eq!(service_rows(&catalog).len(), 2051);
+    }
+    #[test]
+    fn completed_scan_expiry_keeps_routed_and_recent_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("names.json");
+        let root = temp.path().join("app");
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        let live = server(5173, 1, "vite");
+        let old = server(3000, 2, "api.js");
+        catalog
+            .replace_local(vec![(root.clone(), live.clone()), (root.clone(), old)])
+            .unwrap();
+        let before = catalog.snapshot().services;
+        let old_id = before.iter().find(|s| s.port == 3000).unwrap().id.clone();
+        let live_entry = before.iter().find(|s| s.port == 5173).unwrap().clone();
+        {
+            let mut state = catalog.0.state.lock().unwrap();
+            state.names.scan_clock_ms += SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS;
+        }
+        // Partial scans cannot prune, even after sufficient completed-scan time.
+        catalog
+            .replace_local_scanned(vec![(root.clone(), live.clone())], false)
+            .unwrap();
+        assert!(service_rows(&catalog).iter().any(|(id, _)| *id == old_id));
+        catalog
+            .replace_local_scanned(vec![(root.clone(), live.clone())], true)
+            .unwrap();
+        assert!(!service_rows(&catalog).iter().any(|(id, _)| *id == old_id));
+        let after = catalog.snapshot().services[0].clone();
+        assert_eq!(
+            (after.id, after.hostname),
+            (live_entry.id, live_entry.hostname)
+        );
+        drop(catalog);
+        let reopened = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        reopened
+            .replace_local_scanned(vec![(root, live)], true)
+            .unwrap();
+        assert_eq!(
+            reopened.snapshot().services[0].id,
+            before.iter().find(|s| s.port == 5173).unwrap().id
+        );
+    }
+    #[test]
+    fn pruning_protects_routed_names_even_if_their_stamps_are_old() {
+        let mut names = Names::default();
+        names.projects.insert(
+            "/missing".into(),
+            ProjectName {
+                id: "project".into(),
+                label: "app".into(),
+                last_seen_ms: 1,
+                services: vec![ServiceName {
+                    id: "live".into(),
+                    fingerprint: "f".into(),
+                    label: "app".into(),
+                    last_seen_ms: 1,
+                }],
+            },
+        );
+        assert!(!prune_names(
+            &mut names,
+            &HashSet::from(["live".into()]),
+            SERVICE_TTL_MS + 2 * SEEN_BUCKET_MS
+        ));
+        assert_eq!(names.projects["/missing"].services[0].id, "live");
+    }
+    #[test]
+    fn scan_clock_pauses_for_partial_scans_and_restarts() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("names.json");
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        catalog.replace_local_scanned(Vec::new(), true).unwrap();
+        {
+            catalog.0.state.lock().unwrap().last_complete_scan =
+                Some(Instant::now() - std::time::Duration::from_secs(5));
+        }
+        let before = catalog.0.state.lock().unwrap().names.scan_clock_ms;
+        catalog.replace_local_scanned(Vec::new(), false).unwrap();
+        catalog.replace_local_scanned(Vec::new(), true).unwrap();
+        assert_eq!(catalog.0.state.lock().unwrap().names.scan_clock_ms, before);
+        {
+            catalog.0.state.lock().unwrap().last_complete_scan =
+                Some(Instant::now() - std::time::Duration::from_secs(5));
+        }
+        catalog.replace_local_scanned(Vec::new(), true).unwrap();
+        assert!(catalog.0.state.lock().unwrap().names.scan_clock_ms >= before + 5_000);
+        drop(catalog);
+        let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        let before = catalog.0.state.lock().unwrap().names.scan_clock_ms;
+        catalog.replace_local_scanned(Vec::new(), true).unwrap();
+        assert_eq!(catalog.0.state.lock().unwrap().names.scan_clock_ms, before);
     }
     #[test]
     fn seen_stamps_are_hourly_and_survive_restart() {
@@ -851,6 +1015,17 @@ mod tests {
         );
         std::fs::write(&file, serde_json::to_vec_pretty(&names).unwrap()).unwrap();
         let catalog = Catalog::open(&file, "device".into(), "Mac".into()).unwrap();
+        {
+            let state = catalog.0.state.lock().unwrap();
+            assert!(
+                state
+                    .names
+                    .projects
+                    .values()
+                    .flat_map(|p| &p.services)
+                    .all(|s| s.last_seen_ms > 0)
+            );
+        }
         catalog
             .replace_local(vec![(root, server(5173, 1, "vite"))])
             .unwrap();

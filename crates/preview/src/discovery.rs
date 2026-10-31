@@ -285,7 +285,7 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
 /// Loopback TCP listeners in `/proc/net/tcp*`, keyed by socket inode.
 /// `None` when neither table can be read.
 #[cfg(target_os = "linux")]
-fn listen_sockets() -> Option<HashMap<String, SocketAddr>> {
+fn listen_sockets() -> Option<(HashMap<String, SocketAddr>, bool)> {
     use std::fs;
     let mut sockets = HashMap::new();
     let mut tables = 0;
@@ -303,7 +303,7 @@ fn listen_sockets() -> Option<HashMap<String, SocketAddr>> {
             }
         }
     }
-    (tables > 0).then_some(sockets)
+    (tables > 0).then_some((sockets, tables == 2))
 }
 
 /// This user's loopback-reachable TCP listeners, attributed to their origin
@@ -312,62 +312,120 @@ fn listen_sockets() -> Option<HashMap<String, SocketAddr>> {
 /// so every scan walks the process descriptors.
 #[cfg(target_os = "linux")]
 pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
-    let sockets = listen_sockets()?;
-    listeners_from(origins, &sockets)
+    listeners_with_completeness(origins).map(|(listeners, _)| listeners)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn listeners_with_completeness(origins: &mut Origins) -> Option<(Vec<Listener>, bool)> {
+    let (sockets, tables_complete) = listen_sockets()?;
+    let (listeners, complete) = listeners_from(origins, &sockets)?;
+    let stable = listen_sockets().is_some_and(|(after, complete)| complete && after == sockets);
+    Some((listeners, complete && tables_complete && stable))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn listeners_with_completeness(origins: &mut Origins) -> Option<(Vec<Listener>, bool)> {
+    // The platform enumerator does not report every per-process read failure.
+    listeners(origins).map(|listeners| (listeners, false))
 }
 
 #[cfg(target_os = "linux")]
 fn listeners_from(
     origins: &mut Origins,
     sockets: &HashMap<String, SocketAddr>,
-) -> Option<Vec<Listener>> {
+) -> Option<(Vec<Listener>, bool)> {
     use std::{fs, os::unix::fs::MetadataExt};
+    let mut complete = true;
     let (boot, ticks) = linux_clock();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
     let mut processes = HashMap::new();
-    for process in fs::read_dir("/proc").ok()?.flatten() {
+    for entry in fs::read_dir("/proc").ok()? {
+        let process = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
         let Ok(pid) = process.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
         let path = process.path();
-        if !fs::metadata(&path).is_ok_and(|m| m.uid() == uid) {
-            continue;
+        match fs::metadata(&path) {
+            Ok(meta) if meta.uid() != uid => continue,
+            Ok(_) => {}
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         }
         let Ok(stat) = fs::read_to_string(path.join("stat")) else {
+            complete = false;
             continue;
         };
         let Some((_, tail)) = stat.rsplit_once(") ") else {
+            complete = false;
             continue;
         };
         let fields: Vec<_> = tail.split_whitespace().collect();
         let Some(parent) = fields.get(1).and_then(|v| v.parse().ok()) else {
+            complete = false;
             continue;
         };
+        if fields
+            .get(19)
+            .and_then(|field| field.parse::<u64>().ok())
+            .is_none()
+        {
+            complete = false;
+            continue;
+        }
         let started_at = linux_started_at(&fields, boot, ticks);
         processes.insert(pid, Process { parent, started_at });
         // Sockets first: most processes listen on nothing, and need neither
         // their cwd nor their arguments read.
         let Ok(fds) = fs::read_dir(path.join("fd")) else {
+            complete = false;
             continue;
         };
-        let addresses: Vec<SocketAddr> = fds
-            .flatten()
-            .filter_map(|fd| {
-                let link = fs::read_link(fd.path()).ok()?;
-                let link = link.to_string_lossy();
-                let inode = link.strip_prefix("socket:[")?.strip_suffix(']')?;
-                sockets.get(inode).copied()
-            })
-            .collect();
+        let mut addresses = Vec::new();
+        for fd in fds {
+            let fd = match fd {
+                Ok(fd) => fd,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            let link = match fs::read_link(fd.path()) {
+                Ok(link) => link,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            let link = link.to_string_lossy();
+            if let Some(address) = link
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|inode| sockets.get(inode))
+            {
+                addresses.push(*address);
+            }
+        }
         if addresses.is_empty() {
             continue;
         }
         let Ok(cwd) = fs::read_link(path.join("cwd")) else {
+            complete = false;
             continue;
         };
         let args = fs::read(path.join("cmdline"))
-            .unwrap_or_default()
+            .unwrap_or_else(|_| {
+                complete = false;
+                Vec::new()
+            })
             .split(|b| *b == 0)
             .filter(|b| !b.is_empty())
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -387,11 +445,17 @@ fn listeners_from(
         }
     }
     origins.attribute(&mut result, &processes, |pid| {
-        fs::read(format!("/proc/{pid}/environ")).ok()
+        match fs::read(format!("/proc/{pid}/environ")) {
+            Ok(env) => Some(env),
+            Err(_) => {
+                complete = false;
+                None
+            }
+        }
     });
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
-    Some(result)
+    Some((result, complete))
 }
 
 #[cfg(target_os = "linux")]
