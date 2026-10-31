@@ -632,13 +632,19 @@ impl DocsStore {
 
     /// Mark only the exact inspected snapshot, while no pending updates can
     /// change its decoded transcript. The comparison and insert are atomic.
-    pub fn mark_salvage_checked(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+    pub fn mark_salvage_checked(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        epoch: u32,
+    ) -> Result<(), StoreError> {
         store_blocking(|| {
             self.conn().execute(
                 "INSERT OR IGNORE INTO salvage_checked (doc_id)
                  SELECT doc_id FROM snapshots WHERE doc_id = ?1 AND bytes = ?2
+                 AND COALESCE(epoch, 0) = ?3
                  AND NOT EXISTS (SELECT 1 FROM chat_outbox WHERE doc_id = ?1)",
-                params![doc_id, bytes],
+                params![doc_id, bytes, epoch],
             )?;
             Ok(())
         })
