@@ -13674,6 +13674,7 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "ring",
+ "roxmltree 0.21.1",
  "rusqlite",
  "same-file",
  "semver",
