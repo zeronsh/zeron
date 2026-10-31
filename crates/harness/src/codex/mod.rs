@@ -187,9 +187,26 @@ fn codex_proxy_overrides(
     names.sort();
     let mut overrides = Vec::new();
     for name in names {
+        // Codex splits override keys on dots; only bare TOML keys are safe.
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            continue;
+        }
         let Some(row) = servers.get(name).and_then(Value::as_object) else {
             continue;
         };
+        // Do not reconstruct incomplete or unrepresentable launch data.
+        if row.get("args").is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
+            || row.get("env").is_some_and(|v| !v.is_null() && !v.as_object().is_some_and(|e| e.iter().all(|(k, v)| !k.is_empty() && !k.contains(',') && v.is_string())))
+            || row.get("env_vars").is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(|a| a.iter().all(|v| v.as_str().is_some_and(|k| !k.is_empty() && !k.contains(',')))))
+            // Relative cwd cannot be passed to the proxy a second time safely.
+            || row.get("cwd").is_some_and(|v| !v.is_null() && !v.as_str().is_some_and(|cwd| std::path::Path::new(cwd).is_absolute()))
+        {
+            continue;
+        }
         // Codex is already not going to start it. Rewriting the command
         // would not change that, and would clobber a row the user disabled.
         if row.get("enabled").and_then(Value::as_bool) == Some(false) {
@@ -343,6 +360,10 @@ fn codex_proxy_args(
     if !keys.is_empty() {
         args.push("--identity-env".to_owned());
         args.push(keys.join(","));
+    }
+    if let Some(cwd) = row.get("cwd").and_then(Value::as_str) {
+        args.push("--cwd".to_owned());
+        args.push(cwd.to_owned());
     }
     args.push("--run-dir".to_owned());
     args.push(plan.run_dir.clone());
@@ -1803,17 +1824,32 @@ async fn run_session(session: Session) {
             // Title runs are the branch above. Every other run that has a
             // plan reads the resolved servers and rewrites only the lazy
             // stdio ones. A failed read is today's launch: no overrides.
-            let read = client
-                .request("config/read", json!({"includeLayers": false}))
-                .await;
-            if let Err(error) = &read {
+            let read = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.request(
+                    "config/read",
+                    json!({"includeLayers": false, "cwd": request.cwd}),
+                ),
+            )
+            .await;
+            if !matches!(&read, Ok(Ok(_))) {
+                let error = format!("{read:?}");
                 tracing::warn!(
                     target: "zeron_harness::codex",
                     %error,
                     "config/read failed; MCP servers stay as configured"
                 );
             }
-            let extra = codex_mcp_plan_overrides(read.as_ref().ok(), plan);
+            let extra =
+                codex_mcp_plan_overrides(read.as_ref().ok().and_then(|r| r.as_ref().ok()), plan)
+                    .into_iter()
+                    // The injected server's command and args must take precedence.
+                    .filter(|(key, _)| {
+                        !request.mcp.as_ref().is_some_and(|mcp| {
+                            key.starts_with(&format!("mcp_servers.{}.", mcp.name))
+                        })
+                    })
+                    .collect::<Vec<_>>();
             if !extra.is_empty() {
                 if !start_params.contains_key("config") {
                     start_params.insert("config".into(), json!({}));
@@ -3781,6 +3817,25 @@ mod mcp_injection_tests {
     }
 
     #[test]
+    fn unsafe_names_and_incomplete_launch_data_stay_eager() {
+        let servers = json!({
+            "dot.name": {"command": "node", "args": []},
+            "quote\"name": {"command": "node", "args": []},
+            "dash-name": {"command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
+            "bad-args": {"command": "node", "args": [1]},
+            "bad-env": {"command": "node", "env_vars": ["A,B"]},
+            "relative": {"command": "node", "cwd": "relative"}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let overrides = override_map(&servers, &sample_plan());
+        assert_eq!(overrides.len(), 2);
+        let args = arg_list(&overrides, "mcp_servers.dash-name.args");
+        assert_eq!(&args[args.len() - 3..], &["a\\b", "x\ny", "\"z\""]);
+    }
+
+    #[test]
     fn codex_proxy_overrides_rewrite_lazy_stdio_and_leave_the_rest() {
         let overrides = override_map(&resolved_mcp_servers(), &sample_plan());
         let keys: Vec<_> = overrides.keys().cloned().collect();
@@ -3815,6 +3870,8 @@ mod mcp_injection_tests {
                 "10",
                 "--identity-env",
                 "DISPLAY,NOTES_TOKEN,PATH",
+                "--cwd",
+                "/work/notes",
                 "--run-dir",
                 "/data/run/mcp/run-1",
                 "--",
