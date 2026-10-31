@@ -8,7 +8,7 @@ const CATALOG = JSON.parse(readFileSync(new URL("./mcp-tools.json", import.meta.
 
 export default function (pi) {
   const config = JSON.parse(process.env.ZERON_PI_MCP);
-  let child, lines, connecting, nextId = 0, active = false, ready = false, dead = false;
+  let child, lines, connecting, nextId = 0, active = false, ready = false;
   const pending = new Map();
   const chatId = config.env?.ZERON_CHAT_ID ?? process.env.ZERON_CHAT_ID;
   const inChat = typeof chatId === "string" && chatId.trim() !== "";
@@ -23,7 +23,6 @@ export default function (pi) {
     lines = undefined;
     connecting = undefined;
     ready = false;
-    dead = false;
     fail(new Error("Zeron MCP connection closed"));
     reader?.close();
     owned?.kill();
@@ -59,7 +58,7 @@ export default function (pi) {
     });
   }
   function connect() {
-    if (!active || dead) return Promise.reject(new Error("Zeron MCP is not connected"));
+    if (!active) return Promise.reject(new Error("Zeron MCP is not connected"));
     if (ready && child?.stdin.writable) return Promise.resolve();
     if (connecting) return connecting;
     const owned = spawn(config.command, config.args, {
@@ -69,11 +68,11 @@ export default function (pi) {
     const failed = error => {
       if (child !== owned) return;
       ready = false;
-      dead = true;
       child = undefined;
       const reader = lines;
       lines = undefined;
       reader?.close();
+      owned.kill();
       fail(error);
     };
     owned.on("error", failed);
@@ -96,7 +95,6 @@ export default function (pi) {
         ready = true;
       } catch (error) {
         if (child === owned) {
-          dead = true;
           ready = false;
           child = undefined;
           const reader = lines;
@@ -108,7 +106,9 @@ export default function (pi) {
       }
     })();
     connecting = attempt;
-    attempt.finally(() => {
+    attempt.then(() => {
+      if (connecting === attempt) connecting = undefined;
+    }, () => {
       if (connecting === attempt) connecting = undefined;
     });
     return attempt;

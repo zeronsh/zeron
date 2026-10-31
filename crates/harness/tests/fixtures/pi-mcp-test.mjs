@@ -10,6 +10,10 @@ if (process.argv[2] === 'server') {
   createInterface({input: process.stdin}).on('line', line => {
     const msg = JSON.parse(line);
     let result;
+    if (msg.method === 'initialize' && process.env.ZERON_PI_FAIL_INIT === '1' && readFileSync(process.env.ZERON_PI_SPAWN_MARK, 'utf8').trim().split('\n').length === 1) {
+      process.stdout.write(JSON.stringify({jsonrpc:'2.0', id:msg.id, error:{code:-32000,message:'initialization failed'}})+'\n');
+      return;
+    }
     if (msg.method === 'initialize') result = {protocolVersion: '2024-11-05', capabilities: {tools:{}}, serverInfo: {name:'test',version:'1'}};
     else if (msg.method === 'tools/list') result = {tools:['whoami','create_chat','create_chats','read_chat','send_message','wait_for_turn'].map(name => ({name,description:'Zeron delegation',inputSchema:{type:'object',properties:{mode:{type:'string'}}}}))};
     else if (msg.method === 'tools/call') {
@@ -43,12 +47,12 @@ if (process.argv[2] === 'server') {
       const visual = catalog.tools.find(tool => tool.name === 'show_visual');
       assert.equal(tools.zeron_show_visual.description, visual.description);
       assert.equal(tools.zeron_show_image.name, 'zeron_show_image');
+      const concurrent = await Promise.all(['whoami', 'list_devices', 'list_projects'].map(name => tools[`zeron_${name}`].execute('concurrent', {})));
+      assert.equal(concurrent.length, 3);
+      expected += 1;
+      assert.equal(spawns(), expected, 'concurrent first calls share one server');
       for (const name of ['create_chat','create_chats','read_chat','send_message','wait_for_turn']) {
         assert.equal((await tools[`zeron_${name}`].execute('delegation',{})).content[0].text, chat);
-        if (name === 'create_chat') {
-          expected += 1;
-          assert.equal(spawns(), expected, 'the first call starts the server');
-        }
       }
       assert.equal(spawns(), expected, 'later calls reuse the server');
       const tool = tools.zeron_whoami;
@@ -61,7 +65,9 @@ if (process.argv[2] === 'server') {
       controller.abort();
       await assert.rejects(waiting,/cancelled/);
       await assert.rejects(tool.execute('call',{mode:'crash'}),/exited/);
-      assert.equal(spawns(), expected, 'a crashed server stays down until the next session');
+      assert.equal((await tool.execute('retry',{})).content[0].text, chat);
+      expected += 1;
+      assert.equal(spawns(), expected, 'a later call reconnects after a crash');
       assert.equal(handlers.message_end, undefined, "native RPC reports provider failures directly");
       // Restarting the session must not let an old child's exit fail new RPCs.
       await handlers.session_start();
@@ -86,6 +92,15 @@ if (process.argv[2] === 'server') {
     expected += 1;
     assert.equal(spawns(), expected, 'the first call starts the server outside a chat too');
   } finally { handlers.session_shutdown(); }
+  rmSync(mark, {force: true});
+  process.env.ZERON_PI_MCP = JSON.stringify({name:'zeron',command:process.execPath,args:[process.argv[1],'server'],env:{ZERON_CHAT_ID:'retry',ZERON_PI_FAIL_INIT:'1'}});
+  const retryHandlers = {}, retryTools = {};
+  extension({on:(event,fn)=>retryHandlers[event]=fn,registerTool:tool=>retryTools[tool.name]=tool});
+  await retryHandlers.session_start();
+  await assert.rejects(retryTools.zeron_whoami.execute('first',{}), /initialization failed/);
+  assert.equal((await retryTools.zeron_whoami.execute('second',{})).content[0].text, 'retry');
+  assert.equal(spawns(), 2, 'a later call reconnects after initialization fails');
+  retryHandlers.session_shutdown();
   process.env.ZERON_CHAT_ID = 'inherited';
   process.env.ZERON_PI_MCP = JSON.stringify({name:'zeron',command:process.execPath,args:[process.argv[1],'server'],env:{}});
   const inherited = {}, inheritedTools = {};
