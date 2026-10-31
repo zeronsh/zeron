@@ -10,6 +10,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// A failed discovery sends later sessions down the uncached passthrough path; a failure
+/// caused by something transient (offline, a slow first install) must not do so forever.
+pub const DISCOVERY_RETRY_MS: u64 = 6 * 60 * 60 * 1000;
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,6 +70,23 @@ pub fn binary_id(path: &Path) -> String {
         meta.map(|m| m.len()).unwrap_or(0)
     )
 }
+/// Interpreter servers (`node server.js`, `python app.py`) change when their script does,
+/// not when the interpreter does: fold in the identity of every argument that is a file.
+fn arg_files(c: &Config) -> Value {
+    let base = c.cwd.clone().or_else(|| std::env::current_dir().ok());
+    json!(
+        c.args
+            .iter()
+            .take(32)
+            .filter_map(|arg| {
+                let path = base
+                    .as_ref()
+                    .map_or_else(|| PathBuf::from(arg), |b| b.join(arg));
+                path.is_file().then(|| (arg, binary_id(&path)))
+            })
+            .collect::<Vec<_>>()
+    )
+}
 pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Value) -> String {
     let env: BTreeMap<_, _> = c
         .identity_env
@@ -86,6 +106,7 @@ pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Valu
         c.cwd.as_deref(),
         bin,
         npx,
+        arg_files(c),
         initialize,
     )
 }
@@ -98,11 +119,12 @@ fn key_fields(
     cwd: Option<&Path>,
     bin: &Path,
     npx: Value,
+    arg_files: Value,
     init: &Value,
 ) -> String {
     hash(
         &json!({"v":1,"command":command,"args":args,"identity_env":env,"plugin_root":plugin_root,"cwd_if_configured":cwd,
-        "npx":npx,"bin_id":binary_id(bin),"client":{"name":init["clientInfo"]["name"],
+        "npx":npx,"bin_id":binary_id(bin),"arg_files":arg_files,"client":{"name":init["clientInfo"]["name"],
         "version_major":init["clientInfo"]["version"].as_str().unwrap_or("").split('.').next().unwrap_or(""),
         "protocolVersion":init["protocolVersion"],"capabilities_hash":hash(&init["capabilities"])}}),
     )
@@ -152,6 +174,10 @@ impl Entry {
                     .ttl_ms
                     .unwrap_or(u64::MAX)
                     .min(30 * 24 * 60 * 60 * 1000)
+    }
+    /// A recent failed discovery: serve this key transparently instead of retrying yet.
+    pub fn failed_recently(&self) -> bool {
+        self.discovery_failed && now_ms().saturating_sub(self.cached_at) < DISCOVERY_RETRY_MS
     }
     pub fn listing(&self, method: &str) -> Option<Value> {
         match method {
@@ -306,7 +332,7 @@ mod tests {
         let init = json!({"clientInfo":{"name":"client","version":"2.1"},"protocolVersion":"2025-03-26","capabilities":{"roots":{},"sampling":{}}});
         let path = Path::new("/fake/bin");
         let compute = |cmd, args: &[String], env: Value, npx: Value, init: &Value| {
-            key_fields(cmd, args, &env, None, None, path, npx, init)
+            key_fields(cmd, args, &env, None, None, path, npx, json!([]), init)
         };
         let original = compute(path, &[], json!({"A":"secret","B":"2"}), Value::Null, &init);
         assert_eq!(
@@ -426,6 +452,49 @@ mod tests {
         new.ttl_ms = Some(0);
         save(dir.path(), &new).unwrap();
         assert!(read(dir.path(), "key").is_none());
+    }
+    #[test]
+    fn script_arguments_are_part_of_the_identity() {
+        let root = dir();
+        let script = root.path().join("server.js");
+        fs::write(&script, "one").unwrap();
+        let config = Config::parse(
+            [
+                "--server".into(),
+                "demo".into(),
+                "--".into(),
+                "/fake".into(),
+                script.to_string_lossy().into_owned(),
+                "--flag".into(),
+            ],
+            root.path().into(),
+        )
+        .unwrap();
+        let init = json!({"clientInfo":{"name":"c","version":"1"},"protocolVersion":"v","capabilities":{}});
+        let compute = || {
+            key(
+                &config,
+                &init,
+                Path::new("/fake"),
+                Path::new("/fake"),
+                Value::Null,
+            )
+        };
+        let before = compute();
+        assert_eq!(before, compute());
+        fs::write(&script, "longer script").unwrap();
+        assert_ne!(before, compute());
+    }
+    #[test]
+    fn failed_discovery_is_retried_after_a_while() {
+        let mut entry = Entry::new("key".into(), "demo".into(), Value::Null);
+        entry.discovery_failed = true;
+        assert!(entry.failed_recently());
+        entry.cached_at = now_ms() - DISCOVERY_RETRY_MS - 1;
+        assert!(!entry.failed_recently());
+        entry.discovery_failed = false;
+        entry.cached_at = now_ms();
+        assert!(!entry.failed_recently());
     }
     #[test]
     fn validity_ttl_protocol_and_discovery_marker() {

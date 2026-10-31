@@ -393,7 +393,7 @@ impl Proxy {
             };
             self.key = cache::key(&self.config, &message["params"], &command, &bin, npx);
             let disk = cache::read(&self.config.data_dir, &self.key);
-            if disk.as_ref().is_some_and(|e| e.discovery_failed) {
+            if disk.as_ref().is_some_and(|e| e.failed_recently()) {
                 self.passthrough = true;
                 self.event("cache", json!({"status":"discovery-failed-passthrough"}));
             } else if let Some(entry) = disk.filter(|e| e.valid(&self.key)) {

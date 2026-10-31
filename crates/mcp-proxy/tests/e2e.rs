@@ -945,3 +945,25 @@ async fn idle_cycles_leave_no_zombies_or_adopted_children() {
     );
     peer.close().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_old_failed_discovery_marker_is_retried() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
+    assert!(peer.init().await.get("error").is_some());
+    peer.close().await;
+    let file = &cache_files(d, "json")[0];
+    let mut entry: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(entry["discovery_failed"], true);
+    entry["cached_at"] = json!(1);
+    fs::write(file, entry.to_string()).unwrap();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    assert!(peer.init().await.get("result").is_some());
+    eventually(|| {
+        serde_json::from_slice::<Value>(&fs::read(file).unwrap())
+            .is_ok_and(|e| e["discovery_failed"] == false && e["tools"][0]["name"] == "echo")
+    })
+    .await;
+    peer.close().await;
+}
