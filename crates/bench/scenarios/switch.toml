@@ -1,0 +1,17 @@
+# S-switch: round-robin chat switching (bench.md 3.4).
+[defaults]
+switches = 60
+dwell_ms = 2000
+streaming = 0          # chats streaming at opus cadence while switching (while-streaming variant: 2)
+settle_s = 15
+
+[tier.quick]
+switches = 24
+dwell_ms = 1000
+settle_s = 10
+
+[tier.standard]
+switches = 60
+
+[tier.full]
+switches = 60

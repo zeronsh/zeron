@@ -60,13 +60,13 @@ enum Command {
         #[arg(long)]
         repo: Option<PathBuf>,
     },
-    /// Compare two revisions. This unit runs an injected `--scenario` (`--inject`); live scenarios are later.
+    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch; `S-stream:K=2,watch=one` sets options).
     Ab {
         /// Baseline revision.
         a: String,
         /// Candidate revision.
         b: String,
-        /// Scenario name. `S-build` is refused. Other names need `--inject` until their runners land.
+        /// `stream`, `boot`, `idle` or `switch` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
         #[arg(long)]
         scenario: String,
         /// `quick` (2 pairs), `standard` (5), or `full` (7).
@@ -140,6 +140,44 @@ fn main() -> ExitCode {
                     ExitCode::from(1)
                 }
             },
+            // The scenarios start their own runtime per trial.
+            Command::Ab {
+                a,
+                b,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+            } => exit_of(ab_command(
+                a, b, scenario, tier, zb_root, repo, seed, inject, no_build, preflight, false,
+            )),
+            Command::Control {
+                rev,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+            } => exit_of(ab_command(
+                rev.clone(),
+                rev,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+                true,
+            )),
             other => match run(other) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
@@ -175,47 +213,24 @@ async fn async_main(command: Command) -> Result<()> {
         Command::ExecCounted { .. } | Command::Build { .. } => {
             unreachable!("handled before the runtime")
         }
-        Command::Ab {
-            a,
-            b,
-            scenario,
-            tier,
-            zb_root,
-            repo,
-            seed,
-            inject,
-            no_build,
-            preflight,
-        } => ab_command(
-            a, b, scenario, tier, zb_root, repo, seed, inject, no_build, preflight, false,
-        ),
-        Command::Control {
-            rev,
-            scenario,
-            tier,
-            zb_root,
-            repo,
-            seed,
-            inject,
-            no_build,
-            preflight,
-        } => ab_command(
-            rev.clone(),
-            rev,
-            scenario,
-            tier,
-            zb_root,
-            repo,
-            seed,
-            inject,
-            no_build,
-            preflight,
-            true,
-        ),
+        Command::Ab { .. } | Command::Control { .. } => {
+            unreachable!("handled before the runtime")
+        }
         Command::Report { run } => {
             let report = zeron_bench::ab::regenerate_report(&run)?;
             print!("{report}");
             Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn exit_of(result: Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("zeron-bench: {err:#}");
+            ExitCode::from(1)
         }
     }
 }

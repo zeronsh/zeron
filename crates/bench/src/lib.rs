@@ -27,6 +27,8 @@ pub mod ab;
 pub mod probe;
 #[cfg(unix)]
 pub mod replay;
+#[cfg(unix)]
+pub mod scenario;
 pub mod rpc;
 pub mod transcript;
 #[cfg(unix)]

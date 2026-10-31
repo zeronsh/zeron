@@ -1,0 +1,23 @@
+# S-stream: K concurrent long chats streaming zb-replay scripts (bench.md 3.4).
+# Override on the command line: --scenario "S-stream:K=1,watch=one,base=5m".
+[defaults]
+K = 4
+base = "1m"            # 100k | 1m | 5m: transcript size of each target chat before the turn
+watch = "all"          # all: per-chat UI streams on every target; one: only on the first
+cadence = "opus"       # opus | haiku
+turn_ms = 90000        # scripted length of each chat's turn at cadence speed
+marker_every = 20      # one latency marker per 20 text deltas
+settle_s = 20          # after the UI streams are open and before the window
+tail_s = 5             # quiet tail kept inside the window
+canary_ms = 100        # LocalDevice round-trip canary period
+
+[tier.quick]
+turn_ms = 45000
+settle_s = 15
+
+[tier.standard]
+turn_ms = 90000
+
+[tier.full]
+turn_ms = 120000
+settle_s = 20

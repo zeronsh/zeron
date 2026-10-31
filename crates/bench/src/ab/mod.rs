@@ -878,13 +878,6 @@ pub fn run_ab(opts: &AbOptions) -> Result<ExecuteResult> {
     if is_cancelled_scenario(&opts.scenario) {
         bail!("S-build is cancelled; the bench does not run it");
     }
-    let Some(inject) = &opts.inject else {
-        bail!(
-            "scenario {} has no runner in this unit; pass --inject for the fake scenario. Live scenarios arrive with U7",
-            opts.scenario
-        );
-    };
-    let mut scenario = load_inject(&opts.scenario, inject)?;
     let fingerprint = opts.fingerprint.clone().unwrap_or_else(host_fingerprint);
     let now_unix = opts.now_unix.unwrap_or_else(stats::now_unix);
     let preflight = if opts.preflight {
@@ -908,6 +901,10 @@ pub fn run_ab(opts: &AbOptions) -> Result<ExecuteResult> {
     } else {
         format!("ab {}", opts.scenario)
     };
+    let mut scenario: Box<dyn Scenario> = match &opts.inject {
+        Some(inject) => Box::new(load_inject(&opts.scenario, inject)?),
+        None => live_scenario(opts, &run_id, &side_a, &side_b)?,
+    };
     let req = ProtocolRequest {
         zb_root: opts.zb_root.clone(),
         run_id,
@@ -926,7 +923,7 @@ pub fn run_ab(opts: &AbOptions) -> Result<ExecuteResult> {
         control: opts.control,
         preflight,
     };
-    let result = execute(&req, &mut scenario)?;
+    let result = execute(&req, scenario.as_mut())?;
     if let Some(before) = governor_before {
         let after = governor_signature();
         if before != after {
@@ -936,6 +933,34 @@ pub fn run_ab(opts: &AbOptions) -> Result<ExecuteResult> {
         }
     }
     Ok(result)
+}
+
+/// A real scenario (S-stream, S-boot, S-idle, S-switch) over the two built engines.
+fn live_scenario(
+    opts: &AbOptions,
+    run_id: &str,
+    side_a: &SideBuild,
+    side_b: &SideBuild,
+) -> Result<Box<dyn Scenario>> {
+    if opts.no_build {
+        bail!("live scenarios need built engines; drop --no-build or pass --inject");
+    }
+    let env = crate::scenario::RunEnv::new(
+        opts.zb_root.clone(),
+        crate::env::sanitize(run_id),
+        opts.tier,
+        opts.seed,
+        side_a.path.clone(),
+        side_b.path.clone(),
+    )?;
+    match crate::scenario::build(&opts.scenario, env)? {
+        Some(scenario) => Ok(scenario),
+        None => bail!(
+            "unknown scenario {}; live scenarios: {}",
+            opts.scenario,
+            crate::scenario::SCENARIOS.join(", ")
+        ),
+    }
 }
 
 fn resolve_sides(opts: &AbOptions) -> Result<(SideBuild, SideBuild)> {

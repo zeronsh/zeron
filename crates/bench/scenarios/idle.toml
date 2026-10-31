@@ -1,0 +1,20 @@
+# S-idle: 20 chats, minutes of idle (bench.md 3.4). No RPC in the window.
+[defaults]
+variant = "ui"         # headless | ui | parked
+settle_s = 60
+window_s = 300         # a multiple of 60 s so it spans malloc_trim ticks
+parked_chats = 5       # parked: chats that finished a replay turn and stay alive
+ballast_mib = 300      # parked: per-session zb-replay ballast
+children = "2:250"     # parked: n:MiB ballast children per session (the MCP fleet stand-in)
+
+[tier.quick]
+settle_s = 30
+window_s = 120
+
+[tier.standard]
+settle_s = 60
+window_s = 300
+
+[tier.full]
+settle_s = 60
+window_s = 300

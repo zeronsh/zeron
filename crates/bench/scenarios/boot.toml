@@ -1,0 +1,19 @@
+# S-boot: start the engine on a large profile (bench.md 3.4).
+[defaults]
+chats = 200            # P200 shape: log-normal sizes (p50 176 KB, p90 4.4 MB), 30 spaces
+cap_bytes = 8000000    # tail cap for the log-normal draw, keeps the fixture build to minutes
+outliers = 2           # chats forced to 30 MB
+max_wait_s = 120       # give up waiting for t_settle after this
+hold_s = 30            # keep sampling after settle to catch late sweeps
+ui = false             # true: open the UI set and one chat right after the engine is ready
+
+[tier.quick]
+hold_s = 10
+max_wait_s = 90
+
+[tier.standard]
+hold_s = 30
+
+[tier.full]
+hold_s = 30
+max_wait_s = 180
