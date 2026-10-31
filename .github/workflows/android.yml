@@ -1,6 +1,6 @@
 name: Android
 
-# Builds the Android APK whenever the app or its Rust core changes. Pull
+# Builds the Android APK and Play App Bundle whenever the app or its Rust core changes. Pull
 # requests get it as a workflow artifact; main also publishes it to the
 # `comet-native-releases` R2 bucket, served at
 # zeron.sh/releases/zeron-android-arm64.apk (the website's download, served
@@ -38,6 +38,21 @@ on:
       - 'rust-toolchain.toml'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+    inputs:
+      upload_play:
+        description: Upload this build to Google Play (main only)
+        type: boolean
+        default: false
+      play_track:
+        description: Google Play testing track
+        type: choice
+        options: [beta, internal]
+        default: beta
+      play_status:
+        description: Draft for review in Console, or roll out to testers
+        type: choice
+        options: [draft, completed]
+        default: draft
 
 permissions:
   contents: read
@@ -53,7 +68,7 @@ env:
   # Published builds (main): thin LTO, stripped — the profile iOS archives use,
   # about 10% smaller. Pull requests take the quicker `mobile` profile (AGP
   # still strips its debug info).
-  ZERON_ANDROID_PROFILE: ${{ github.ref == 'refs/heads/main' && 'mobile-dist' || 'mobile' }}
+  ZERON_ANDROID_PROFILE: ${{ github.event_name != 'pull_request' && 'mobile-dist' || 'mobile' }}
 
 jobs:
   apk:
@@ -97,6 +112,7 @@ jobs:
 
       - id: signing
         name: release key
+        if: github.event_name != 'pull_request'
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -119,26 +135,87 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: assemble release APK
+      - name: assemble release APK and Play App Bundle
         working-directory: apps/android
-        run: ./gradlew :app:assembleRelease -PzeronVersionCode="$BUILD_NUMBER" --console=plain --no-configuration-cache
+        run: ./gradlew :app:assembleRelease :app:bundleRelease -PzeronVersionCode="$BUILD_NUMBER" --console=plain --no-configuration-cache
 
       - name: package
         run: |
           mkdir -p out/android
           apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
+          aab="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.aab"
           cp apps/android/app/build/outputs/apk/release/app-release.apk "$apk"
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | grep -m1 "certificate SHA-256" || true
+          cp apps/android/app/build/outputs/bundle/release/app-release.aab "$aab"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk"
+          jarsigner -verify "$aab" | tee "$RUNNER_TEMP/aab-verification.txt"
+          grep -q 'jar verified' "$RUNNER_TEMP/aab-verification.txt"
           (cd out/android && sha256sum "$(basename "$apk")" > "$(basename "$apk").sha256")
+          (cd out/android && sha256sum "$(basename "$aab")" > "$(basename "$aab").sha256")
           ls -la out/android
-          rm -f "$RUNNER_TEMP/zeron-release.jks"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: android-apk
-          path: out/android/*
+          path: |
+            out/android/*.apk
+            out/android/*.apk.sha256
           if-no-files-found: error
           retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-aab
+          path: |
+            out/android/*.aab
+            out/android/*.aab.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/zeron-release.jks"
+
+  play:
+    name: Upload to Google Play testing
+    needs: apk
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'push' && vars.PLAY_UPLOAD_ENABLED == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.upload_play))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: android-google-play
+      cancel-in-progress: false
+    env:
+      PLAY_TRACK: ${{ inputs.play_track || vars.PLAY_TRACK || 'beta' }}
+      PLAY_STATUS: ${{ inputs.play_status || vars.PLAY_RELEASE_STATUS || 'draft' }}
+    steps:
+      - name: check Play configuration
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          SIGNED: ${{ needs.apk.outputs.signed }}
+        run: |
+          test "$SIGNED" = true || { echo 'A release signing key is required for Play.' >&2; exit 1; }
+          test -n "$PLAY_SERVICE_ACCOUNT_JSON" || { echo 'Set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON in repository secrets.' >&2; exit 1; }
+          case "$PLAY_TRACK" in beta|internal) ;; *) echo 'Only testing tracks are supported.' >&2; exit 1;; esac
+          case "$PLAY_STATUS" in draft|completed) ;; *) echo 'Use draft or completed for PLAY_RELEASE_STATUS.' >&2; exit 1;; esac
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-aab
+          path: out/android
+      - name: verify bundle checksum
+        working-directory: out/android
+        run: sha256sum -c ./*.aab.sha256
+      - name: upload signed bundle
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: sh.zeron.android
+          releaseFiles: out/android/*.aab
+          releaseName: ${{ needs.apk.outputs.version }} (${{ needs.apk.outputs.build }})
+          tracks: ${{ env.PLAY_TRACK }}
+          status: ${{ env.PLAY_STATUS }}
 
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.apk.outputs.signed == 'true'

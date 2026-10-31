@@ -31,7 +31,8 @@ iterating on Kotlin; `ZERON_ANDROID_ABIS=arm64-v8a` builds one ABI.
 
 ## Releases
 
-`.github/workflows/android.yml` builds a release APK (arm64, the core at the
+`.github/workflows/android.yml` builds a release APK and Google Play App Bundle
+(`.aab`, arm64, the core at the
 `mobile-dist` profile) whenever the app or the Rust core changes: pull requests
 get it as a workflow artifact, and pushes to `main` publish it to
 `zeron.sh/releases/zeron-android-arm64.apk` — the website's Android download —
@@ -43,6 +44,42 @@ run. Publishing needs the upload key in repository secrets
 `ANDROID_KEY_PASSWORD`) so each build installs over the last; without them the
 APK is debug-signed and not published. Locally, `ZERON_ANDROID_KEYSTORE` (and
 the three variables beside it) signs `assembleRelease` the same way.
+
+### Google Play testing
+
+Every Android workflow run also saves an `android-aab` artifact (bundle and
+SHA-256 checksum, retained for 90 days). Builds from `main` or a manual run use
+the release key; pull requests use a debug key and cannot upload to Play.
+The APK and bundle share the same version code, `1000 + GITHUB_RUN_NUMBER`.
+Start a **new run**, rather than rerunning an uploaded build, to get a new code.
+
+For the first release, download `android-aab` from Actions and upload the `.aab`
+in Play Console → Test and release → Testing → Open testing. Complete the app's
+required declarations, signing setup, and review before opening the test.
+
+To enable subsequent automatic uploads:
+
+1. Enable the Google Play Android Developer API in a Google Cloud project.
+2. Create a service account and grant it access to **Zeron only** in Play Console
+   → Users and permissions, with app read access and permission to release to
+   testing tracks. It does not need production, financial, or account admin access.
+3. Store its JSON key in the repository secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`.
+4. Set repository variable `PLAY_UPLOAD_ENABLED=true`. Pushes to `main` that
+   trigger the Android workflow will then upload the signed bundle to open testing
+   (`beta`). `PLAY_TRACK=internal` selects internal testing instead.
+5. The default `PLAY_RELEASE_STATUS=draft` leaves the uploaded release ready in
+   Console. Once the app's initial setup/review is complete, set it to `completed`
+   to roll future uploads out to testers, subject to Google's review.
+
+For a manual build/upload, run **Android** on `main`, check `upload_play`, and
+choose `beta` (open testing) or `internal`, plus `draft` or `completed`.
+Manual runs leave the website download unchanged. Only testing tracks are
+accepted; this workflow does not release to production.
+
+The Play upload job is serialized. Avoid editing a release in Console during
+an upload. If Play rejects a release, the signed artifact remains downloadable
+and the workflow reports the error. Missing credentials never fall back to a
+debug-signed Play upload.
 
 ## Layout
 
