@@ -4,8 +4,8 @@
 async fn main() -> std::io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     zeron_harness::claude::shim_fixture(
-        &args[0].clone().into(),
-        &args[1].clone().into(),
+        std::path::Path::new(&args[0]),
+        std::path::Path::new(&args[1]),
         args[2].to_str().unwrap(),
     )
     .await

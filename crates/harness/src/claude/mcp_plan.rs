@@ -70,13 +70,14 @@ fn servers(snapshot: &ClaudeMcpSnapshot, plan: &McpPlan, path: &std::ffi::OsStr)
                 scope: row.scope.clone().unwrap_or_default(),
             };
             let class = mcp_policy::classify(&fact);
-            let mode = plan.modes.get(&row.name).copied().unwrap_or_else(|| {
-                if class == McpClass::HeavyRuntime {
-                    plan.default_mode
-                } else {
-                    McpMode::Eager
-                }
-            });
+            let mode = if class == McpClass::HeavyRuntime {
+                plan.modes
+                    .get(&row.name)
+                    .copied()
+                    .unwrap_or(plan.default_mode)
+            } else {
+                McpMode::Eager
+            };
             let mode = match mode {
                 McpMode::Lazy => "lazy",
                 McpMode::LazyKeepAlive => "lazy-keep-alive",
@@ -90,7 +91,7 @@ fn servers(snapshot: &ClaudeMcpSnapshot, plan: &McpPlan, path: &std::ffi::OsStr)
                 args,
                 mode: mode.into(),
                 channel,
-                owner_legacy: channel && !plan.drop_channels,
+                owner_legacy: channel,
             })
         })
         .collect()

@@ -261,6 +261,25 @@ impl Proxy {
         self.event("stop", json!({"reason":reason}));
     }
     async fn fail(&mut self, reason: String) -> io::Result<()> {
+        if self.discovery && self.config.shim_identity.is_some() {
+            let _ = crate::shim::record_discovery(&self.config, crate::shim::Discovery::Failed);
+            if let Some(id) = self.initialize_id.take() {
+                // No response has reached the client yet. Restart eagerly and
+                // replay its original initialize, then forward normal traffic.
+                self.queue.push_front(rpc::request(
+                    id,
+                    "initialize",
+                    self.initialize.clone().unwrap_or(json!({})),
+                ));
+                self.stop("discovery-fallback").await;
+                self.discovery = false;
+                self.passthrough = true;
+                self.failed = None;
+                if self.spawn("legacy-fallback").is_ok() {
+                    return self.flush();
+                }
+            }
+        }
         let startup = self.state == State::Starting
             || self.discovery
             || self.started.elapsed() < Duration::from_secs(10);
@@ -544,6 +563,7 @@ impl Proxy {
             return self.capture(capture.entry.initialize);
         }
         let entry = capture.entry;
+        let _ = crate::shim::record_discovery(&self.config, crate::shim::Discovery::NonChannel);
         self.save(&entry);
         self.event(
             "cache",
@@ -642,9 +662,23 @@ impl Proxy {
             if !result.is_object() {
                 return self.fail("initialize result is not an object".into()).await;
             }
-            if cache::declares_channel(&result) {
-                self.config.mode = Mode::LazyKeepAlive;
+            let channel = cache::declares_channel(&result);
+            if channel {
                 self.stop_after_capture = false;
+                let _ =
+                    crate::shim::record_discovery(&self.config, crate::shim::Discovery::Channel);
+                let entry =
+                    Entry::new(self.key.clone(), self.config.server.clone(), result.clone());
+                self.save(&entry);
+                if let Some(id) = self.initialize_id.take() {
+                    // Keep the very same server alive. Let Claude send initialized
+                    // itself and forward every channel notification unchanged.
+                    self.discovery = false;
+                    self.state = State::Warm;
+                    self.passthrough = true;
+                    self.client_out(rpc::ok(id, result))?;
+                    return self.flush();
+                }
             }
             self.child_out(rpc::notification("notifications/initialized", json!({})))?;
             if let Some(params) = self.logging.clone() {
@@ -672,6 +706,11 @@ impl Proxy {
             }
             self.state = State::Warm;
             self.failed = None;
+            if channel {
+                self.discovery = false;
+                self.passthrough = true;
+                return self.flush();
+            }
             self.capture(result)?;
             // Non-discovery starts needn't delay calls for metadata refresh.
             if !self.discovery {

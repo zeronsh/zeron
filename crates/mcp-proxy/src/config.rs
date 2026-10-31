@@ -15,6 +15,8 @@ pub struct Config {
     pub identity_env: Vec<String>,
     /// Shim-only PATH identity, with its per-run interception directory removed.
     pub identity_path: Option<String>,
+    /// Launch identity shared across client-specific catalog cache entries.
+    pub shim_identity: Option<String>,
     pub plugin_root: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub run_dir: Option<PathBuf>,
@@ -47,6 +49,7 @@ impl Config {
             idle: Duration::from_secs(600),
             identity_env: Vec::new(),
             identity_path: None,
+            shim_identity: None,
             plugin_root: None,
             cwd: None,
             run_dir: None,

@@ -87,7 +87,8 @@ launcher.write_text('const {spawn}=require("child_process");\n'
 
 
 def server(label):
-    return {'type': 'stdio', 'command': 'node', 'args': [str(launcher), label], 'env': {
+    return {'type': 'stdio', 'command': 'npx' if label == 'entry' else 'node',
+        'args': ['--no-install', '-c', f'node {shlex.quote(str(launcher))} {label}'] if label == 'entry' else [str(launcher), label], 'env': {
         'FAKE_SPAWN_MARK': str(SPAWNS), 'FAKE_CHILD_MARK': str(CHILDREN),
         'FAKE_DUMP_ENV': str(ROOT / f'{label}-env.json'), 'FAKE_REQUEST_LOG': str(ROOT / f'{label}-requests'),
         'FAKE_BALLAST_MIB': '150', 'FAKE_GRANDCHILD': '1', 'FAKE_WATCHDOG': '1',
@@ -197,6 +198,8 @@ class Session:
             time.sleep(.1)
         assert len(self.rows()) == 2 and all(r['status'] == 'connected' for r in self.rows()), self.status
         self.known |= tree(self.p.pid)
+        self.cli_pid = next(p for p in tree(self.p.pid) if Path(f'/proc/{p}/exe').resolve() == CLI)
+        self.cli_env = dict(part.split(b'=', 1) for part in Path(f'/proc/{self.cli_pid}/environ').read_bytes().split(b'\0') if b'=' in part)
 
     def rows(self):
         return self.status['response']['response']['mcpServers']
@@ -266,7 +269,7 @@ class Session:
 
     def close(self):
         self.known |= tree(self.p.pid)
-        self.known |= {int(p) for p in lines(SPAWNS) + lines(CHILDREN)}
+        self.known |= {int(p) for p in lines(SPAWNS) + lines(CHILDREN) + lines(ROOT / 'channel-spawns') + lines(ROOT / 'channel-children')}
         self.p.terminate()
         try:
             self.p.wait(timeout=10)
@@ -289,6 +292,12 @@ try:
     baseline.close(); sessions.remove(baseline)
     spec = {**BASE, 'status': rows}; write(SPEC, spec)
     subprocess.run([str(HARNESS), str(CLI), str(SPEC), 'capture'], env=ENV, cwd=PROJECT, check=True)
+    # Both escape hatches leave PATH entirely unmodified.
+    ENV['ZERON_MCP_LAZY'] = '0'
+    disabled = Session('disabled', True)
+    assert b'ZERON_MCP_SHIM_DIR' not in disabled.cli_env
+    disabled.close(); sessions.remove(disabled)
+    ENV.pop('ZERON_MCP_LAZY')
     warm = Session('warm', True)
     wait_until(lambda: not any(alive(int(p)) for p in lines(SPAWNS) + lines(CHILDREN)), 'discovery children must stop')
     warm.close(); sessions.remove(warm)
@@ -316,11 +325,40 @@ try:
     denied.turn(False)
     assert len(lines(SPAWNS)) == count, 'denied call must not start a server'
     denied.close(); sessions.remove(denied)
+    # Channel capability comes from initialize, not invented mcp_status fields.
+    settings(True)
+    channel_config = json.loads((PLUGIN / '.mcp.json').read_text())
+    channel_config['playwright']['env'].update({'FAKE_CHANNEL': '1', 'FAKE_BALLAST_MIB': '0',
+        'FAKE_SPAWN_MARK': str(ROOT / 'channel-spawns'), 'FAKE_CHILD_MARK': str(ROOT / 'channel-children')})
+    write(PLUGIN / '.mcp.json', channel_config)
+    channel_base = Session('channel-baseline', False)
+    channel_rows = channel_base.status
+    channel_base.close(); sessions.remove(channel_base)
+    write(SPEC, {**BASE, 'status': channel_rows})
+    subprocess.run([str(HARNESS), str(CLI), str(SPEC), 'capture'], env=ENV, cwd=PROJECT, check=True)
+    channel_results = []
+    for name, expect_proxy in [('channel-first', True), ('channel-later', False)]:
+        before = len(lines(ROOT / 'channel-spawns'))
+        session = Session(name, True)
+        time.sleep(.6)  # Many 20 ms proxy checks: a channel must never idle-stop.
+        channel_pids = [int(p) for p in lines(ROOT / 'channel-spawns')][before:]
+        assert len(channel_pids) == 1 and alive(channel_pids[0])
+        pid, ancestors = channel_pids[0], []
+        while pid != session.cli_pid:
+            pid = int(Path(f'/proc/{pid}/stat').read_text().split(') ')[1].split()[1])
+            ancestors.append(pid)
+        proxied = any(Path(f'/proc/{p}/exe').resolve() == PROXY for p in ancestors)
+        assert proxied == expect_proxy, (name, ancestors, proxied)
+        response = session.control('mcp_call', tool=TOOL, arguments={}, result_not_for_model=True)
+        assert response['response']['subtype'] == 'success' and 'echo' in json.dumps(response), response
+        assert len(lines(ROOT / 'channel-spawns')) == before + 1 and alive(channel_pids[0])
+        channel_results.append({'case': name, 'proxied': proxied, 'one_live_server': True, 'call_forwarded': True})
+        session.close(); sessions.remove(session)
     result = {'baseline_mcp_pss': baseline_pss, 'lazy_mcp_pss': lazy_pss,
         'saved_kib': baseline_pss['median_kib'] - lazy_pss['median_kib'], 'server_names_and_tools': names,
         'checks': ['catalog names', 'zero servers before call', 'one server on first call', 'plugin/entry env',
                    'allow and deny permission rules', 'Bash node/npx/python argv0/env/exit', 'descendant/watchdog teardown'],
-        'zero_tokens': True, 'all_children_gone': True}
+        'channel_cases': channel_results, 'zero_tokens': True, 'all_children_gone': True}
     write(ROOT / 'result.json', result)
     print(json.dumps(result), flush=True)
 finally:
