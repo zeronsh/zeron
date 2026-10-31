@@ -1840,6 +1840,314 @@ mod tests {
         assert!(hub.installed().contains_key(&root.join("out/deep")));
     }
 
+    #[tokio::test]
+    async fn directory_renamed_into_the_root_from_outside_is_walked_and_rescanned() {
+        let (_tmp, base) = tree();
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("x/y")).unwrap();
+        std::fs::write(outside.join("x/y/early"), "1").unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let _a = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        hub.apply();
+        settle(&hub).await;
+        while a.try_recv().is_ok() {}
+        std::fs::rename(&outside, root.join("in")).unwrap();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(hub.installed().contains_key(&root.join("in/x/y")));
+        let late = root.join("in/x/y/late");
+        std::fs::write(&late, "2").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&late)).await;
+    }
+
+    #[tokio::test]
+    async fn directory_renamed_out_and_back_in_stays_watched() {
+        for settle_between in [false, true] {
+            let (_tmp, base) = tree();
+            let root = base.join("root");
+            std::fs::create_dir_all(root.join("d/s")).unwrap();
+            let hub = per_root_hub();
+            let (on_a, mut a) = record_events();
+            let _a = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+            hub.apply();
+            settle(&hub).await;
+            std::fs::rename(root.join("d"), base.join("out")).unwrap();
+            if settle_between {
+                settle(&hub).await;
+                assert!(!hub.installed().contains_key(&root.join("d/s")));
+            }
+            std::fs::rename(base.join("out"), root.join("d")).unwrap();
+            settle(&hub).await;
+            assert!(
+                hub.installed().contains_key(&root.join("d/s")),
+                "settle_between={settle_between}: {:?}",
+                hub.installed()
+            );
+            while a.try_recv().is_ok() {}
+            let file = root.join("d/s/f");
+            std::fs::write(&file, "x").unwrap();
+            event_matching(&mut a, |e| e.paths.contains(&file)).await;
+        }
+    }
+
+    /// A real IN_Q_OVERFLOW: a handler that stalls notify's reader thread lets
+    /// the kernel queue (16384 events by default) fill, so the directory made
+    /// afterwards is lost without a trace except the overflow event itself.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kernel_queue_overflow_rescans_and_attaches_directories_whose_creation_was_lost() {
+        let queue: usize = std::fs::read_to_string("/proc/sys/fs/inotify/max_queued_events")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let (_tmp, root) = tree();
+        std::fs::create_dir(root.join("flood")).unwrap();
+        let hub = per_root_hub();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = unbounded_channel::<notify::Event>();
+        let handler_gate = gate.clone();
+        let _watch = hub.watch_tree(&root, Arc::new(|_| true), move |event| {
+            if !event.need_rescan()
+                && !matches!(event.kind, notify::EventKind::Access(_))
+                && !stalled.swap(true, Ordering::AcqRel)
+            {
+                let (open, signal) = &*handler_gate;
+                let _held = signal
+                    .wait_while(lock(open), |open| !*open)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            let _ = tx.send(event.clone());
+        });
+        hub.apply();
+        settle(&hub).await;
+        while rx.try_recv().is_ok() {}
+        std::fs::write(root.join("trigger"), "x").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await; // reader is now parked
+        for i in 0..queue {
+            std::fs::File::create(root.join("flood").join(i.to_string())).unwrap();
+        }
+        std::fs::create_dir_all(root.join("lost/deep")).unwrap();
+        std::fs::write(root.join("lost/deep/early"), "1").unwrap();
+        {
+            let (open, signal) = &*gate;
+            *lock(open) = true;
+            signal.notify_all();
+        }
+        let before_overflow = Mutex::new(Vec::new());
+        event_matching(&mut rx, |event| {
+            lock(&before_overflow).push(event.clone());
+            event.need_rescan()
+        })
+        .await;
+        let before_overflow = before_overflow.into_inner().unwrap();
+        // The kernel dropped everything after the queue filled, so the
+        // directory made last must never have been reported.
+        eprintln!("events before overflow: {}", before_overflow.len());
+        assert!(
+            before_overflow.iter().all(|event| event
+                .paths
+                .iter()
+                .all(|path| !path.starts_with(root.join("lost")))),
+            "the creation was not lost: no overflow happened"
+        );
+        settle(&hub).await;
+        assert!(
+            hub.installed().contains_key(&root.join("lost/deep")),
+            "overflow repairs the directory set"
+        );
+        while rx.try_recv().is_ok() {}
+        let late = root.join("lost/deep/late");
+        std::fs::write(&late, "2").unwrap();
+        event_matching(&mut rx, |e| e.paths.contains(&late)).await;
+    }
+
+    /// Stands in for inotify ENOSPC: a directory whose watch cannot install
+    /// must leave the tree not-live (the consumers' repair ticks keep running)
+    /// while the rest keeps delivering, and recover once the cause is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unwatchable_directory_leaves_the_tree_not_live_and_recovers() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("ok")).unwrap();
+        std::fs::create_dir_all(root.join("locked/inner")).unwrap();
+        let lock_dir = |mode| {
+            std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(mode))
+                .unwrap()
+        };
+        lock_dir(0o000);
+        if std::fs::read_dir(root.join("locked")).is_ok() {
+            lock_dir(0o755);
+            return; // privileged user: permissions do not apply
+        }
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let watch = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        hub.apply();
+        settle(&hub).await;
+        assert!(!watch.is_live(), "an unwatchable directory is not live");
+        while a.try_recv().is_ok() {}
+        let file = root.join("ok/f");
+        std::fs::write(&file, "x").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&file)).await;
+        lock_dir(0o755);
+        watch.refresh();
+        event_matching(&mut a, notify::Event::need_rescan).await;
+        assert!(watch.is_live());
+        assert!(hub.installed().contains_key(&root.join("locked/inner")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pruned_tree_does_not_follow_symlinked_directories_or_cycles() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("real/sub/loop")).unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let watch = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        hub.apply();
+        settle(&hub).await;
+        assert!(watch.is_live());
+        let mut installed: Vec<_> = hub.installed().into_keys().collect();
+        installed.sort();
+        assert_eq!(
+            installed,
+            vec![root.clone(), root.join("real"), root.join("real/sub")]
+        );
+        while a.try_recv().is_ok() {}
+        // The kernel reports a write through the alias under the real path.
+        std::fs::write(root.join("alias/sub/f"), "x").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&root.join("real/sub/f"))).await;
+    }
+
+    async fn churn(hub: &Arc<FsWatchHub>, root: &Path, cycles: usize) {
+        for i in 0..cycles {
+            let tree_watch = hub.watch_tree(root, Arc::new(|_| true), |_| {});
+            let flat = hub.watch(
+                &root.join("src"),
+                notify::RecursiveMode::NonRecursive,
+                |_| {},
+            );
+            let legacy = hub.watch(&root.join("src"), notify::RecursiveMode::Recursive, |_| {});
+            if i % 2 == 0 {
+                hub.apply();
+                assert!(tree_watch.is_live() && flat.is_live() && legacy.is_live());
+            }
+            drop((tree_watch, flat, legacy));
+            if i % 3 == 0 {
+                hub.apply();
+            }
+        }
+        settle(hub).await;
+        hub.apply();
+    }
+
+    fn assert_idle(hub: &FsWatchHub) {
+        let os = lock(&hub.os);
+        assert!(os.installed.is_empty(), "installed: {:?}", os.installed);
+        assert!(os.watcher.is_none() && os.roots.is_empty() && os.failed.is_empty());
+        assert!(lock(&hub.routes).regs.is_empty());
+        assert!(!lock(&hub.batch).worker);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn register_unregister_cycles_leave_no_watchers_or_workers() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        let hub = per_root_hub();
+        churn(&hub, &root, 120).await;
+        assert_idle(&hub);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "process-wide kernel measurement; run alone with --ignored --nocapture"]
+    async fn register_unregister_cycles_leave_no_inotify_fds_or_threads() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        let before = inotify_counts();
+        let hub = per_root_hub();
+        churn(&hub, &root, 200).await;
+        assert_idle(&hub);
+        // notify's reader thread exits asynchronously after its instance closes.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while inotify_counts() != before {
+            assert!(
+                Instant::now() < deadline,
+                "{:?} vs {before:?}",
+                inotify_counts()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let batch_threads = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .flatten()
+            .filter(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.starts_with("fs-watch batch"))
+            })
+            .count();
+        assert_eq!(batch_threads, 0);
+    }
+
+    /// Handlers are called outside every hub lock and a dropped handle stops
+    /// delivery: after a drop returns, nothing further may arrive beyond events
+    /// already collected for dispatch, and no registration change deadlocks
+    /// against a busy event stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribing_during_an_event_stream_neither_deadlocks_nor_leaks_deliveries() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let hub = per_root_hub();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (root, stop) = (root.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Acquire) {
+                    n += 1;
+                    let _ = std::fs::write(root.join("src").join(format!("f{}", n % 64)), "x");
+                    if n % 16 == 0 {
+                        let dir = root.join(format!("d{}", n % 8));
+                        let _ = std::fs::create_dir_all(dir.join("sub"));
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
+                }
+            })
+        };
+        let anchor = hub.watch_tree(&root, Arc::new(|_| true), |_| {});
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut cycles = 0;
+        while Instant::now() < deadline {
+            let delivered = Arc::new(AtomicUsize::new(0));
+            let counter = delivered.clone();
+            let watch = hub.watch_tree(&root, Arc::new(|_| true), move |_| {
+                counter.fetch_add(1, Ordering::AcqRel);
+            });
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(watch);
+            // At most a handler call already past the route lookup may land.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let settled = delivered.load(Ordering::Acquire);
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(delivered.load(Ordering::Acquire), settled);
+            cycles += 1;
+        }
+        stop.store(true, Ordering::Release);
+        writer.join().unwrap();
+        assert!(cycles > 5);
+        drop(anchor);
+        settle(&hub).await;
+        hub.apply();
+        assert_idle(&hub);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "process-wide kernel measurement; run alone with --ignored --nocapture"]
