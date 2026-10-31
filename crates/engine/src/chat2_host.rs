@@ -564,26 +564,20 @@ mod tests {
             sink.apply_row(&row, 1),
             RowImportOutcome::PendingDependencies
         );
-        let (_, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
-        assert_eq!(cursor, 0, "a restart must retry the invisible update");
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.cursor, 0, "a restart must retry the invisible update");
 
         sink.apply_checkpoint(&checkpoint, 0).unwrap();
         assert_eq!(sink.apply_row(&row, 1), RowImportOutcome::Applied);
-        let (snapshot, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
-        assert_eq!(cursor, 1);
-        let restored = loro::LoroDoc::new();
-        restored.import(&snapshot).unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.cursor, 1);
+        let restored = state.doc;
         assert_eq!(restored.get_text("body").to_string(), "parent child");
 
         let incomplete = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
         let incomplete_sink = EngineChatSink::new(&incomplete, store.clone(), "incomplete");
         assert!(incomplete_sink.apply_checkpoint(&row, 1).is_err());
-        assert!(
-            store
-                .load_snapshot_with_cursor("incomplete")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store.load_chat_state("incomplete").unwrap().is_none());
     }
 }
 

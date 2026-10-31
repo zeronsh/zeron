@@ -200,12 +200,11 @@ async fn slow_checkpoints_survive_idle_grace_with_all_slots_occupied() {
     relay.release.send_replace(true);
     until(|| store.sync_work_counts().unwrap() == (0, 0)).await;
     for i in 0..ACTIVE_SYNC_CAP {
-        let bytes = store
-            .load_snapshot(&format!("slow-{i:02}"))
+        let doc = store
+            .load_chat_state(&format!("slow-{i:02}"))
             .unwrap()
-            .unwrap();
-        let doc = loro::LoroDoc::new();
-        doc.import(&bytes).unwrap();
+            .unwrap()
+            .doc;
         assert_eq!(doc.get_text("slow-checkpoint").to_string(), "received");
     }
     host.shutdown_workers().await;
@@ -448,8 +447,10 @@ async fn rejoin_after_idle_retirement_resumes_from_its_cursor() {
     let handle = host.open("remote").unwrap();
     until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
     until(|| {
-        store.snapshot_cursor("remote").unwrap() == 5
-            && store.snapshot_cursor_verified("remote").unwrap()
+        store
+            .load_chat_state("remote")
+            .unwrap()
+            .is_some_and(|state| state.cursor == 5 && state.verified)
     })
     .await;
     assert_eq!(
@@ -470,7 +471,7 @@ async fn rejoin_after_idle_retirement_resumes_from_its_cursor() {
         "rejoin rewound to the checkpoint"
     );
     until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
-    assert_eq!(store.snapshot_cursor("remote").unwrap(), 5);
+    assert_eq!(store.load_chat_state("remote").unwrap().unwrap().cursor, 5);
     assert_eq!(handle.doc.doc().get_text("log").to_string(), "1;2;3;4;5;");
     host.shutdown_workers().await;
 }
@@ -608,9 +609,7 @@ async fn admissible_wakes_preserve_missing_rows_modern_readers_and_local_epoch()
     relay.release.send_replace(true);
     until(|| store.sync_work_counts().unwrap().1 == 0).await;
     for id in ids {
-        let snapshot = store.load_snapshot(id).unwrap().unwrap();
-        let doc = loro::LoroDoc::new();
-        doc.import(&snapshot).unwrap();
+        let doc = store.load_chat_state(id).unwrap().unwrap().doc;
         assert_eq!(doc.get_text("slow-checkpoint").to_string(), "received");
     }
     host.shutdown_workers().await;

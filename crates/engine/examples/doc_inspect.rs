@@ -9,12 +9,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = args.next().expect("store root");
     let chat_id = args.next().expect("chat id");
     let store = zeron_sync::DocsStore::open(std::path::PathBuf::from(root))?;
-    let Some(bytes) = store.load_snapshot(&chat_id)? else {
+    let Some(state) = store.load_chat_state(&chat_id)? else {
         println!("NO SNAPSHOT for {chat_id}");
         return Ok(());
     };
-    let raw = loro::LoroDoc::new();
-    raw.import(&bytes)?;
+    let raw = state.doc;
     let doc = zeron_doc::SessionDoc::from_doc(raw);
     let entries = doc.read_entries()?;
     println!("== messages: {} ==", entries.len());

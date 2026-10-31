@@ -1,4 +1,4 @@
-//! Coalesced chat snapshots. Cursor is sampled BEFORE export; snapshot and
+//! Coalesced chat snapshot delta log. Cursor is sampled BEFORE export; snapshot and
 //! cursor commit atomically. Queue/lock waits never occupy a Tokio worker.
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -8,6 +8,20 @@ use zeron_doc::SessionDoc;
 use zeron_sync::DocsStore;
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+const QUIET_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_DELTAS: usize = 256;
+const MIN_DELTA_BYTES: usize = 512 * 1024;
+
+#[derive(Default)]
+struct WriteState {
+    // None forces a full first write. In particular, recovered outbox ops
+    // must never be mistaken for operations already persisted in this log.
+    saved_vv: Option<loro::VersionVector>,
+    delta_count: usize,
+    delta_bytes: usize,
+    verifications: u64,
+    needs_compaction: bool,
+}
 
 pub(crate) struct ChatPersistence {
     doc: Weak<SessionDoc>,
@@ -17,8 +31,9 @@ pub(crate) struct ChatPersistence {
     generation: AtomicU64,
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
+    delta_bytes: AtomicUsize,
     urgent: AtomicBool,
-    write: Mutex<()>,
+    write: Mutex<WriteState>,
     wake: Option<mpsc::Sender<()>>,
     /// Seeded from the store, then set by the first verified write: cursor
     /// repair is once per legacy snapshot, never once per rejoin. The thin
@@ -50,8 +65,9 @@ impl ChatPersistence {
             generation: AtomicU64::new(0),
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
+            delta_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
-            write: Mutex::new(()),
+            write: Mutex::new(WriteState::default()),
             wake: runtime.as_ref().map(|_| tx),
             cursor_verified: AtomicBool::new(verified),
             #[cfg(test)]
@@ -63,6 +79,34 @@ impl ChatPersistence {
             runtime.spawn(Self::run(Arc::downgrade(&this), rx));
         }
         this
+    }
+
+    /// Called with the imported disk state BEFORE replaying the independent
+    /// outbox. Outbox-only operations must be included in the next delta.
+    pub(crate) fn restore_base(
+        &self,
+        vv: loro::VersionVector,
+        snapshot_bytes: usize,
+        delta_count: usize,
+        delta_bytes: usize,
+        needs_compaction: bool,
+    ) {
+        let mut write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        write.saved_vv = if needs_compaction || !self.cursor_verified() {
+            None
+        } else {
+            Some(vv)
+        };
+        write.needs_compaction = needs_compaction;
+        write.delta_count = delta_count;
+        write.delta_bytes = delta_bytes;
+        self.snapshot_bytes.store(snapshot_bytes, Ordering::Relaxed);
+        self.delta_bytes.store(delta_bytes, Ordering::Relaxed);
+        if (delta_count > 0 || needs_compaction)
+            && let Some(wake) = &self.wake
+        {
+            let _ = wake.try_send(());
+        }
     }
 
     pub(crate) fn cursor(&self) -> u64 {
@@ -78,7 +122,11 @@ impl ChatPersistence {
     }
 
     pub(crate) fn snapshot_bytes(&self) -> usize {
-        self.snapshot_bytes.load(Ordering::Relaxed)
+        // Keep the host's warm-document budget aware of growth between
+        // compactions, without taking the persistence lock on admission.
+        self.snapshot_bytes
+            .load(Ordering::Relaxed)
+            .saturating_add(self.delta_bytes.load(Ordering::Relaxed))
     }
 
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
@@ -101,23 +149,30 @@ impl ChatPersistence {
             let _ = wake.try_send(());
         } else {
             // Offline synchronous tooling/tests have no executor to schedule.
-            self.flush_sync();
+            self.flush(false);
         }
     }
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
-        while rx.recv().await.is_some() {
-            let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
-            loop {
-                let Some(this) = weak.upgrade() else { return };
-                let urgent = this.urgent.swap(false, Ordering::AcqRel);
-                drop(this);
-                if urgent {
-                    break;
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    message = rx.recv() => if message.is_none() { return; },
+        let mut compact_at = None;
+        loop {
+            let compact = tokio::select! {
+                message = rx.recv() => if message.is_none() { return } else { false },
+                _ = async { tokio::time::sleep_until(compact_at.unwrap()).await }, if compact_at.is_some() => true,
+            };
+            if !compact {
+                let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
+                loop {
+                    let Some(this) = weak.upgrade() else { return };
+                    let urgent = this.urgent.swap(false, Ordering::AcqRel);
+                    drop(this);
+                    if urgent {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        message = rx.recv() => if message.is_none() { return; },
+                    }
                 }
             }
             let Some(this) = weak.upgrade() else { return };
@@ -127,12 +182,17 @@ impl ChatPersistence {
             let job = this.clone();
             if let Err(error) = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                job.flush_sync();
+                job.flush(compact);
             })
             .await
             {
                 tracing::error!(%error, "chat snapshot worker failed");
             }
+            compact_at = {
+                let write = this.write.lock().unwrap_or_else(|e| e.into_inner());
+                (write.delta_count > 0 || write.needs_compaction)
+                    .then(|| tokio::time::Instant::now() + QUIET_INTERVAL)
+            };
             if this.doc.strong_count() == 0 {
                 return;
             }
@@ -147,10 +207,17 @@ impl ChatPersistence {
     }
 
     pub(crate) fn flush_sync(&self) {
+        self.flush(true);
+    }
+
+    fn flush(&self, compact: bool) {
         let flush = || {
-            let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            let mut write = self.write.lock().unwrap_or_else(|e| e.into_inner());
             let generation = self.generation.load(Ordering::Acquire);
-            if generation == self.saved.load(Ordering::Acquire) {
+            if generation == self.saved.load(Ordering::Acquire)
+                && !(compact && write.delta_count > 0)
+                && !write.needs_compaction
+            {
                 return;
             }
             let Some(doc) = self.doc.upgrade() else {
@@ -163,20 +230,57 @@ impl ChatPersistence {
             if let Some(hook) = self.before_export.lock().unwrap().take() {
                 hook();
             }
-            let result = doc
-                .export_snapshot()
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
-                    self.store
-                        .save_verified_snapshot_with_cursor(
-                            &self.chat_id,
-                            &bytes,
-                            cursor,
-                            super::chat2_host::CHAT2_DOC_EPOCH,
-                        )
-                        .map_err(|e| e.to_string())
+            let vv_now = doc.doc().oplog_vv();
+            let result = (|| -> Result<(), String> {
+                let delta = if !compact {
+                    write
+                        .saved_vv
+                        .as_ref()
+                        .map(|vv| doc.doc().export(loro::ExportMode::updates(vv)))
+                        .transpose()
+                        .map_err(|e| e.to_string())?
+                } else {
+                    None
+                };
+                let roots = DocsStore::snapshot_roots(doc.doc()).map_err(|e| e.to_string())?;
+                let full = delta.as_ref().is_none_or(|bytes| {
+                    write.delta_count + 1 > MAX_DELTAS
+                        || write.delta_bytes + bytes.len() + roots.len()
+                            > MIN_DELTA_BYTES.max(self.snapshot_bytes.load(Ordering::Relaxed) / 2)
                 });
+                if full {
+                    self.save_full(&doc, cursor)?;
+                    write.delta_count = 0;
+                    write.delta_bytes = 0;
+                    write.needs_compaction = false;
+                } else {
+                    let bytes = delta.unwrap();
+                    self.store
+                        .append_snapshot_delta(&self.chat_id, &bytes, cursor, &roots)
+                        .map_err(|e| e.to_string())?;
+                    write.delta_count += 1;
+                    write.delta_bytes += bytes.len() + roots.len();
+                    write.verifications += 1;
+                    // The oracle uses the full snapshot at exactly the
+                    // persisted frontier, so a racing edit is not a mismatch.
+                    if cfg!(debug_assertions)
+                        || (std::env::var("ZERON_PERF_VERIFY").as_deref() == Ok("1")
+                            && write.verifications % 32 == 0)
+                    {
+                        if let Err(error) = self.verify_full(&doc, &vv_now) {
+                            tracing::error!(chat = %self.chat_id, %error, "snapshot delta mismatch; using full snapshot");
+                            self.save_full(&doc, cursor)?;
+                            write.delta_count = 0;
+                            write.delta_bytes = 0;
+                        }
+                    }
+                }
+                // Sampled before export: later operations may be included and
+                // are harmlessly re-exported next time. Never skip an op.
+                write.saved_vv = Some(vv_now);
+                Ok(())
+            })();
+            self.delta_bytes.store(write.delta_bytes, Ordering::Relaxed);
             match result {
                 Ok(()) => {
                     #[cfg(test)]
@@ -199,11 +303,285 @@ impl ChatPersistence {
             flush();
         }
     }
+
+    fn save_full(&self, doc: &SessionDoc, cursor: u64) -> Result<(), String> {
+        let bytes = doc.export_snapshot().map_err(|e| e.to_string())?;
+        self.store
+            .save_verified_snapshot_with_cursor(
+                &self.chat_id,
+                &bytes,
+                cursor,
+                super::chat2_host::CHAT2_DOC_EPOCH,
+            )
+            .map_err(|e| e.to_string())?;
+        self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn verify_full(&self, doc: &SessionDoc, vv_now: &loro::VersionVector) -> Result<(), String> {
+        let restored = self
+            .store
+            .load_chat_state(&self.chat_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing persisted doc")?;
+        if !restored.doc.oplog_vv().includes_vv(vv_now) {
+            return Err("delta replay omitted sampled operations".into());
+        }
+        // SnapshotAt temporarily checks out the document. Only use it on an
+        // isolated full copy, never on the live doc that may still stream.
+        let bytes = doc.export_snapshot().map_err(|e| e.to_string())?;
+        let mut full = loro::LoroDoc::new();
+        full.import(&bytes).map_err(|e| e.to_string())?;
+        if full.oplog_vv() != restored.doc.oplog_vv() {
+            let bytes = full
+                .export(loro::ExportMode::snapshot_at(
+                    &restored.doc.state_frontiers(),
+                ))
+                .map_err(|e| e.to_string())?;
+            full = loro::LoroDoc::new();
+            full.import(&bytes).map_err(|e| e.to_string())?;
+        }
+        if full.oplog_vv() != restored.doc.oplog_vv()
+            || full.get_deep_value() != restored.doc.get_deep_value()
+        {
+            return Err("full snapshot differs from delta replay".into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn seeded_ascii(bytes: usize) -> String {
+        let mut rng = 0x12_ab_cd_ef_u64;
+        (0..bytes)
+            .map(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (32 + rng % 95) as u8 as char
+            })
+            .collect()
+    }
+
+    fn assert_state(store: &DocsStore, doc: &SessionDoc, cursor: u64) -> zeron_sync::ChatState {
+        let state = store.load_chat_state("whale").unwrap().unwrap();
+        let full = loro::LoroDoc::new();
+        full.import(&doc.export_snapshot().unwrap()).unwrap();
+        assert_eq!(state.doc.oplog_vv(), full.oplog_vv());
+        assert_eq!(state.doc.get_deep_value(), full.get_deep_value());
+        assert_eq!(state.cursor, cursor);
+        state
+    }
+
+    #[test]
+    fn delta_count_and_byte_thresholds_compact_without_losing_cursor() {
+        let (_dir, doc, store, p) = fixture();
+        p.applied(1, false); // first save establishes a base
+        for i in 0..MAX_DELTAS {
+            doc.doc().get_map("counter").insert("i", i as i64).unwrap();
+            doc.doc().commit();
+            p.applied(i as u64 + 2, false);
+        }
+        assert_eq!(assert_state(&store, &doc, 257).delta_count, MAX_DELTAS);
+        p.applied(258, false);
+        assert_eq!(assert_state(&store, &doc, 258).delta_count, 0);
+        doc.doc()
+            .get_text("big")
+            .insert(0, &seeded_ascii(MIN_DELTA_BYTES + 1000))
+            .unwrap();
+        doc.doc().commit();
+        p.applied(259, false);
+        assert_eq!(assert_state(&store, &doc, 259).delta_count, 0);
+        doc.doc().get_map("counter").insert("last", true).unwrap();
+        doc.doc().commit();
+        p.applied(260, false);
+        assert_eq!(assert_state(&store, &doc, 260).delta_count, 1);
+        assert!(p.is_clean());
+        p.flush_sync(); // clean deltas still compact on shutdown/eviction
+        assert_eq!(assert_state(&store, &doc, 260).delta_count, 0);
+    }
+
+    #[test]
+    fn restored_base_exports_recovered_outbox_ops_and_repairs_torn_suffix() {
+        let (dir, doc, store, p) = fixture();
+        p.applied(1, false);
+        doc.doc().get_text("text").insert(0, "saved").unwrap();
+        doc.doc().commit();
+        p.applied(2, false);
+        let state = store.load_chat_state("whale").unwrap().unwrap();
+        let vv = state.doc.oplog_vv();
+        let reopened = Arc::new(SessionDoc::from_doc(state.doc));
+        // This import happened before the host subscribed the new persister.
+        reopened.doc().get_text("text").insert(0, "outbox").unwrap();
+        reopened.doc().commit();
+        let next = ChatPersistence::new(&reopened, store.clone(), "whale".into(), state.cursor);
+        next.restore_base(
+            vv,
+            state.snapshot_bytes,
+            state.delta_count,
+            state.delta_bytes,
+            state.needs_compaction,
+        );
+        next.applied(3, false);
+        assert_eq!(assert_state(&store, &reopened, 3).delta_count, 2);
+        // Corrupt the first delta; reopening must use the base and mark that
+        // the suffix must be cleared before the next append (also in release).
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute("UPDATE snapshot_deltas SET bytes=X'00' WHERE seq=1", [])
+            .unwrap();
+        let state = store.load_chat_state("whale").unwrap().unwrap();
+        assert!(state.needs_compaction);
+        assert_eq!(state.delta_count, 0);
+        let vv = state.doc.oplog_vv();
+        let repaired = Arc::new(SessionDoc::from_doc(state.doc));
+        let next = ChatPersistence::new(&repaired, store.clone(), "whale".into(), state.cursor);
+        next.restore_base(
+            vv,
+            state.snapshot_bytes,
+            state.delta_count,
+            state.delta_bytes,
+            state.needs_compaction,
+        );
+        repaired
+            .doc()
+            .get_map("after-crash")
+            .insert("saved", true)
+            .unwrap();
+        repaired.doc().commit();
+        next.applied(4, false);
+        assert_eq!(assert_state(&store, &repaired, 4).delta_count, 0);
+    }
+
+    #[test]
+    fn equivalence_oracle_replaces_an_incorrect_delta_with_full_state() {
+        let (_dir, doc, store, p) = fixture();
+        p.applied(1, false);
+        doc.doc()
+            .get_text("text")
+            .insert(0, "must survive")
+            .unwrap();
+        doc.doc().commit();
+        // Simulate an incorrectly advanced incremental cache. The oracle
+        // must contain the mistake by replacing the log with a full save.
+        p.write.lock().unwrap().saved_vv = Some(doc.doc().oplog_vv());
+        p.applied(2, false);
+        assert!(p.is_clean());
+        assert_eq!(assert_state(&store, &doc, 2).delta_count, 0);
+    }
+
+    #[test]
+    fn failed_delta_retries_from_last_durable_vv() {
+        let (dir, doc, store, p) = fixture();
+        p.applied(1, false);
+        let db = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'disk full'); END").unwrap();
+        doc.doc().get_text("text").insert(0, "first").unwrap();
+        doc.doc().commit();
+        p.applied(2, false);
+        assert!(!p.is_clean());
+        doc.doc().get_text("text").insert(0, "second").unwrap();
+        doc.doc().commit();
+        db.execute_batch("DROP TRIGGER fail_delta").unwrap();
+        p.applied(3, false);
+        assert_eq!(assert_state(&store, &doc, 3).delta_count, 1);
+        assert!(p.is_clean());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_compacts_after_thirty_seconds_and_keeps_one_second_save() {
+        let (_dir, doc, store, p) = fixture();
+        p.applied(1, false);
+        p.flush(false);
+        doc.doc().get_text("text").insert(0, "stream").unwrap();
+        doc.doc().commit();
+        p.applied(2, false);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert_eq!(store.load_chat_state("whale").unwrap().unwrap().cursor, 1);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let start = std::time::Instant::now();
+        while p.writes.load(Ordering::Relaxed) < 2 {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(assert_state(&store, &doc, 2).delta_count, 1);
+        // Let run() observe completion and arm its idle deadline.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert_eq!(
+            store.load_chat_state("whale").unwrap().unwrap().delta_count,
+            1
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let start = std::time::Instant::now();
+        while p.writes.load(Ordering::Relaxed) < 3 {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(assert_state(&store, &doc, 2).delta_count, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_five_mb_store_write_volume() {
+        let (_dir, doc, store, p) = fixture();
+        let baseline_dir = tempfile::tempdir().unwrap();
+        let baseline = DocsStore::open(baseline_dir.path()).unwrap();
+        // Loro stores this text in state and operation history: 2.5 MB of
+        // content makes a measured ~5 MB serialized snapshot.
+        let text = seeded_ascii(2_500_000);
+        doc.doc().get_text("history").insert(0, &text).unwrap();
+        doc.doc().commit();
+        p.applied(0, false);
+        p.flush(false);
+        let base_bytes = p.snapshot_bytes();
+        let before = store.snapshot_payload_bytes_written();
+        let seconds = 12u64;
+        for second in 1..=seconds {
+            // Eight stream commits per simulated second, one persistence tick.
+            for _ in 0..8 {
+                let text = doc.doc().get_text("stream");
+                text.insert(text.len_unicode(), &"token🦀".repeat(12))
+                    .unwrap();
+                doc.doc().commit();
+                p.applied(second, false);
+            }
+            p.flush(false);
+            baseline
+                .save_verified_snapshot_with_cursor(
+                    "whale",
+                    &doc.export_snapshot().unwrap(),
+                    second,
+                    2,
+                )
+                .unwrap();
+        }
+        let full = baseline.snapshot_payload_bytes_written();
+        let delta = store.snapshot_payload_bytes_written() - before;
+        eprintln!(
+            "5MB_STREAM base_bytes={base_bytes} seconds={seconds} full_bytes={full} delta_bytes={delta} full_bytes_per_second={} delta_bytes_per_second={}",
+            full / seconds,
+            delta / seconds
+        );
+        assert!((5_000_000..5_010_000).contains(&base_bytes));
+        assert!(delta / seconds < 50_000);
+        assert!(full > delta * 100);
+        assert_eq!(
+            assert_state(&store, &doc, seconds).delta_count,
+            seconds as usize
+        );
+        let before_shutdown = store.snapshot_payload_bytes_written();
+        p.flush_sync();
+        eprintln!(
+            "5MB_STREAM shutdown_compaction_bytes={}",
+            store.snapshot_payload_bytes_written() - before_shutdown
+        );
+        assert_eq!(assert_state(&store, &doc, seconds).delta_count, 0);
+    }
+
     /// Runs only on an explicitly supplied local snapshot; never writes back
     /// to it or connects to an edge/production room.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -410,6 +788,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_import_cannot_label_an_older_export_with_a_newer_cursor() {
         let (_dir, doc, store, persistence) = fixture();
+        persistence.applied(0, false);
+        persistence.flush(false); // establish the base, then exercise a delta export
         persistence.applied(1, false);
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -418,7 +798,7 @@ mod tests {
             release_rx.recv().unwrap();
         }));
         let p = persistence.clone();
-        let job = tokio::task::spawn_blocking(move || p.flush_sync());
+        let job = tokio::task::spawn_blocking(move || p.flush(false));
         started_rx.recv().unwrap();
         doc.doc().get_map("test").insert("second", true).unwrap();
         doc.doc().commit();
@@ -426,7 +806,7 @@ mod tests {
         release_tx.send(()).unwrap();
         job.await.unwrap();
         assert_eq!(
-            store.snapshot_cursor("whale").unwrap(),
+            store.load_chat_state("whale").unwrap().unwrap().cursor,
             1,
             "cursor must have been captured before export"
         );

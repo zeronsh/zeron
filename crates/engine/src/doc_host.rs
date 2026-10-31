@@ -1187,7 +1187,7 @@ struct SalvageScan {
 enum SalvageScanKind {
     /// Already salvage-checked. No snapshot was read.
     Skip,
-    /// Persisted transcript is non-empty. Caller records the marker.
+    /// Persisted transcript is non-empty; scan may certify a stable full base.
     Healthy,
     /// Empty, and nothing on disk can refill it. Left unmarked.
     Absent,
@@ -1223,26 +1223,31 @@ fn scan_salvage(
     }
     let mut imports = 0u64;
     let stored = store
-        .load_snapshot_with_cursor(chat_id)
+        .load_chat_state(chat_id)
         .map_err(|err| err.to_string())?;
-    if let Some((bytes, _, epoch)) = &stored {
+    if let Some(state) = &stored {
         // A pre-chat2 snapshot may be discarded by open() during adoption;
         // its entries are a recovery SOURCE, not proof the new doc is healthy.
-        if *epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || !edge_configured {
-            let raw = import_snapshot(bytes, &mut imports)?;
-            let snapshot_healthy = !messages_list_empty(&raw)?;
+        if state.epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || !edge_configured {
+            let raw = &state.doc;
+            imports += 1;
+            let snapshot_healthy = !messages_list_empty(raw)?;
             let updates = store
                 .pending_chat_updates(chat_id)
                 .map_err(|err| err.to_string())?;
-            if snapshot_healthy && updates.is_empty() {
+            if snapshot_healthy
+                && updates.is_empty()
+                && state.delta_count == 0
+                && !state.needs_compaction
+            {
                 store
-                    .mark_salvage_checked(chat_id, bytes, *epoch)
+                    .mark_salvage_checked(chat_id, &state.base_snapshot, state.epoch)
                     .map_err(|err| err.to_string())?;
             }
             for (_, update) in updates {
                 raw.import(&update).map_err(|err| err.to_string())?;
             }
-            if !messages_list_empty(&raw)? {
+            if !messages_list_empty(raw)? {
                 return Ok(SalvageScan {
                     imports,
                     kind: SalvageScanKind::Healthy,
@@ -1256,8 +1261,8 @@ fn scan_salvage(
         .map_err(|err| err.to_string())?
         .or_else(|| {
             stored
-                .filter(|(_, _, epoch)| *epoch < crate::chat2_host::CHAT2_DOC_EPOCH)
-                .map(|(bytes, _, _)| bytes)
+                .filter(|s| s.epoch < crate::chat2_host::CHAT2_DOC_EPOCH)
+                .and_then(|s| s.doc.export(loro::ExportMode::Snapshot).ok())
         });
     let Some(bytes) = source else {
         return Ok(SalvageScan {
@@ -1830,8 +1835,21 @@ impl DocHost {
         // duplicate every message. Local epoch >= 2 forces the chat2 branch
         // and best-effort completes the flip.
         self.inner.document_loads.fetch_add(1, Ordering::Relaxed);
-        let stored = self.inner.store.load_snapshot_with_cursor(chat_id)?;
-        let stored_epoch = stored.as_ref().map(|(_, _, e)| *e).unwrap_or(0);
+        let stored = self.inner.store.load_chat_state(chat_id)?;
+        let persisted_base = stored
+            .as_ref()
+            .filter(|s| s.epoch >= crate::chat2_host::CHAT2_DOC_EPOCH)
+            .map(|s| {
+                (
+                    s.doc.oplog_vv(),
+                    s.snapshot_bytes,
+                    s.delta_count,
+                    s.delta_bytes,
+                    s.needs_compaction,
+                )
+            });
+        let stored = stored.map(|s| (s.doc, s.cursor, s.epoch, s.snapshot_bytes));
+        let stored_epoch = stored.as_ref().map(|(_, _, e, _)| *e).unwrap_or(0);
         let room_gen = if stored_epoch >= crate::chat2_host::CHAT2_DOC_EPOCH {
             if registry_gen < 2
                 && let Some(ws) = self.workspace()
@@ -1853,28 +1871,24 @@ impl DocHost {
         let mut requeue_commands: Vec<SessionCommandEntry> = Vec::new();
         let doc = if room_gen >= 2 {
             match stored {
-                Some((bytes, cursor, epoch)) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH => {
-                    snapshot_len = bytes.len();
+                Some((raw, cursor, epoch, base_len))
+                    if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH =>
+                {
+                    snapshot_len = base_len;
                     chat2_cursor = cursor;
-                    let raw = loro::LoroDoc::new();
-                    raw.import(&bytes)
-                        .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
                     SessionDoc::from_doc(raw)
                 }
-                Some((bytes, _cursor, epoch)) if self.inner.config.edge.is_none() => {
+                Some((raw, _cursor, epoch, base_len)) if self.inner.config.edge.is_none() => {
                     // Offline/edge-less: adopting would blank a readable
                     // transcript with no way to catch up (review B4). Keep
                     // the old doc read-only-ish; the adopt runs on the next
                     // online open.
                     tracing::info!(chat = %chat_id, old_epoch = epoch,
                         "chat2 adopt deferred (no edge configured)");
-                    snapshot_len = bytes.len();
-                    let raw = loro::LoroDoc::new();
-                    raw.import(&bytes)
-                        .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
+                    snapshot_len = base_len;
                     SessionDoc::from_doc(raw)
                 }
-                Some((bytes, _cursor, epoch)) => {
+                Some((raw, _cursor, epoch, _base_len)) => {
                     // M3 discard-and-adopt: this device's doc predates the
                     // chat2 lineage. Keep the old snapshot under a suffixed
                     // id for rollback, carry over OUR OWN unresolved
@@ -1888,13 +1902,12 @@ impl DocHost {
                     // with a near-empty doc under `chat_id` — the FIRST
                     // rollback copy is the real transcript; never overwrite
                     // it (review B5).
-                    if matches!(self.inner.store.load_snapshot(&rollback_id), Ok(None)) {
+                    if matches!(self.inner.store.load_snapshot(&rollback_id), Ok(None))
+                        && let Ok(bytes) = raw.export(loro::ExportMode::Snapshot)
+                    {
                         let _ = self.inner.store.save_snapshot(&rollback_id, &bytes);
                     }
-                    if let Ok(raw) = {
-                        let old = loro::LoroDoc::new();
-                        old.import(&bytes).map(|_| old)
-                    } {
+                    {
                         let old_doc = SessionDoc::from_doc(raw);
                         if let Ok(commands) = old_doc.read_commands() {
                             requeue_commands = commands
@@ -1930,11 +1943,8 @@ impl DocHost {
             }
         } else {
             match stored {
-                Some((bytes, _, _)) => {
-                    snapshot_len = bytes.len();
-                    let raw = loro::LoroDoc::new();
-                    raw.import(&bytes)
-                        .map_err(|e| EngineError::Other(format!("snapshot import failed: {e}")))?;
+                Some((raw, _, _, base_len)) => {
+                    snapshot_len = base_len;
                     SessionDoc::from_doc(raw)
                 }
                 None => SessionDoc::init(chat_id)?,
@@ -1951,12 +1961,16 @@ impl DocHost {
         }
         let doc = Arc::new(doc);
         let persistence = (room_gen >= 2 && !deferred_adoption).then(|| {
-            crate::chat_persistence::ChatPersistence::new(
+            let persistence = crate::chat_persistence::ChatPersistence::new(
                 &doc,
                 self.inner.store.clone(),
                 chat_id.to_string(),
                 chat2_cursor,
-            )
+            );
+            if let Some((vv, bytes, count, delta_bytes, needs_compaction)) = persisted_base {
+                persistence.restore_base(vv, bytes, count, delta_bytes, needs_compaction);
+            }
+            persistence
         });
         let changed_persistence = persistence.clone();
 
@@ -3043,9 +3057,10 @@ impl DocHost {
         // never overwriting an existing copy (review B5).
         let rollback_id = format!("{chat_id}.pre-chat2");
         if matches!(self.inner.store.load_snapshot(&rollback_id), Ok(None))
-            && let Ok(Some(old)) = self.inner.store.load_snapshot(chat_id)
+            && let Ok(Some(old)) = self.inner.store.load_chat_state(chat_id)
+            && let Ok(bytes) = old.doc.export(loro::ExportMode::Snapshot)
         {
-            let _ = self.inner.store.save_snapshot(&rollback_id, &old);
+            let _ = self.inner.store.save_snapshot(&rollback_id, &bytes);
         }
         self.inner
             .store
@@ -6445,8 +6460,8 @@ impl DocHost {
             // the save turned an app quit into total loss (2026-08-11);
             // persist it, and let the adopt path convert it on reopen.
             let thin_on_disk = matches!(
-                self.inner.store.load_snapshot_with_cursor(&handle.chat_id),
-                Ok(Some((_, _, epoch))) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
+                self.inner.store.snapshot_epoch(&handle.chat_id),
+                Ok(epoch) if epoch >= crate::chat2_host::CHAT2_DOC_EPOCH
             );
             if thin_on_disk {
                 return;
@@ -6566,6 +6581,67 @@ mod transfer_progress_tests {
             },
         );
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn delta_only_transcript_is_visible_to_open_and_salvage() {
+        let (_dir, host) = host();
+        let source = zeron_doc::SessionDoc::init("delta-only").unwrap();
+        source.read_queue().unwrap(); // open_local also accesses this unversioned root
+        let store = &host.inner.store;
+        store
+            .save_verified_snapshot_with_cursor(
+                "delta-only",
+                &source.export_snapshot().unwrap(),
+                1,
+                2,
+            )
+            .unwrap();
+        let vv = source.doc().oplog_vv();
+        source
+            .push_message(&zeron_doc::SessionMessageEntry {
+                id: "delta-message".into(),
+                role: zeron_doc::MessageRole::User,
+                parts: vec![zeron_doc::MessagePart::Text {
+                    id: "text".into(),
+                    text: "only in a delta".into(),
+                }],
+                created_at: 1,
+                device_id: "remote".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+        store
+            .append_snapshot_delta(
+                "delta-only",
+                &source.doc().export(loro::ExportMode::updates(&vv)).unwrap(),
+                2,
+                &zeron_sync::DocsStore::snapshot_roots(source.doc()).unwrap(),
+            )
+            .unwrap();
+        let scan = super::scan_salvage(store, "delta-only", false).unwrap();
+        assert!(matches!(scan.kind, super::SalvageScanKind::Healthy));
+        let handle = host.open_local("delta-only").unwrap();
+        assert_eq!(
+            handle.doc.read_entries().unwrap(),
+            source.read_entries().unwrap()
+        );
+        assert_eq!(handle.doc.doc().oplog_vv(), source.doc().oplog_vv());
+        assert_eq!(
+            handle.doc.doc().get_deep_value(),
+            source.doc().get_deep_value()
+        );
+        host.shutdown_workers().await;
+        assert_eq!(
+            store
+                .load_chat_state("delta-only")
+                .unwrap()
+                .unwrap()
+                .delta_count,
+            0
+        );
     }
 
     #[tokio::test]
