@@ -363,6 +363,7 @@ struct Inner {
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
     sessions_tx: watch::Sender<Vec<Session>>,
+    runtime_states_tx: watch::Sender<std::collections::BTreeMap<String, zeron_proto::RuntimeState>>,
     /// View-only projection. Native control and completion receipts continue
     /// to read `statuses`; terminal activity is merged at this boundary.
     activity_tx: OnceLock<watch::Sender<Vec<Session>>>,
@@ -417,6 +418,7 @@ impl SessionsEngine {
         registry: Arc<HarnessRegistry>,
     ) -> Self {
         let (sessions_tx, _) = watch::channel(Vec::new());
+        let (runtime_states_tx, _) = watch::channel(std::collections::BTreeMap::new());
         let engine = Self {
             inner: Arc::new(Inner {
                 voice: crate::voice::VoiceManager::default(),
@@ -441,6 +443,7 @@ impl SessionsEngine {
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
                 sessions_tx,
+                runtime_states_tx,
                 activity_tx: OnceLock::new(),
                 activity_task: Mutex::new(None),
                 last_requests: Mutex::new(HashMap::new()),
@@ -619,6 +622,12 @@ impl SessionsEngine {
     }
 
     /// Status watch: the full session list, re-sent on every transition.
+    pub fn watch_runtime_states(
+        &self,
+    ) -> watch::Receiver<std::collections::BTreeMap<String, zeron_proto::RuntimeState>> {
+        self.inner.runtime_states_tx.subscribe()
+    }
+
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner
             .activity_tx
@@ -2676,6 +2685,17 @@ impl Inner {
             let was_active = matches!(
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
+            self.runtime_states_tx.send_if_modified(|states| {
+                if states.get(chat_id).copied() == runtime {
+                    return false;
+                }
+                if let Some(runtime) = runtime {
+                    states.insert(chat_id.to_owned(), runtime);
+                } else {
+                    states.remove(chat_id);
+                }
+                true
+            });
             );
             if let Some(turn) = completed_turn {
                 entry.last_completed_turn = Some(turn);
@@ -6112,6 +6132,20 @@ mod tests {
                     run.idle_since.unwrap_or_else(tokio::time::Instant::now),
                 ));
                 run.hibernate.notify_one();
+    #[tokio::test]
+    async fn runtime_states_watch_tracks_transitions_without_heartbeat_updates() {
+        let t = HibernationTest::new(false, false).await;
+        let mut watch = t.core.sessions.watch_runtime_states();
+        assert_eq!(watch.borrow_and_update().get("sleep"), Some(&zeron_proto::RuntimeState::Parked));
+        t.core.sessions.inner.set_status("sleep", SessionStatus::Idle, false);
+        assert!(!watch.has_changed().unwrap());
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        watch.changed().await.unwrap();
+        assert_eq!(watch.borrow_and_update().get("sleep"), Some(&zeron_proto::RuntimeState::Hibernated));
+        t.core.sessions.shutdown().await;
+    }
+
             }
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
