@@ -4009,17 +4009,17 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
-    // A full window already behind us, so the run's first event commits
-    // immediately. Each commit moves this forward; `arm` then holds the next
-    // deadline on `last_commit + STREAM_COMMIT_MS`.
-    let mut last_commit =
-        tokio::time::Instant::now() - std::time::Duration::from_millis(STREAM_COMMIT_MS);
+    // No previous commit means the first event is due immediately, without
+    // subtracting from the clock (which may be paused in tests).
+    let mut last_commit: Option<tokio::time::Instant> = None;
     // Leading edge when the previous commit is already a window old;
     // otherwise the deadline stays anchored there, so a burst still
     // coalesces to one write per `STREAM_COMMIT_MS`.
-    fn arm(flush_at: &mut tokio::time::Instant, last_commit: tokio::time::Instant) {
+    fn arm(flush_at: &mut tokio::time::Instant, last_commit: Option<tokio::time::Instant>) {
         let now = tokio::time::Instant::now();
-        *flush_at = now.max(last_commit + std::time::Duration::from_millis(STREAM_COMMIT_MS));
+        *flush_at = last_commit
+            .and_then(|at| at.checked_add(std::time::Duration::from_millis(STREAM_COMMIT_MS)))
+            .map_or(now, |deadline| now.max(deadline));
     }
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
@@ -4153,6 +4153,31 @@ async fn drive_run(
     let mut final_completed_turn = None;
     let mut final_outcome = None;
     let final_status = loop {
+        // Flush even when prepared events or the harness stream stay ready.
+        if (dirty || subagents.values().any(|s| s.dirty)) && flush_at <= tokio::time::Instant::now()
+        {
+            #[cfg(test)]
+            FLUSH_TICKS.with(|t| t.set(t.get() + 1));
+            if dirty {
+                if let Err(err) = sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                    &mut segment_render,
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
+                }
+                dirty = false;
+            }
+            for sink in subagents.values_mut() {
+                sink.flush(&device_id);
+            }
+            last_commit = Some(tokio::time::Instant::now());
+            continue;
+        }
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
@@ -4263,6 +4288,9 @@ async fn drive_run(
                 }
                 // Engine-made events are final: a `show_image` image is
                 // already in uploads, outside the generated-image intake root.
+                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
+                    continue;
+                }
                 Some(event) = engine_rx.recv() => {
                     prepared_events.push_back(event);
                     continue;
@@ -4300,32 +4328,6 @@ async fn drive_run(
                         session_id: None,
                     },
                 },
-                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
-                    #[cfg(test)]
-                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
-                    // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
-                    // (parent + any dirty subagent docs). A leading edge armed
-                    // this deadline at `now`, so that event does not wait.
-                    if dirty {
-                        if let Err(err) = sync_segment(
-                            doc_ref,
-                            &mut writer,
-                            &entry_id,
-                            &device_id,
-                            segment_started,
-                            &folded,
-                            &mut segment_render,
-                        ) {
-                            tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
-                        }
-                        dirty = false;
-                    }
-                    for sink in subagents.values_mut() {
-                        sink.flush(&device_id);
-                    }
-                    last_commit = tokio::time::Instant::now();
-                    continue;
-                }
                 // Turn-quiesce watchdog (see the knob above). Armed only when the
                 // fold says nothing is in flight: an unresolved tool part is a
                 // command still running (legitimately silent for minutes — the
@@ -5980,6 +5982,243 @@ mod tests {
             "parked, with the subagent's sink open"
         );
         core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leading_commit_is_not_starved_by_ready_events() {
+        FLUSH_TICKS.with(|t| t.set(0));
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-ready-stream";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        for _ in 0..100 {
+            feed.send(text("x")).unwrap();
+        }
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        for _ in 0..400 {
+            if core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            FLUSH_TICKS.with(|t| t.get()),
+            1,
+            "a ready stream must not starve the leading commit"
+        );
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn steer_finalizes_pending_delta_before_starting_next_segment() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-steer-pending";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        feed.send(text("A")).unwrap();
+        feed.send(text("B")).unwrap();
+        feed.send(AgentEvent::Steered {
+            assistant_message_id: None,
+            next_assistant_message_id: Some("next".into()),
+        })
+        .unwrap();
+        feed.send(text("C")).unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        let read = || {
+            core.doc_host
+                .open(chat)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.role == MessageRole::Assistant)
+                .map(|e| {
+                    e.parts
+                        .into_iter()
+                        .filter_map(|p| match p {
+                            MessagePart::Text { text, .. } => Some(text),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..400 {
+            if read() == ["AB", "C"] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read(), ["AB", "C"]);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_leading_and_terminal_deltas_reach_its_doc() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-subagent-leading";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        feed.send(AgentEvent::ToolCall {
+            id: "tool-1".into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "Agent: probe".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        for _ in 0..400 {
+            if core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(STREAM_COMMIT_MS)).await;
+        let sub_id = subagent_doc_id(chat, "tool-1");
+        let read_text = || -> String {
+            core.doc_host
+                .open(&sub_id)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap()
+                .into_iter()
+                .flat_map(|e| e.parts)
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let tagged = |event| AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(event),
+        };
+        let start = tokio::time::Instant::now();
+        feed.send(tagged(text("A"))).unwrap();
+        for _ in 0..400 {
+            if read_text() == "A" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read_text(), "A");
+        assert!(start.elapsed() < std::time::Duration::from_millis(5));
+        feed.send(tagged(text("B"))).unwrap();
+        feed.send(tagged(done(DoneStatus::Completed))).unwrap();
+        for _ in 0..400 {
+            if read_text() == "AB" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read_text(), "AB");
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_delta_is_finalized_on_done_interrupt_and_stream_end() {
+        for case in 0..4 {
+            let (feed, rx) = mpsc::unbounded_channel();
+            let registry = HarnessRegistry::new();
+            registry.register(Arc::new(FeedHarness {
+                feed: Mutex::new(Some(rx)),
+            }));
+            let dir = tempfile::tempdir().unwrap();
+            let core =
+                crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                    .unwrap();
+            let chat = "chat-pending-final";
+            core.sessions
+                .dispatch(chat, HarnessId::Mock, request(), None)
+                .await
+                .unwrap();
+            feed.send(started()).unwrap();
+            feed.send(text("A")).unwrap();
+            let read_text = || -> String {
+                core.doc_host
+                    .open(chat)
+                    .unwrap()
+                    .doc()
+                    .read_entries()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.role == MessageRole::Assistant)
+                    .flat_map(|e| e.parts)
+                    .filter_map(|p| match p {
+                        MessagePart::Text { text, .. } => Some(text),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for _ in 0..400 {
+                if read_text() == "A" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(read_text(), "A");
+            feed.send(text("B")).unwrap();
+            match case {
+                0 => feed.send(done(DoneStatus::Completed)).unwrap(),
+                1 => feed.send(done(DoneStatus::Errored)).unwrap(),
+                2 => {
+                    core.sessions.interrupt(chat).await.unwrap();
+                }
+                _ => drop(feed),
+            }
+            for _ in 0..400 {
+                if read_text() == "AB" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(read_text(), "AB", "case {case} lost the pending delta");
+            core.sessions.shutdown().await;
+        }
     }
 
     /// The first text after an idle window is in the doc without waiting out
