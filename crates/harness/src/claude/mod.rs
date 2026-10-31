@@ -54,6 +54,7 @@ mod background;
 pub mod catalog;
 mod discovery;
 mod fork_tail;
+pub mod mcp_capture;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -560,6 +561,9 @@ impl ClaudeHarness {
 
     async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
+        let capture_context = mcp_capture::FingerprintInputs::for_probe(cwd)
+            .ok()
+            .and_then(|inputs| inputs.key(&exe).ok().map(|key| (inputs, key)));
         let mut cmd = Command::new(&exe);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
@@ -603,6 +607,7 @@ impl ClaudeHarness {
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
         const PROBE_ID: &str = "zeron-command-probe";
+        let mut lines = crate::lossy_lines::lossy_lines(stdout);
         let discovery = async {
             let request = serde_json::json!({
                 "type": "control_request",
@@ -623,7 +628,6 @@ impl ClaudeHarness {
                     "initialize request not delivered to the discovery probe"
                 );
             }
-            let mut lines = crate::lossy_lines::lossy_lines(stdout);
             while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
                 let Ok(frame) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -674,7 +678,44 @@ impl ClaudeHarness {
         // CLI exit after waiting only 2s for the save — see `refresh_lock`).
         let kill_grace = self.kill_grace;
         let lock_dir = refresh_lock::config_dir();
+        let initialized = result.is_ok();
+        if !initialized
+            && let (Some((_, key)), Some(store)) =
+                (&capture_context, mcp_capture::store_for_probe())
+        {
+            let _ = store.invalidate(key);
+        }
         tokio::spawn(async move {
+            if initialized
+                && let (Some((inputs, key)), Some(store)) =
+                    (capture_context, mcp_capture::store_for_probe())
+            {
+                match mcp_capture::capture(&mut stdin, &mut lines).await {
+                    Ok(servers) if inputs.key(&exe).ok().as_ref() == Some(&key) => {
+                        let snapshot = mcp_capture::ClaudeMcpSnapshot::new(key, servers);
+                        if store.save(&snapshot).is_err() {
+                            let _ = store.invalidate(&snapshot.key);
+                            tracing::debug!(target: "zeron_harness::claude", "MCP snapshot was not saved; use legacy launch");
+                        }
+                        if !managed_mcp_config()
+                            && let Some((proxy, args)) = mcp_capture::selftest_command()
+                        {
+                            let _ = mcp_capture::probe_caps(
+                                &exe,
+                                &proxy,
+                                &args,
+                                &snapshot.servers,
+                                &store,
+                            )
+                            .await;
+                        }
+                    }
+                    _ => {
+                        let _ = store.invalidate(&key);
+                        tracing::debug!(target: "zeron_harness::claude", "MCP capture unavailable or config changed; use legacy launch");
+                    }
+                }
+            }
             refresh_lock::settle(&lock_dir, refresh_lock::SETTLE_MAX).await;
             drop(stdin);
             child.shutdown(kill_grace).await;

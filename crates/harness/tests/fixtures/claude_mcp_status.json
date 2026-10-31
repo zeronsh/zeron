@@ -1,0 +1,879 @@
+{
+  "baseline": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin:playwright:playwright",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value",
+                "/fixture/plugin"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "plugin",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "project_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "project"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "project",
+            "source": "project",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "local_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "local"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "baseline-pending": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-1",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin:playwright:playwright",
+            "status": "pending",
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value",
+                "/fixture/plugin"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "plugin"
+          },
+          {
+            "name": "user_fixture",
+            "status": "pending",
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user"
+          },
+          {
+            "name": "project_fixture",
+            "status": "pending",
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "project"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "project",
+            "source": "project"
+          },
+          {
+            "name": "local_fixture",
+            "status": "pending",
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "local"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local"
+          }
+        ]
+      }
+    }
+  },
+  "strict": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "zeron_caps",
+            "status": "connected",
+            "serverInfo": {
+              "name": "zeron-mcp-proxy-selftest",
+              "version": "1"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/fixture/bin/zeron-mcp-proxy",
+              "args": [
+                "--selftest"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "zeron_proxy_selftest",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "normalized": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin_playwright_playwright",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "proxy-env": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "proxy_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/fixture/bin/zeron-mcp-proxy",
+              "args": [
+                "--server",
+                "proxy_fixture",
+                "--mode",
+                "keep-alive",
+                "--run-dir",
+                "/fixture/proxy-run",
+                "--",
+                "/usr/bin/python3",
+                "/fixture/claude_mcp_fake.py",
+                "proxy-env"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "override": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "override"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "project_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "project"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "project",
+            "source": "project",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "local_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "local"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "installed-plugin": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin:playwright:playwright",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value",
+                "/fixture/plugin"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "plugin",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "project_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "project"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "project",
+            "source": "project",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "local_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "local"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "no-mcp-plugin": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "project_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "project"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "project",
+            "source": "project",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "local_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "local"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "connector-redeclare": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-1",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "connector_fixture",
+            "status": "failed",
+            "error": "No claude.ai OAuth token found",
+            "config": {
+              "type": "claudeai-proxy",
+              "url": "http://127.0.0.1:1/mcp",
+              "id": "fixture-id"
+            },
+            "transport": "claudeai-proxy",
+            "sessionProxied": true,
+            "scope": "dynamic",
+            "source": "dynamic"
+          }
+        ]
+      }
+    }
+  },
+  "channel": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "channel_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "fixture"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "channel-enabled": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "channel_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "fixture"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "dynamic",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "http-strict": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "oauth_fixture",
+            "status": "failed",
+            "error": "Dynamic Client Registration rejected (HTTP 401): ",
+            "config": {
+              "type": "http",
+              "url": "http://127.0.0.1:46737/mcp"
+            },
+            "transport": "http",
+            "scope": "dynamic",
+            "source": "dynamic"
+          }
+        ]
+      }
+    }
+  },
+  "worktree-key": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin:playwright:playwright",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value",
+                "/fixture/plugin"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "plugin",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "main_key",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "main_key"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "nested-key": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "capture-2",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "plugin:playwright:playwright",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "expanded-value",
+                "/fixture/plugin"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "dynamic",
+            "source": "plugin",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "user_fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "user"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "user",
+            "source": "user",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          },
+          {
+            "name": "main_key",
+            "status": "connected",
+            "serverInfo": {
+              "name": "capture-fixture",
+              "version": "1.0.0"
+            },
+            "config": {
+              "type": "stdio",
+              "command": "/usr/bin/python3",
+              "args": [
+                "/fixture/claude_mcp_fake.py",
+                "main_key"
+              ]
+            },
+            "transport": "stdio",
+            "scope": "local",
+            "source": "local",
+            "tools": [
+              {
+                "name": "browser_click",
+                "annotations": {}
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

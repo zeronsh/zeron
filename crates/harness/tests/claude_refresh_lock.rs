@@ -18,7 +18,11 @@ trap 'echo term >> "$dir/events"; exit 0' TERM
 : > "$dir/ready"
 read line
 echo '{"type":"control_response","response":{"subtype":"success","request_id":"zeron-command-probe","response":{"commands":[{"name":"review","description":"Review"}]}}}'
-while read line; do :; done
+while read line; do
+  case "$line" in
+    *zeron-mcp-status*) echo '{"type":"control_response","response":{"subtype":"success","request_id":"zeron-mcp-status","response":{"mcpServers":[]}}}' ;;
+  esac
+done
 echo eof >> "$dir/events"
 "#;
 
