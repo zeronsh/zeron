@@ -703,25 +703,48 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
         .unwrap()
         .as_millis() as i64;
     let expected: Vec<_> = (0..100).map(|i| format!("remote message {i}")).collect();
-    // No await: all entries are visible together, as with a remote document import.
+    let peer = zeron_doc::SessionDoc::from_doc(loro::LoroDoc::new());
+    peer.doc()
+        .import(&handle.doc().export_snapshot().unwrap())
+        .unwrap();
+    let base = peer.doc().oplog_vv();
     for (i, prompt) in expected.iter().enumerate() {
-        handle
-            .doc()
-            .queue_command(&zeron_doc::SessionCommandEntry {
-                id: format!("remote-command-{i}"),
-                payload: SessionCommandPayload::Steer {
-                    prompt: prompt.clone(),
-                    message_id: Some(format!("remote-message-{i}")),
-                },
-                issued_by: "remote-device".into(),
-                issued_at: now + i as i64,
-                based_on: None,
-                expires_at: None,
-                status: zeron_doc::SessionCommandStatus::Pending,
-                resolution: None,
-            })
-            .unwrap();
+        peer.queue_command(&zeron_doc::SessionCommandEntry {
+            id: format!("remote-command-{i}"),
+            payload: SessionCommandPayload::Steer {
+                prompt: prompt.clone(),
+                message_id: Some(format!("remote-message-{i}")),
+            },
+            issued_by: "remote-device".into(),
+            issued_at: now + i as i64,
+            based_on: None,
+            expires_at: None,
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
     }
+    let update = peer.doc().export(loro::ExportMode::updates(&base)).unwrap();
+    handle.doc().doc().import(&update).unwrap();
+    // No explicit drain until the worker has consumed the remote import.
+    wait_for(
+        || queue_texts(&core) == expected,
+        "imported commands to drain",
+    )
+    .await;
+    wait_for(
+        || {
+            handle
+                .doc()
+                .read_commands()
+                .unwrap()
+                .iter()
+                .all(|c| c.status == zeron_doc::SessionCommandStatus::Applied)
+        },
+        "imported outcomes",
+    )
+    .await;
+    handle.doc().doc().import(&update).unwrap(); // replay is idempotent
     core.doc_host.drain_commands(&handle).await;
     core.doc_host.drain_commands(&handle).await;
     // Mid-turn, the whole burst waits in order in the queue: nothing reached
@@ -859,7 +882,7 @@ async fn commands_queued_between_streaming_commits_run_in_order() {
 /// ran a drain. A transcript-only commit must be enough.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
-    let (core, harness, _prompts) = setup(SteeringMode::TurnBoundary).await;
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
     core.workspace
         .set_chat_host(CHAT, "device-remote")
         .expect("move chat host away");
@@ -868,8 +891,11 @@ async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
     handle
         .doc()
         .queue_command(&zeron_doc::SessionCommandEntry {
-            id: "waiting-stop".into(),
-            payload: SessionCommandPayload::Interrupt {},
+            id: "waiting-prompt".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "host-flip prompt".into(),
+                message_id: Some("host-flip-message".into()),
+            },
             issued_by: "remote-device".into(),
             issued_at: now,
             based_on: None,
@@ -885,7 +911,7 @@ async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
             .read_commands()
             .unwrap()
             .iter()
-            .find(|c| c.id == "waiting-stop")
+            .find(|c| c.id == "waiting-prompt")
             .map(|c| c.status)
     };
     assert_eq!(
@@ -896,12 +922,25 @@ async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
     core.workspace
         .set_chat_host(CHAT, &core.device_id)
         .expect("host moves here");
-    handle.doc().push_message(&noise("after-host-move")).unwrap();
+    handle
+        .doc()
+        .push_message(&noise("after-host-move"))
+        .unwrap();
     wait_for(
         || status(&handle) != Some(zeron_doc::SessionCommandStatus::Pending),
         "the pending command to drain after the host change",
     )
     .await;
+    assert_eq!(
+        status(&handle),
+        Some(zeron_doc::SessionCommandStatus::Applied)
+    );
+    wait_for(
+        || !prompts.lock().unwrap().is_empty(),
+        "host-flip prompt to execute",
+    )
+    .await;
+    assert_eq!(*prompts.lock().unwrap(), vec!["host-flip prompt"]);
     let _ = harness.finish.send(());
     core.shutdown().await;
 }

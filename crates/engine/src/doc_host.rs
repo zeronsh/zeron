@@ -941,21 +941,23 @@ impl ChatDocHandle {
     }
 
     fn publish_queue(&self) {
-        match self.doc.read_queue() {
-            Ok(items) => {
-                self.queue_tx.send_if_modified(|slot| {
-                    if *slot == items {
-                        false
-                    } else {
-                        *slot = items;
-                        true
-                    }
-                });
+        self.publish_queue_with(|| self.doc.read_queue());
+    }
+
+    fn publish_queue_with(&self, read: impl FnOnce() -> Result<Vec<QueuedMessage>, DocError>) {
+        // Serialize the read with the send. A publisher paused after its read
+        // must not overwrite a drain's newer snapshot when it resumes.
+        self.queue_tx.send_if_modified(|slot| match read() {
+            Ok(items) if *slot != items => {
+                *slot = items;
+                true
             }
+            Ok(_) => false,
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "queue read failed");
+                false
             }
-        }
+        });
     }
 
     fn touch(&self) {
@@ -7366,6 +7368,49 @@ mod change_mask_tests {
         host.shutdown_workers().await;
     }
 
+    #[tokio::test]
+    async fn a_slow_queue_publisher_cannot_overwrite_a_newer_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("queue-publish-order").unwrap();
+        host.shutdown_workers().await;
+        handle
+            .doc
+            .push_queued(&zeron_doc::QueuedMessage::new("q1", "text", "host"))
+            .unwrap();
+        let queue = handle.watch_queue();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.publish_queue_with(|| {
+                    let rows = handle.doc.read_queue();
+                    read_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    rows
+                })
+            })
+        };
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.doc.take_queue_head().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let drain_publish = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.publish_queue();
+                done_tx.send(()).unwrap();
+            })
+        };
+        // If publication is serialized, the second publisher waits behind
+        // the first. Otherwise let it finish before releasing the old read.
+        let _ = done_rx.recv_timeout(Duration::from_millis(50));
+        release_tx.send(()).unwrap();
+        slow.join().unwrap();
+        drain_publish.join().unwrap();
+        assert_eq!(*queue.borrow(), handle.doc.read_queue().unwrap());
+    }
+
     /// Plan D3 test (a): a stream of commits that never touches the ledger
     /// reads it zero times after the first pass.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7461,6 +7506,56 @@ mod change_mask_tests {
         host.shutdown_workers().await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn ledger_wait_retains_updates_between_read_and_wait() {
+        let (tx, mut rx) = watch::channel(0u64);
+        let read_generation = *rx.borrow();
+        tx.send_modify(|generation| *generation += 1);
+        tx.send_modify(|generation| *generation += 1);
+        let started = tokio::time::Instant::now();
+        assert!(wait_for_ledger(&mut rx, WAIT_RECHECK).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(*rx.borrow(), read_generation + 2);
+        tx.send_modify(|generation| *generation += 1);
+        assert!(wait_for_ledger(&mut rx, WAIT_RECHECK).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        drop(tx);
+        assert!(!wait_for_ledger(&mut rx, WAIT_RECHECK).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_an_earlier_prompt_wakes_on_its_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("prompt-wait").unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(crate::run_journal::RunJournal::open(dir.path().join("journal")).unwrap()),
+            Arc::new(crate::HarnessRegistry::new()),
+        );
+        handle.doc.queue_command(&steer("prompt")).unwrap();
+        handle
+            .doc
+            .queue_command(&command("stop", SessionCommandPayload::Interrupt {}))
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let waiter = {
+            let (host, handle) = (host.clone(), handle.clone());
+            tokio::spawn(
+                async move { host.await_earlier_prompts(&sessions, &handle, "stop").await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished());
+        handle
+            .doc
+            .set_command_status("prompt", SessionCommandStatus::Cancelled, None)
+            .unwrap();
+        waiter.await.unwrap();
+        assert!(started.elapsed() < WAIT_RECHECK);
+        host.shutdown_workers().await;
+    }
+
     #[test]
     fn drain_outcome_is_complete_only_for_a_finished_pass() {
         assert!(DrainOutcome::COMPLETE.complete);
@@ -7475,6 +7570,48 @@ mod change_mask_tests {
         let host = host(dir.path());
         let handle = host.open_local("incomplete").unwrap();
         assert!(!host.drain_commands(&handle).await.complete);
+        host.shutdown_workers().await;
+    }
+    /// Controls cannot execute this prompt, and there is no set_sessions or
+    /// lift_quiesce kick to rescue it. Only the dispatcher's incomplete-pass
+    /// retry on the transcript event can resolve it.
+    #[tokio::test]
+    async fn incomplete_dispatch_retries_a_prompt_on_a_message_only_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        *lock(&host.inner.sessions) = Some(SessionsEngine::new(
+            "host".into(),
+            Arc::new(crate::run_journal::RunJournal::open(dir.path().join("journal")).unwrap()),
+            Arc::new(crate::HarnessRegistry::new()),
+        ));
+        host.inner.quiesced.store(true, Ordering::SeqCst);
+        let handle = host.open_local("incomplete-prompt").unwrap();
+        let mut prompt = steer("deferred-prompt");
+        prompt.expires_at = Some(0); // resolution needs no live harness
+        handle.doc.queue_command(&prompt).unwrap();
+        settle().await;
+        assert_eq!(
+            handle.commands().unwrap()[0].status,
+            SessionCommandStatus::Pending
+        );
+        assert!(
+            handle.dispatch_bits.take().is_empty(),
+            "dispatcher consumed the command event"
+        );
+
+        host.inner.quiesced.store(false, Ordering::SeqCst);
+        handle.doc.push_message(&message("retry-tick")).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handle.commands().unwrap()[0].status == SessionCommandStatus::Pending {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("message-only event must retry the incomplete prompt pass");
+        assert_eq!(
+            handle.commands().unwrap()[0].status,
+            SessionCommandStatus::Expired
+        );
         host.shutdown_workers().await;
     }
 }

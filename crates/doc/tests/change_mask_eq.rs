@@ -462,7 +462,7 @@ fn queue_command_invalidates_before_it_returns() {
 }
 
 #[test]
-fn cache_oracle_detects_a_stale_entry_and_recovers() {
+fn cache_reconciles_writes_without_an_observer() {
     let doc = SessionDoc::init("chat").unwrap();
     let cache = CommandsCache::new().with_verify(Verify::Always);
     doc.queue_command(&command("c1", SessionCommandPayload::Interrupt {}, 1))
@@ -472,8 +472,94 @@ fn cache_oracle_detects_a_stale_entry_and_recovers() {
     doc.queue_command(&command("c2", SessionCommandPayload::Interrupt {}, 2))
         .unwrap();
     let got = cache.get(&doc).unwrap();
-    assert_eq!(cache.mismatches(), 1, "stale cache is detected");
+    assert_eq!(cache.mismatches(), 0, "operation spans catch callback lag");
     assert_eq!(got.len(), 2, "the fresh result wins");
     assert_eq!(cache.get(&doc).unwrap().len(), 2);
-    assert_eq!(cache.mismatches(), 1, "the dropped cache refilled cleanly");
+    assert_eq!(cache.mismatches(), 0);
+}
+
+#[test]
+fn cache_sees_command_outcomes_before_callback_invalidation() {
+    for verify in [Verify::Never, Verify::Always] {
+        for remote in [false, true] {
+            let doc = Arc::new(SessionDoc::init("chat").unwrap());
+            doc.queue_command(&command("c1", SessionCommandPayload::Interrupt {}, 1))
+                .unwrap();
+            let cache = Arc::new(CommandsCache::new().with_verify(verify));
+            assert_eq!(
+                cache.get(&doc).unwrap()[0].status,
+                SessionCommandStatus::Pending
+            );
+            let peer = SessionDoc::from_doc(LoroDoc::new());
+            peer.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+            peer.set_command_status("c1", SessionCommandStatus::Applied, None)
+                .unwrap();
+            let update = peer.doc().export(ExportMode::all_updates()).unwrap();
+
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            let _sub = {
+                let cache = cache.clone();
+                doc.doc().subscribe_root(Arc::new(move |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                    cache.invalidate();
+                }))
+            };
+            let writer = {
+                let doc = doc.clone();
+                std::thread::spawn(move || {
+                    if remote {
+                        doc.doc().import(&update).unwrap();
+                    } else {
+                        doc.set_command_status("c1", SessionCommandStatus::Applied, None)
+                            .unwrap();
+                    }
+                })
+            };
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let fresh = doc.read_commands().unwrap();
+            let (read_tx, read_rx) = std::sync::mpsc::channel();
+            let reader = {
+                let (cache, doc) = (cache.clone(), doc.clone());
+                std::thread::spawn(move || read_tx.send(cache.get(&doc).unwrap()).unwrap())
+            };
+            // A reader may wait for Loro's transaction lock, but it must not
+            // return the old cached status while invalidation is held back.
+            let early = read_rx.recv_timeout(std::time::Duration::from_millis(50));
+            release_tx.send(()).unwrap();
+            writer.join().unwrap();
+            let got = early.unwrap_or_else(|_| {
+                read_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+            });
+            reader.join().unwrap();
+            assert_eq!(*got, fresh, "remote={remote}, verify={verify:?}");
+            assert_eq!(
+                cache.mismatches(),
+                0,
+                "callback lag is not cache divergence"
+            );
+        }
+    }
+}
+
+#[test]
+fn cache_sees_uncommitted_command_edits() {
+    let doc = SessionDoc::init("chat").unwrap();
+    doc.queue_command(&command("c1", SessionCommandPayload::Interrupt {}, 1))
+        .unwrap();
+    let cache = CommandsCache::new().with_verify(Verify::Never);
+    cache.get(&doc).unwrap();
+    let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) =
+        doc.doc().get_list("commands").get(0)
+    else {
+        panic!("command map")
+    };
+    map.insert("status", "cancelled").unwrap();
+    assert_eq!(*cache.get(&doc).unwrap(), doc.read_commands().unwrap());
 }

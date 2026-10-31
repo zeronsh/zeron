@@ -21,8 +21,8 @@
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use loro::Index;
 use loro::event::DiffEvent;
+use loro::{Index, LoroDoc, VersionVector};
 
 use crate::commands::SessionCommandEntry;
 use crate::schema::{DocError, SessionDoc};
@@ -109,18 +109,23 @@ impl AtomicChangeMask {
     }
 }
 
+struct CachedCommands {
+    generation: u64,
+    version: VersionVector,
+    commands: Arc<Vec<SessionCommandEntry>>,
+}
+
 /// The decoded `commands` ledger, shared until the next ledger change.
 ///
 /// [`CommandsCache::invalidate`] is called from the doc callback when the mask
-/// carries `COMMANDS`. Loro emits that callback synchronously inside the
-/// committing call, and every writer of `commands` commits before returning,
-/// so by the time a write returns the cache already knows it is stale.
+/// carries `COMMANDS`. Reads also reconcile operation spans: edits are visible
+/// before the callback runs, and a reader must see those edits too.
 pub struct CommandsCache {
     generation: AtomicU64,
     /// The generation sampled BEFORE the read that produced the entry, so a
     /// commit racing the read can only leave the entry looking older than it
     /// is, never newer.
-    cached: Mutex<Option<(u64, Arc<Vec<SessionCommandEntry>>)>>,
+    cached: Mutex<Option<CachedCommands>>,
     verify: Verify,
     fills: AtomicU64,
     hits: AtomicU64,
@@ -171,21 +176,30 @@ impl CommandsCache {
     pub fn get(&self, doc: &SessionDoc) -> Result<Arc<Vec<SessionCommandEntry>>, DocError> {
         let mut cached = lock(&self.cached);
         let generation = self.generation.load(Ordering::SeqCst);
-        if let Some((at, commands)) = &*cached
-            && *at == generation
+        let loro = doc.doc();
+        let version = loro.state_vv();
+        if loro.get_pending_txn_len() != 0 {
+            return self.read_uncached(doc, &mut cached);
+        }
+        if let Some(entry) = &mut *cached
+            && entry.generation == generation
+            && !commands_changed_since(loro, &entry.version, &version)
         {
+            if !version_is_current(loro, &version) {
+                return self.read_uncached(doc, &mut cached);
+            }
+            entry.version = version.clone();
             let hits = self.hits.fetch_add(1, Ordering::Relaxed);
-            let commands = commands.clone();
+            let commands = entry.commands.clone();
             if self.verify_due(hits) {
-                // An unreadable fresh ledger is a read error, not evidence the
-                // cache is wrong; the cached value stands.
-                if let Ok(fresh) = doc.read_commands()
-                    && fresh != *commands
-                    // A commit between the sample and the oracle read is a
-                    // race, not a stale cache: the callback already moved the
-                    // generation.
-                    && self.generation.load(Ordering::SeqCst) == generation
-                {
+                let fresh = doc.read_commands()?;
+                // State advances before callback invalidation. A racing full
+                // read wins, but is not an oracle failure and is not cached.
+                if !version_is_current(loro, &version) {
+                    *cached = None;
+                    return Ok(Arc::new(fresh));
+                }
+                if fresh != *commands {
                     self.mismatches.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         cached = commands.len(),
@@ -201,8 +215,22 @@ impl CommandsCache {
         }
         self.fills.fetch_add(1, Ordering::Relaxed);
         let commands = Arc::new(doc.read_commands()?);
-        *cached = Some((generation, commands.clone()));
+        *cached = version_is_current(loro, &version).then(|| CachedCommands {
+            generation,
+            version,
+            commands: commands.clone(),
+        });
         Ok(commands)
+    }
+
+    fn read_uncached(
+        &self,
+        doc: &SessionDoc,
+        cached: &mut Option<CachedCommands>,
+    ) -> Result<Arc<Vec<SessionCommandEntry>>, DocError> {
+        *cached = None;
+        self.fills.fetch_add(1, Ordering::Relaxed);
+        doc.read_commands().map(Arc::new)
     }
 
     fn verify_due(&self, hits: u64) -> bool {
@@ -211,5 +239,55 @@ impl CommandsCache {
             Verify::Always => true,
             Verify::Auto => verify_sampled(hits),
         }
+    }
+}
+
+fn version_is_current(doc: &LoroDoc, version: &VersionVector) -> bool {
+    doc.state_vv() == *version && doc.get_pending_txn_len() == 0 && doc.state_vv() == *version
+}
+
+fn commands_changed_since(doc: &LoroDoc, before: &VersionVector, after: &VersionVector) -> bool {
+    if before.sub_iter(after).next().is_some() {
+        return true; // checkout removed operations
+    }
+    for span in after.sub_iter(before) {
+        // Unlike get_changed_containers_in, this never commits a transaction
+        // (which could deadlock a writer whose callback is still running).
+        let changes = doc.export_json_in_id_span(span);
+        let len: usize = changes.iter().map(|change| change.op_len()).sum();
+        if len != (span.counter.end - span.counter.start) as usize {
+            return true; // unavailable history, e.g. a shallow import
+        }
+        for op in changes.into_iter().flat_map(|change| change.ops) {
+            match doc.get_path_to_container(&op.container) {
+                Some(path) if matches!(path.first(), Some((_, Index::Key(key))) if key.as_str() != "commands") =>
+                    {}
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_drops_a_corrupt_cache() {
+        let doc = SessionDoc::init("chat").unwrap();
+        let cache = CommandsCache::new().with_verify(Verify::Always);
+        cache.get(&doc).unwrap();
+        let entry: SessionCommandEntry = serde_json::from_value(serde_json::json!({
+            "id": "corrupt", "payload": {"kind": "interrupt"}, "issuedBy": "dev",
+            "issuedAt": 1, "status": "pending"
+        }))
+        .unwrap();
+        lock(&cache.cached).as_mut().unwrap().commands = Arc::new(vec![entry]);
+        assert!(cache.get(&doc).unwrap().is_empty());
+        assert_eq!(cache.mismatches(), 1);
+        assert!(lock(&cache.cached).is_none());
+        assert!(cache.get(&doc).unwrap().is_empty());
+        assert_eq!(cache.mismatches(), 1);
     }
 }
