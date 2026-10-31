@@ -31,11 +31,16 @@ still needs native validation; only Linux has been executed here.
   for at most 24 hours per version; then the original `npx` runs once, which
   revalidates it against the registry, and the clock restarts.
 - `run/mcp/<run>/<pgid>` when `--run-dir` is supplied: private ownership markers.
-  Linux markers include the leader's start ticks to reject PID reuse.
-  `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups.
-- `logs/mcp-proxy.jsonl` when `--run-dir` is supplied: append-only bounded JSON
-  lifecycle records, also emitted to stderr. Child stderr is copied verbatim;
-  failure reporting retains at most 8 KiB and exposes at most 300 characters.
+  Markers carry the leader's start time (`/proc` ticks on Linux, `ps` lstart
+  elsewhere) so a reused number is recognized and dropped, never signalled.
+  `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups
+  that still have members. Directories are created 0700.
+- `logs/mcp-proxy.jsonl` when `--run-dir` is supplied: append-only JSON lifecycle
+  records (one line under 4 KiB each), rotated to `.1` at 4 MiB, also emitted to
+  stderr. Child stderr is copied verbatim; failure reporting retains at most
+  8 KiB, exposes at most 300 characters, and masks the values of
+  credential-named environment variables and `--token`/`--api-key` style
+  arguments.
 
 Lazy cache misses start a discovery child and stop it after capture unless a
 call/subscription/progress/request holds it. Cache hits initialize without a
@@ -44,7 +49,9 @@ persistent catalog and refresh it in the background. Cached metadata remains
 available to this client during startup. Cache entries expire at the declared
 TTL or 30 days, whichever is sooner. Private and zero-TTL results remain only
 in this proxy's memory. Failed discovery marks the key for transparent
-passthrough in the next proxy.
+passthrough in the next proxy, for six hours. List requests carrying a cursor
+(issued by a live server) are never answered from the merged catalog.
+Server stdout lines that are not JSON objects are skipped, as clients do.
 
 Lazy idle timeout is ten minutes, checked every thirty seconds; a zero timeout
 disables idle stopping. Lazy-keep-alive never idle-stops. Keep-alive starts the
