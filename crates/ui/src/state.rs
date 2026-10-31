@@ -3966,9 +3966,9 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
-        // The runtime-state watch ships with the lazy-MCP engine; an older
+        // The runtime-state watch has its own capability; an older
         // one has no such method and would only be asked again every 2 s.
-        if engine_info.supports(zeron_proto::capabilities::MCP_LAZY_V1) {
+        if engine_info.supports(zeron_proto::capabilities::MCP_RUNTIME_CONTROLS_V1) {
             watch_tasks.push(spawn_watch(
                 cx,
                 handle.clone(),

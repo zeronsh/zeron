@@ -7,10 +7,10 @@ use super::*;
 
 impl Shell {
     /// Whether the chat menu offers the action for `chat_id`: its host runs
-    /// the lazy-MCP engine, and so does the engine this window talks to
+    /// an engine supporting this action, and so does the engine this window talks to
     /// (which forwards a remote host's request).
     pub(super) fn chat_can_restart_with_all_mcp(&self, chat_id: &str, cx: &App) -> bool {
-        let capability = zeron_proto::capabilities::MCP_LAZY_V1;
+        let capability = zeron_proto::capabilities::MCP_RUNTIME_CONTROLS_V1;
         let state = self.state.read(cx);
         state.chat_host_supports(chat_id, capability)
             && state

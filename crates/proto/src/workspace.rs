@@ -40,6 +40,8 @@ pub mod capabilities {
     /// Lazy MCP settings (`GetMcpSettings` / `SetMcpSettings`) and the
     /// host-stamped [`crate::McpPlan`].
     pub const MCP_LAZY_V1: &str = "mcp-lazy-v1";
+    /// Runtime-state watch and the per-chat full-MCP restart action.
+    pub const MCP_RUNTIME_CONTROLS_V1: &str = "mcp-runtime-controls-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -55,6 +57,7 @@ pub mod capabilities {
         BACKGROUND_TASKS_V1,
         crate::voice::remote::CAPABILITY,
         MCP_LAZY_V1,
+        MCP_RUNTIME_CONTROLS_V1,
         PREWARM_V1,
     ];
 
