@@ -150,6 +150,7 @@ impl DocsStore {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         let result = self.conn().execute(
             "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
             params![doc_id, batch_id, bytes],
@@ -196,6 +197,7 @@ impl DocsStore {
     }
 
     fn reject_chat_update_blocking(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -230,6 +232,7 @@ impl DocsStore {
         doc_id: &str,
         batch_id: &str,
     ) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -534,6 +537,7 @@ impl DocsStore {
         let mut inserted = 0;
         let conn = self.conn();
         for (command_id, processed_at) in rows {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
             inserted += conn.execute(
                 "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
                 params![command_id, processed_at],
@@ -567,6 +571,7 @@ impl DocsStore {
     }
 
     fn mark_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         let changed = self.conn().execute(
             "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
             params![command_id, now_ms()],

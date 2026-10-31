@@ -403,7 +403,10 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 fn parse_value(line: &str) -> Result<Value, serde_json::Error> {
     zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
     serde_json::from_str(line).or_else(|error| match repair_lone_surrogates(line) {
-        Some(repaired) => serde_json::from_str(&repaired),
+        Some(repaired) => {
+            zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+            serde_json::from_str(&repaired)
+        },
         None => Err(error),
     })
 }
