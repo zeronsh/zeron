@@ -4466,6 +4466,9 @@ async fn drive_run(
                 };
             if chip_streaming {
                 if !sink_known && !done_only {
+                    // `note` only needs the length. Reading it inside the
+                    // loop overlaps the `iter_mut` borrow.
+                    let folded_len = folded.len();
                     for (index, p) in folded.iter_mut().enumerate() {
                         if let MessagePart::Tool {
                             id,
@@ -4481,7 +4484,7 @@ async fn drive_run(
                             && call.is_subagent_spawn()
                         {
                             *subagent_ref = Some(sub_id.clone());
-                            segment_render.note(Touched::Index(index), folded.len());
+                            segment_render.note(Touched::Index(index), folded_len);
                         }
                     }
                 }
