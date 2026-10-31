@@ -11,7 +11,7 @@ mod env;
 #[cfg(unix)]
 mod launch;
 #[cfg(unix)]
-mod sample;
+pub mod sample;
 
 #[cfg(unix)]
 pub use env::{
