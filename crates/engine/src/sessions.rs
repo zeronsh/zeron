@@ -5542,6 +5542,8 @@ mod tests {
         finish: Arc<tokio::sync::Notify>,
         /// Wakes the parked child into a turn of its own: reasoning, no text.
         think: Arc<tokio::sync::Notify>,
+        /// The provider has lost the conversation a resume asks for.
+        lose_session: std::sync::atomic::AtomicBool,
     }
     #[async_trait::async_trait]
     impl Harness for HibernationFixture {
@@ -5579,6 +5581,22 @@ mod tests {
             zeron_harness::HarnessError,
         > {
             lock(&self.launches).push(request.clone());
+            if request.resume.is_some()
+                && self
+                    .lose_session
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let id = request.resume.clone().unwrap_or_default();
+                return Ok(futures::stream::iter([Ok(AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    result: None,
+                    error: Some(format!(
+                        "Claude exited unexpectedly (exit code 1): No conversation found with session ID: {id}"
+                    )),
+                    session_id: None,
+                })])
+                .boxed());
+            }
             if let Some(discovery) = self.plugin_discovery {
                 record_plugin_discovery(&request.mcp_plan.as_ref().unwrap().run_dir, discovery);
             }
@@ -5685,6 +5703,7 @@ mod tests {
                 hold_turn,
                 finish: Default::default(),
                 think: Default::default(),
+                lose_session: Default::default(),
             });
             registry.register(fixture.clone());
             let core = crate::EngineCore::assemble_with_profile(
@@ -6227,6 +6246,150 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "first,second"))
         }));
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_wake_keeps_model_access_cwd_and_env() {
+        let t = HibernationTest::new(false, false).await;
+        // The chat's own configuration, as the client sends it with each message.
+        let mut configured = t.request.clone();
+        configured.model = Some("model-under-test".into());
+        configured.reasoning = Some(zeron_proto::ReasoningLevel::Low);
+        configured.sandbox = SandboxLevel::ReadOnly;
+        configured.auto_approve = false;
+        configured.plan = true;
+        configured
+            .env
+            .insert("PROJECT_FLAG".into(), "kept".into());
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, configured.clone(), None)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&t.fixture.launches).len() < 2
+                && !lock(&t.fixture.conversation).contains(&configured.prompt)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The configuration changed, so the parked runtime was replaced in
+        // place; hibernate the one that took it, then wake it with the same.
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let before = lock(&t.fixture.launches).len();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        let mut wake = configured.clone();
+        wake.prompt = "wake".into();
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, wake, None)
+            .await
+            .unwrap();
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let launches = lock(&t.fixture.launches).clone();
+        assert_eq!(launches.len(), before + 1, "the wake is one fresh launch");
+        let woke = launches.last().unwrap();
+        assert_eq!(woke.resume.as_deref(), Some("hibernation-session"));
+        assert_eq!(woke.model.as_deref(), Some("model-under-test"));
+        assert_eq!(woke.reasoning, Some(zeron_proto::ReasoningLevel::Low));
+        assert_eq!(woke.sandbox, SandboxLevel::ReadOnly);
+        assert!(!woke.auto_approve);
+        assert!(woke.plan);
+        assert_eq!(woke.cwd, configured.cwd);
+        assert_eq!(woke.env.get("PROJECT_FLAG").map(String::as_str), Some("kept"));
+        // The wake is a new run: its own stamp, not the retired runtime's.
+        let first_run = launches[before - 1].env.get("ZERON_RUN_ID");
+        assert_ne!(woke.env.get("ZERON_RUN_ID"), first_run);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_wake_after_the_provider_lost_the_session_says_so() {
+        let t = HibernationTest::new(false, false).await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.fixture
+            .lose_session
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut wake = t.request.clone();
+        wake.prompt = "after the loss".into();
+        t.core
+            .sessions
+            .dispatch("sleep", HarnessId::Mock, wake, Some("wake-msg".into()))
+            .await
+            .unwrap();
+        // The rejected resume is retried once, fresh, never silently as a
+        // continuation: the reply opens with the notice.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while lock(&t.fixture.launches).len() < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the rejected wake is retried");
+        {
+            let launches = lock(&t.fixture.launches);
+            assert_eq!(launches[1].resume.as_deref(), Some("hibernation-session"));
+            assert_eq!(launches[2].resume, None, "the retry starts a new session");
+            assert_eq!(launches[2].prompt, "after the loss");
+        }
+        t.wait(zeron_proto::RuntimeState::Parked).await;
+        let (events, _) = t.core.sessions.subscribe("sleep", 0).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                AgentEvent::Error { message } if message == FRESH_START_NOTICE
+            )),
+            "{events:#?}"
+        );
+        // The dead id is not tried again.
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.fixture
+            .lose_session
+            .store(false, std::sync::atomic::Ordering::Release);
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_racing_engine_shutdown_leaves_no_runtime_or_working_row() {
+        let t = HibernationTest::new(false, false).await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.core.sessions.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while t.core.sessions.has_run("sleep") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the run ends once");
+        let row = t.core.sessions.session_status("sleep").unwrap();
+        assert_eq!(row.status, SessionStatus::Idle);
+        assert_eq!(row.runtime, Some(zeron_proto::RuntimeState::Hibernated));
+    }
+    #[tokio::test]
+    async fn hibernation_racing_a_stop_or_archive_ends_the_run_once() {
+        // Archiving a chat terminates its runtime; the two claims serialize on
+        // the steering ledger and exactly one tears the run down.
+        let t = HibernationTest::new(false, false).await;
+        let (hibernated, terminated) = tokio::join!(
+            async { t.core.sessions.hibernate("sleep") },
+            t.core.sessions.terminate("sleep")
+        );
+        assert!(terminated.unwrap());
+        let _ = hibernated;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while t.core.sessions.has_run("sleep") {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the run ends");
+        // Nothing queued behind it fires a second teardown or a phantom launch.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!t.core.sessions.has_run("sleep"));
+        assert_eq!(lock(&t.fixture.launches).len(), 1);
         t.core.sessions.shutdown().await;
     }
     #[tokio::test]
