@@ -70,6 +70,9 @@ use notify::Watcher as _;
 const BATCH_QUIET: Duration = Duration::from_millis(100);
 /// …or this long after its first change, whichever comes first.
 const BATCH_MAX: Duration = Duration::from_secs(1);
+/// Walk-install-verify rounds one [`FsWatchHub::apply`] makes before handing
+/// a still-changing tree to the batch worker.
+const MAX_VERIFY_PASSES: usize = 3;
 /// Whether a watch change restarts the stream for every path (FSEvents).
 const STREAM_RESTARTS_ON_CHANGE: bool = cfg!(target_os = "macos");
 /// Whether every root can share one watcher. inotify (and kqueue) build a
@@ -101,6 +104,24 @@ pub(crate) fn tree_directories(
             Ok(_) => None,
             Err(err) => Some(Err(err)),
         })
+}
+
+/// The pruned directory set of one tree, and whether the walk read all of it.
+fn walk_tree(root: &Path, filter: &TreeFilter) -> (HashSet<PathBuf>, bool) {
+    let mut dirs = HashSet::new();
+    let mut complete = true;
+    for entry in tree_directories(root, filter.clone()) {
+        match entry {
+            Ok(path) => {
+                dirs.insert(path);
+            }
+            Err(err) => {
+                complete = false;
+                tracing::debug!(error = %err, "fs-watch: tree walk failed");
+            }
+        }
+    }
+    (dirs, complete)
 }
 
 pub(crate) fn exceeds_tree_budget(root: &Path, limit: usize) -> bool {
@@ -221,6 +242,10 @@ pub(crate) struct FsWatchHub {
     bridge_enabled: AtomicBool,
     #[cfg_attr(not(test), allow(dead_code))]
     stats: Stats,
+    /// Runs once a tree walk finished and before its watches install: the
+    /// window in which a new directory is invisible to both.
+    #[cfg(test)]
+    after_walk: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// A registration. Dropping it stops delivery and releases the OS watch.
@@ -270,6 +295,8 @@ impl FsWatchHub {
             shared_watcher: SHARED_WATCHER,
             bridge_enabled: AtomicBool::new(true),
             stats: Stats::default(),
+            #[cfg(test)]
+            after_walk: Mutex::default(),
         })
     }
 
@@ -489,17 +516,37 @@ impl FsWatchHub {
     /// Bring the installed OS watches in line with the registrations and
     /// deliver the resulting rescan signals. Blocking. Idempotent.
     pub(crate) fn apply(&self) {
-        let rescans = {
-            let mut os = lock(&self.os);
-            self.reconcile_os(&mut os)
-        };
+        let mut rescans: Vec<Handler> = Vec::new();
+        let mut again = true;
+        for _ in 0..MAX_VERIFY_PASSES {
+            let (handlers, redo) = {
+                let mut os = lock(&self.os);
+                self.reconcile_os(&mut os)
+            };
+            for handler in handlers {
+                if !rescans.iter().any(|seen| Arc::ptr_eq(seen, &handler)) {
+                    rescans.push(handler);
+                }
+            }
+            again = redo;
+            if !again {
+                break;
+            }
+        }
         let event = rescan_event();
         for handler in rescans {
             handler(&event);
         }
+        if again {
+            // A tree that keeps changing under its walk: keep converging on
+            // the batch worker rather than looping here.
+            if let Some(hub) = self.weak.upgrade() {
+                hub.schedule_with_fallback(false);
+            }
+        }
     }
 
-    fn reconcile_os(&self, os: &mut OsState) -> Vec<Handler> {
+    fn reconcile_os(&self, os: &mut OsState) -> (Vec<Handler>, bool) {
         // Walk outside the routes lock: native events keep flowing during a
         // scan. A concurrent topology change marks dirty and schedules a pass.
         let trees: Vec<_> = lock(&self.routes)
@@ -511,28 +558,22 @@ impl FsWatchHub {
                     .map(|tree| (reg.path.clone(), tree.clone()))
             })
             .collect();
+        let mut walked = Vec::new();
         for (root, tree) in &trees {
             if tree.dirty.swap(false, Ordering::AcqRel) {
-                let mut dirs = HashSet::new();
-                let mut complete = true;
-                for entry in tree_directories(root, tree.filter.clone()) {
-                    match entry {
-                        Ok(path) => {
-                            dirs.insert(path);
-                        }
-                        Err(err) => {
-                            complete = false;
-                            tracing::debug!(error = %err, "fs-watch: tree walk failed");
-                        }
-                    }
-                }
+                let (dirs, complete) = walk_tree(root, &tree.filter);
                 for path in &dirs {
                     os.failed.remove(path);
                 }
                 *lock(&tree.dirs) = dirs;
                 tree.complete.store(complete, Ordering::Release);
                 tree.rescan.store(true, Ordering::Release);
+                walked.push((root, tree));
             }
+        }
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.after_walk).take() {
+            hook();
         }
         // Removed/replaced directories may have the same spelling by the
         // next pass, but their old kernel watch refers to a different inode.
@@ -563,6 +604,7 @@ impl FsWatchHub {
         let mut bridge: Option<notify::RecommendedWatcher> = None;
         let mut bridge_tried = false;
         let mut touched = false;
+        let mut attached_new = false;
         // A failed install may uncover paths it would have covered — iterate
         // until a pass adds no new failures (bounded: `failed` only grows).
         loop {
@@ -612,6 +654,7 @@ impl FsWatchHub {
                 ) {
                     Ok(()) => {
                         os.installed.insert(path, recursive);
+                        attached_new = true;
                     }
                     Err(err) => {
                         tracing::debug!(path = %path.display(), error = %err, "fs-watch: watch failed");
@@ -634,6 +677,20 @@ impl FsWatchHub {
 
         if os.installed.is_empty() {
             os.watcher.take();
+        }
+        // A directory created after its tree was walked but before its
+        // parent's watch attached raised no event and is not in the set. Every
+        // directory made after the installs above does raise one, so a second
+        // walk closes the gap; if it differs the tree is walked again.
+        let mut again = false;
+        if attached_new {
+            for (root, tree) in &walked {
+                let (dirs, complete) = walk_tree(root, &tree.filter);
+                if dirs != *lock(&tree.dirs) || complete != tree.complete.load(Ordering::Acquire) {
+                    tree.dirty.store(true, Ordering::Release);
+                    again = true;
+                }
+            }
         }
         let routes = lock(&self.routes);
         let mut rescans = Vec::new();
@@ -677,7 +734,7 @@ impl FsWatchHub {
                 rescans.push(reg.handler.clone());
             }
         }
-        rescans
+        (rescans, again)
     }
 
     /// Start a stream covering every installed path that survives this pass,
@@ -1275,6 +1332,7 @@ mod tests {
             batch: Mutex::default(),
             bridge_enabled: AtomicBool::new(true),
             stats: Stats::default(),
+            after_walk: Mutex::default(),
         })
     }
 
@@ -1662,6 +1720,35 @@ mod tests {
         assert!(wb.is_live());
         std::fs::write(&file, "xx").unwrap();
         event_matching(&mut b_rx, |e| e.paths.contains(&file)).await;
+    }
+
+    /// A directory created after the walk but before its parent's watch
+    /// installs produces no event and is not in the walked set: nothing would
+    /// ever attach it, and a later edit inside it would go unseen until some
+    /// unrelated topology change.
+    #[tokio::test]
+    async fn directory_created_between_walk_and_install_is_still_attached() {
+        let (_tmp, root) = tree();
+        std::fs::create_dir(root.join("a")).unwrap();
+        let hub = per_root_hub();
+        let (on_a, mut a) = record_events();
+        let _a = hub.watch_tree(&root, Arc::new(|_| true), on_a);
+        let racing = root.join("a/raced/deep");
+        let hook_path = racing.clone();
+        *lock(&hub.after_walk) = Some(Arc::new(move || {
+            std::fs::create_dir_all(&hook_path).unwrap();
+        }));
+        hub.apply();
+        settle(&hub).await;
+        assert!(
+            hub.installed().contains_key(&racing),
+            "installed: {:?}",
+            hub.installed()
+        );
+        while a.try_recv().is_ok() {}
+        let file = racing.join("file");
+        std::fs::write(&file, "x").unwrap();
+        event_matching(&mut a, |e| e.paths.contains(&file)).await;
     }
 
     #[cfg(target_os = "linux")]
