@@ -267,7 +267,7 @@ impl TranscriptMirror {
             .map(Arc::new)
             .collect();
         if !version_is_current(loro, &version) {
-            state.use_full(raw);
+            state.use_full(raw, expected);
             lock(&self.pending).full = true;
             return state.joined.clone();
         }
@@ -283,7 +283,7 @@ impl TranscriptMirror {
             // doc_host resolves presentation provenance from with_raw right
             // after refresh. Keep the raw side of the same full snapshot, even
             // though the incremental indexes must be rebuilt next time.
-            state.use_full(raw);
+            state.use_full(raw, expected);
             lock(&self.pending).full = true;
             return state.joined.clone();
         }
@@ -292,7 +292,11 @@ impl TranscriptMirror {
 
     fn fallback(&self, doc: &SessionDoc, state: &mut State) -> Arc<Vec<SharedEntry>> {
         if let Ok(raw) = doc.read_entries() {
-            state.use_full(raw);
+            let joined = join_continuation_entries(raw.clone())
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            state.use_full(raw, joined);
         }
         lock(&self.pending).full = true;
         state.joined.clone()
@@ -363,7 +367,7 @@ fn first_difference(a: &[SharedEntry], b: &[SharedEntry]) -> Option<usize> {
 }
 
 impl State {
-    fn use_full(&mut self, raw: Vec<SessionMessageEntry>) {
+    fn use_full(&mut self, raw: Vec<SessionMessageEntry>, joined: Vec<SharedEntry>) {
         *self = Self::default();
         self.slots = raw
             .into_iter()
@@ -372,7 +376,7 @@ impl State {
                 entry: Some(Arc::new(entry)),
             })
             .collect();
-        self.rejoin();
+        self.joined = Arc::new(joined);
     }
 
     /// Decode one entry container exactly as `read_entries` does: deep value
