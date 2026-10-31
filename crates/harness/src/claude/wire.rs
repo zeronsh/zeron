@@ -744,6 +744,14 @@ mod tests {
     }
 
     #[test]
+    fn repaired_value_counts_each_json_parse() {
+        let before = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(parse_value(r#"{"text":"\ud83d"}"#).is_ok());
+        let after = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(after >= before + 2);
+    }
+
+    #[test]
     fn lone_surrogate_escapes_are_repaired() {
         // A text delta cut through an emoji's surrogate pair.
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"a\ud83d b \ude00 \\ud83d 😀"}}}"#;

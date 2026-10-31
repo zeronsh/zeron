@@ -745,6 +745,17 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn autocommit_writes_increment_transaction_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let before = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        store.enqueue_chat_update("chat", "batch", b"data").unwrap();
+        store.acknowledge_chat_update("chat", "batch").unwrap();
+        let after = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        assert!(after >= before + 2);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contended_connection_does_not_starve_a_two_worker_runtime() {
         use std::sync::Arc;

@@ -1611,6 +1611,15 @@ mod tests {
     use crate::parts::fold_event_into_parts;
 
     #[test]
+    fn snapshot_export_counters_include_all_callers() {
+        let before = zeron_counters::snapshot();
+        let bytes = SessionDoc::init("counter-test").unwrap().export_snapshot().unwrap();
+        let after = zeron_counters::snapshot();
+        assert!(after[zeron_counters::C::SnapshotExports as usize].1 >= before[zeron_counters::C::SnapshotExports as usize].1 + 1);
+        assert!(after[zeron_counters::C::SnapshotExportBytes as usize].1 >= before[zeron_counters::C::SnapshotExportBytes as usize].1 + bytes.len() as u64);
+    }
+
+    #[test]
     fn fork_seam_round_trips_through_the_doc() {
         let doc = SessionDoc::init("fork").unwrap();
         let seam = MessagePart::Fork {
