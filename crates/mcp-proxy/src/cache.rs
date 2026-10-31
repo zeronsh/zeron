@@ -74,7 +74,11 @@ pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Valu
         .map(|k| {
             (
                 k.clone(),
-                std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()),
+                if k == "PATH" && c.identity_path.is_some() {
+                    c.identity_path.clone()
+                } else {
+                    std::env::var_os(k).map(|v| v.to_string_lossy().into_owned())
+                },
             )
         })
         .collect();

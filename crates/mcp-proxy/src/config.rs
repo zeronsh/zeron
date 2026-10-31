@@ -13,6 +13,8 @@ pub struct Config {
     pub mode: Mode,
     pub idle: Duration,
     pub identity_env: Vec<String>,
+    /// Shim-only PATH identity, with its per-run interception directory removed.
+    pub identity_path: Option<String>,
     pub plugin_root: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub run_dir: Option<PathBuf>,
@@ -44,6 +46,7 @@ impl Config {
             mode: Mode::Lazy,
             idle: Duration::from_secs(600),
             identity_env: Vec::new(),
+            identity_path: None,
             plugin_root: None,
             cwd: None,
             run_dir: None,

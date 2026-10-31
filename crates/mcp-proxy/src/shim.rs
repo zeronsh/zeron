@@ -132,6 +132,11 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
     let real = real_command(command, &dir)?;
     let selected = (|| -> Option<crate::Config> {
         // Shell children take this branch without even opening launch.json.
+        // A configured server has the configured launcher as argv0. Keep
+        // explicit exec -a invocations on their ordinary executable path.
+        if Path::new(arg0).file_name()? != command {
+            return None;
+        }
         let parent = parent_exe().ok()?;
         if std::env::var_os(PARENT_ENV).as_deref() != Some(parent.as_os_str()) {
             return None;
@@ -190,6 +195,14 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
                     )
             })
             .collect();
+        config.identity_path = Some(
+            std::env::join_paths(
+                std::env::split_paths(&std::env::var_os("PATH")?).filter(|p| p != &dir),
+            )
+            .ok()?
+            .into_string()
+            .ok()?,
+        );
         config.plugin_root = std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from);
         Some(config)
     })();

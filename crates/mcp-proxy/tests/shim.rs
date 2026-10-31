@@ -68,3 +68,59 @@ fn shell_passthrough_preserves_argv0_non_utf8_env_fds_and_exit_code_even_with_br
         }
     }
 }
+
+#[test]
+fn bash_custom_argv0_exec_passes_through_even_when_server_args_match() {
+    let root = tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap()).unwrap();
+    let shims = root.path().join("shim");
+    let real = root.path().join("real");
+    fs::create_dir(&shims).unwrap();
+    fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_zeron-mcp-proxy"), shims.join("node")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-mcp"), real.join("node")).unwrap();
+    let parent = std::env::current_exe().unwrap();
+    let launch = shim::Launch {
+        version: 1,
+        key: "fresh".into(),
+        parent_exe: parent.clone(),
+        parent_identity: zeron_mcp_proxy::cache::binary_id(&parent),
+        data_dir: root.path().into(),
+        run_dir: root.path().join("run"),
+        idle_minutes: 10,
+        servers: vec![shim::Server {
+            name: "exact-match".into(),
+            command: "node".into(),
+            resolved_command: real.join("node").canonicalize().unwrap(),
+            args: vec!["argument".into()],
+            mode: "lazy".into(),
+            channel: false,
+            owner_legacy: false,
+        }],
+    };
+    fs::write(
+        shims.join(shim::MANIFEST),
+        serde_json::to_vec(&launch).unwrap(),
+    )
+    .unwrap();
+    let output = Command::new("/bin/bash")
+        .args(["-c", "exec -a custom-node node argument"])
+        .env("PATH", std::env::join_paths([shims.clone(), real]).unwrap())
+        .env(shim::DIR_ENV, &shims)
+        .env(shim::KEY_ENV, "fresh")
+        .env(shim::PARENT_ENV, &parent)
+        .env("SHLVL", "1")
+        .env("FAKE_EXEC_PROBE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(37),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        record["args"][0],
+        serde_json::json!(b"custom-node".to_vec())
+    );
+}

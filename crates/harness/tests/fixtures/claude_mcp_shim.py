@@ -146,7 +146,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         events = [('message_start', {'type': 'message_start', 'message': message})]
         for index, block in enumerate(content):
-            events += [('content_block_start', {'type': 'content_block_start', 'index': index, 'content': block}),
+            events += [('content_block_start', {'type': 'content_block_start', 'index': index, 'content_block': block}),
                        ('content_block_stop', {'type': 'content_block_stop', 'index': index})]
         events += [('message_delta', {'type': 'message_delta', 'delta': {
             'stop_reason': 'tool_use' if results < 2 else 'end_turn', 'stop_sequence': None},
@@ -187,6 +187,7 @@ class Session:
         for stream in [self.p.stdout, self.p.stderr]:
             os.set_blocking(stream.fileno(), False)
             self.sel.register(stream, selectors.EVENT_READ, bytearray())
+        sessions.append(self)
         self.control('initialize')
         for _ in range(80):
             self.status = self.control('mcp_status')
@@ -280,7 +281,7 @@ class Session:
 
 sessions = []
 try:
-    baseline = Session('baseline', False); sessions.append(baseline)
+    baseline = Session('baseline', False)
     baseline_pss = baseline.measure()
     rows = baseline.status
     names = sorted((r['name'], [t['name'] for t in r.get('tools', [])]) for r in baseline.rows())
@@ -288,11 +289,11 @@ try:
     baseline.close(); sessions.remove(baseline)
     spec = {**BASE, 'status': rows}; write(SPEC, spec)
     subprocess.run([str(HARNESS), str(CLI), str(SPEC), 'capture'], env=ENV, cwd=PROJECT, check=True)
-    warm = Session('warm', True); sessions.append(warm)
+    warm = Session('warm', True)
     wait_until(lambda: not any(alive(int(p)) for p in lines(SPAWNS) + lines(CHILDREN)), 'discovery children must stop')
     warm.close(); sessions.remove(warm)
     count = len(lines(SPAWNS))
-    lazy = Session('lazy', True); sessions.append(lazy)
+    lazy = Session('lazy', True)
     assert len(lines(SPAWNS)) == count, 'warm-cache startup spawned a real server'
     assert sorted((r['name'], [t['name'] for t in r.get('tools', [])]) for r in lazy.rows()) == names
     lazy_pss = lazy.measure()
@@ -311,7 +312,7 @@ try:
     lazy.close(); sessions.remove(lazy)
     settings(False)
     count = len(lines(SPAWNS))
-    denied = Session('denied', True); sessions.append(denied)
+    denied = Session('denied', True)
     denied.turn(False)
     assert len(lines(SPAWNS)) == count, 'denied call must not start a server'
     denied.close(); sessions.remove(denied)
