@@ -1262,6 +1262,69 @@ impl SelectOption {
 type SelectReach<V> = Rc<dyn Fn(&mut V) -> &mut SelectState>;
 type SelectHandler<V> = Rc<dyn Fn(&mut V, usize, &mut Window, &mut Context<V>)>;
 
+/// Grok speech-speed track: filled to the thumb, with a live position.
+pub fn grok_speed_track(theme: &Theme, fraction: f32) -> gpui::Div {
+    let fraction = fraction.clamp(0.0, 1.0);
+    div()
+        .relative()
+        .flex_1()
+        .h(px(28.0))
+        .child(
+            div()
+                .absolute()
+                .left(px(2.0))
+                .right(px(2.0))
+                .top(px(9.0))
+                .h(px(10.0))
+                .rounded_full()
+                .bg(theme.border)
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(fraction))
+                        .rounded_full()
+                        .bg(theme.text),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(8.0))
+                .right(px(8.0))
+                .top_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .justify_between()
+                .children((0..9).map(|_| {
+                    div()
+                        .size(px(3.0))
+                        .rounded_full()
+                        .bg(theme.text_muted.opacity(0.7))
+                })),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(4.0))
+                .size(px(20.0))
+                .ml(px(-10.0))
+                .left(gpui::relative(fraction))
+                .rounded_full()
+                .bg(theme.bg)
+                .border_2()
+                .border_color(theme.text),
+        )
+}
+
+/// Map a pointer x inside a [`grok_speed_track`] to a snapped speed.
+pub fn grok_speed_at_x(bounds: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels) -> f32 {
+    let fraction = ((f32::from(x - bounds.left()) - 10.0)
+        / (f32::from(bounds.size.width) - 20.0).max(1.0))
+    .clamp(0.0, 1.0);
+    zeron_grok_voice::speed_from_fraction(fraction)
+}
+
 /// The settings dropdown: a [`select_trigger`] opening a [`select_menu`] of
 /// options with a check on the current one. Pointer: the trigger toggles and
 /// an outside press dismisses. Keyboard: ↑/↓ open and move the highlight,

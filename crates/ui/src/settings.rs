@@ -1042,6 +1042,88 @@ impl SkillCompletionSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceProviderChoice {
+    #[default]
+    Ask,
+    Codex,
+    Grok,
+}
+
+/// Spoken style added to a Grok call. It does not replace the orchestrator prompt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrokPersonality {
+    #[default]
+    Assistant,
+    Therapist,
+    Storyteller,
+    Doctor,
+    Meditation,
+    Conspiracy,
+    KidsStories,
+    KidsTrivia,
+}
+
+fn default_grok_voice_speed() -> f32 {
+    1.0
+}
+
+impl GrokPersonality {
+    pub const ALL: [Self; 8] = [
+        Self::Assistant,
+        Self::Therapist,
+        Self::Storyteller,
+        Self::Doctor,
+        Self::Meditation,
+        Self::Conspiracy,
+        Self::KidsStories,
+        Self::KidsTrivia,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Assistant => "Assistant",
+            Self::Therapist => "Therapist",
+            Self::Storyteller => "Storyteller",
+            Self::Doctor => "Doctor",
+            Self::Meditation => "Meditation",
+            Self::Conspiracy => "Conspiracy",
+            Self::KidsStories => "Kids story time",
+            Self::KidsTrivia => "Kids trivia",
+        }
+    }
+
+    /// Extra spoken direction. Assistant adds none.
+    pub fn direction(self) -> Option<&'static str> {
+        match self {
+            Self::Assistant => None,
+            Self::Therapist => Some(
+                "Listen first. Be warm, calm, and curious, and reflect what you heard before you advise.",
+            ),
+            Self::Storyteller => {
+                Some("Tell it as a short spoken story, with a clear beginning and a landing.")
+            }
+            Self::Doctor => Some(
+                "Be a careful clinician. Ask what matters, stay plain, and say when something needs a real doctor.",
+            ),
+            Self::Meditation => {
+                Some("Speak slowly and gently, and leave short pauses. Do not rush.")
+            }
+            Self::Conspiracy => {
+                Some("Enjoy the puzzle, then say plainly what is known and what is not.")
+            }
+            Self::KidsStories => Some(
+                "Tell a short, kind story a child can follow, in simple words, and land somewhere friendly.",
+            ),
+            Self::KidsTrivia => Some(
+                "Play a gentle trivia game for a child. One easy question at a time, and cheer the try.",
+            ),
+        }
+    }
+}
+
 pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
     (zeron_proto::HarnessId::Antigravity, "Antigravity"),
     (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
@@ -1279,6 +1361,22 @@ pub struct UiSettings {
     /// Local preference: never transfers an active call or credentials.
     #[serde(default)]
     pub codex_voice_device: Option<String>,
+    /// Ask, Codex, or Grok. Absent files keep Ask.
+    #[serde(default)]
+    pub voice_provider: VoiceProviderChoice,
+    /// Grok realtime voice id. Absent uses the server default.
+    #[serde(default)]
+    pub grok_voice: Option<String>,
+    /// Playback speed for Grok. Snapped to the slider step.
+    #[serde(default = "default_grok_voice_speed")]
+    pub grok_voice_speed: f32,
+    /// Spoken style added on top of the orchestrator prompt.
+    #[serde(default)]
+    pub grok_personality: GrokPersonality,
+    /// Grok call microphone as a `zeron_voice::InputDevice` id. Absent follows
+    /// the system default.
+    #[serde(default)]
+    pub grok_input: Option<String>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1381,6 +1479,11 @@ impl Default for UiSettings {
             smooth_scrolling: true,
             codex_voice: None,
             codex_voice_device: None,
+            voice_provider: VoiceProviderChoice::Ask,
+            grok_voice: None,
+            grok_voice_speed: default_grok_voice_speed(),
+            grok_personality: GrokPersonality::Assistant,
+            grok_input: None,
             legacy_accent_color: None,
         }
     }
@@ -2219,6 +2322,11 @@ impl UiSettings {
             smooth_scrolling,
             codex_voice,
             codex_voice_device,
+            voice_provider,
+            grok_voice,
+            grok_voice_speed,
+            grok_personality,
+            grok_input,
             legacy_accent_color,
             pull_request_destination,
             last_pull_request_repository,
@@ -2274,6 +2382,15 @@ impl UiSettings {
             crate::typography::FONT_SIZE_MAX,
             crate::typography::CODE_FONT_SIZE_DEFAULT,
         );
+        self.grok_voice_speed = zeron_grok_voice::snap_speed(self.grok_voice_speed);
+        self.grok_voice = self.grok_voice.and_then(|voice| {
+            let voice = voice.trim().to_string();
+            (!voice.is_empty()).then_some(voice)
+        });
+        self.grok_input = self.grok_input.and_then(|input| {
+            let input = input.trim().to_string();
+            (!input.is_empty()).then_some(input)
+        });
         self.git_history_column_widths = self.git_history_column_widths.clamped();
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.ui_font_size = self.ui_font_size.normalized();
@@ -3297,6 +3414,24 @@ mod tests {
     }
 
     #[test]
+    fn grok_speech_defaults_when_the_file_omits_them_and_snaps() {
+        let loaded: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.grok_voice, None);
+        assert_eq!(loaded.grok_voice_speed, 1.0);
+        assert_eq!(loaded.grok_personality, GrokPersonality::Assistant);
+        let snapped = UiSettings {
+            grok_voice: Some("  ".into()),
+            grok_voice_speed: f32::NAN,
+            grok_personality: GrokPersonality::Meditation,
+            ..loaded
+        }
+        .clamped();
+        assert_eq!(snapped.grok_voice, None);
+        assert_eq!(snapped.grok_voice_speed, 1.0);
+        assert_eq!(snapped.grok_personality, GrokPersonality::Meditation);
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -3305,6 +3440,11 @@ mod tests {
             window_geometry: None,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),
+            voice_provider: VoiceProviderChoice::Grok,
+            grok_voice: Some("eve".into()),
+            grok_voice_speed: 1.25,
+            grok_personality: GrokPersonality::Storyteller,
+            grok_input: Some("yetix".into()),
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
@@ -3463,6 +3603,11 @@ mod tests {
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+        assert!(json.contains(r#""voiceProvider": "grok""#));
+        assert!(json.contains(r#""grokVoice": "eve""#));
+        assert!(json.contains(r#""grokVoiceSpeed": 1.25"#));
+        assert!(json.contains(r#""grokPersonality": "storyteller""#));
+        assert!(json.contains(r#""grokInput": "yetix""#));
     }
 
     #[test]

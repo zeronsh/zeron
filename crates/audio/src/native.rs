@@ -35,8 +35,12 @@ pub struct AudioIo {
 }
 impl AudioIo {
     pub fn open(generation: u64) -> Result<Self, AudioError> {
+        Self::open_input(generation, None)
+    }
+    /// `input_id` is a cpal device id. A missing or unknown id uses the system default.
+    pub fn open_input(generation: u64, input_id: Option<&str>) -> Result<Self, AudioError> {
         let host = cpal::default_host();
-        let input_device = host.default_input_device().ok_or(AudioError::Device)?;
+        let input_device = resolve_input(&host, input_id)?;
         let output_device = host.default_output_device().ok_or(AudioError::Device)?;
         let input_config = input_device
             .default_input_config()
@@ -129,16 +133,26 @@ impl AudioIo {
         }
         Ok(())
     }
+    pub fn output_queued(&self) -> usize {
+        self.playout.len()
+    }
+    /// Device-rate samples the playout ring can still take.
+    pub fn output_space(&self) -> usize {
+        self.playout.capacity().saturating_sub(self.playout.len())
+    }
     pub fn enqueue(&mut self, frame: &zeron_proto::voice::VoiceFrame) -> Result<(), AudioError> {
         if frame.generation != self.generation.load(Ordering::Acquire) {
             return Err(AudioError::Frame);
         }
         let samples = crate::decode(frame)?;
+        let saved = self.output_resampler;
         self.scratch.clear();
         for sample in samples {
             self.output_resampler.push(sample, &mut self.scratch);
         }
-        if self.scratch.len() > self.playout.capacity() - self.playout.len() {
+        // The callback only removes samples, so the space measured here cannot shrink.
+        if self.scratch.len() > self.output_space() {
+            self.output_resampler = saved;
             return Err(AudioError::Overflow);
         }
         for value in &self.scratch {
@@ -155,12 +169,67 @@ impl AudioIo {
         self.muted.store(value, Ordering::Release);
         while self.capture.pop().is_some() {}
     }
+    /// Empty the playout ring and reset the output resampler. The generation
+    /// stays put, so a later enqueue is not rejected.
+    pub fn clear_playout(&mut self) {
+        while self.playout.pop().is_some() {}
+        while self.reference.pop().is_some() {}
+        self.output_resampler = Resampler::new(24_000, self.output_rate).unwrap();
+    }
     pub fn flush(&mut self, next_generation: u64) {
         self.generation.store(next_generation, Ordering::Release);
         while self.playout.pop().is_some() {}
         while self.reference.pop().is_some() {}
         while self.capture.pop().is_some() {}
         self.output_resampler = Resampler::new(24_000, self.output_rate).unwrap();
+    }
+    /// Swap the capture device and leave the speaker stream playing.
+    pub fn replace_input(&mut self, input_id: Option<&str>) -> Result<(), AudioError> {
+        let host = cpal::default_host();
+        let device = resolve_input(&host, input_id)?;
+        let input_config = device
+            .default_input_config()
+            .map_err(|_| AudioError::Device)?;
+        let input_rate = input_config.sample_rate();
+        let ic: StreamConfig = input_config.clone().into();
+        if ic.channels == 0 || ic.channels > 8 || Resampler::new(input_rate, 24_000).is_none() {
+            return Err(AudioError::Device);
+        }
+        let capture = Arc::new(ArrayQueue::new(ring_samples(input_rate)));
+        let failed = Arc::clone(&self.failed);
+        let muted = Arc::clone(&self.muted);
+        macro_rules! input {
+            ($t:ty) => {
+                input_stream::<$t>(
+                    &device,
+                    ic.clone(),
+                    capture.clone(),
+                    failed.clone(),
+                    muted.clone(),
+                )?
+            };
+        }
+        let stream = match input_config.sample_format() {
+            SampleFormat::F32 => input!(f32),
+            SampleFormat::F64 => input!(f64),
+            SampleFormat::I16 => input!(i16),
+            SampleFormat::U16 => input!(u16),
+            SampleFormat::I32 => input!(i32),
+            SampleFormat::U32 => input!(u32),
+            SampleFormat::I8 => input!(i8),
+            SampleFormat::U8 => input!(u8),
+            _ => return Err(AudioError::Device),
+        };
+        // Start the new capture before dropping the old one. A failed start
+        // leaves the call on the microphone it already had.
+        stream.play().map_err(|_| AudioError::Device)?;
+        let old = std::mem::replace(&mut self.input, stream);
+        let _ = old.pause();
+        drop(old);
+        self.capture = capture;
+        self.input_rate = input_rate;
+        self.failed.store(false, Ordering::Release);
+        Ok(())
     }
 }
 impl Drop for AudioIo {
@@ -172,6 +241,17 @@ impl Drop for AudioIo {
         while self.playout.pop().is_some() {}
     }
 }
+fn resolve_input(host: &cpal::Host, id: Option<&str>) -> Result<cpal::Device, AudioError> {
+    let chosen = id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| id.parse::<cpal::DeviceId>().ok())
+        .and_then(|id| host.device_by_id(&id));
+    chosen
+        .or_else(|| host.default_input_device())
+        .ok_or(AudioError::Device)
+}
+
 fn input_stream<T>(
     device: &cpal::Device,
     config: StreamConfig,

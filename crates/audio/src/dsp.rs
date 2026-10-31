@@ -1,11 +1,22 @@
 //! Stateful resampling and fixed framing outside real-time callbacks.
 /// Continuous linear resampler. One sample of lookahead, no chunk-edge reset.
+#[derive(Clone, Copy)]
 pub struct Resampler {
     step: f64,
     phase: f64,
     previous: Option<f32>,
 }
 impl Resampler {
+    /// Most samples `count` more inputs can append. The extra four cover the
+    /// last partial step so a caller can reserve ring space before `push`.
+    pub fn max_outputs(input_rate: u32, output_rate: u32, count: usize) -> usize {
+        if input_rate == 0 || count == 0 {
+            return 0;
+        }
+        let per = (output_rate as usize).div_ceil(input_rate as usize);
+        count.saturating_mul(per).saturating_add(4)
+    }
+
     pub fn new(input: u32, output: u32) -> Option<Self> {
         (input >= 8_000 && output >= 8_000 && input <= 192_000 && output <= 192_000).then_some(
             Self {
@@ -64,5 +75,44 @@ mod tests {
         assert_eq!(all, chunks);
         assert_eq!(all.len(), 2400);
         assert!(all.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn upsampling_24k_to_48k_keeps_double_duration() {
+        let mut resampler = Resampler::new(24_000, 48_000).unwrap();
+        let mut out = Vec::new();
+        for i in 0..2_401 {
+            resampler.push((i as f32 * 0.01).sin(), &mut out);
+        }
+        assert_eq!(out.len(), 4_800);
+    }
+
+    #[test]
+    fn max_outputs_covers_every_supported_playback_rate() {
+        for output_rate in [
+            8_000, 16_000, 22_050, 24_000, 44_100, 48_000, 96_000, 192_000,
+        ] {
+            let mut resampler = Resampler::new(24_000, output_rate).unwrap();
+            let mut produced = Vec::new();
+            let mut most = 0;
+            for chunk in 0..30 {
+                let start = produced.len();
+                for i in 0..480 {
+                    let n = chunk * 480 + i;
+                    resampler.push((n as f32 * 0.002).sin(), &mut produced);
+                }
+                most = most.max(produced.len() - start);
+            }
+            let bound = Resampler::max_outputs(24_000, output_rate, 480);
+            assert!(
+                most <= bound,
+                "rate {output_rate} emitted {most}, bound {bound}"
+            );
+            let expected = 480 * output_rate as usize / 24_000;
+            assert!(
+                most + 8 >= expected,
+                "rate {output_rate} emitted {most}, expected about {expected}"
+            );
+        }
     }
 }
