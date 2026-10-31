@@ -144,7 +144,7 @@ async fn run_pair(env: &RunEnv, planned: &PlannedTrial, attempt: u32) -> Result<
     Ok(body)
 }
 
-fn cli_executable() -> Result<PathBuf> {
+pub fn cli_executable() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ZB_REAL_CLAUDE") {
         return Ok(fs::canonicalize(path).context("resolve ZB_REAL_CLAUDE")?);
     }

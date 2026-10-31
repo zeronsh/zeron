@@ -420,7 +420,9 @@ fn maybe_reexec_native_mcp(command: &Command) -> Result<Option<ExitCode>> {
                 build_rev(rev, root.clone(), repo.clone())?;
             }
         }
+        let claude = zeron_bench::scenario::mcp::cli_executable()?;
         let status = std::process::Command::new("/usr/bin/unshare")
+            .env("ZB_REAL_CLAUDE", claude)
             .args(["-Urnm", "--", "/bin/sh", "-c", "mount --make-rprivate / && mount --bind \"$TMPDIR\" /tmp && ip link set lo up && exec \"$@\"", "zeron-bench"])
             .arg(std::env::current_exe()?).args(std::env::args_os().skip(1))
             .status().context("start isolated S-mcp namespace")?;
