@@ -11,6 +11,8 @@ mod env;
 #[cfg(unix)]
 mod launch;
 
+pub mod sample;
+
 #[cfg(unix)]
 pub use env::{
     DEFAULT_IPC_PORT, RealEngine, Trial, ZB_ROOT_ENV, assert_isolated, default_zb_root,
