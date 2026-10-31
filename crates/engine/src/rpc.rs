@@ -2198,6 +2198,7 @@ fn forwardable(method: &str) -> bool {
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
             // Sessions and their runtimes live on the chat's host.
+            | methods::PREWARM_CHAT
             | methods::HIBERNATE_CHAT
             | methods::HIBERNATE_IDLE
             // Background processes run in the chat host's runtime.
@@ -3102,6 +3103,23 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "removed": removed }))
+            }
+            methods::PREWARM_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                let request = self
+                    .sessions
+                    .last_request(&p.chat_id)
+                    .or_else(|| self.doc_host.request_from_chat_row(&p.chat_id, ""));
+                let prewarming = if let Some(request) = request {
+                    let harness = self.doc_host.harness_for_request(&p.chat_id, &request);
+                    self.sessions
+                        .prewarm(&p.chat_id, harness, request)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                } else {
+                    false
+                };
+                RpcReply::value(&serde_json::json!({ "prewarming": prewarming }))
             }
             methods::HIBERNATE_CHAT => {
                 let p: ChatParams = parse_params(params)?;

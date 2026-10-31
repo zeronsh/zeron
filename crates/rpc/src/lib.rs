@@ -53,6 +53,8 @@ pub mod methods {
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     /// Lazy MCP preferences and the discovered-server list (empty until
     /// snapshots exist). Set replaces the prefs object.
+    /// Resume a hibernated chat without submitting a user message.
+    pub const PREWARM_CHAT: &str = "PrewarmChat";
     pub const HIBERNATE_CHAT: &str = "HibernateChat";
     pub const HIBERNATE_IDLE: &str = "HibernateIdle";
     pub const GET_MCP_SETTINGS: &str = "GetMcpSettings";

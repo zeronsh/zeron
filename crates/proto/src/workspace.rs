@@ -35,6 +35,8 @@ pub mod capabilities {
     /// rows and answers `StopBackgroundTask` / `ReadBackgroundTaskOutput`
     /// (forwarding them, for a chat another device hosts).
     pub const BACKGROUND_TASKS_V1: &str = "background-tasks-v1";
+    /// Resume a chat into a parked runtime without submitting a user message.
+    pub const PREWARM_V1: &str = "prewarm-v1";
     /// Lazy MCP settings (`GetMcpSettings` / `SetMcpSettings`) and the
     /// host-stamped [`crate::McpPlan`].
     pub const MCP_LAZY_V1: &str = "mcp-lazy-v1";
@@ -53,6 +55,7 @@ pub mod capabilities {
         BACKGROUND_TASKS_V1,
         crate::voice::remote::CAPABILITY,
         MCP_LAZY_V1,
+        PREWARM_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -138,7 +141,8 @@ mod tests {
                     "provider-switch-v1",
                     "background-tasks-v1",
                     "voice-client-media-v1",
-                    "mcp-lazy-v1"
+                    "mcp-lazy-v1",
+                    "prewarm-v1"
                 ],
             })
         );

@@ -3,7 +3,7 @@
 A completed persistent harness turn parks its runtime. Hibernation retires only
 that parked runtime; it does not change the transcript, provider session ID,
 last completed turn, or native turn outcome. The next prompt uses the existing
-provider-native resume path. No Claude `start_idle` or prewarm behavior is added.
+provider-native resume path.
 
 The idle window is selected once per run: `ZERON_SESSION_IDLE_MS`, then five
 minutes for a voice orchestrator, then `mcp.session_idle_minutes` (ten minutes by
@@ -74,16 +74,44 @@ ownership uses Job Objects; Unix pgid signaling is not available there.
 
 Session rows publish Live/Parked while a handle exists and Hibernated when a
 resumable provider session remains after its handle ends. No UI change is in this
-unit. `Starting` remains reserved for later prewarm work.
+unit.
 
 Tracing records `session_hibernated` with harness, reason (idle/pressure/manual),
 idle_s, and Linux pss_freed_mib. PSS is the attributed pre-cancel estimate, summed
 once per process across groups carrying the engine's per-run env stamp and the
 run's MCP group markers; unavailable PSS is omitted. `session_woken` records the
-resumed launch's time to first event and `prewarmed=false`. The engine incrementally
-reads complete records from logs/mcp-proxy.jsonl into `mcp_proxy` tracing events
+resumed launch's time to first event and whether the launch was prewarmed. The
+engine incrementally reads complete records from logs/mcp-proxy.jsonl into `mcp_proxy` tracing events
 with event, server_class and startup_ms. The intake is bounded per tick.
 
 Linux is exercised locally. The macOS and Windows sensor implementations require
 platform validation. Live authenticated vendor CLI wake/capability behavior is
 not covered by the offline fake harness tests.
+
+## Speculative resume (WU9b)
+
+`PrewarmChat {chatId}` (capability `prewarm-v1`) returns `{prewarming: boolean}`
+and accepts the existing `targetDeviceId` routing field. It starts only when no
+runtime exists, the host has a resumable provider session, `mcp.prewarm` is on,
+and memory pressure is absent. The host uses the chat's last request (or its
+persisted configuration after an engine restart), clears prompt/attachments,
+and resumes its native session. Refused requests do not start inference.
+Attempts are limited to one per chat per 60 seconds, including failed starts
+and a prewarm that was hibernated again; the in-memory limit resets on engine
+restart. Concurrent prewarm requests are serialized, and a user message racing
+registration routes through the normal steering ledger.
+
+Claude's `start_idle` launches with `--resume=<id>` and sends `initialize` only.
+After a successful handshake it emits `SessionStarted` and waits on stdin; it
+never writes an empty user message. The next prompt uses the existing steering
+path. An empty known transcript is refused rather than starting fresh. Claude's
+`SessionStart` hooks fire on every wake, with `source=resume`; there is no hook
+suppression flag.
+
+A prewarm-started park has a three-minute idle window, regardless of the normal
+idle-window override. Once a prompt takes it up, later parks use the normal
+window. All existing hibernation guards, including Claude's launch-bound channel
+evidence, still apply. Prewarm creates no transcript entry or sidebar message
+activity and preserves the previous actual park's LRU age; the two-minute
+pressure floor still measures the new runtime's actual parked duration.
+Composer-focus/typing wiring and debounce are left to the later UI unit.
