@@ -32,7 +32,7 @@ use crate::transcript::ChatView;
 use crate::{Trial, launch};
 
 /// Bump when the generator output changes, so cached fixtures are rebuilt.
-const GENERATOR_VERSION: u32 = 1;
+const GENERATOR_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatSpec {
@@ -371,6 +371,18 @@ pub fn install(fx: &Fixture, trial: &Trial) -> Result<()> {
         .status()
         .context("run cp")?;
     ensure!(status.success(), "cp of fixture data failed");
+    // The chats' Claude sessions: replay state lets the engine `--resume` them.
+    let state = fx.dir.join("replay-state");
+    if state.is_dir() {
+        let dest = trial.root.join("replay-state");
+        let status = Command::new("cp")
+            .args(["-a", "--reflink=auto"])
+            .arg(&state)
+            .arg(&dest)
+            .status()
+            .context("run cp")?;
+        ensure!(status.success(), "cp of replay state failed");
+    }
     // A fresh token and lock come with the new engine.
     for stale in ["ipc-token", "engine.lock"] {
         let _ = fs::remove_file(trial.data.join(stale));
@@ -473,11 +485,29 @@ pub(super) async fn queue_play(
         !script.to_string_lossy().contains(char::is_whitespace),
         "script path has whitespace"
     );
+    queue_prompt(
+        client,
+        chat,
+        cwd,
+        message,
+        &format!("zb:play {} speed={speed}", script.display()),
+    )
+    .await
+}
+
+/// Queue one `run` command with a literal prompt.
+pub(super) async fn queue_prompt(
+    client: &Client,
+    chat: &str,
+    cwd: &Path,
+    message: &str,
+    prompt: &str,
+) -> Result<()> {
     client
         .call(
             "QueueCommand",
             json!({"chatId":chat,"command":{"kind":"run","messageId":message,"request":{
-                "prompt":format!("zb:play {} speed={speed}", script.display()),
+                "prompt":prompt,
                 "model":"haiku","reasoning":null,"modelOptions":{},"cwd":cwd,
                 "sandbox":"workspace-write","autoApprove":true,"resume":null}}}),
         )
@@ -485,17 +515,21 @@ pub(super) async fn queue_play(
     Ok(())
 }
 
+/// Text a warm-up turn (`zb:echo ready`) adds to a chat.
+pub const WARM_PROMPT: &str = "zb:echo ready";
+pub const WARM_TEXT: &str = "ready";
+
 /// Start a trial engine that serves `fixture-style` work (also used for the crash phase).
-fn fixture_trial(env: &RunEnv, label: &str, index: u32) -> Result<Trial> {
+fn fixture_trial(env: &RunEnv, label: &str, index: u32, state: &Path) -> Result<Trial> {
     let mut trial = Trial::at(&env.zb_root, label, index, "fx")?;
     trial.replay_bin = env.replay_bin.clone();
     trial.bench_bin = env.bench_bin.clone();
     trial.probe_sock = env.short_sock(label, index)?;
     trial.extra.push(("ZERON_HARNESS".into(), "claude-code".into()));
-    trial.extra.push((
-        "ZB_REPLAY_STATE_DIR".into(),
-        trial.root.join("replay-state").into_os_string(),
-    ));
+    // Session state outlives the fixture engines so trials can `--resume` the chats.
+    trial
+        .extra
+        .push(("ZB_REPLAY_STATE_DIR".into(), state.as_os_str().to_os_string()));
     trial.allocate_port()?;
     trial.ready_timeout = Duration::from_secs(180);
     Ok(trial)
@@ -529,7 +563,9 @@ async fn build(env: &RunEnv, spec: &FixtureSpec, id: &str, dir: &Path) -> Result
     }
 
     let label = format!("fixture-{id}");
-    let trial = fixture_trial(env, &label, 0)?;
+    let state = dir.join("replay-state");
+    fs::create_dir_all(&state)?;
+    let trial = fixture_trial(env, &label, 0, &state)?;
     let engine = launch(&env.fixture_engine, &trial).await?;
     let client = Client::connect(trial.port, &trial.data).await?;
     let (device, _) = client.call("LocalDevice", json!({})).await?;
@@ -607,7 +643,6 @@ async fn build(env: &RunEnv, spec: &FixtureSpec, id: &str, dir: &Path) -> Result
         data_bytes: dir_bytes(&data),
     };
     let _ = fs::remove_dir_all(&plan.scripts);
-    let _ = fs::remove_dir_all(trial.root.join("replay-state"));
     fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
     eprintln!(
         "zeron-bench: fixture {id} ready in {:.0}s ({} chats, {:.1} MB data)",
@@ -700,7 +735,7 @@ async fn crash_residue(
     infos: &mut [ChatInfo],
 ) -> Result<()> {
     let label = format!("fixture-{id}");
-    let trial = fixture_trial(env, &label, 1)?;
+    let trial = fixture_trial(env, &label, 1, &dir.join("replay-state"))?;
     trial.prepare()?;
     let data = dir.join("data");
     fs::remove_dir_all(&trial.data)?;

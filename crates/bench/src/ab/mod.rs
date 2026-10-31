@@ -952,6 +952,7 @@ fn live_scenario(
         opts.seed,
         side_a.path.clone(),
         side_b.path.clone(),
+        std::env::current_exe().context("resolve zeron-bench")?,
     )?;
     match crate::scenario::build(&opts.scenario, env)? {
         Some(scenario) => Ok(scenario),

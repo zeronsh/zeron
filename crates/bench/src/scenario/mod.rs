@@ -72,8 +72,8 @@ impl RunEnv {
         seed: u64,
         engine_a: PathBuf,
         engine_b: PathBuf,
+        bench_bin: PathBuf,
     ) -> Result<Self> {
-        let bench_bin = std::env::current_exe().context("resolve zeron-bench")?;
         let replay_bin = bench_bin
             .parent()
             .map(|dir| dir.join("zb-replay"))
@@ -612,7 +612,9 @@ impl<W: Workload> Live<W> {
                     && *t >= window.start_ns
                     && *t <= window.end_ns
                 {
-                    *shim.entry(prog.clone()).or_insert(0u64) += 1;
+                    // zb-replay stands in for the `claude` process.
+                    let prog = if prog == "zb-replay" { "claude" } else { prog.as_str() };
+                    *shim.entry(prog.to_string()).or_insert(0u64) += 1;
                 }
             }
             sampled.spawns = shim;

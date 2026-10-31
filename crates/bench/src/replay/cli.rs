@@ -90,6 +90,17 @@ fn arg_value(args: &[String], key: &str) -> Option<String> {
             .or_else(|| (arg == key).then(|| args.get(i + 1).cloned()).flatten())
     })
 }
+/// The engine hands the chat id to the CLI only inside the inline
+/// `--mcp-config` (the `zeron` server's env), not in the CLI's own environment.
+fn chat_from_mcp_config(args: &[String]) -> Option<String> {
+    let raw = arg_value(args, "--mcp-config")?;
+    let config: Value = serde_json::from_str(&raw).ok()?;
+    config["mcpServers"]
+        .as_object()?
+        .values()
+        .find_map(|server| server["env"]["ZERON_CHAT_ID"].as_str().map(str::to_owned))
+}
+
 fn log_spawn(args: &[String]) -> Result<()> {
     let probe = ProbeSender::from_env();
     probe.send(&ProbeEvent::Spawn {
@@ -232,7 +243,9 @@ async fn run(args: Vec<String>) -> Result<()> {
         model: arg_value(&args, "--model").unwrap_or_else(|| "haiku".into()),
         chat: std::env::var("ZB_REPLAY_CHAT")
             .or_else(|_| std::env::var("ZERON_CHAT_ID"))
-            .unwrap_or_else(|_| "00000000".into())
+            .ok()
+            .or_else(|| chat_from_mcp_config(&args))
+            .unwrap_or_else(|| "00000000".into())
             .chars()
             .take(8)
             .collect(),
@@ -482,4 +495,23 @@ async fn turn(
         tx.send((generation, Output::Frame(f, None))).await?;
     }
     Ok((text, json!({"input_tokens":0,"output_tokens":0}), None))
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn chat_id_comes_from_the_inline_mcp_config() {
+        let args = vec![
+            "--print".to_string(),
+            "--mcp-config".to_string(),
+            r#"{"mcpServers":{"zeron":{"command":"z","env":{"ZERON_CHAT_ID":"b7000001-0000"}}}}"#
+                .to_string(),
+        ];
+        assert_eq!(chat_from_mcp_config(&args).as_deref(), Some("b7000001-0000"));
+        assert_eq!(chat_from_mcp_config(&["--print".to_string()]), None);
+        let empty = vec!["--mcp-config".to_string(), r#"{"mcpServers":{}}"#.to_string()];
+        assert_eq!(chat_from_mcp_config(&empty), None);
+    }
 }

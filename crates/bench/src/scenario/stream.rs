@@ -83,11 +83,12 @@ fn verify(
         return (false, bad);
     }
     let full = text_of(view);
-    if full.len() != chat.text_bytes + expected.len() {
+    let warm = fixture::WARM_TEXT.len();
+    if full.len() != chat.text_bytes + warm + expected.len() {
         return (
             false,
             format!(
-                "text is {} bytes, expected {} base + {} streamed",
+                "text is {} bytes, expected {} base + {warm} warm-up + {} streamed",
                 full.len(),
                 chat.text_bytes,
                 expected.len()
@@ -97,7 +98,7 @@ fn verify(
     if sha256_hex(&full[..chat.text_bytes]) != chat.text_sha256 {
         return (false, "base transcript differs from the manifest".into());
     }
-    if sha256_hex(&full[chat.text_bytes..]) != expected_sha {
+    if sha256_hex(&full[chat.text_bytes + warm..]) != expected_sha {
         return (false, "streamed text hash differs from the script".into());
     }
     let errors = view.entries.iter().any(|e| {
@@ -162,6 +163,37 @@ impl Workload for Stream {
                 (ok, format!("{} bytes, {} entries (manifest {} / {})", text.len(), s.view.entries.len(), chat.text_bytes, chat.entries))
             });
             ctx.check(&format!("base_matches_manifest:{}", chat.n), ok, if ok { String::new() } else { detail });
+        }
+
+        // Warm the sessions first (a resumed, parked Claude per chat, as in a
+        // working session), so the window does not include process starts.
+        {
+            let mut temp = Vec::new();
+            for chat in &targets {
+                let msg = fixture::message_uuid(chat.n, 6900);
+                fixture::queue_prompt(&client, &chat.id, fx.space_path(chat), &msg, fixture::WARM_PROMPT)
+                    .await?;
+                if ui.watches.contains_key(&chat.id) {
+                    continue;
+                }
+                let sub = client
+                    .subscribe("WatchDocMessages", json!({"chatId": chat.id, "openingTail": true}))
+                    .await?;
+                temp.push(Watch::spawn(chat.id.clone(), sub, ctx.stats.clone()));
+            }
+            for chat in &targets {
+                let want = chat.text_bytes + fixture::WARM_TEXT.len();
+                let done = |s: &super::driver::ChatState| {
+                    turn_settled(&s.view) && text_of(&s.view).len() >= want
+                };
+                match ui.watches.get(&chat.id) {
+                    Some(w) => w.wait_for(Duration::from_secs(90), "the warm-up turn", done).await?,
+                    None => {
+                        let w = temp.iter().find(|w| w.chat == chat.id).context("temp watch")?;
+                        w.wait_for(Duration::from_secs(90), "the warm-up turn", done).await?;
+                    }
+                }
+            }
         }
 
         // One script per chat, identical across trials and sides.
@@ -240,6 +272,10 @@ impl Workload for Stream {
                     .collect();
                 (ok, detail, seqs, s.markers.clone())
             });
+            if !ok {
+                let dump = watch.with(|s| serde_json::to_vec_pretty(&s.view.entries).unwrap_or_default());
+                let _ = std::fs::write(ctx.trial.root.join(format!("failed-transcript-{}.json", chat.n)), dump);
+            }
             ctx.check(&format!("transcript_sha:{}", chat.n), ok, detail);
             let want: BTreeSet<u64> = (1..=built.markers as u64).collect();
             ctx.check(
