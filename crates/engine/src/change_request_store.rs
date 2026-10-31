@@ -260,6 +260,8 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Rebuildable cache: NORMAL skips a full fsync on every page write.
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version != SCHEMA_VERSION {
@@ -515,5 +517,28 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn rebuildable_cache_uses_normal_synchronous() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChangeRequestStore::new(dir.path());
+        assert!(
+            store
+                .load("me", "acme/zeron", ChangeRequestFilter::All)
+                .await
+                .is_none()
+        );
+        let (journal, synchronous) = store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))?,
+                    conn.pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))?,
+                ))
+            })
+            .unwrap();
+        assert!(journal.eq_ignore_ascii_case("wal"));
+        assert_eq!(synchronous, 1, "NORMAL");
     }
 }

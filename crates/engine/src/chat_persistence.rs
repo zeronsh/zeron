@@ -7,7 +7,21 @@ use tokio::sync::mpsc;
 use zeron_doc::SessionDoc;
 use zeron_sync::DocsStore;
 
-const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Local-only docs stay here. It is also the floor for an edge outbox:
+/// local ops are already durable in `chat_outbox` until acked, so a slow
+/// export may wait longer instead of rewriting the whole snapshot every second.
+const SAVE_INTERVAL_MIN_MS: u64 = 1_000;
+const SAVE_INTERVAL_MAX_MS: u64 = 10_000;
+/// `clamp(last_export_ms * SCALE, MIN, MAX)` once a doc has an edge outbox.
+const SAVE_INTERVAL_EXPORT_SCALE: u64 = 50;
+
+fn scaled_save_interval(edge_outbox: bool, last_export_ms: u64) -> Duration {
+    if !edge_outbox {
+        return Duration::from_millis(SAVE_INTERVAL_MIN_MS);
+    }
+    let scaled = last_export_ms.saturating_mul(SAVE_INTERVAL_EXPORT_SCALE);
+    Duration::from_millis(scaled.clamp(SAVE_INTERVAL_MIN_MS, SAVE_INTERVAL_MAX_MS))
+}
 
 pub(crate) struct ChatPersistence {
     doc: Weak<SessionDoc>,
@@ -18,6 +32,11 @@ pub(crate) struct ChatPersistence {
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
     urgent: AtomicBool,
+    /// Refreshed on the blocking flush. The async loop only reads the atomic:
+    /// the marker query must not occupy a Tokio worker.
+    edge_outbox: AtomicBool,
+    /// Wall time of the last `export_snapshot`, in milliseconds.
+    last_export_ms: AtomicU64,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     /// Seeded from the store, then set by the first verified write: cursor
@@ -51,6 +70,8 @@ impl ChatPersistence {
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            edge_outbox: AtomicBool::new(false),
+            last_export_ms: AtomicU64::new(0),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             cursor_verified: AtomicBool::new(verified),
@@ -81,6 +102,15 @@ impl ChatPersistence {
         self.snapshot_bytes.load(Ordering::Relaxed)
     }
 
+    /// Edge docs wait `clamp(last_export_ms * 50, 1s, 10s)`. Local-only docs
+    /// stay at 1s: the snapshot is their only durability.
+    fn save_interval(&self) -> Duration {
+        scaled_save_interval(
+            self.edge_outbox.load(Ordering::Relaxed),
+            self.last_export_ms.load(Ordering::Relaxed),
+        )
+    }
+
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
         self.cursor.fetch_max(cursor, Ordering::AcqRel);
         self.dirty(immediate);
@@ -107,7 +137,9 @@ impl ChatPersistence {
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
         while rx.recv().await.is_some() {
-            let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
+            let Some(this) = weak.upgrade() else { return };
+            let deadline = tokio::time::Instant::now() + this.save_interval();
+            drop(this);
             loop {
                 let Some(this) = weak.upgrade() else { return };
                 let urgent = this.urgent.swap(false, Ordering::AcqRel);
@@ -159,24 +191,32 @@ impl ChatPersistence {
             // Never read the cursor AFTER exporting: a concurrent import
             // could then label an older snapshot with a newer cursor.
             let cursor = self.cursor.load(Ordering::Acquire);
+            let edge = self
+                .store
+                .chat_outbox_initialized(&self.chat_id)
+                .unwrap_or(false);
+            self.edge_outbox.store(edge, Ordering::Relaxed);
             #[cfg(test)]
             if let Some(hook) = self.before_export.lock().unwrap().take() {
                 hook();
             }
-            let result = doc
-                .export_snapshot()
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
-                    self.store
-                        .save_verified_snapshot_with_cursor(
-                            &self.chat_id,
-                            &bytes,
-                            cursor,
-                            super::chat2_host::CHAT2_DOC_EPOCH,
-                        )
-                        .map_err(|e| e.to_string())
-                });
+            let export_started = std::time::Instant::now();
+            let exported = doc.export_snapshot().map_err(|e| e.to_string());
+            self.last_export_ms.store(
+                u64::try_from(export_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            let result = exported.and_then(|bytes| {
+                self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
+                self.store
+                    .save_verified_snapshot_with_cursor(
+                        &self.chat_id,
+                        &bytes,
+                        cursor,
+                        super::chat2_host::CHAT2_DOC_EPOCH,
+                    )
+                    .map_err(|e| e.to_string())
+            });
             match result {
                 Ok(()) => {
                     #[cfg(test)]
@@ -432,5 +472,136 @@ mod tests {
         );
         persistence.flush_sync();
         assert_eq!(store.snapshot_cursor("whale").unwrap(), 2);
+    }
+
+    #[test]
+    fn adaptive_interval_scales_with_doc_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        for id in ["small", "large"] {
+            store.initialize_chat_outbox(id, &[]).unwrap();
+        }
+        let small_doc = Arc::new(SessionDoc::init("small").unwrap());
+        small_doc.doc().get_map("t").insert("k", "v").unwrap();
+        small_doc.doc().commit();
+        let small = ChatPersistence::new(&small_doc, store.clone(), "small".into(), 0);
+        small.dirty(true);
+
+        let large_doc = Arc::new(SessionDoc::init("large").unwrap());
+        large_doc
+            .doc()
+            .get_map("t")
+            .insert("blob", "x".repeat(2 * 1024 * 1024).as_str())
+            .unwrap();
+        large_doc.doc().commit();
+        let large = ChatPersistence::new(&large_doc, store.clone(), "large".into(), 0);
+        large.dirty(true);
+
+        let small_ms = small.last_export_ms.load(Ordering::Relaxed);
+        let large_ms = large.last_export_ms.load(Ordering::Relaxed);
+        assert!(
+            large.snapshot_bytes() > small.snapshot_bytes(),
+            "large {} bytes, small {} bytes",
+            large.snapshot_bytes(),
+            small.snapshot_bytes()
+        );
+        assert!(
+            large_ms >= small_ms,
+            "larger doc exported in {large_ms} ms, small in {small_ms} ms"
+        );
+        assert!(small.edge_outbox.load(Ordering::Relaxed));
+        assert!(large.edge_outbox.load(Ordering::Relaxed));
+        assert_eq!(
+            small.save_interval(),
+            super::scaled_save_interval(true, small_ms)
+        );
+        assert_eq!(
+            large.save_interval(),
+            super::scaled_save_interval(true, large_ms)
+        );
+        assert!(large.save_interval() >= small.save_interval());
+        assert!(large.save_interval() >= Duration::from_secs(1));
+        assert!(large.save_interval() <= Duration::from_secs(10));
+        // The scale, independent of how fast this machine exports.
+        assert_eq!(super::scaled_save_interval(true, 0), Duration::from_secs(1));
+        assert_eq!(
+            super::scaled_save_interval(true, 20),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            super::scaled_save_interval(true, 100),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::scaled_save_interval(true, 200),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            super::scaled_save_interval(true, 10_000),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            super::scaled_save_interval(false, 10_000),
+            Duration::from_secs(1),
+            "a local-only doc keeps the 1s floor"
+        );
+
+        let local_doc = Arc::new(SessionDoc::init("local").unwrap());
+        local_doc
+            .doc()
+            .get_map("t")
+            .insert("blob", "x".repeat(2 * 1024 * 1024).as_str())
+            .unwrap();
+        local_doc.doc().commit();
+        let local = ChatPersistence::new(&local_doc, store, "local".into(), 0);
+        local.dirty(true);
+        assert!(!local.edge_outbox.load(Ordering::Relaxed));
+        assert_eq!(local.save_interval(), Duration::from_secs(1));
+    }
+
+    /// Virtual clock: an edge doc whose last export took 100 ms waits 5 s.
+    /// A local-only doc with the same export cost still waits 1 s.
+    #[tokio::test(start_paused = true)]
+    async fn edge_outbox_debounce_uses_the_scaled_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        store.initialize_chat_outbox("edge", &[]).unwrap();
+        let edge_doc = Arc::new(SessionDoc::init("edge").unwrap());
+        let edge = ChatPersistence::new(&edge_doc, store.clone(), "edge".into(), 0);
+        // A prior export that took 100 ms → 5 s. The marker is already set.
+        edge.edge_outbox.store(true, Ordering::Relaxed);
+        edge.last_export_ms.store(100, Ordering::Relaxed);
+
+        let local_doc = Arc::new(SessionDoc::init("local").unwrap());
+        let local = ChatPersistence::new(&local_doc, store, "local".into(), 0);
+        local.last_export_ms.store(100, Ordering::Relaxed);
+
+        local.dirty(false);
+        edge.dirty(false);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_writes(&local, 1).await;
+        assert_eq!(
+            edge.writes.load(Ordering::Relaxed),
+            0,
+            "edge interval is 5s"
+        );
+        tokio::time::advance(Duration::from_millis(3_990)).await;
+        assert_eq!(edge.writes.load(Ordering::Relaxed), 0);
+        tokio::time::advance(Duration::from_millis(20)).await;
+        wait_for_writes(&edge, 1).await;
+    }
+
+    async fn wait_for_writes(persistence: &ChatPersistence, n: usize) {
+        let started = std::time::Instant::now();
+        while persistence.writes.load(Ordering::Relaxed) < n {
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("snapshot flush did not finish");
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

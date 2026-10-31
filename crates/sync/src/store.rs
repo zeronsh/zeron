@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 /// Errors surfaced by [`DocsStore`].
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +96,11 @@ const VACUUM_MIN_FREE_DENOMINATOR: i64 = 4;
 /// connection holds a lock.
 const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Negative `cache_size` is kibibytes: 8 MiB on each connection.
+const CACHE_SIZE_KIB: i64 = -8192;
+/// 256 MiB. Large snapshot reads stay off the page cache.
+const MMAP_SIZE_BYTES: i64 = 268_435_456;
+
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
 /// Holds warm-open doc snapshots (the DO room is authoritative; these make
@@ -103,6 +108,9 @@ const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// that gives command execution mark-BEFORE-execute idempotence.
 pub struct DocsStore {
     conn: Mutex<Connection>,
+    /// WAL reader. Each call is its own statement, so a committed write is
+    /// visible on the next read, and reads do not take the writer mutex.
+    reader: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
     pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -118,6 +126,7 @@ impl DocsStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        tune_connection(&conn)?;
         conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
         migrate(&mut conn)?;
         // Best-effort hygiene must never stall boot behind another connection.
@@ -125,10 +134,14 @@ impl DocsStore {
         // Only the cheap WAL truncate here: open sits on boot paths (engine
         // assembly, the iOS client), and a VACUUM's cost is linear in the
         // live size. Callers run `reclaim_free_space` off those paths.
+        // The reader opens afterwards: a live reader would make this
+        // truncate report busy.
         checkpoint_truncate(&conn, &path, "open");
         conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
+        let reader = open_reader(&path)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            reader: Mutex::new(reader),
             failed_publications: Mutex::new(HashSet::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -171,7 +184,7 @@ impl DocsStore {
     /// Admission/lifetime checks must not copy the pending payloads.
     pub fn has_pending_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
         store_blocking(|| {
-            Ok(self.conn().query_row(
+            Ok(self.reader().query_row(
                 "SELECT EXISTS(SELECT 1 FROM chat_outbox WHERE doc_id=?1)",
                 params![doc_id],
                 |row| row.get(0),
@@ -183,7 +196,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn
             .prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 ORDER BY ordinal")?;
         Ok(stmt
@@ -214,7 +227,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn.prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=1 ORDER BY ordinal")?;
         Ok(stmt
             .query_map(params![doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -243,7 +256,7 @@ impl DocsStore {
 
     fn chat_outbox_initialized_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         Ok(self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM chat_outbox_initialized WHERE doc_id=?1",
                 params![doc_id],
@@ -293,7 +306,7 @@ impl DocsStore {
 
     fn load_snapshot_blocking(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let bytes = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT bytes FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -389,7 +402,7 @@ impl DocsStore {
     pub fn snapshot_cursor(&self, doc_id: &str) -> Result<u64, StoreError> {
         store_blocking(|| {
             Ok(self
-                .conn()
+                .reader()
                 .query_row(
                     "SELECT COALESCE(cursor, 0) FROM snapshots WHERE doc_id = ?1",
                     params![doc_id],
@@ -406,7 +419,7 @@ impl DocsStore {
 
     fn snapshot_cursor_verified_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         Ok(self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT cursor_verified FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -429,7 +442,7 @@ impl DocsStore {
     pub fn snapshot_epoch(&self, doc_id: &str) -> Result<u32, StoreError> {
         store_blocking(|| {
             Ok(self
-                .conn()
+                .reader()
                 .query_row(
                     "SELECT COALESCE(epoch, 0) FROM snapshots WHERE doc_id = ?1",
                     params![doc_id],
@@ -445,7 +458,7 @@ impl DocsStore {
         doc_id: &str,
     ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
         let row = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT bytes, cursor, epoch FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -491,7 +504,7 @@ impl DocsStore {
 
     fn has_snapshot_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         let hit = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -508,7 +521,7 @@ impl DocsStore {
     }
 
     fn processed_commands_blocking(&self) -> Result<Vec<(String, i64)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn.prepare("SELECT command_id, processed_at FROM processed_commands")?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -544,7 +557,7 @@ impl DocsStore {
 
     fn is_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
         let hit = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM processed_commands WHERE command_id = ?1",
                 params![command_id],
@@ -618,6 +631,31 @@ impl DocsStore {
         // connection itself is still usable.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Read connection. Mutations and maintenance (`reclaim_free_space`,
+    /// checkpoint) stay on [`Self::conn`].
+    pub(crate) fn reader(&self) -> MutexGuard<'_, Connection> {
+        self.reader.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// `temp_store`, page cache, and mmap. Per connection; not a schema change.
+/// `synchronous` is left as the caller set it.
+fn tune_connection(conn: &Connection) -> Result<(), StoreError> {
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB)?;
+    conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)?;
+    Ok(())
+}
+
+fn open_reader(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    tune_connection(&conn)?;
+    conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
+    Ok(conn)
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -888,6 +926,153 @@ mod tests {
         );
         assert!(store.is_processed("cmd-1").unwrap());
         assert!(!store.mark_processed("cmd-1").unwrap());
+    }
+
+    fn pragma_i64(conn: &rusqlite::Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn writer_and_reader_apply_cache_pragmas_without_changing_synchronous() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let writer = store.conn();
+        let reader = store.reader();
+        for conn in [&*writer, &*reader] {
+            assert_eq!(pragma_i64(conn, "temp_store"), 2, "MEMORY");
+            assert_eq!(pragma_i64(conn, "cache_size"), CACHE_SIZE_KIB);
+            assert_eq!(pragma_i64(conn, "mmap_size"), MMAP_SIZE_BYTES);
+        }
+        assert_eq!(pragma_i64(&writer, "synchronous"), 1, "NORMAL stays");
+        let journal: String = writer
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert!(journal.eq_ignore_ascii_case("wal"));
+        assert!(reader.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+        assert!(!writer.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+    }
+
+    #[test]
+    fn reader_sees_committed_writes_while_a_writer_transaction_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        store
+            .save_snapshot_with_cursor("chat", b"committed", 7, 2)
+            .unwrap();
+        store.mark_processed("cmd-1").unwrap();
+        store.initialize_chat_outbox("chat", &[]).unwrap();
+        store
+            .enqueue_chat_update("chat", "batch", b"bytes")
+            .unwrap();
+        store.reject_chat_update("chat", "batch").unwrap();
+        store.schedule_sync_job("chat", "wake").unwrap();
+
+        let holder = store.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel::<()>();
+        let holding = std::thread::spawn(move || {
+            let mut conn = holder.conn();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
+                params!["chat", vec![9u8; 20 * 1024 * 1024], 1i64],
+            )
+            .unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            tx.commit().unwrap();
+            commit_tx.send(()).unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let reader_store = store.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let snapshot = reader_store.load_snapshot("chat").unwrap();
+            let with_cursor = reader_store.load_snapshot_with_cursor("chat").unwrap();
+            let cursor = reader_store.snapshot_cursor("chat").unwrap();
+            let epoch = reader_store.snapshot_epoch("chat").unwrap();
+            let verified = reader_store.snapshot_cursor_verified("chat").unwrap();
+            let has = reader_store.has_snapshot("chat").unwrap();
+            let processed = reader_store.is_processed("cmd-1").unwrap();
+            let missing = reader_store.is_processed("other").unwrap();
+            let ledger = reader_store.processed_commands().unwrap();
+            let outbox = reader_store.chat_outbox_initialized("chat").unwrap();
+            let pending = reader_store.pending_chat_updates("chat").unwrap();
+            let has_pending = reader_store.has_pending_chat_updates("chat").unwrap();
+            let rejected = reader_store.rejected_chat_updates("chat").unwrap();
+            let jobs = reader_store.pending_sync_jobs("wake", "", 10).unwrap();
+            done_tx
+                .send((
+                    started.elapsed(),
+                    snapshot,
+                    with_cursor,
+                    cursor,
+                    epoch,
+                    verified,
+                    has,
+                    processed,
+                    missing,
+                    ledger,
+                    outbox,
+                    pending,
+                    has_pending,
+                    rejected,
+                    jobs,
+                ))
+                .unwrap();
+        });
+        let read = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reads blocked on the writer transaction");
+        release_tx.send(()).unwrap();
+        holding.join().unwrap();
+        reading.join().unwrap();
+        commit_rx.recv().unwrap();
+
+        let (
+            elapsed,
+            snapshot,
+            with_cursor,
+            cursor,
+            epoch,
+            verified,
+            has,
+            processed,
+            missing,
+            ledger,
+            outbox,
+            pending,
+            has_pending,
+            rejected,
+            jobs,
+        ) = read;
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "read took {elapsed:?} behind a 20 MB open upsert"
+        );
+        assert_eq!(snapshot.as_deref(), Some(&b"committed"[..]));
+        assert_eq!(with_cursor, Some((b"committed".to_vec(), 7, 2)));
+        assert_eq!(cursor, 7);
+        assert_eq!(epoch, 2);
+        assert!(!verified);
+        assert!(has);
+        assert!(processed);
+        assert!(!missing);
+        assert!(ledger.iter().any(|(id, _)| id == "cmd-1"));
+        assert!(outbox);
+        assert_eq!(pending, vec![("batch".into(), b"bytes".to_vec())]);
+        assert!(has_pending);
+        assert_eq!(rejected, pending);
+        assert_eq!(jobs, vec!["chat".to_string()]);
+
+        let committed = store.load_snapshot("chat").unwrap().unwrap();
+        assert_eq!(committed.len(), 20 * 1024 * 1024);
+        assert!(committed.iter().all(|byte| *byte == 9));
     }
 }
 
