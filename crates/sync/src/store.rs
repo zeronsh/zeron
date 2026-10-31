@@ -2,7 +2,7 @@
 //! processed-command ledger (ARCHITECTURE §2 command plane: entries are marked
 //! processed BEFORE execution so a crash can never double-execute a command).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -113,6 +113,9 @@ pub struct DocsStore {
     /// visible on the next read, and reads do not take the writer mutex.
     reader: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
+    // Retain failed rows in submission order. Every insertion path drains a
+    // chat's failed prefix before allowing a later row to take an ordinal.
+    failed_updates: Mutex<HashMap<String, Vec<(String, Vec<u8>)>>>,
     /// Write transactions the outbox has taken: one per [`Self::enqueue_chat_updates`]
     /// batch, one per [`Self::enqueue_chat_update`] row.
     outbox_write_txs: AtomicU64,
@@ -152,6 +155,7 @@ impl DocsStore {
             conn: Mutex::new(conn),
             reader: Mutex::new(reader),
             failed_publications: Mutex::new(HashSet::new()),
+            failed_updates: Mutex::new(HashMap::new()),
             outbox_write_txs: AtomicU64::new(0),
             snapshot_barriers: Mutex::new(Vec::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -174,16 +178,39 @@ impl DocsStore {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
+        let mut failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
-        let result = self.conn().execute(
-            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-            params![doc_id, batch_id, bytes],
-        );
+        let result = (|| {
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            if let Some(prefix) = failed.get(doc_id) {
+                for (id, bytes) in prefix {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+                        params![doc_id, id, bytes],
+                    )?;
+                }
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+                params![doc_id, batch_id, bytes],
+            )?;
+            tx.commit()
+        })();
         if result.is_err() {
+            let prefix = failed.entry(doc_id.to_string()).or_default();
+            if !prefix.iter().any(|(id, _)| id == batch_id) {
+                prefix.push((batch_id.to_string(), bytes.to_vec()));
+            }
             self.failed_publications
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(doc_id.to_string());
+        } else {
+            failed.remove(doc_id);
         }
         result?;
         Ok(())
@@ -205,6 +232,14 @@ impl DocsStore {
         &self,
         items: &[(&str, &str, &[u8])],
     ) -> Result<(), StoreError> {
+        let failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Fall back to the ordered single-row path if any chat has a gap.
+        if items.iter().any(|(doc, _, _)| failed.contains_key(*doc)) {
+            return Err(std::io::Error::other("outbox has an earlier failed row").into());
+        }
         self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -559,6 +594,10 @@ impl DocsStore {
     }
 
     fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
+        let mut failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
@@ -572,6 +611,7 @@ impl DocsStore {
             params![doc_id],
         )?;
         tx.commit()?;
+        failed.remove(doc_id);
         Ok(())
     }
 
@@ -1078,6 +1118,34 @@ mod tests {
         store.enqueue_chat_update("good", "g1", b"1").unwrap();
         assert!(store.enqueue_chat_update("bad", "poison", b"2").is_err());
         assert_eq!(store.pending_chat_updates("good").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn later_rows_cannot_overtake_a_failed_row_even_across_retry_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER poison BEFORE INSERT ON chat_outbox WHEN NEW.batch_id='first' BEGIN SELECT RAISE(FAIL,'injected'); END;").unwrap();
+        assert!(store.enqueue_chat_update("a", "first", b"1").is_err());
+        assert!(
+            store
+                .enqueue_chat_updates(&[("a", "second", b"2")])
+                .is_err()
+        );
+        assert!(store.enqueue_chat_update("a", "second", b"2").is_err());
+        store.enqueue_chat_update("b", "other", b"3").unwrap();
+        assert!(store.pending_chat_updates("a").unwrap().is_empty());
+        store.conn().execute_batch("DROP TRIGGER poison;").unwrap();
+        // A client may retry the later row before the supervisor retries first.
+        store.enqueue_chat_update("a", "second", b"2").unwrap();
+        let ids: Vec<_> = store
+            .pending_chat_updates("a")
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["first", "second"]);
+        store.enqueue_chat_update("a", "first", b"1").unwrap();
+        assert_eq!(store.pending_chat_updates("a").unwrap().len(), 2);
     }
 
     #[test]
