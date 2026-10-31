@@ -26,7 +26,6 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use zeron_proto::AgentEvent;
 
@@ -61,10 +60,6 @@ struct ChatState {
     next_send: u64,
     ready: BTreeMap<u64, ReadyLine>,
     loaded: bool,
-    /// Hash of the last `AvailableCommands` recorded for this chat. `None` until
-    /// seeded from the file or the first record.
-    commands_hash: Option<[u8; 32]>,
-    commands_seq: u64,
 }
 
 impl ChatState {
@@ -74,8 +69,6 @@ impl ChatState {
             next_send: 1,
             ready: BTreeMap::new(),
             loaded: false,
-            commands_hash: None,
-            commands_seq: 0,
         }
     }
 }
@@ -132,10 +125,6 @@ pub struct RunJournal {
     gate: Mutex<()>,
     tx: Mutex<Option<SyncSender<Job>>>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Seqs whose `write_all` failed. The writer appends here; publishers drain
-    /// their chat's entries so a failed `AvailableCommands` record is not treated
-    /// as already on disk.
-    failed_writes: Arc<Mutex<Vec<(String, u64)>>>,
 }
 
 impl RunJournal {
@@ -143,19 +132,16 @@ impl RunJournal {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let (tx, rx) = mpsc::sync_channel(JOURNAL_QUEUE);
-        let failed_writes = Arc::new(Mutex::new(Vec::new()));
-        let failed = Arc::clone(&failed_writes);
         let writer_dir = dir.clone();
         let writer = std::thread::Builder::new()
             .name("zeron-journal".into())
-            .spawn(move || writer_loop(writer_dir, rx, failed))?;
+            .spawn(move || writer_loop(writer_dir, rx))?;
         Ok(Self {
             dir,
             chats: Mutex::new(HashMap::new()),
             gate: Mutex::new(()),
             tx: Mutex::new(Some(tx)),
             writer: Mutex::new(Some(writer)),
-            failed_writes,
         })
     }
 
@@ -263,20 +249,12 @@ impl RunJournal {
     }
 
     /// Append one event; returns its journal seq. Waits until `write_all` returns.
-    /// An `AvailableCommands` list identical to the last one recorded for this
-    /// chat is not written again; the returned seq is that earlier record.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
-        self.record(chat_id, event, true).map(|(seq, _)| seq)
+        self.record(chat_id, event, true)
     }
 
-    /// Queue `event` without waiting for the write. `recorded` is false when an
-    /// unchanged `AvailableCommands` list was skipped; `seq` is then the copy
-    /// already on disk (and nothing is broadcast for it).
-    pub(crate) fn enqueue(
-        &self,
-        chat_id: &str,
-        event: &AgentEvent,
-    ) -> Result<(u64, bool), JournalError> {
+    /// Queue `event` without waiting for the write.
+    pub(crate) fn enqueue(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
         self.record(chat_id, event, false)
     }
 
@@ -363,61 +341,19 @@ impl RunJournal {
         Ok(())
     }
 
-    fn record(
-        &self,
-        chat_id: &str,
-        event: &AgentEvent,
-        wait: bool,
-    ) -> Result<(u64, bool), JournalError> {
-        let proposed = match event {
-            AgentEvent::AvailableCommands { commands } => hash_commands(commands),
-            _ => None,
-        };
-        // Seed the hash from disk once per process, outside the gate: the scan
-        // can walk a large file, and it must not call `events_rev` (that flushes).
-        if proposed.is_some() {
-            let state = self.chat(chat_id);
-            let mut chat = lock_mutex(&state);
-            self.apply_failed(chat_id, &mut chat);
-            if chat.commands_hash.is_none() {
-                drop(chat);
-                self.flush()?;
-            }
-        }
-
+    fn record(&self, chat_id: &str, event: &AgentEvent, wait: bool) -> Result<u64, JournalError> {
         let _gate = lock_mutex(&self.gate);
         let state = self.chat(chat_id);
         let mut chat = lock_mutex(&state);
         self.ensure_loaded(chat_id, &mut chat)?;
-        self.apply_failed(chat_id, &mut chat);
-        if let Some(hash) = proposed {
-            if chat.commands_hash.is_none()
-                && let Some((found, found_seq)) = commands_on_disk(&self.path_for(chat_id))?
-            {
-                chat.commands_hash = Some(found);
-                chat.commands_seq = found_seq;
-            }
-            if chat.commands_hash == Some(hash) {
-                return Ok((chat.commands_seq, false));
-            }
-        }
-
         let seq = chat.next_seq;
         chat.next_seq = seq + 1;
-        if let Some(hash) = proposed {
-            chat.commands_hash = Some(hash);
-            chat.commands_seq = seq;
-        }
         drop(chat);
 
         let line = match serde_json::to_vec(&JournalLineRef { seq, event }) {
             Ok(line) => line,
             Err(err) => {
                 let mut chat = lock_mutex(&state);
-                if proposed.is_some() && chat.commands_seq == seq {
-                    chat.commands_hash = None;
-                    chat.commands_seq = 0;
-                }
                 chat.ready.insert(
                     seq,
                     ReadyLine {
@@ -453,20 +389,12 @@ impl RunJournal {
 
         if let Some(rx) = ack_rx {
             match rx.recv() {
-                Ok(Ok(())) => Ok((seq, true)),
-                Ok(Err(err)) => {
-                    let mut chat = lock_mutex(&state);
-                    if chat.commands_seq == seq {
-                        chat.commands_hash = None;
-                        chat.commands_seq = 0;
-                    }
-                    self.apply_failed(chat_id, &mut chat);
-                    Err(err)
-                }
+                Ok(Ok(())) => Ok(seq),
+                Ok(Err(err)) => Err(err),
                 Err(_) => Err(writer_stopped()),
             }
         } else {
-            Ok((seq, true))
+            Ok(seq)
         }
     }
 
@@ -487,22 +415,6 @@ impl RunJournal {
         chat.next_send = next_seq;
         chat.loaded = true;
         Ok(())
-    }
-
-    /// Drop this chat's failed write seqs. A failed `AvailableCommands` record
-    /// must not suppress the next copy of that list.
-    fn apply_failed(&self, chat_id: &str, chat: &mut ChatState) {
-        let mut failed = lock_mutex(&self.failed_writes);
-        failed.retain(|(id, seq)| {
-            if id != chat_id {
-                return true;
-            }
-            if chat.commands_seq == *seq {
-                chat.commands_hash = None;
-                chat.commands_seq = 0;
-            }
-            false
-        });
     }
 
     /// Send every ready line from `next_send` upward, in seq order.
@@ -566,27 +478,7 @@ fn journal_file(dir: &Path, chat_id: &str) -> PathBuf {
     dir.join(format!("{}.jsonl", sanitize_id(chat_id)))
 }
 
-fn hash_commands(commands: &[zeron_proto::SlashCommand]) -> Option<[u8; 32]> {
-    let bytes = serde_json::to_vec(commands).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Some(hasher.finalize().into())
-}
-
-/// Newest `AvailableCommands` already in the file, if any. Direct tail walk:
-/// `RunJournal::events_rev` would flush, and this runs while the caller holds
-/// the chat lock.
-fn commands_on_disk(path: &Path) -> Result<Option<([u8; 32], u64)>, JournalError> {
-    for item in RevEvents::open(path)? {
-        let (seq, event) = item?;
-        if let AgentEvent::AvailableCommands { commands } = event {
-            return Ok(hash_commands(&commands).map(|hash| (hash, seq)));
-        }
-    }
-    Ok(None)
-}
-
-fn writer_loop(dir: PathBuf, rx: Receiver<Job>, failed: Arc<Mutex<Vec<(String, u64)>>>) {
+fn writer_loop(dir: PathBuf, rx: Receiver<Job>) {
     let mut open = HashMap::new();
     let mut clock = 0u64;
     let mut last_error: Option<String> = None;
@@ -623,7 +515,7 @@ fn writer_loop(dir: PathBuf, rx: Receiver<Job>, failed: Arc<Mutex<Vec<(String, u
                         Err(_) => break,
                     }
                 }
-                write_batch(&dir, &mut open, &mut clock, &mut last_error, &failed, batch);
+                write_batch(&dir, &mut open, &mut clock, &mut last_error, batch);
             }
             other => {
                 if handle_control(&mut open, &mut last_error, other) {
@@ -663,7 +555,6 @@ fn write_batch(
     open: &mut HashMap<String, OpenJournal>,
     clock: &mut u64,
     last_error: &mut Option<String>,
-    failed: &Mutex<Vec<(String, u64)>>,
     batch: Vec<Job>,
 ) {
     let mut order = Vec::new();
@@ -695,10 +586,6 @@ fn write_batch(
             tracing::error!(chat = %chat_id, error = %err, "journal write failed");
             *last_error = Some(err.to_string());
             open.remove(&chat_id);
-            let mut failed = lock_mutex(failed);
-            for (seq, _, _) in &lines {
-                failed.push((chat_id.clone(), *seq));
-            }
         }
         for (_, _, ack) in lines {
             let Some(ack) = ack else { continue };
@@ -1479,8 +1366,7 @@ mod tests {
         {
             let journal = RunJournal::open(dir.path()).unwrap();
             for i in 0..100 {
-                let (seq, recorded) = journal.enqueue("chat-1", &text(&format!("n{i}"))).unwrap();
-                assert!(recorded);
+                let seq = journal.enqueue("chat-1", &text(&format!("n{i}"))).unwrap();
                 assert_eq!(seq, i as u64 + 1);
             }
         }
@@ -1539,62 +1425,21 @@ mod tests {
     }
 
     #[test]
-    fn available_commands_skip_unchanged_lists_and_readers_see_the_latest() {
+    fn repeated_commands_are_recorded_after_restart_and_visible_to_cursor_replay() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("chat-1.jsonl");
         let journal = RunJournal::open(dir.path()).unwrap();
         assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 1);
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 1);
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(journal.append("chat-1", &text("turn")).unwrap(), 2);
-        assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 1);
-        let changed = journal.append("chat-1", &commands("test")).unwrap();
-        assert_eq!(changed, 3);
-
-        let replay = journal.replay("chat-1", 0).unwrap();
-        assert!(matches!(
-            &replay.last().unwrap().1,
-            AgentEvent::AvailableCommands { commands } if commands[0].name == "test"
-        ));
-        let rev = journal
-            .events_rev("chat-1")
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(matches!(
-            &rev[0].1,
-            AgentEvent::AvailableCommands { commands } if commands[0].name == "test"
-        ));
         drop(journal);
 
         let journal = RunJournal::open(dir.path()).unwrap();
-        let before = std::fs::read(&path).unwrap();
-        assert_eq!(journal.append("chat-1", &commands("test")).unwrap(), 3);
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-
-        // Copies already in the file stay put; a new list is appended after them.
-        let first = serde_json::to_string(&JournalLine {
-            seq: 1,
-            event: commands("old"),
-        })
-        .unwrap();
-        let second = serde_json::to_string(&JournalLine {
-            seq: 2,
-            event: commands("old"),
-        })
-        .unwrap();
-        let original = format!("{first}\n{second}\n");
-        let archived_path = dir.path().join("archived.jsonl");
-        std::fs::write(&archived_path, &original).unwrap();
-        assert_eq!(journal.append("archived", &commands("old")).unwrap(), 2);
-        assert_eq!(std::fs::read(&archived_path).unwrap(), original.as_bytes());
-        assert_eq!(journal.append("archived", &commands("new")).unwrap(), 3);
+        assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 3);
+        let replay = journal.replay("chat-1", 2).unwrap();
         assert!(
-            std::fs::read(&archived_path)
-                .unwrap()
-                .starts_with(original.as_bytes())
+            matches!(&replay[..], [(3, AgentEvent::AvailableCommands { commands })] if commands[0].name == "build")
         );
+        assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 4);
+        assert_eq!(journal.replay("chat-1", 0).unwrap().len(), 4);
     }
 
     #[test]

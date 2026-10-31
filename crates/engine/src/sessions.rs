@@ -2007,11 +2007,11 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
-        let (seq, recorded) = match self.journal.enqueue(chat_id, event) {
-            Ok(recorded) => recorded,
+        let seq = match self.journal.enqueue(chat_id, event) {
+            Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
-                (0, true)
+                0
             }
         };
         // SessionStarted carries the resume id; Done closes the turn. Both have
@@ -2028,9 +2028,8 @@ impl Inner {
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
-        // An unchanged AvailableCommands list was not appended; subscribers already
-        // have that seq. With no receivers there is nothing to clone for.
-        if recorded && let Some(hub) = lock(&self.hubs).get(chat_id) {
+        // With no receivers there is nothing to clone for.
+        if let Some(hub) = lock(&self.hubs).get(chat_id) {
             if hub.receiver_count() > 0 {
                 let _ = hub.send(JournaledEvent {
                     seq,
