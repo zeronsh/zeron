@@ -483,7 +483,7 @@ fn make_virtual_conn(
 }
 
 // The relay shares the engine service with IPC, so enforce local-only methods here.
-struct RelayService(Arc<dyn RpcService>);
+pub(crate) struct RelayService(pub(crate) Arc<dyn RpcService>);
 #[async_trait::async_trait]
 impl RpcService for RelayService {
     async fn handle(
@@ -755,7 +755,7 @@ impl DeviceLink {
         });
 
         Self {
-            client: Arc::new(RpcClient::new(out_tx, in_rx)),
+            client: Arc::new(RpcClient::new(out_tx, in_rx).for_relay()),
             closed_rx,
             pump,
         }
@@ -1289,6 +1289,16 @@ mod counters_transport_tests {
             crate::RpcReply::value(&true)
         }
     }
+    #[tokio::test]
+    async fn engine_counters_relay_outbound_refused() {
+        let (out, mut wire) = mpsc::channel(4);
+        let (_in_tx, inbound) = mpsc::channel(4);
+        let client = RpcClient::new(out, inbound).for_relay();
+        assert!(client.call(crate::methods::ENGINE_COUNTERS, serde_json::json!({})).await.is_err());
+        assert!(client.subscribe(crate::methods::ENGINE_COUNTERS, serde_json::json!({})).await.is_err());
+        assert!(wire.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn engine_counters_relay_refused() {
         let (out_tx, mut out_rx) = mpsc::channel(4);

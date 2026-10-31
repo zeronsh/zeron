@@ -156,7 +156,12 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
+                let service = if peer.ip().is_loopback() {
+                    service.clone()
+                } else {
+                    Arc::new(crate::device_room::RelayService(service.clone())) as Arc<dyn RpcService>
+                };
+                tokio::spawn(serve_ws_socket(stream, service, token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");

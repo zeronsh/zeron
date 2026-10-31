@@ -37,6 +37,7 @@ impl Shared {
 /// [`connect_ws`]). Cheap to clone-by-Arc internally; use one per connection.
 pub struct RpcClient {
     out: mpsc::Sender<String>,
+    relay: bool,
     shared: Arc<Shared>,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
@@ -136,6 +137,7 @@ impl RpcClient {
         });
         Self {
             out,
+            relay: false,
             shared,
             next_id: AtomicU64::new(1),
             reader,
@@ -279,7 +281,15 @@ impl RpcClient {
         Ok(subscription)
     }
 
+    pub(crate) fn for_relay(mut self) -> Self {
+        self.relay = true;
+        self
+    }
+
     async fn send(&self, frame: ClientFrame) -> Result<(), RpcError> {
+        if self.relay && frame.method.as_deref() == Some(crate::methods::ENGINE_COUNTERS) {
+            return Err(RpcError::Failed("EngineCounters is IPC-only".into()));
+        }
         let json = serde_json::to_string(&frame)
             .map_err(|e| RpcError::Transport(format!("serialize frame: {e}")))?;
         self.out.send(json).await.map_err(|_| RpcError::Closed)
