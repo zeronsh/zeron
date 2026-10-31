@@ -466,18 +466,34 @@ where
 }
 
 /// Write the `{id, item}` frame for an already serialized item. Byte-for-byte
-/// what `serde_json::to_string(&ServerFrame { id, item: Some(value), .. })`
-/// produces for the same compact `raw` (the frame's fields are `id, ok, err,
-/// item, done` in that order and the unset ones are skipped), without parsing
-/// `raw` into a tree first.
+/// The frame envelope has the same field order and skips as `ServerFrame`;
+/// the item's original key order and numeric spelling are preserved.
 pub(crate) fn item_frame(id: u64, raw: &serde_json::value::RawValue) -> String {
     let raw = raw.get();
-    // ndjson: a frame is one line. Raw bytes that came from a pretty-printing
-    // producer are re-compacted rather than split across lines.
-    if raw.contains(['\n', '\r'])
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
-        && let Ok(compact) = serde_json::to_string(&value)
-    {
+    // RawValue may contain pretty-printed whitespace, including inside nested
+    // raw values. Remove whitespace outside strings without parsing numbers or
+    // objects into Value, which can lose precision, keys, or fail on depth.
+    if raw.contains(['\n', '\r']) {
+        let mut compact = String::with_capacity(raw.len());
+        let mut quoted = false;
+        let mut escaped = false;
+        for ch in raw.chars() {
+            if quoted {
+                compact.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quoted = false;
+                }
+            } else if ch == '"' {
+                quoted = true;
+                compact.push(ch);
+            } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
+                compact.push(ch);
+            }
+        }
         return item_frame_compact(id, &compact);
     }
     item_frame_compact(id, raw)
@@ -498,7 +514,7 @@ pub enum RpcReply {
     Stream(BoxStream<'static, serde_json::Value>),
     /// [`Stream`](Self::Stream) whose items are already serialized: the server
     /// splices each into its frame instead of encoding a `Value` tree. The
-    /// wire bytes are those of the equivalent `Stream` of parsed items.
+    /// decoded items match those of the equivalent `Stream` of parsed items.
     RawStream(BoxStream<'static, Box<serde_json::value::RawValue>>),
 }
 

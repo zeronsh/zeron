@@ -60,6 +60,18 @@ fn item_frame_keeps_one_line_for_pretty_printed_bytes() {
 }
 
 #[test]
+fn pretty_raw_keeps_numbers_duplicates_and_string_escapes() {
+    let pretty =
+        "{\n \"z\": 1e400, \"z\": 123456789012345678901234567890, \"s\": \"a \\\" \\\\\\\" b\"\n}";
+    let frame = item_frame(8, &raw(pretty));
+    assert_eq!(
+        frame,
+        "{\"id\":8,\"item\":{\"z\":1e400,\"z\":123456789012345678901234567890,\"s\":\"a \\\" \\\\\\\" b\"}}"
+    );
+    assert!(!frame.contains(['\n', '\r']));
+}
+
+#[test]
 fn envelope_reads_every_frame_shape_like_server_frame() {
     let lines = [
         r#"{"id":1,"ok":{"a":1}}"#,
