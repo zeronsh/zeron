@@ -42,8 +42,10 @@ const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
 const SCAN_PERIOD_WATCHED: Duration = Duration::from_secs(2);
 const SCAN_PERIOD_IDLE: Duration = Duration::from_secs(10);
 
-fn scan_period(watched: bool) -> Duration {
-    if watched {
+const NEW_LISTENER_WINDOW: Duration = Duration::from_secs(30);
+
+fn scan_period(watched: bool, recent_listener: bool) -> Duration {
+    if watched || recent_listener {
         SCAN_PERIOD_WATCHED
     } else {
         SCAN_PERIOD_IDLE
@@ -356,6 +358,8 @@ impl PreviewService {
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             let mut origins = discovery::Origins::default();
+            let mut previous_listeners = HashSet::new();
+            let mut newest_listener = None;
             loop {
                 let memory = &mut memory;
                 let origins = &mut origins;
@@ -386,7 +390,17 @@ impl PreviewService {
                             return;
                         }
                     };
-                    let (mut servers, probe) = memory.plan(candidates, Instant::now());
+                    let now = Instant::now();
+                    let listeners: HashSet<_> =
+                        candidates.iter().map(|(_, l)| probe_key(l)).collect();
+                    if listeners
+                        .iter()
+                        .any(|key| !previous_listeners.contains(key))
+                    {
+                        newest_listener = Some(now);
+                    }
+                    previous_listeners = listeners;
+                    let (mut servers, probe) = memory.plan(candidates, now);
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
                             let http = discovery::is_http(listener.address).await;
@@ -407,8 +421,10 @@ impl PreviewService {
                     }
                 };
                 tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                let period = scan_period(catalog.watched());
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(period) => {} }
+                let recent = newest_listener
+                    .is_some_and(|time: Instant| time.elapsed() < NEW_LISTENER_WINDOW);
+                let period = scan_period(catalog.watched(), recent);
+                tokio::select! { _ = stop.cancelled() => break, _ = catalog.scan_wake() => {}, _ = tokio::time::sleep(period) => {} }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -545,7 +561,8 @@ mod tests {
     }
     #[test]
     fn an_unwatched_catalog_scans_less_often() {
-        assert_eq!(scan_period(true), Duration::from_secs(2));
-        assert_eq!(scan_period(false), Duration::from_secs(10));
+        assert_eq!(scan_period(true, false), Duration::from_secs(2));
+        assert_eq!(scan_period(false, false), Duration::from_secs(10));
+        assert_eq!(scan_period(false, true), Duration::from_secs(2));
     }
 }

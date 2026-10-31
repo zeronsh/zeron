@@ -20,6 +20,8 @@ struct Inner {
     device_name: String,
     state: Mutex<State>,
     changes: watch::Sender<PreviewSnapshot>,
+    internal_changes: watch::Sender<PreviewSnapshot>,
+    scan_wake: tokio::sync::Notify,
 }
 struct State {
     names: Names,
@@ -208,6 +210,7 @@ impl Catalog {
         }
         verify_used_labels(&mut used_labels, &names);
         let (changes, _) = watch::channel(PreviewSnapshot::default());
+        let (internal_changes, _) = watch::channel(PreviewSnapshot::default());
         Ok(Self(Arc::new(Inner {
             file,
             device_id,
@@ -221,13 +224,23 @@ impl Catalog {
                 used_labels,
             }),
             changes,
+            internal_changes,
+            scan_wake: tokio::sync::Notify::new(),
         })))
     }
     pub fn device_id(&self) -> &str {
         &self.0.device_id
     }
     pub fn subscribe(&self) -> watch::Receiver<PreviewSnapshot> {
-        self.0.changes.subscribe()
+        let receiver = self.0.changes.subscribe();
+        self.0.scan_wake.notify_one();
+        receiver
+    }
+    pub(crate) fn subscribe_internal(&self) -> watch::Receiver<PreviewSnapshot> {
+        self.0.internal_changes.subscribe()
+    }
+    pub(crate) async fn scan_wake(&self) {
+        self.0.scan_wake.notified().await;
     }
     pub(crate) fn watched(&self) -> bool {
         self.0.changes.receiver_count() > 0
@@ -371,14 +384,16 @@ impl Catalog {
             project_name: None,
             remote: false,
         };
-        self.0.changes.send_if_modified(|previous| {
-            if *previous == next {
-                false
-            } else {
-                *previous = next;
-                true
-            }
-        });
+        for changes in [&self.0.changes, &self.0.internal_changes] {
+            changes.send_if_modified(|previous| {
+                if *previous == next {
+                    false
+                } else {
+                    *previous = next.clone();
+                    true
+                }
+            });
+        }
     }
     /// Input has already passed origin attribution and an HTTP handshake probe.
     pub fn replace_local(&self, mut observations: Vec<(PathBuf, Listener)>) -> anyhow::Result<()> {
