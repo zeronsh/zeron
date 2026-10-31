@@ -187,7 +187,7 @@ impl McpSettingsPage {
     }
 
     fn editable(&self, cx: &gpui::App) -> bool {
-        self.engine(cx).is_some() && self.settings.ready().is_some()
+        self.engine(cx).is_some() && self.settings.ready().is_some() && self.save_task.is_none()
     }
 
     /// `GetMcpSettings`.
@@ -237,9 +237,11 @@ impl McpSettingsPage {
             return;
         };
         change(&mut settings.prefs);
+        // A refresh started before this edit must not replace the saved value.
+        self.load_task = None;
         let params = serde_json::to_value(&settings.prefs).unwrap_or_default();
         self.error = None;
-        // A newer edit supersedes the reply to an older one.
+        // Keep controls disabled until the whole preference block is saved.
         self.save_task = Some(cx.spawn(async move |this, cx| {
             let result = call(&engine, methods::SET_MCP_SETTINGS, params).await;
             this.update(cx, |page, cx| {
