@@ -7,7 +7,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use loro::{ExportMode, LoroDoc, LoroList, LoroMap, LoroText, VersionVector};
+use loro::{
+    Container, ExportMode, LoroDoc, LoroList, LoroMap, LoroMovableList, LoroText, ValueOrContainer,
+    VersionVector,
+};
 use zeron_doc::transcript_delta::{diff_transcript, diff_transcript_shared};
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionDoc, SessionMessageEntry,
@@ -169,7 +172,7 @@ impl World {
     }
 
     fn op(&mut self) {
-        match self.rng.below(24) {
+        match self.rng.below(28) {
             0..=2 => {
                 let id = self.fresh_id("m");
                 let role = [MessageRole::User, MessageRole::System][self.rng.below(2)];
@@ -257,6 +260,10 @@ impl World {
                     self.prev = None;
                 }
             }
+            22 => self.edit_continuation(),
+            23 => self.edit_nested(),
+            24 => self.torn_import_reordered(),
+            25 => self.batched_import(),
             _ => {
                 // A reset mid-stream (stale-mirror recovery) is always safe.
                 if self.rng.below(4) == 0 {
@@ -265,6 +272,95 @@ impl World {
                 }
             }
         }
+    }
+
+    fn pick_map(&mut self) -> Option<LoroMap> {
+        let messages = self.a.doc().get_list("messages");
+        if messages.is_empty() {
+            return None;
+        }
+        match messages.get(self.rng.below(messages.len()))? {
+            ValueOrContainer::Container(Container::Map(map)) => Some(map),
+            _ => None,
+        }
+    }
+
+    fn edit_continuation(&mut self) {
+        let Some(map) = self.pick_map() else { return };
+        let root = self.pick_id();
+        if self.rng.below(3) == 0 {
+            map.delete("continuationOf").unwrap();
+        } else {
+            map.insert("continuationOf", root).unwrap();
+        }
+        map.insert("durationMs", self.rng.below(100) as i64)
+            .unwrap();
+        self.a.doc().commit();
+    }
+
+    fn edit_nested(&mut self) {
+        let Some(map) = self.pick_map() else { return };
+        // Movable parts lists are also JSON arrays to the decoder. Their move
+        // and delete diffs must dirty the owning entry, not the messages order.
+        let parts = match map.get("parts") {
+            Some(ValueOrContainer::Container(Container::MovableList(parts))) => parts,
+            _ => {
+                let parts = map
+                    .insert_container("parts", LoroMovableList::new())
+                    .unwrap();
+                for i in 0..3 {
+                    let part = parts.push_container(LoroMap::new()).unwrap();
+                    part.insert("id", format!("nested-{i}")).unwrap();
+                    part.insert("kind", "text").unwrap();
+                    let text = part.insert_container("text", LoroText::new()).unwrap();
+                    text.insert(0, WORDS[i]).unwrap();
+                }
+                parts
+            }
+        };
+        match self.rng.below(4) {
+            0 if parts.len() > 1 => parts.mov(0, parts.len() - 1).unwrap(),
+            1 if !parts.is_empty() => parts.delete(0, 1).unwrap(),
+            _ => {
+                if let Some(ValueOrContainer::Container(Container::Map(part))) = parts.get(0) {
+                    if let Some(ValueOrContainer::Container(Container::Text(text))) =
+                        part.get("text")
+                    {
+                        text.insert(0, self.word()).unwrap();
+                        if text.len_unicode() > 2 {
+                            text.delete(1, 1).unwrap();
+                        }
+                    }
+                    // Unknown nested containers exercise strict parse + salvage.
+                    let extra = part.insert_container("future", LoroMap::new()).unwrap();
+                    extra.insert("value", self.word()).unwrap();
+                }
+            }
+        }
+        self.a.doc().commit();
+    }
+
+    fn batched_import(&mut self) {
+        // Many entry and descendant diffs in a single import, including roots
+        // that arrive after orphan continuations in messages order.
+        let root = self.fresh_id("batch-root");
+        for i in 0..8 {
+            let id = self.fresh_id("batch");
+            let continuation = (i % 2 == 0).then_some(root.as_str());
+            let word = self.word();
+            self.b
+                .push_message(&entry(&id, MessageRole::Assistant, word, continuation))
+                .unwrap();
+        }
+        self.b
+            .push_message(&entry(&root, MessageRole::Assistant, "late root", None))
+            .unwrap();
+        self.ids.push(root);
+        self.sync_b(true);
+    }
+
+    fn torn_import_reordered(&mut self) {
+        self.torn_import_impl(true);
     }
 
     fn grow_live(&mut self) {
@@ -427,6 +523,10 @@ impl World {
     /// The peer builds an entry across several commits and each update is
     /// imported on its own, so the mirror sees every intermediate (torn) state.
     fn torn_import(&mut self) {
+        self.torn_import_impl(false);
+    }
+
+    fn torn_import_impl(&mut self, reorder: bool) {
         let id = self.fresh_id("torn");
         let continuation = self.rng.below(3) == 0;
         let root = self.pick_id();
@@ -459,6 +559,13 @@ impl World {
         stage(self);
         map.insert("status", "complete").unwrap();
         stage(self);
+        if reorder {
+            // Deliver missing-dependency updates first, then close their gaps.
+            for i in (1..stages.len()).rev() {
+                let j = self.rng.below(i + 1);
+                stages.swap(i, j);
+            }
+        }
         for (ix, bytes) in stages.into_iter().enumerate() {
             if ix % 2 == 0 {
                 self.a.doc().import(&bytes).unwrap();
@@ -505,8 +612,56 @@ fn mirror_equals_full_rebuild_over_random_op_sequences() {
     }
 }
 
+/// Fixed regression seeds guarantee the newly added operations run even
+/// when PERF_SEEDS is reduced: regroup edits, nested list/text mutations,
+/// dependency-reordered torn updates, and imports with many diffs.
 #[test]
-fn oracle_catches_a_missed_event_and_recovers() {
+fn seeded_regroup_nested_and_reordered_import_regressions() {
+    for seed in [0xc071, 0x7e57, 0x0de2, 0xba7c] {
+        let mut world = World::new(seed);
+        for (id, root) in [("root", None), ("cont", Some("root")), ("other", None)] {
+            world
+                .a
+                .push_message(&entry(id, MessageRole::Assistant, "original", root))
+                .unwrap();
+            world.ids.push(id.to_owned());
+        }
+        world.check();
+        for _ in 0..12 {
+            world.edit_continuation();
+            world.check();
+            world.edit_nested();
+            world.check();
+        }
+        world.torn_import_reordered();
+        world.check();
+        world.batched_import();
+        world.check();
+    }
+}
+
+#[test]
+fn uncommitted_edits_are_visible_without_committing_them() {
+    let mut world = World::new(0xdec0de);
+    world
+        .a
+        .push_message(&entry("root", MessageRole::User, "old", None))
+        .unwrap();
+    world.check();
+    let map = world.pick_map().unwrap();
+    map.insert("continuationOf", "orphan").unwrap();
+    assert!(world.a.doc().get_pending_txn_len() > 0);
+    world.check();
+    assert!(
+        world.a.doc().get_pending_txn_len() > 0,
+        "refresh must remain read-only"
+    );
+    world.a.doc().commit();
+    world.check();
+}
+
+#[test]
+fn committed_versions_recover_even_without_an_observer() {
     let doc = SessionDoc::init("chat").unwrap();
     let mirror = TranscriptMirror::new().with_verify(Verify::Always);
     for i in 0..5 {
@@ -518,15 +673,59 @@ fn oracle_catches_a_missed_event_and_recovers() {
     doc.set_message_status("m2", MessageStatus::Aborted)
         .unwrap();
     let got = mirror.refresh(&doc);
-    assert_eq!(mirror.mismatches(), 1, "stale mirror is detected");
+    assert_eq!(
+        mirror.mismatches(),
+        0,
+        "version reconciliation catches missed events"
+    );
     assert_eq!(
         got[2].status,
         Some(MessageStatus::Aborted),
         "full result wins"
     );
     let again = mirror.refresh(&doc);
-    assert_eq!(mirror.mismatches(), 1, "the reset mirror rebuilt cleanly");
+    assert_eq!(mirror.mismatches(), 0, "the mirror stays current");
     assert_eq!(again[2].status, Some(MessageStatus::Aborted));
+}
+
+/// Seed 0xd1ff: refresh after a second map changed, before its event is
+/// delivered, with another map already pending. Draining only pending events
+/// silently retains the second map's old Arc in release.
+#[test]
+fn refresh_before_event_delivery_does_not_reuse_changed_arcs() {
+    let mut rng = Xorshift::new(0xd1ff);
+    let doc = Arc::new(SessionDoc::init("chat").unwrap());
+    let mirror = Arc::new(TranscriptMirror::new().with_verify(Verify::Never));
+    for i in 0..3 {
+        doc.push_message(&entry(&format!("m{i}"), MessageRole::User, "old", None))
+            .unwrap();
+    }
+    let before = mirror.refresh(&doc);
+    let delayed = rng.below(3);
+    let other = (delayed + 1) % 3;
+    let captured = Arc::new(Mutex::new(None));
+    let _sub = {
+        let doc = doc.clone();
+        let mirror = mirror.clone();
+        let captured = captured.clone();
+        doc.doc().clone().subscribe_root(Arc::new(move |event| {
+            // Deliberately publish while this event has not reached observe.
+            *captured.lock().unwrap() = Some(mirror.refresh(&doc));
+            mirror.observe(&event);
+        }))
+    };
+    doc.set_message_status(&format!("m{other}"), MessageStatus::Aborted)
+        .unwrap();
+    doc.set_message_status(&format!("m{delayed}"), MessageStatus::Aborted)
+        .unwrap();
+    let got = captured.lock().unwrap().take().unwrap();
+    let expected = join_continuation_entries(doc.read_entries().unwrap());
+    assert_eq!(
+        got.iter().map(|e| (**e).clone()).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(!Arc::ptr_eq(&before[delayed], &got[delayed]));
+    assert_eq!(mirror.mismatches(), 0);
 }
 
 #[test]
