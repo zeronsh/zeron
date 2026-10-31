@@ -43,7 +43,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,17 @@ const INTEREST_LINGER: Duration = Duration::from_secs(30);
 /// under this; a node_modules/vendored tree blows past it. The repair tick
 /// still covers skipped checkouts.
 const MAX_WATCH_DIRS: usize = 8_000;
+/// Byte ceiling for the tracked-change metadata (`--name-status` and `--numstat`
+/// each, or `--raw --numstat` at twice this) and the status listings.
+const MAX_DIFF_METADATA_BYTES: usize = 2 * 1024 * 1024;
+/// Most changed paths the gate stats; past it a capture never vouches for a skip.
+const MAX_GATE_PATHS: usize = 4096;
+/// A file stamped this recently before a capture may still change within the
+/// timestamp's granularity, so the capture's fingerprint is not trusted.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+/// Repair ticks an idle, watched checkout may skip in a row before one runs
+/// its gate anyway, as a safety net for events the OS watcher dropped.
+const REPAIR_FORCE_EVERY: u32 = 10;
 /// `git hash-object -t tree /dev/null` — diff base for repos with no commits yet.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -108,7 +119,7 @@ pub struct DiffSidecar {
 }
 
 /// One bounded atomic snapshot of a checkout's working tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiffSnapshot {
     pub git_status: Option<(Vec<zeron_proto::GitFileStatus>, bool)>,
     pub branch: String,
@@ -153,6 +164,71 @@ struct CheckoutEntry {
     /// walk + FSEvents registration) can block for seconds, so [`add_entry`]
     /// does it off the runtime and attaches the result here once ready.
     watchers: Mutex<Vec<FsWatch>>,
+    /// What the watcher callbacks have reported; see [`WatchSignals`].
+    signals: Arc<WatchSignals>,
+    /// Gate fingerprint of the last successful capture; a matching one skips
+    /// the capture. Cleared whenever the entry's state may have moved under it.
+    gate: Mutex<Option<GateState>>,
+}
+
+/// Watcher health for one checkout, shared with its watch callbacks, so the
+/// repair tick can tell an idle watched checkout from one it must re-check.
+struct WatchSignals {
+    /// Bumped by every watch event that can change the diff.
+    events: AtomicU64,
+    /// `events` as read just before the last successful capture began;
+    /// [`NEVER_CAPTURED`] until one completes. Equal to `events` means nothing
+    /// has happened since that capture.
+    captured_events: AtomicU64,
+    /// The recursive watch on the worktree itself is installed (not just the
+    /// git dir of an over-budget tree, whose edits only the repair tick sees).
+    covers_worktree: AtomicBool,
+    /// Consecutive repair ticks skipped for this checkout; see [`REPAIR_FORCE_EVERY`].
+    quiet_ticks: AtomicU32,
+}
+
+const NEVER_CAPTURED: u64 = u64::MAX;
+
+impl WatchSignals {
+    fn new() -> Self {
+        Self {
+            events: AtomicU64::new(0),
+            captured_events: AtomicU64::new(NEVER_CAPTURED),
+            covers_worktree: AtomicBool::new(false),
+            quiet_ticks: AtomicU32::new(0),
+        }
+    }
+}
+
+impl CheckoutEntry {
+    /// The live watcher covers the whole checkout and has reported nothing
+    /// since the last capture: a repair re-check could only find the same diff.
+    fn watch_is_quiet(&self) -> bool {
+        let signals = &self.signals;
+        if !signals.covers_worktree.load(Ordering::Acquire) {
+            return false;
+        }
+        let captured = signals.captured_events.load(Ordering::Acquire);
+        if captured != signals.events.load(Ordering::Acquire) {
+            return false; // never captured, or events since
+        }
+        let watchers = lock(&self.watchers);
+        !watchers.is_empty() && watchers.iter().all(FsWatch::is_live)
+    }
+
+    /// The repair tick's kick: skipped while the watcher is healthy and quiet
+    /// (bar a periodic safety-net pass), otherwise a capture that the gate
+    /// cheapens to one `git status` when nothing changed.
+    fn repair_kick(&self) {
+        if self.watch_is_quiet() {
+            let skipped = self.signals.quiet_ticks.fetch_add(1, Ordering::AcqRel) + 1;
+            if skipped < REPAIR_FORCE_EVERY {
+                return;
+            }
+        }
+        self.signals.quiet_ticks.store(0, Ordering::Release);
+        let _ = self.kick_tx.send(());
+    }
 }
 
 /// Working-tree snapshot recorded when a chat's turn dispatches — the diff
@@ -181,7 +257,7 @@ struct DiffSyncInner {
     /// discarding its checksum state and kicking a redundant full capture.
     reconcile_gate: tokio::sync::Mutex<()>,
     /// cwd → resolved checkout identity. See [`resolve_identity`].
-    identities: Mutex<HashMap<String, CheckoutIdentity>>,
+    identities: Mutex<HashMap<String, MemoizedIdentity>>,
     /// How long an entry may sit chat-less before reconcile removes it.
     orphan_grace: Duration,
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
@@ -270,6 +346,44 @@ fn interested_chats(inner: &DiffSyncInner) -> HashSet<String> {
                 .is_some_and(|at| at.elapsed() < inner.interest_linger)
     });
     interest.keys().cloned().collect()
+}
+
+/// Every git process the diff-sync paths start (captures, the status gate and
+/// the identity resolves behind reconcile), for idle-cost checks.
+static GIT_SPAWNS: AtomicU64 = AtomicU64::new(0);
+
+/// Per working directory, so a test can count only its own fixture's spawns
+/// while the rest of the suite runs git in parallel.
+#[cfg(test)]
+static GIT_SPAWNS_BY_DIR: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
+/// Count one git spawn made with `cwd` as its working directory.
+pub(crate) fn note_git_spawn(cwd: Option<&Path>) {
+    GIT_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    if let Some(cwd) = cwd {
+        *lock(&GIT_SPAWNS_BY_DIR)
+            .entry(cwd.to_path_buf())
+            .or_default() += 1;
+    }
+    #[cfg(not(test))]
+    let _ = cwd;
+}
+
+/// Git processes diff sync has started since boot.
+pub fn git_spawn_count() -> u64 {
+    GIT_SPAWNS.load(Ordering::Relaxed)
+}
+
+/// Spawns made in `dir` or below it.
+#[cfg(test)]
+fn git_spawns_under(dir: &Path) -> u64 {
+    lock(&GIT_SPAWNS_BY_DIR)
+        .iter()
+        .filter(|(cwd, _)| cwd.starts_with(dir))
+        .map(|(_, count)| *count)
+        .sum()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -391,13 +505,12 @@ impl CheckoutDiffSync {
         reconcile(&self.inner, chats, false).await;
     }
 
-    /// Repair-tick path for tests: fresh identity revalidation, then kick every
-    /// tracked checkout.
+    /// Repair-tick path for tests: fresh identity revalidation, then re-check
+    /// every tracked checkout the watcher cannot vouch for.
     #[doc(hidden)]
     pub async fn repair_now(&self) {
         let chats = self.inner.workspace.watch_chats().borrow().clone();
-        reconcile(&self.inner, chats, true).await;
-        self.sync_all();
+        repair_pass(&self.inner, chats).await;
     }
 
     /// Tracked checkout roots, each with its count of live fs watches — test
@@ -525,7 +638,9 @@ impl CheckoutDiffSync {
 
             // Publish immediately instead of waiting for the watcher debounce.
             // The watcher kick remains useful if an external writer races this
-            // operation after the final capture.
+            // operation after the final capture. The discard rewrote files
+            // behind the gate's back: capture for real.
+            *lock(&entry.gate) = None;
             sync_entry(&inner, &entry).await;
             let _ = entry.kick_tx.send(());
             result
@@ -538,6 +653,73 @@ impl CheckoutDiffSync {
 // ---------------------------------------------------------------------------
 // Reconcile: chats ⇄ checkout entries
 // ---------------------------------------------------------------------------
+
+/// A memoized identity plus what the filesystem looked like when it was
+/// resolved, so a repair tick can confirm it without spawning git.
+#[derive(Clone)]
+struct MemoizedIdentity {
+    identity: CheckoutIdentity,
+    stamp: Option<IdentityStamp>,
+}
+
+/// Stats that move whenever a cwd's checkout identity could: the worktree's
+/// `.git` entry (replaced by a re-clone or `git init`), a `.git` directly in
+/// the cwd (a nested repository), and the git dir's `HEAD`.
+#[derive(Clone, PartialEq, Eq)]
+struct IdentityStamp {
+    root_dot_git: FileStamp,
+    cwd_dot_git: Option<FileStamp>,
+    head: Option<FileStamp>,
+}
+
+/// `(mtime, size, inode)` of one path, without following symlinks. A
+/// directory's own mtime and size only track churn among its entries (every
+/// index lock inside `.git` moves them), so for one only the inode counts.
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<Duration>,
+    len: u64,
+    ino: u64,
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        #[cfg(unix)]
+        let ino = {
+            use std::os::unix::fs::MetadataExt as _;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let ino = 0;
+        if meta.is_dir() {
+            return Some(Self {
+                modified: None,
+                len: 0,
+                ino,
+            });
+        }
+        Some(Self {
+            modified: meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()),
+            len: meta.len(),
+            ino,
+        })
+    }
+}
+
+impl IdentityStamp {
+    /// `None` when the worktree has no `.git` entry to anchor on.
+    fn read(cwd: &str, identity: &CheckoutIdentity) -> Option<Self> {
+        Some(Self {
+            root_dot_git: FileStamp::of(&identity.root.join(".git"))?,
+            cwd_dot_git: FileStamp::of(&Path::new(cwd).join(".git")),
+            head: FileStamp::of(&identity.git_dir.join("HEAD")),
+        })
+    }
+}
 
 /// Resolve `cwd` to its canonical checkout identity, preferring the memo.
 ///
@@ -554,19 +736,33 @@ impl CheckoutDiffSync {
 ///    reconcile. Back-to-back `git diff` forever, on an idle tree.
 ///
 /// So: chat-watch reconciles reuse the memo (no git at all), the repair tick
-/// revalidates (`fresh`), and a failed fresh resolve keeps the memo unless the
-/// directory is actually gone.
+/// revalidates (`fresh`) — spawning git only when the memo's [`IdentityStamp`]
+/// no longer matches the filesystem — and a failed fresh resolve keeps the
+/// memo unless the directory is actually gone.
 async fn resolve_identity(
     inner: &Arc<DiffSyncInner>,
     cwd: &str,
     fresh: bool,
 ) -> Option<CheckoutIdentity> {
-    if !fresh && let Some(identity) = lock(&inner.identities).get(cwd).cloned() {
-        return Some(identity);
+    let memo = lock(&inner.identities).get(cwd).cloned();
+    if let Some(memo) = &memo
+        && (!fresh
+            || memo.stamp.as_ref().is_some_and(|stamp| {
+                IdentityStamp::read(cwd, &memo.identity).as_ref() == Some(stamp)
+            }))
+    {
+        return Some(memo.identity.clone());
     }
     match inner.repos.checkout_identity(Path::new(cwd)).await {
         Ok(identity) => {
-            lock(&inner.identities).insert(cwd.to_string(), identity.clone());
+            let stamp = IdentityStamp::read(cwd, &identity);
+            lock(&inner.identities).insert(
+                cwd.to_string(),
+                MemoizedIdentity {
+                    identity: identity.clone(),
+                    stamp,
+                },
+            );
             Some(identity)
         }
         Err(err) => {
@@ -575,7 +771,7 @@ async fn resolve_identity(
                 tracing::debug!(cwd = %cwd, error = %err, "diff-sync: checkout gone");
                 return None;
             }
-            let cached = lock(&inner.identities).get(cwd).cloned();
+            let cached = memo.map(|memo| memo.identity);
             match &cached {
                 Some(_) => tracing::debug!(cwd = %cwd, error = %err,
                     "diff-sync: identity resolve failed; keeping memoized identity"),
@@ -784,6 +980,8 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         skipped_while_orphaned: AtomicBool::new(false),
         kick_tx: kick_tx.clone(),
         watchers: Mutex::new(Vec::new()),
+        signals: Arc::new(WatchSignals::new()),
+        gate: Mutex::new(None),
     });
     lock(&inner.entries).insert(entry.identity.id.clone(), entry.clone());
     tokio::spawn(entry_task(
@@ -806,7 +1004,12 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         let Some(entry) = weak.upgrade() else {
             return; // entry removed before watchers were ready
         };
-        let watchers = build_watchers(&FsWatchHub::global(), &entry.identity, &kick_tx);
+        let watchers = build_watchers(
+            &FsWatchHub::global(),
+            &entry.identity,
+            &kick_tx,
+            &entry.signals,
+        );
         *lock(&entry.watchers) = watchers;
     });
 }
@@ -821,13 +1024,21 @@ fn build_watchers(
     hub: &Arc<FsWatchHub>,
     identity: &CheckoutIdentity,
     kick_tx: &mpsc::UnboundedSender<()>,
+    signals: &Arc<WatchSignals>,
 ) -> Vec<FsWatch> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
         let tx = kick_tx.clone();
+        let signals = signals.clone();
+        if target == identity.root {
+            signals.covers_worktree.store(true, Ordering::Release);
+        }
         watchers.push(
             hub.watch(&target, notify::RecursiveMode::Recursive, move |event| {
                 if is_checkout_change(event) {
+                    // Count before kicking: the tick must never see a quiet
+                    // watcher while a kick is already on its way.
+                    signals.events.fetch_add(1, Ordering::AcqRel);
                     let _ = tx.send(());
                 }
             }),
@@ -885,15 +1096,33 @@ async fn entry_task(
 // ---------------------------------------------------------------------------
 
 async fn sync_entry(inner: &Arc<DiffSyncInner>, entry: &Arc<CheckoutEntry>) {
-    let snapshot = match capture_diff(&inner.repos, &entry.identity.root).await {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
-                "diff-sync: capture failed");
-            git_status::publish(inner, entry, Vec::new(), false);
-            return;
-        }
-    };
+    // Events counted before the capture starts are covered by it; later ones
+    // leave the entry non-quiet, so the next repair tick re-checks it.
+    let events = entry.signals.events.load(Ordering::Acquire);
+    let prior = lock(&entry.gate).clone();
+    let (snapshot, gate) =
+        match capture_gated(&inner.repos, &entry.identity.root, None, prior.as_ref()).await {
+            Ok(Gated::Captured(snapshot, gate)) => (*snapshot, gate),
+            Ok(Gated::Unchanged) => {
+                entry
+                    .signals
+                    .captured_events
+                    .store(events, Ordering::Release);
+                return; // the tree is as last published
+            }
+            Err(err) => {
+                tracing::debug!(checkout = %entry.identity.root.display(), error = %err,
+                    "diff-sync: capture failed");
+                *lock(&entry.gate) = None;
+                git_status::publish(inner, entry, Vec::new(), false);
+                return;
+            }
+        };
+    *lock(&entry.gate) = gate;
+    entry
+        .signals
+        .captured_events
+        .store(events, Ordering::Release);
 
     if let Some((files, complete)) = &snapshot.git_status {
         git_status::publish(inner, entry, files.clone(), *complete);
@@ -1002,6 +1231,18 @@ fn publish_watch(inner: &Arc<DiffSyncInner>) {
     });
 }
 
+/// The repair tick: revalidate every memoized identity (git is spawned only
+/// for a cwd whose [`IdentityStamp`] moved), then re-check each checkout the
+/// live watcher cannot vouch for. A healthy watcher that has reported nothing
+/// since the last capture costs no git at all.
+async fn repair_pass(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>) {
+    reconcile(inner, chats, true).await;
+    let entries: Vec<Arc<CheckoutEntry>> = lock(&inner.entries).values().cloned().collect();
+    for entry in entries {
+        entry.repair_kick();
+    }
+}
+
 /// Chat-watch follower + repair tick. Holds only weak handles so dropping the
 /// service tears the loop down; the token ends it eagerly on shutdown.
 async fn diff_sync_task(
@@ -1035,11 +1276,7 @@ async fn diff_sync_task(
             _ = repair.tick() => {
                 let Some(inner) = inner.upgrade() else { break };
                 let chats = chats_rx.borrow().clone();
-                // Fresh: revalidate every memoized identity against git.
-                reconcile(&inner, chats, true).await;
-                for entry in lock(&inner.entries).values() {
-                    let _ = entry.kick_tx.send(());
-                }
+                repair_pass(&inner, chats).await;
             }
         }
     }
@@ -1075,6 +1312,7 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     max_bytes: usize,
     snapshot: Option<&TreeSnapshot>,
 ) -> Result<Capture, EngineError> {
+    note_git_spawn(Some(cwd));
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -1176,6 +1414,18 @@ fn has_non_utf8_status_path(value: &[u8]) -> bool {
     false
 }
 
+/// Summary status for a `--name-status` / `--raw` change letter.
+fn status_name(code: char) -> &'static str {
+    match code {
+        'A' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        'C' => "copied",
+        'U' => "unmerged",
+        _ => "modified",
+    }
+}
+
 fn parse_name_status(value: &[u8]) -> Vec<DiffFileSummary> {
     let fields = split_z(value);
     let mut out = Vec::new();
@@ -1196,18 +1446,10 @@ fn parse_name_status(value: &[u8]) -> Vec<DiffFileSummary> {
         } else {
             None
         };
-        let status = match code {
-            'A' => "added",
-            'D' => "deleted",
-            'R' => "renamed",
-            'C' => "copied",
-            'U' => "unmerged",
-            _ => "modified",
-        };
         out.push(DiffFileSummary {
             path: second.clone().unwrap_or_else(|| first.clone()),
             old_path: second.is_some().then_some(first),
-            status: status.to_string(),
+            status: status_name(code).to_string(),
             additions: 0,
             deletions: 0,
             binary: false,
@@ -1471,6 +1713,124 @@ pub async fn capture_diff_against(
     root: &Path,
     base_override: Option<&str>,
 ) -> Result<DiffSnapshot, EngineError> {
+    match capture_gated(repos, root, base_override, None).await? {
+        Gated::Captured(snapshot, _) => Ok(*snapshot),
+        // No prior fingerprint was offered, so nothing can have matched it.
+        Gated::Unchanged => Err(EngineError::Other(
+            "ungated capture reported no change".into(),
+        )),
+    }
+}
+
+/// The result of [`capture_gated`].
+enum Gated {
+    /// The gate fingerprint matched the prior capture's: nothing to publish.
+    Unchanged,
+    /// A fresh snapshot, with the fingerprint to gate the next capture on
+    /// (`None` when this capture cannot vouch for a later skip).
+    Captured(Box<DiffSnapshot>, Option<GateState>),
+}
+
+/// [`capture_diff_against`] behind the D16 gate. One `git status` yields the
+/// head oid, the branch and every changed path; its output plus the
+/// `(mtime, size)` of the listed paths is the [`GateState`]. When that equals
+/// `prior` the working tree cannot have moved, so nothing else is spawned. On
+/// a change the tracked metadata (`--raw` + `--numstat`) and the patch run in
+/// parallel: three spawns against the legacy six. Anything the fast path
+/// cannot reproduce exactly (truncated output, an unparsable record, a failed
+/// status) falls back to [`capture_diff_legacy`], so the result is always the
+/// one the legacy path would give.
+async fn capture_gated(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+    prior: Option<&GateState>,
+) -> Result<Gated, EngineError> {
+    // Taken before git reads anything: a file stamped at or after this may
+    // still change within the timestamp's granularity (racy-git).
+    let started = std::time::SystemTime::now();
+    let Some(status) = capture_status(root).await else {
+        let snapshot = capture_diff_legacy(repos, root, base_override).await?;
+        return Ok(Gated::Captured(Box::new(snapshot), None));
+    };
+    let gate = if base_override.is_none() {
+        let root = root.to_path_buf();
+        let bytes = status.raw.clone();
+        let paths = status.paths.clone();
+        tokio::task::spawn_blocking(move || GateState::fingerprint(&root, &bytes, &paths, started))
+            .await
+            .ok()
+    } else {
+        None
+    };
+    if let (Some(prior), Some(gate)) = (prior, &gate)
+        && prior.trusted
+        && gate.trusted
+        && prior.fingerprint == gate.fingerprint
+    {
+        return Ok(Gated::Unchanged);
+    }
+
+    let base: &str = match base_override {
+        Some(base) => base,
+        None if status.head.is_empty() => EMPTY_TREE_SHA,
+        None => &status.head,
+    };
+    let meta_args = [
+        "diff",
+        "--raw",
+        "--numstat",
+        "-z",
+        "--find-renames",
+        base,
+        "--",
+    ];
+    let patch_args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-color",
+        "--find-renames",
+        "--unified=3",
+        base,
+        "--",
+    ];
+    let (meta, tracked) = tokio::join!(
+        capture_git(root, &meta_args, 2 * MAX_DIFF_METADATA_BYTES),
+        capture_git(root, &patch_args, MAX_PATCH_BYTES),
+    );
+    let (meta, tracked) = (meta?, tracked?);
+    let parsed = (!meta.truncated)
+        .then(|| split_raw_numstat(&meta.stdout))
+        .flatten();
+    let Some((mut files, numstat)) = parsed else {
+        let snapshot = capture_diff_legacy(repos, root, base_override).await?;
+        return Ok(Gated::Captured(Box::new(snapshot), None));
+    };
+    apply_numstat(&mut files, numstat);
+    let snapshot = finish_snapshot(
+        root,
+        status.branch,
+        status.head,
+        files,
+        tracked,
+        false,
+        Capture {
+            stdout: status.porcelain_v1,
+            truncated: false,
+        },
+    )
+    .await?;
+    Ok(Gated::Captured(Box::new(snapshot), gate))
+}
+
+/// The pre-D16 capture: six sequential spawns. Kept as the fallback for what
+/// the gated path declines to handle and as the oracle the equivalence tests
+/// compare it against.
+async fn capture_diff_legacy(
+    repos: &Repos,
+    root: &Path,
+    base_override: Option<&str>,
+) -> Result<DiffSnapshot, EngineError> {
     let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
         .await
         .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
@@ -1488,13 +1848,13 @@ pub async fn capture_diff_against(
     let names = capture_git(
         root,
         &["diff", "--name-status", "-z", "--find-renames", base, "--"],
-        2 * 1024 * 1024,
+        MAX_DIFF_METADATA_BYTES,
     )
     .await?;
     let nums = capture_git(
         root,
         &["diff", "--numstat", "-z", "--find-renames", base, "--"],
-        2 * 1024 * 1024,
+        MAX_DIFF_METADATA_BYTES,
     )
     .await?;
     let tracked = capture_git(
@@ -1528,8 +1888,31 @@ pub async fn capture_diff_against(
 
     let mut files = parse_name_status(&names.stdout);
     apply_numstat(&mut files, &nums.stdout);
+    finish_snapshot(
+        root,
+        branch,
+        head,
+        files,
+        tracked,
+        names.truncated || nums.truncated,
+        status,
+    )
+    .await
+}
+
+/// Shared tail of both captures: fold the untracked files (from the porcelain
+/// v1 `status`) into the tracked `files`/`patch`, then checksum.
+async fn finish_snapshot(
+    root: &Path,
+    branch: String,
+    head: String,
+    mut files: Vec<DiffFileSummary>,
+    tracked: Capture,
+    metadata_truncated: bool,
+    status: Capture,
+) -> Result<DiffSnapshot, EngineError> {
     let mut patch = String::from_utf8_lossy(&tracked.stdout).to_string();
-    let mut truncated = tracked.truncated || names.truncated || nums.truncated || status.truncated;
+    let mut truncated = tracked.truncated || metadata_truncated || status.truncated;
     if has_non_utf8_status_path(&status.stdout) {
         truncated = true;
     }
@@ -1666,6 +2049,219 @@ pub async fn capture_diff_against(
         truncated,
         checksum,
     })
+}
+
+/// What the gate's single `git status` run reports.
+struct StatusV2 {
+    /// HEAD's commit; empty on an unborn branch (what `rev-parse --verify HEAD`
+    /// would have printed, or failed to).
+    head: String,
+    /// Current branch, `HEAD` when detached (what `current_branch` returns).
+    branch: String,
+    /// The output as git printed it, for the gate fingerprint.
+    raw: Vec<u8>,
+    /// The same entries as `--porcelain=v1 -z --untracked-files=all` prints
+    /// them, so the untracked scan and [`git_status::parse`] stay unchanged.
+    porcelain_v1: Vec<u8>,
+    /// Changed and untracked paths (destination only), to stat for the gate.
+    paths: Vec<Vec<u8>>,
+}
+
+/// `None` when the status cannot be used as the legacy path's stand-in: git
+/// failed, the output hit the byte ceiling, or a record is not understood.
+async fn capture_status(root: &Path) -> Option<StatusV2> {
+    let capture = capture_git(
+        root,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+        ],
+        MAX_DIFF_METADATA_BYTES,
+    )
+    .await
+    .ok()?;
+    if capture.truncated {
+        return None;
+    }
+    parse_status_v2(capture.stdout)
+}
+
+/// The path after the `spaces`th space of a v2 record (paths may contain spaces).
+fn path_after_spaces(record: &[u8], spaces: usize) -> Option<&[u8]> {
+    let mut seen = 0usize;
+    for (i, byte) in record.iter().enumerate() {
+        if *byte == b' ' {
+            seen += 1;
+            if seen == spaces {
+                return Some(&record[i + 1..]).filter(|path| !path.is_empty());
+            }
+        }
+    }
+    None
+}
+
+fn parse_status_v2(raw: Vec<u8>) -> Option<StatusV2> {
+    if !(raw.is_empty() || raw.ends_with(&[0])) {
+        return None;
+    }
+    let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+    let mut head = None;
+    let mut branch = None;
+    let mut porcelain_v1 = Vec::new();
+    let mut paths = Vec::new();
+    let mut records = raw.split(|b| *b == 0).filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        if let Some(oid) = record.strip_prefix(b"# branch.oid ") {
+            head = Some(if oid == b"(initial)" {
+                String::new()
+            } else {
+                lossy(oid)
+            });
+            continue;
+        }
+        if let Some(name) = record.strip_prefix(b"# branch.head ") {
+            let name = lossy(name);
+            branch = Some(if name.is_empty() || name == "(detached)" {
+                "HEAD".to_string()
+            } else {
+                name
+            });
+            continue;
+        }
+        if record.starts_with(b"# ") {
+            continue; // branch.upstream / branch.ab: fingerprinted, not parsed
+        }
+        let (xy, path, origin): (&[u8], &[u8], Option<&[u8]>) = match record {
+            [b'?', b' ', path @ ..] if !path.is_empty() => (b"??", path, None),
+            [kind @ (b'1' | b'2' | b'u'), b' ', _, _, b' ', ..] => {
+                let spaces = match kind {
+                    b'1' => 8,
+                    b'2' => 9,
+                    _ => 10,
+                };
+                let xy = &record[2..4];
+                let path = path_after_spaces(record, spaces)?;
+                let origin = if *kind == b'2' {
+                    Some(records.next()?)
+                } else {
+                    None
+                };
+                (xy, path, origin)
+            }
+            _ => return None,
+        };
+        // v2 marks an unchanged column `.`, v1 a space.
+        porcelain_v1.extend(xy.iter().map(|b| if *b == b'.' { b' ' } else { *b }));
+        porcelain_v1.push(b' ');
+        porcelain_v1.extend_from_slice(path);
+        porcelain_v1.push(0);
+        if let Some(origin) = origin {
+            porcelain_v1.extend_from_slice(origin);
+            porcelain_v1.push(0);
+        }
+        paths.push(path.to_vec());
+    }
+    Some(StatusV2 {
+        head: head?,
+        branch: branch?,
+        raw,
+        porcelain_v1,
+        paths,
+    })
+}
+
+/// Split `git diff --raw --numstat -z` into the file summaries (from the raw
+/// records, `:modes shas STATUS NUL path [NUL path] NUL`) and the numstat
+/// records that follow them. `None` for anything not cleanly NUL-terminated.
+fn split_raw_numstat(value: &[u8]) -> Option<(Vec<DiffFileSummary>, &[u8])> {
+    fn field<'a>(value: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+        let rest = &value[*pos..];
+        let end = rest.iter().position(|b| *b == 0)?;
+        *pos += end + 1;
+        Some(&rest[..end])
+    }
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).to_string();
+    let mut files = Vec::new();
+    let mut pos = 0usize;
+    while value.get(pos) == Some(&b':') {
+        let header = field(value, &mut pos)?;
+        let code = char::from(*header.rsplit(|b| *b == b' ').next()?.first()?);
+        let first = text(field(value, &mut pos)?);
+        let second = if matches!(code, 'R' | 'C') {
+            Some(text(field(value, &mut pos)?))
+        } else {
+            None
+        };
+        files.push(DiffFileSummary {
+            path: second.clone().unwrap_or_else(|| first.clone()),
+            old_path: second.is_some().then_some(first),
+            status: status_name(code).to_string(),
+            additions: 0,
+            deletions: 0,
+            binary: false,
+        });
+    }
+    Some((files, &value[pos..]))
+}
+
+/// Fingerprint of a checkout's observable state, from one `git status`.
+#[derive(Debug, Clone)]
+struct GateState {
+    fingerprint: [u8; 32],
+    /// False when it cannot vouch for a later skip: a listed file was stamped
+    /// within [`RACY_WINDOW`] (an edit that keeps size and timestamp could hide
+    /// in the same tick), or the list passed [`MAX_GATE_PATHS`].
+    trusted: bool,
+}
+
+impl GateState {
+    /// `sha256(status output ‖ (path, mtime_ns, size, inode) per listed path)`.
+    /// Blocking: stats every path.
+    fn fingerprint(
+        root: &Path,
+        status: &[u8],
+        paths: &[Vec<u8>],
+        started: std::time::SystemTime,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(status);
+        let mut trusted = paths.len() <= MAX_GATE_PATHS;
+        for path in paths.iter().take(MAX_GATE_PATHS) {
+            hasher.update([0u8]);
+            hasher.update(path);
+            match std::fs::symlink_metadata(root.join(path_argument(path))) {
+                Ok(meta) => {
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok());
+                    let settled = meta
+                        .modified()
+                        .ok()
+                        .and_then(|at| started.duration_since(at).ok())
+                        .is_some_and(|age| age >= RACY_WINDOW);
+                    trusted &= settled;
+                    hasher.update([1u8]);
+                    hasher.update(modified.unwrap_or_default().as_nanos().to_le_bytes());
+                    hasher.update(meta.len().to_le_bytes());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt as _;
+                        hasher.update(meta.ino().to_le_bytes());
+                    }
+                }
+                Err(_) => hasher.update([0u8]),
+            }
+        }
+        Self {
+            fingerprint: hasher.finalize().into(),
+            trusted,
+        }
+    }
 }
 
 fn status_paths(status: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -2115,7 +2711,9 @@ mod watch_budget_tests {
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let hub = crate::fs_watch::FsWatchHub::new();
-        let watchers = super::build_watchers(&hub, &identity(&root, &root.join(".git")), &tx);
+        let signals = std::sync::Arc::new(super::WatchSignals::new());
+        let watchers =
+            super::build_watchers(&hub, &identity(&root, &root.join(".git")), &tx, &signals);
         // Install now (the batch worker would within ~100 ms) and expect the
         // attach rescan's kick; then let registration settle and drop
         // anything it raised.
@@ -2259,5 +2857,474 @@ mod watch_budget_tests {
         // A self-referential symlink cycle must not send the walk into a spin.
         std::os::unix::fs::symlink(root.join("real"), root.join("real/inner/loop")).unwrap();
         assert!(!exceeds_watch_budget(root)); // terminates, under budget
+    }
+}
+
+#[cfg(test)]
+mod git_gating_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use super::{
+        EMPTY_TREE_SHA, GateState, Gated, capture_diff_against, capture_diff_legacy, capture_gated,
+        git_spawns_under, parse_status_v2, split_raw_numstat,
+    };
+    use crate::repos::Repos;
+
+    fn git_out(dir: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .expect("git spawns")
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = git_out(dir, args);
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn write(dir: &Path, name: &str, content: &[u8]) {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// Two commits of a few tracked files (text, binary, nested).
+    fn base_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+        write(dir, "a.txt", b"a\nb\nc\nd\ne\nf\ng\nh\n");
+        write(dir, "b.txt", b"one\ntwo\n");
+        write(dir, "old.txt", b"q1\nq2\nq3\nq4\nq5\nq6\n");
+        write(dir, "bin.dat", b"\0\x01\x02binary");
+        write(dir, "dir/c.txt", b"c1\nc2\nc3\nc4\n");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        write(dir, "a.txt", b"a\nb\nc\nd\ne\nf\ng\nh\ni\n");
+        git(dir, &["commit", "-q", "-am", "second"]);
+    }
+
+    /// Every working-tree shape the capture has to reproduce, as
+    /// `(name, checkout root)`.
+    fn fixtures(tmp: &Path) -> Vec<(&'static str, PathBuf)> {
+        let out = std::cell::RefCell::new(Vec::new());
+        let fresh = |name: &'static str| {
+            let dir = tmp.join(name);
+            base_repo(&dir);
+            out.borrow_mut().push((name, dir.clone()));
+            dir
+        };
+
+        fresh("clean");
+
+        let dir = fresh("modified");
+        write(&dir, "a.txt", b"changed\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        write(&dir, "b.txt", b"one\ntwo\nstaged\n");
+        git(&dir, &["add", "b.txt"]);
+        write(&dir, "b.txt", b"one\ntwo\nstaged\nand more\n");
+        std::fs::remove_file(dir.join("dir/c.txt")).unwrap();
+        write(&dir, "bin.dat", b"\0\x01\x02different binary");
+
+        let dir = fresh("untracked");
+        write(&dir, "new file.txt", b"hello\nworld\n");
+        write(&dir, "sub/deep/u.txt", b"no trailing newline");
+        write(&dir, "empty.txt", b"");
+        write(&dir, "blob.bin", b"\0\0\0");
+        write(&dir, "quo\"te\\.txt", b"x\n");
+        write(&dir, ".gitignore", b"ignored.log\n");
+        write(&dir, "ignored.log", b"nope\n");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a.txt", dir.join("link")).unwrap();
+
+        let dir = fresh("renamed");
+        git(&dir, &["mv", "old.txt", "renamed name.txt"]);
+        write(&dir, "renamed name.txt", b"q1\nq2\nq3\nq4\nq5\nq6\nq7\n");
+        std::fs::rename(dir.join("dir/c.txt"), dir.join("dir/moved.txt")).unwrap();
+
+        let dir = fresh("detached");
+        git(&dir, &["checkout", "-q", "--detach", "HEAD~1"]);
+        write(&dir, "b.txt", b"edited while detached\n");
+
+        let dir = tmp.join("unborn");
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "trunk"]);
+        write(&dir, "staged.txt", b"s\n");
+        git(&dir, &["add", "staged.txt"]);
+        write(&dir, "loose.txt", b"l\n");
+        out.borrow_mut().push(("unborn", dir));
+
+        let main = fresh("worktree-main");
+        let linked = tmp.join("worktree-linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                linked.to_str().unwrap(),
+            ],
+        );
+        write(&linked, "b.txt", b"edited in the linked worktree\n");
+        write(&linked, "extra.txt", b"extra\n");
+        out.borrow_mut().push(("linked-worktree", linked));
+
+        let dir = fresh("merge");
+        git(&dir, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+        write(&dir, "b.txt", b"side\n");
+        git(&dir, &["commit", "-q", "-am", "side"]);
+        git(&dir, &["checkout", "-q", "main"]);
+        write(&dir, "b.txt", b"main\n");
+        git(&dir, &["commit", "-q", "-am", "main"]);
+        assert!(!git_out(&dir, &["merge", "side"]).status.success());
+        write(&dir, "after-conflict.txt", b"x\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let dir = fresh("non-utf8");
+            std::fs::write(
+                dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff.txt")),
+                "x\n",
+            )
+            .unwrap();
+        }
+        out.into_inner()
+    }
+
+    fn repos(tmp: &Path) -> Repos {
+        Repos::new(&tmp.join("data"), "device")
+    }
+
+    fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    #[tokio::test]
+    async fn gated_capture_equals_the_legacy_capture() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let repos = repos(&tmp_path);
+        for (name, dir) in fixtures(&tmp_path) {
+            let head = git_out(&dir, &["rev-parse", "--verify", "HEAD~1"]);
+            let older = head
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&head.stdout).trim().to_string());
+            let mut bases = vec![None, Some(EMPTY_TREE_SHA.to_string())];
+            bases.extend(older.map(Some));
+            for base in bases {
+                let base = base.as_deref();
+                let legacy = capture_diff_legacy(&repos, &dir, base).await;
+                let gated = capture_diff_against(&repos, &dir, base).await;
+                match (legacy, gated) {
+                    (Ok(legacy), Ok(gated)) => {
+                        assert_eq!(legacy, gated, "{name} against {base:?}");
+                    }
+                    (Err(legacy), Err(gated)) => {
+                        // Same failure; wording may differ between the commands.
+                        let _ = (legacy, gated);
+                    }
+                    (legacy, gated) => {
+                        panic!("{name} against {base:?}: legacy {legacy:?} vs gated {gated:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The equivalence above would pass vacuously on empty snapshots.
+    #[tokio::test]
+    async fn fixtures_exercise_every_shape() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let repos = repos(&tmp_path);
+        let mut shot = std::collections::HashMap::new();
+        for (name, dir) in fixtures(&tmp_path) {
+            shot.insert(
+                name,
+                capture_diff_against(&repos, &dir, None).await.unwrap(),
+            );
+        }
+        assert!(shot["clean"].files.is_empty() && shot["clean"].head_sha.is_some());
+        let statuses = |name: &str| -> Vec<String> {
+            shot[name].files.iter().map(|f| f.status.clone()).collect()
+        };
+        assert!(statuses("modified").contains(&"deleted".to_string()));
+        assert!(shot["modified"].files.iter().any(|f| f.binary));
+        assert!(
+            shot["untracked"]
+                .files
+                .iter()
+                .any(|f| f.path == "new file.txt")
+        );
+        assert!(
+            !shot["untracked"]
+                .files
+                .iter()
+                .any(|f| f.path == "ignored.log")
+        );
+        assert!(statuses("renamed").contains(&"renamed".to_string()));
+        assert_eq!(shot["detached"].branch, "HEAD");
+        assert_eq!(shot["unborn"].head_sha, None);
+        assert_eq!(shot["unborn"].branch, "trunk");
+        assert_eq!(shot["linked-worktree"].branch, "feature");
+        let (merge_status, _) = shot["merge"].git_status.clone().unwrap();
+        assert!(
+            merge_status
+                .iter()
+                .any(|f| f.worktree == zeron_proto::GitFileState::Unmerged)
+        );
+        #[cfg(unix)]
+        assert!(shot["non-utf8"].truncated);
+    }
+
+    #[test]
+    fn status_v2_is_translated_to_the_v1_listing() {
+        let v2 = b"# branch.oid 78d33ff07ae8619f2e138856d1a0644a0cd1d47b\0# branch.head main\0\
+# branch.upstream origin/main\0# branch.ab +1 -2\0\
+1 .M N... 100644 100644 100644 aaaa bbbb a b.txt\0\
+2 R. N... 100644 100644 100644 aaaa bbbb R100 new name\0old name\0\
+u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
+? un tracked\0"
+            .to_vec();
+        let parsed = parse_status_v2(v2).unwrap();
+        assert_eq!(parsed.head, "78d33ff07ae8619f2e138856d1a0644a0cd1d47b");
+        assert_eq!(parsed.branch, "main");
+        assert_eq!(
+            parsed.porcelain_v1,
+            b" M a b.txt\0R  new name\0old name\0UU c.txt\0?? un tracked\0".to_vec()
+        );
+        assert_eq!(parsed.paths.len(), 4);
+        // Unusable output is declined, never half-parsed.
+        assert!(
+            parse_status_v2(b"# branch.oid abc\0# branch.head main\0garbage\0".to_vec()).is_none()
+        );
+        assert!(parse_status_v2(b"# branch.oid abc\0# branch.head main".to_vec()).is_none());
+        assert!(parse_status_v2(b"? only.txt\0".to_vec()).is_none());
+    }
+
+    #[test]
+    fn raw_numstat_splits_at_the_first_numstat_record() {
+        let out = b":100644 100644 aaa bbb M\0a.txt\0:100644 100644 aaa bbb R075\0old\0new\0\
+1\t0\ta.txt\0" as &[u8];
+        let (files, numstat) = split_raw_numstat(out).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[1].old_path.as_deref(), Some("old"));
+        assert_eq!(files[1].status, "renamed");
+        assert_eq!(numstat, b"1\t0\ta.txt\0");
+        assert!(split_raw_numstat(b":100644 100644 aaa bbb M\0a.tx").is_none());
+        assert_eq!(split_raw_numstat(b"").unwrap().0.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn gated_capture_spawns_three_git_processes_against_six() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let repos = repos(&tmp_path);
+        let dir = tmp_path.join("modified");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        write(&dir, "u.txt", b"untracked\n");
+
+        let before = git_spawns_under(&dir);
+        capture_diff_legacy(&repos, &dir, None).await.unwrap();
+        let legacy = git_spawns_under(&dir) - before;
+        let before = git_spawns_under(&dir);
+        capture_diff_against(&repos, &dir, None).await.unwrap();
+        let gated = git_spawns_under(&dir) - before;
+        assert_eq!((legacy, gated), (6, 3));
+    }
+
+    fn backdate(path: &Path, age: Duration) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unchanged_gate_skips_everything_but_the_status_run() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let repos = repos(&tmp_path);
+        let dir = tmp_path.join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"changed\n");
+        write(&dir, "u.txt", b"untracked\n");
+        let hour = Duration::from_secs(3600);
+        backdate(&dir.join("a.txt"), hour);
+        backdate(&dir.join("u.txt"), hour);
+
+        let Gated::Captured(first, Some(gate)) =
+            capture_gated(&repos, &dir, None, None).await.unwrap()
+        else {
+            panic!("first capture produces a snapshot and a gate");
+        };
+        assert!(gate.trusted);
+
+        let before = git_spawns_under(&dir);
+        let again = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap();
+        assert!(matches!(again, Gated::Unchanged));
+        assert_eq!(git_spawns_under(&dir) - before, 1, "only the gate's status");
+
+        // Same size, same second: only the nanoseconds differ.
+        write(&dir, "a.txt", b"CHANGED\n");
+        let stamp = SystemTime::now() - hour + Duration::from_nanos(7);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("a.txt"))
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        let Gated::Captured(second, next) = capture_gated(&repos, &dir, None, Some(&gate))
+            .await
+            .unwrap()
+        else {
+            panic!("a same-size edit must be seen");
+        };
+        assert_ne!(first.checksum, second.checksum);
+        assert!(next.is_some_and(|gate| gate.trusted));
+
+        // A change in what git lists is seen as well.
+        git(&dir, &["checkout", "--", "a.txt"]);
+        let gate = match capture_gated(&repos, &dir, None, None).await.unwrap() {
+            Gated::Captured(_, Some(gate)) => gate,
+            _ => panic!("gate"),
+        };
+        std::fs::remove_file(dir.join("u.txt")).unwrap();
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+    }
+
+    #[tokio::test]
+    async fn freshly_written_files_never_vouch_for_a_skip() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let repos = repos(&tmp_path);
+        let dir = tmp_path.join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"just now\n");
+        let Gated::Captured(_, Some(gate)) = capture_gated(&repos, &dir, None, None).await.unwrap()
+        else {
+            panic!("gate");
+        };
+        assert!(!gate.trusted, "an mtime inside the racy window");
+        assert!(matches!(
+            capture_gated(&repos, &dir, None, Some(&gate))
+                .await
+                .unwrap(),
+            Gated::Captured(..)
+        ));
+    }
+
+    #[test]
+    fn gate_never_trusts_a_change_list_past_the_cap() {
+        let tmp = scratch();
+        let paths: Vec<Vec<u8>> = (0..super::MAX_GATE_PATHS + 1)
+            .map(|i| format!("f{i}").into_bytes())
+            .collect();
+        let gate = GateState::fingerprint(tmp.path(), b"status", &paths, SystemTime::now());
+        assert!(!gate.trusted);
+    }
+
+    async fn settled_spawns(dir: &Path) -> u64 {
+        // Captures raise watch events of their own (index refreshes); wait
+        // until the checkout has stopped spawning git.
+        let mut last = git_spawns_under(dir);
+        let mut calm = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while calm < 4 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "checkout never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let now = git_spawns_under(dir);
+            calm = if now == last { calm + 1 } else { 0 };
+            last = now;
+        }
+        last
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_repair_tick_spawns_no_git_while_the_watcher_is_live() {
+        let tmp = scratch();
+        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+        let dir = tmp_path.join("repo");
+        base_repo(&dir);
+        write(&dir, "a.txt", b"dirty\n");
+        write(&dir, "u.txt", b"untracked\n");
+
+        let core = crate::EngineCore::assemble(
+            &tmp_path.join("data"),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_space("space", &core.device_id, &dir.to_string_lossy(), None, true)
+            .unwrap();
+        core.workspace
+            .create_chat("chat", Some("space"), None, None, None)
+            .unwrap();
+        let sync = &core.diff_sync;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            sync.reconcile_now().await;
+            let watched = sync.tracked_checkouts().iter().any(|(_, live)| *live > 0);
+            if watched && !sync.watch_diffs().borrow().is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "checkout never tracked"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let idle = settled_spawns(&dir).await;
+        assert!(idle > 0, "the initial capture spawned git");
+        for _ in 0..3 {
+            sync.repair_now().await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        assert_eq!(
+            git_spawns_under(&dir),
+            idle,
+            "an idle, watched checkout costs no git at the repair tick"
+        );
+
+        // An edit still reaches the diff through the watcher.
+        let before = sync.watch_diffs().borrow()[0].checksum.clone();
+        write(&dir, "a.txt", b"edited again\n");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while sync.watch_diffs().borrow()[0].checksum == before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "edit never published"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        core.shutdown().await;
     }
 }
