@@ -212,6 +212,11 @@ fn codex_proxy_overrides(
         if row.get("enabled").and_then(Value::as_bool) == Some(false) {
             continue;
         }
+        // A missing capability snapshot is unknown, not proof of non-channel.
+        // Probing here would itself start a potentially channel-owning server.
+        if !row.get("capabilities").and_then(Value::as_object).is_some() {
+            continue;
+        }
         let Some(mode) = codex_server_mode(name, row, plan) else {
             continue;
         };
@@ -3749,6 +3754,7 @@ mod mcp_injection_tests {
     fn resolved_mcp_servers() -> serde_json::Map<String, Value> {
         json!({
             "notes": {
+                "capabilities": {},
                 "command": "npx",
                 "args": ["-y", "@scope/notes", "--title", "a b", "say \"hi\""],
                 "env": {"NOTES_TOKEN": "secret-token", "DISPLAY": ":1"},
@@ -3762,6 +3768,7 @@ mod mcp_injection_tests {
                 "disabled_tools": ["delete_note"]
             },
             "playwright": {
+                "capabilities": {},
                 "command": "npx",
                 "args": ["-y", "@playwright/mcp@0.0.1"],
                 "env_vars": ["PLAYWRIGHT_BROWSERS_PATH"],
@@ -3770,6 +3777,7 @@ mod mcp_injection_tests {
                 "tool_timeout_sec": null
             },
             "spaced": {
+                "capabilities": {},
                 "command": "/opt/My Servers/node",
                 "args": ["srv.js", "a b", "say \"hi\""],
                 "enabled": true
@@ -3817,14 +3825,26 @@ mod mcp_injection_tests {
     }
 
     #[test]
+    fn unknown_or_channel_capabilities_stay_eager() {
+        let servers = json!({
+            "unknown": {"command": "node"},
+            "channel": {"command": "node", "capabilities": {"experimental": {"vendor/channel": {}}}},
+            "ordinary": {"command": "node", "capabilities": {"tools": {}}}
+        }).as_object().unwrap().clone();
+        let overrides = override_map(&servers, &sample_plan());
+        assert_eq!(overrides.len(), 2);
+        assert!(overrides.contains_key("mcp_servers.ordinary.command"));
+    }
+
+    #[test]
     fn unsafe_names_and_incomplete_launch_data_stay_eager() {
         let servers = json!({
             "dot.name": {"command": "node", "args": []},
             "quote\"name": {"command": "node", "args": []},
-            "dash-name": {"command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
-            "bad-args": {"command": "node", "args": [1]},
-            "bad-env": {"command": "node", "env_vars": ["A,B"]},
-            "relative": {"command": "node", "cwd": "relative"}
+            "dash-name": {"capabilities": {}, "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
+            "bad-args": {"capabilities": {}, "command": "node", "args": [1]},
+            "bad-env": {"capabilities": {}, "command": "node", "env_vars": ["A,B"]},
+            "relative": {"capabilities": {}, "command": "node", "cwd": "relative"}
         })
         .as_object()
         .unwrap()
