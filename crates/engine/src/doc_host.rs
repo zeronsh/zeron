@@ -7725,6 +7725,34 @@ mod salvage_tests {
         emptiness_agrees(&continuation);
     }
 
+    #[test]
+    fn salvage_marker_tracks_snapshot_and_pending_update_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let id = "chat";
+        let healthy = SessionDoc::init(id).unwrap();
+        healthy.push_message(&user_message("one", "kept")).unwrap();
+        let healthy_bytes = healthy.export_snapshot().unwrap();
+        let blank_bytes = SessionDoc::init(id).unwrap().export_snapshot().unwrap();
+        store.save_snapshot(id, &healthy_bytes).unwrap();
+        store.mark_salvage_checked(id, &healthy_bytes).unwrap();
+        assert!(store.salvage_checked(id).unwrap());
+        store.save_snapshot(id, &blank_bytes).unwrap();
+        assert!(!store.salvage_checked(id).unwrap());
+        // An inspection racing a replacement cannot mark the new snapshot.
+        store.mark_salvage_checked(id, &healthy_bytes).unwrap();
+        assert!(!store.salvage_checked(id).unwrap());
+        store.save_snapshot(id, &healthy_bytes).unwrap();
+        store.mark_salvage_checked(id, &healthy_bytes).unwrap();
+        store.enqueue_chat_update(id, "update", b"update").unwrap();
+        assert!(!store.salvage_checked(id).unwrap());
+        store.mark_salvage_checked(id, &healthy_bytes).unwrap();
+        assert!(!store.salvage_checked(id).unwrap());
+        store.delete_snapshot(id).unwrap();
+        store.save_snapshot(id, &blank_bytes).unwrap();
+        assert!(!store.salvage_checked(id).unwrap());
+    }
+
     #[tokio::test]
     async fn salvage_refills_a_blank_journaled_chat_and_the_marker_skips_the_next_boot() {
         let dir = tempfile::tempdir().unwrap();
