@@ -11,7 +11,7 @@ use std::{
 };
 
 pub async fn generate(name: &str, engine: &Path, seed: u64) -> Result<PathBuf> {
-    let target = match name {
+    let target: usize = match name {
         "T-100k" => 100_000,
         "T-1m" => 1_000_000,
         "T-5m" => 5_000_000,
