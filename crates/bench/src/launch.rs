@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::net::TcpListener;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -266,6 +267,12 @@ pub async fn launch(bin: impl AsRef<Path>, trial: &Trial) -> Result<Engine> {
     let bin = absolute_existing(bin.as_ref())?;
     trial.prepare()?;
     assert_isolated(trial)?;
+    // After the guard. The binary is placed inside the trial and the tool
+    // names are relative links to it, so a later isolation walk stays inside
+    // `ZB_ROOT`. A launch whose `bench_bin` has no `zb-shim` sibling (the
+    // scaffold's fake-engine test, before this bin is built) leaves `shims/`
+    // empty and the engine resolves commands from `/usr/bin`.
+    install_shims(trial)?;
     if trial.port == DEFAULT_IPC_PORT || forbidden_now(trial.port) {
         bail!("refusing to launch on port {}", trial.port);
     }
@@ -320,6 +327,70 @@ pub async fn launch(bin: impl AsRef<Path>, trial: &Trial) -> Result<Engine> {
         data: trial.data.clone(),
         reaped: false,
     })
+}
+
+/// Tools the bench counts. `PATH` lists [`Trial::shims`] first, so each of
+/// these names hits `zb-shim` before `/usr/bin`.
+const SHIM_NAMES: &[&str] = &[
+    "git", "sh", "bash", "ps", "ss", "lsof", "node", "npm", "npx", "uvx", "cargo", "rustc",
+];
+
+/// Install `zb-shim` into the trial and symlink [`SHIM_NAMES`] at it.
+///
+/// The file inside the trial is a hard link of the built binary when the
+/// trial and the target dir share a filesystem, otherwise a copy. The tool
+/// names are relative symlinks (`git` → `zb-shim`), so they canonicalize
+/// back inside the bench root.
+fn install_shims(trial: &Trial) -> Result<()> {
+    let Some(source) = shim_source(trial) else {
+        return Ok(());
+    };
+    let dest = trial.shims.join("zb-shim");
+    place_shim_binary(&source, &dest)?;
+    for name in SHIM_NAMES {
+        ensure_rel_symlink(Path::new("zb-shim"), &trial.shims.join(name))?;
+    }
+    Ok(())
+}
+
+fn shim_source(trial: &Trial) -> Option<PathBuf> {
+    let candidate = trial.bench_bin.parent()?.join("zb-shim");
+    if !candidate.is_file() {
+        return None;
+    }
+    fs::canonicalize(&candidate).ok().or(Some(candidate))
+}
+
+fn place_shim_binary(source: &Path, dest: &Path) -> Result<()> {
+    if let (Ok(src), Ok(dst)) = (fs::metadata(source), fs::metadata(dest))
+        && src.dev() == dst.dev()
+        && src.ino() == dst.ino()
+    {
+        return Ok(());
+    }
+    if dest.exists() {
+        fs::remove_file(dest).with_context(|| format!("replace {}", dest.display()))?;
+    }
+    if fs::hard_link(source, dest).is_ok() {
+        return Ok(());
+    }
+    fs::copy(source, dest)
+        .with_context(|| format!("copy {} to {}", source.display(), dest.display()))?;
+    let mode = fs::metadata(source)?.permissions().mode() | 0o111;
+    fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+fn ensure_rel_symlink(rel_target: &Path, link: &Path) -> Result<()> {
+    match fs::read_link(link) {
+        Ok(existing) if existing == rel_target => return Ok(()),
+        Ok(_) => fs::remove_file(link)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => fs::remove_file(link)?,
+    }
+    std::os::unix::fs::symlink(rel_target, link)
+        .with_context(|| format!("symlink {} -> {}", link.display(), rel_target.display()))?;
+    Ok(())
 }
 
 /// Host checks for `zeron-bench doctor`: user scope, smaps, perf paranoid,
@@ -908,6 +979,7 @@ fn mark(ok: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::env::test_trial;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn scope_argv_is_env_dash_i_and_carries_no_parent_secrets() {
@@ -1027,5 +1099,39 @@ mod tests {
         assert_eq!(parse_proc_stat("12 (my proc) S 1 12 12 0"), Some((1, 12)));
         assert_eq!(parse_proc_stat("1 (systemd) S 0 1"), Some((0, 1)));
         assert_eq!(parse_proc_stat("nope"), None);
+    }
+
+    #[test]
+    fn install_shims_links_every_counted_command_inside_the_trial() {
+        let mut trial = test_trial("shims");
+        let bin_dir = trial.root.join("bins");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let source = bin_dir.join("zb-shim");
+        fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        trial.bench_bin = bin_dir.join("zeron-bench");
+        install_shims(&trial).unwrap();
+        install_shims(&trial).unwrap();
+        let root = fs::canonicalize(&trial.zb_root).unwrap();
+        for name in SHIM_NAMES {
+            let link = trial.shims.join(name);
+            assert_eq!(
+                fs::read_link(&link).unwrap(),
+                Path::new("zb-shim"),
+                "{name}"
+            );
+            let canon = fs::canonicalize(&link).unwrap();
+            assert!(canon.starts_with(&root), "{}", canon.display());
+        }
+        assert_isolated(&trial).unwrap();
+    }
+
+    #[test]
+    fn install_shims_leaves_the_directory_empty_without_a_binary() {
+        let mut trial = test_trial("no-shim");
+        trial.bench_bin = trial.root.join("absent").join("zeron-bench");
+        install_shims(&trial).unwrap();
+        let entries: Vec<_> = fs::read_dir(&trial.shims).unwrap().collect();
+        assert!(entries.is_empty());
     }
 }

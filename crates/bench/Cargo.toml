@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "zeron-bench"
 path = "src/bin/zeron-bench.rs"
 
+[[bin]]
+name = "zb-shim"
+path = "src/bin/zb-shim.rs"
+
 [dependencies]
 tokio.workspace = true
 tokio-tungstenite.workspace = true
