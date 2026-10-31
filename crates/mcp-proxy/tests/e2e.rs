@@ -696,6 +696,17 @@ async fn lone_server_request_blocks_idle_and_inflight_cancel_is_remapped() {
     peer.close().await;
 }
 
+fn cache_files(d: &Path, extension: &str) -> Vec<PathBuf> {
+    fs::read_dir(d.join("mcp-cache/v1"))
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == extension))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stray_server_stdout_lines_are_skipped_like_a_direct_client_would() {
     for mode in ["lazy", "lazy-keep-alive", "keep-alive"] {
@@ -758,4 +769,18 @@ async fn server_negotiating_an_older_protocol_still_hits_the_cache() {
         .await;
         assert_eq!(pids(&d.join("spawn")).len(), 1, "session {session}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resources_without_template_listing_still_cache() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_NO_TEMPLATES", "1")]);
+    assert!(peer.init().await.get("result").is_some());
+    peer.close().await;
+    eventually(|| cache_files(d, "json").len() == 1).await;
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_NO_TEMPLATES", "1")]);
+    peer.init().await;
+    peer.close().await;
+    assert_eq!(pids(&d.join("spawn")).len(), 1);
 }

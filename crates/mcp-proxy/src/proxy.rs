@@ -676,15 +676,22 @@ impl Proxy {
             .and_then(|c| c.active.as_ref())
             .is_some_and(|(id, _)| message["id"] == *id)
         {
-            if message.get("error").is_some() {
+            let capture = self.capture.as_mut().unwrap();
+            let (id, list) = capture.active.as_mut().unwrap();
+            // A server may declare prompts/resources yet not implement every listing
+            // (typically resources/templates/list); that is an empty list, not a failure.
+            let unimplemented = message["error"]["code"] == -32601 && list.method != "tools/list";
+            if message.get("error").is_some() && !unimplemented {
                 return self
                     .capture_failed(format!("metadata capture: {}", message["error"]))
                     .await;
             }
-            let capture = self.capture.as_mut().unwrap();
-            let (id, list) = capture.active.as_mut().unwrap();
             let result = &message["result"];
-            let Some(items) = result[list.field].as_array() else {
+            let none = Vec::new();
+            let Some(items) = result[list.field]
+                .as_array()
+                .or(unimplemented.then_some(&none))
+            else {
                 return self.capture_failed("invalid metadata listing".into()).await;
             };
             list.items.extend(items.iter().cloned());
