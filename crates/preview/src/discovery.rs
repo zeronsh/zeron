@@ -2,6 +2,12 @@
 //! run or terminal that started it (see [`zeron_proto::ORIGIN_ENV`]). HTTP probes
 //! run only after that origin is established and commands performing
 //! authentication have been excluded.
+#[cfg(target_os = "linux")]
+use std::{
+    collections::BTreeSet,
+    sync::{LazyLock, Mutex, atomic::AtomicU32},
+    time::Instant,
+};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -11,7 +17,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeron_proto::ORIGIN_ENV;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener {
     pub pid: u32,
     pub parent: u32,
@@ -282,12 +288,76 @@ pub fn same_process(pid: u32, started_at: u64) -> bool {
     linux_started_at(&fields, boot, ticks) == started_at
 }
 
-/// This user's loopback-reachable TCP listeners, attributed to their origin
-/// chat. `None` when the process table itself could not be read: the caller
-/// keeps what it last saw rather than reading a failed scan as "nothing runs".
+/// How long a cached listen-inode set may stand in for another `/proc/*/fd` walk.
 #[cfg(target_os = "linux")]
-pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
-    use std::{fs, os::unix::fs::MetadataExt};
+const FULL_LISTEN_WALK: Duration = Duration::from_secs(30);
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ListenCache {
+    inodes: BTreeSet<String>,
+    listeners: Vec<Listener>,
+    walked_at: Option<Instant>,
+}
+
+#[cfg(target_os = "linux")]
+fn owners_alive(listeners: &[Listener]) -> bool {
+    let mut seen = HashSet::new();
+    for listener in listeners {
+        if seen.insert((listener.pid, listener.started_at))
+            && !same_process(listener.pid, listener.started_at)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+impl ListenCache {
+    fn matches(&self, inodes: &BTreeSet<String>, now: Instant) -> bool {
+        let Some(walked_at) = self.walked_at else {
+            return false;
+        };
+        now.saturating_duration_since(walked_at) < FULL_LISTEN_WALK
+            && &self.inodes == inodes
+            && owners_alive(&self.listeners)
+    }
+
+    fn store(&mut self, inodes: BTreeSet<String>, listeners: Vec<Listener>, now: Instant) {
+        self.inodes = inodes;
+        self.listeners = listeners;
+        self.walked_at = Some(now);
+    }
+}
+
+#[cfg(target_os = "linux")]
+static LISTEN_TICK: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "linux")]
+static LISTEN_CACHE: LazyLock<Mutex<ListenCache>> =
+    LazyLock::new(|| Mutex::new(ListenCache::default()));
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static FD_WALKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(target_os = "linux")]
+fn note_fd_walk() {
+    #[cfg(test)]
+    FD_WALKS.with(|walks| walks.set(walks.get() + 1));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn fd_walks() -> u32 {
+    FD_WALKS.with(|walks| walks.get())
+}
+
+/// Loopback TCP listeners in `/proc/net/tcp*`, keyed by socket inode.
+/// `None` when neither table can be read.
+#[cfg(target_os = "linux")]
+fn listen_sockets() -> Option<HashMap<String, SocketAddr>> {
+    use std::fs;
     let mut sockets = HashMap::new();
     let mut tables = 0;
     for (file, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
@@ -304,9 +374,29 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
             }
         }
     }
-    if tables == 0 {
-        return None;
-    }
+    (tables > 0).then_some(sockets)
+}
+
+#[cfg(target_os = "linux")]
+fn inode_set(sockets: &HashMap<String, SocketAddr>) -> BTreeSet<String> {
+    sockets.keys().cloned().collect()
+}
+
+/// The full `/proc/*/fd` walk [`listeners`] skips when the listen-inode set is
+/// unchanged. `None` when the process table itself could not be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn listeners_full(origins: &mut Origins) -> Option<Vec<Listener>> {
+    let sockets = listen_sockets()?;
+    listeners_from(origins, &sockets)
+}
+
+#[cfg(target_os = "linux")]
+fn listeners_from(
+    origins: &mut Origins,
+    sockets: &HashMap<String, SocketAddr>,
+) -> Option<Vec<Listener>> {
+    use std::{fs, os::unix::fs::MetadataExt};
+    note_fd_walk();
     let (boot, ticks) = linux_clock();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
@@ -377,6 +467,63 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
     Some(result)
+}
+
+/// Cached listen scan. `verify` compares a hit with [`listeners_full`] and, on
+/// a real mismatch, returns the full result and drops the cache.
+#[cfg(target_os = "linux")]
+fn listeners_scanned(
+    origins: &mut Origins,
+    cache: &mut ListenCache,
+    verify: bool,
+) -> Option<Vec<Listener>> {
+    let sockets = listen_sockets()?;
+    let inodes = inode_set(&sockets);
+    let now = Instant::now();
+    if cache.matches(&inodes, now) {
+        let cached = cache.listeners.clone();
+        if verify {
+            return match listeners_full(origins) {
+                Some(full) if full == cached => Some(cached),
+                Some(full) => {
+                    let stable = listen_sockets().is_some_and(|fresh| inode_set(&fresh) == inodes);
+                    if stable {
+                        tracing::error!("preview listener cache mismatched a full walk; resetting");
+                    }
+                    *cache = ListenCache::default();
+                    Some(full)
+                }
+                None => {
+                    tracing::error!("preview listener cache mismatched a full walk; resetting");
+                    *cache = ListenCache::default();
+                    None
+                }
+            };
+        }
+        return Some(cached);
+    }
+    let full = listeners_full(origins)?;
+    if listen_sockets().is_some_and(|fresh| inode_set(&fresh) == inodes) {
+        cache.store(inodes, full.clone(), now);
+    } else {
+        *cache = ListenCache::default();
+    }
+    Some(full)
+}
+
+/// This user's loopback-reachable TCP listeners, attributed to their origin
+/// chat. `None` when the process table itself could not be read: the caller
+/// keeps what it last saw rather than reading a failed scan as "nothing runs".
+///
+/// When the set of listening socket inodes is the same as the previous walk,
+/// every cached owner is still that process, and the last full walk was under
+/// 30s ago, the `/proc/*/fd` walk is skipped.
+#[cfg(target_os = "linux")]
+pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
+    let mut cache = LISTEN_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    listeners_scanned(origins, &mut cache, crate::perf_verify(&LISTEN_TICK))
 }
 
 #[cfg(target_os = "linux")]
@@ -933,5 +1080,59 @@ mod tests {
         assert!(!is_http(address).await);
         assert!(is_http(address).await);
         task.await.unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unchanged_listen_set_skips_the_fd_walk_and_matches_the_full_scan() {
+        let mut proved = false;
+        for _ in 0..8 {
+            let mut origins = Origins::default();
+            let mut cache = ListenCache::default();
+            let before = fd_walks();
+            let Some(first) = listeners_scanned(&mut origins, &mut cache, false) else {
+                continue;
+            };
+            if fd_walks() != before + 1 {
+                continue;
+            }
+            let primed = fd_walks();
+            let Some(second) = listeners_scanned(&mut origins, &mut cache, false) else {
+                continue;
+            };
+            if fd_walks() != primed || second != first {
+                continue;
+            }
+            let before_oracle = fd_walks();
+            let Some(verified) = listeners_scanned(&mut origins, &mut cache, true) else {
+                continue;
+            };
+            if fd_walks() <= before_oracle || verified != second {
+                continue;
+            }
+            if !cache.listeners.is_empty() {
+                cache.listeners[0].started_at = cache.listeners[0].started_at.wrapping_add(9);
+                let before_owner = fd_walks();
+                let Some(rescanned) = listeners_scanned(&mut origins, &mut cache, false) else {
+                    continue;
+                };
+                if fd_walks() <= before_owner || rescanned != verified {
+                    continue;
+                }
+            }
+            cache.walked_at = Some(Instant::now() - FULL_LISTEN_WALK);
+            let before_forced = fd_walks();
+            let Some(forced) = listeners_scanned(&mut origins, &mut cache, false) else {
+                continue;
+            };
+            if fd_walks() <= before_forced || forced != verified {
+                continue;
+            }
+            proved = true;
+            break;
+        }
+        assert!(
+            proved,
+            "listen set never stayed stable long enough to prove the fast path"
+        );
     }
 }

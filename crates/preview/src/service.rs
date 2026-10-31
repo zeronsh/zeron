@@ -39,6 +39,16 @@ enum Verdict {
 }
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
 const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const SCAN_PERIOD_WATCHED: Duration = Duration::from_secs(2);
+const SCAN_PERIOD_IDLE: Duration = Duration::from_secs(10);
+
+fn scan_period(watched: bool) -> Duration {
+    if watched {
+        SCAN_PERIOD_WATCHED
+    } else {
+        SCAN_PERIOD_IDLE
+    }
+}
 
 /// (servers already confirmed HTTP, listeners to probe this cycle)
 type Planned<T> = (Vec<(T, discovery::Listener)>, Vec<(T, discovery::Listener)>);
@@ -397,7 +407,8 @@ impl PreviewService {
                     }
                 };
                 tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
+                let period = scan_period(catalog.watched());
+                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(period) => {} }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -531,5 +542,10 @@ mod tests {
         }
         let (_, probe) = memory.plan(vec![((), listener(7, 8081))], now);
         assert_eq!(probe.len(), 1, "still retried once per max backoff");
+    }
+    #[test]
+    fn an_unwatched_catalog_scans_less_often() {
+        assert_eq!(scan_period(true), Duration::from_secs(2));
+        assert_eq!(scan_period(false), Duration::from_secs(10));
     }
 }
