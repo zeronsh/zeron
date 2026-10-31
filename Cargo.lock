@@ -13604,6 +13604,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-bench"
+version = "0.2.130"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "rand_chacha 0.9.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.1.4+spec-1.1.0",
+ "zeron-rpc",
+]
+
+[[package]]
 name = "zeron-client"
 version = "0.2.130"
 dependencies = [

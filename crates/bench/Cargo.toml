@@ -1,0 +1,33 @@
+[package]
+name = "zeron-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Isolated launcher and A/B harness for the Zeron engine"
+
+[lib]
+name = "zeron_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zeron-bench"
+path = "src/bin/zeron-bench.rs"
+
+[dependencies]
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+sha2.workspace = true
+zeron-rpc.workspace = true
+# Fixtures and reports (later units). Declared with the scaffold so the
+# crate's dependency set does not move under those units.
+toml = "1"
+rand_chacha = "0.9"
+
+[dev-dependencies]
+tokio.workspace = true

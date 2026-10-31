@@ -10,6 +10,7 @@ members = [
     "crates/term-link",
     "crates/theme",
     "crates/audio",
+    "crates/bench",
     "crates/proto",
     "crates/preview",
     "crates/doc",
