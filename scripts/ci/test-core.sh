@@ -9,7 +9,7 @@
 #                  plus `--test pi_rpc` with native-fixture; native-fixture only
 #                  adds the pi_rpc fixture binaries, so it is on for the whole build)
 #   zeron-preview  every test binary (preview-tests)
-#   zeron-doc      lib + attachments_roundtrip (cursor-compatibility)
+#   zeron-doc      lib + persistence and memory regressions + attachments_roundtrip
 #   zeron-sync, zeron-update   lib only (session-sync-regressions)
 #   zeron-engine   lib + the integration tests named below. Engine has many other
 #                  integration binaries (live agents etc.) that no workflow ran, so
@@ -21,10 +21,10 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 tests=()
-for f in crates/harness/tests/*.rs crates/preview/tests/*.rs; do
+for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.rs; do
   tests+=(--test "$(basename "$f" .rs)")
 done
-for t in session_publication restart_resume side_chats codex_subagents claude_subagents local_profiles message_queue pi_resume attachments_roundtrip osc7501; do
+for t in session_publication restart_resume side_chats codex_subagents claude_subagents local_profiles message_queue pi_resume osc7501; do
   tests+=(--test "$t")
 done
 
