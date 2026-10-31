@@ -2617,7 +2617,7 @@ impl RpcService for EngineRpc {
                 let metrics = tokio::runtime::Handle::current().metrics();
                 RpcReply::value(&serde_json::json!({
                     "counters": zeron_counters::snapshot().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
-                    "malloc": crate::counter_metrics::malloc(),
+                    "malloc": tokio::task::spawn_blocking(crate::counter_metrics::malloc).await.ok().flatten(),
                     "tokio": { "workers": metrics.num_workers(), "alive_tasks": metrics.num_alive_tasks() },
                 }))
             }
