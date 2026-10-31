@@ -62,8 +62,7 @@ struct ServiceName {
     last_seen_ms: i64,
 }
 /// Seen-at is stored as the start of the current hour, so a service that stays
-/// up rewrites the registry at most hourly and a restart still finds it inside
-/// the retention window.
+/// up rewrites the registry at most hourly, including across restarts.
 const SEEN_BUCKET_MS: i64 = 60 * 60 * 1000;
 static LABEL_TICK: AtomicU32 = AtomicU32::new(0);
 
