@@ -1075,6 +1075,8 @@ pub struct UiSettings {
     pub compact_model_picker: bool,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// Show persistent provider usage cards above the sidebar footer.
+    pub sidebar_show_usage_cards: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
@@ -1293,6 +1295,7 @@ impl Default for UiSettings {
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
+            sidebar_show_usage_cards: true,
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
@@ -2139,6 +2142,7 @@ impl UiSettings {
             compact_model_picker,
             sidebar_width,
             sidebar_collapsed,
+            sidebar_show_usage_cards,
             sidebar_grouped,
             sidebar_organization,
             sidebar_sort,
@@ -3307,6 +3311,7 @@ mod tests {
             codex_voice_device: Some("fedora".into()),
             sidebar_width: 300.0,
             sidebar_collapsed: true,
+            sidebar_show_usage_cards: false,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,

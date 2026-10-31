@@ -13,6 +13,7 @@
 //! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
 
 mod account_usage;
+mod accounts_resource;
 pub mod app_menus;
 pub mod app_update;
 pub mod appearance;
@@ -70,6 +71,7 @@ mod roll_text;
 pub mod running_pill;
 pub mod settings;
 pub mod shell;
+mod sidebar_usage;
 pub mod smooth_scroll;
 pub mod sound;
 pub mod state;

@@ -4,7 +4,6 @@
 //! usage meters — and clicking one switches to it, the same `ActivateAgentAccount` Settings →
 //! Accounts runs. Both views share [`AccountsSnapshotCache`], so a switch in
 //! either shows up in the other.
-use std::time::{Duration, Instant};
 
 use gpui::{
     Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div,
@@ -13,6 +12,7 @@ use gpui::{
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 use zeron_rpc::methods;
 
+use crate::accounts_resource::{AccountsResource, Refresh, active_account, used_fraction};
 use crate::popover;
 use crate::settings::accounts::{
     self, AccountsSnapshotCache, UsageLevel, render_usage_meter, reports_usage, signs_in,
@@ -22,79 +22,35 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// Forced probes hit the provider; the engine throttles them too, but the
-/// ring re-probes on every hover, so don't even ask more often than this.
-const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
-/// Background re-probe while a composer is alive: usage moves as turns run.
-const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// The binding limit: the most-used window of the account. Pure.
-pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
-    account
-        .usage_windows
-        .iter()
-        .map(|window| window.used_fraction.clamp(0.0, 1.0))
-        .reduce(f32::max)
-}
-
-/// The harness's live account, when it reports usage. Pure.
-pub fn active_account(
-    snapshot: &AgentAccountsSnapshot,
-    harness: HarnessId,
-) -> Option<&AgentAccount> {
-    snapshot
-        .accounts
-        .iter()
-        .find(|account| account.harness == harness && account.active)
-}
-
 /// Loads (and switches) the accounts of the composer's target device.
 pub struct AccountUsage {
     state: Entity<AppState>,
     /// `None` = this device, as in [`AccountsSnapshotCache`].
     target: Option<String>,
     harness: Option<HarnessId>,
-    /// Once any list has been asked for the current target.
-    loaded: bool,
-    last_forced: Option<Instant>,
     error: Option<SharedString>,
-    load_task: Option<Task<()>>,
+    resource: Entity<AccountsResource>,
+    _resource: Subscription,
     action_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
-    _poll: Task<()>,
     _cache: Subscription,
     _state: Subscription,
 }
 
 impl AccountUsage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL_INTERVAL).await;
-                if this
-                    .update(cx, |usage, cx| {
-                        if usage.harness.is_some() {
-                            usage.load(true, cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        let resource = AccountsResource::for_target(state.clone(), None, cx);
+        let observation = cx.observe(&resource, |_, _, cx| cx.notify());
         Self {
             _state: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
             target: None,
             harness: None,
-            loaded: false,
-            last_forced: None,
             error: None,
-            load_task: None,
+            resource,
+            _resource: observation,
             action_task: None,
             popup: popover::Popup::default(),
-            _poll: poll,
             // Settings → Accounts writes the same cache.
             _cache: cx.observe_global::<AccountsSnapshotCache>(|_, cx| cx.notify()),
         }
@@ -112,13 +68,14 @@ impl AccountUsage {
         self.harness = harness;
         if self.target != target {
             self.target = target;
-            self.loaded = false;
-            self.last_forced = None;
+            self.resource =
+                AccountsResource::for_target(self.state.clone(), self.target.clone(), cx);
+            self._resource = cx.observe(&self.resource, |_, _, cx| cx.notify());
             self.error = None;
         }
-        if harness.is_some() && !self.loaded {
-            self.loaded = true;
-            self.load(true, cx);
+        if harness.is_some() {
+            self.resource
+                .update(cx, |resource, cx| resource.ensure_loaded(cx));
         }
     }
 
@@ -133,57 +90,6 @@ impl AccountUsage {
             object.insert("targetDeviceId".into(), serde_json::json!(target));
         }
         value
-    }
-
-    /// Plain list first when nothing is cached (the engine's persisted usage
-    /// paints at once), then the forced probe replaces it.
-    fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
-        if force_usage {
-            if self
-                .last_forced
-                .is_some_and(|at| at.elapsed() < FORCE_MIN_INTERVAL)
-            {
-                return;
-            }
-            self.last_forced = Some(Instant::now());
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let key = self.target.clone();
-        let paint_first = force_usage && self.snapshot(cx).is_none();
-        let plain = self.params(serde_json::json!({ "forceUsage": false }));
-        let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let fetch = |params: serde_json::Value| {
-                let engine = engine.clone();
-                async move {
-                    engine
-                        .client()
-                        .call(methods::LIST_AGENT_ACCOUNTS, params)
-                        .await
-                        .ok()
-                        .and_then(|value| {
-                            serde_json::from_value::<AgentAccountsSnapshot>(value).ok()
-                        })
-                }
-            };
-            let store = |snapshot: AgentAccountsSnapshot, cx: &mut gpui::AsyncApp| {
-                let key = key.clone();
-                this.update(cx, |_, cx| {
-                    cx.default_global::<AccountsSnapshotCache>()
-                        .0
-                        .insert(key, snapshot);
-                })
-                .ok();
-            };
-            if paint_first && let Some(snapshot) = fetch(plain).await {
-                store(snapshot, cx);
-            }
-            if let Some(snapshot) = fetch(params).await {
-                store(snapshot, cx);
-            }
-        }));
     }
 
     /// Switch optimistically, like Settings → Accounts: the rows flip at once
@@ -218,7 +124,9 @@ impl AccountUsage {
                             .0
                             .insert(key, snapshot);
                     }
-                    Ok(Err(_)) => usage.load(false, cx),
+                    Ok(Err(_)) => usage
+                        .resource
+                        .update(cx, |resource, cx| resource.refresh(Refresh::Accounts, cx)),
                     Err(err) => {
                         if let Some(previous) = previous {
                             cx.default_global::<AccountsSnapshotCache>()
@@ -251,7 +159,8 @@ impl AccountUsage {
         }
         if card == FooterCard::Accounts {
             // Opening the card is the moment someone cares: re-probe.
-            self.load(true, cx);
+            self.resource
+                .update(cx, |resource, cx| resource.refresh(Refresh::Background, cx));
         }
         self.popup.open(card);
         cx.notify();

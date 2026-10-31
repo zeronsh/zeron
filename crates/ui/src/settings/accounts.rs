@@ -27,6 +27,7 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
+use crate::accounts_resource::{AccountsResource, Refresh};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -283,6 +284,18 @@ pub(crate) fn render_usage_meter(
     window: &zeron_proto::AgentUsageWindow,
     theme: &Theme,
 ) -> AnyElement {
+    usage_meter(window, theme, false)
+}
+
+/// Sidebar meters grow with the card while keeping labels and percentages aligned.
+pub(crate) fn render_sidebar_usage_meter(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+) -> AnyElement {
+    usage_meter(window, theme, true)
+}
+
+fn usage_meter(window: &zeron_proto::AgentUsageWindow, theme: &Theme, stretch: bool) -> AnyElement {
     let fraction = window.used_fraction.clamp(0.0, 1.0);
     let level = usage_level(fraction);
     let fill = usage_color(level, theme).opacity(match level {
@@ -290,6 +303,7 @@ pub(crate) fn render_usage_meter(
         _ => 0.9,
     });
     div()
+        .when(stretch, |el| el.w_full().min_w_0())
         .h(px(16.0))
         .flex()
         .flex_row()
@@ -306,8 +320,8 @@ pub(crate) fn render_usage_meter(
         )
         .child(
             div()
-                .w(px(USAGE_BAR_WIDTH))
-                .flex_none()
+                .when(stretch, |el| el.flex_1().min_w_0())
+                .when(!stretch, |el| el.w(px(USAGE_BAR_WIDTH)).flex_none())
                 .h(px(4.0))
                 .rounded_full()
                 .overflow_hidden()
@@ -412,15 +426,7 @@ struct ApiKeyEntry {
     _events: Subscription,
 }
 
-/// The last accounts list per target device (`None` = this device), shared
-/// by every accounts view so a re-opened Settings paints instantly and
-/// revalidates in place instead of flashing a skeleton.
-#[derive(Default)]
-pub(crate) struct AccountsSnapshotCache(
-    pub(crate) std::collections::HashMap<Option<String>, AgentAccountsSnapshot>,
-);
-
-impl gpui::Global for AccountsSnapshotCache {}
+pub(crate) use crate::accounts_resource::AccountsSnapshotCache;
 
 pub struct AccountsPage {
     state: Entity<AppState>,
@@ -444,7 +450,9 @@ pub struct AccountsPage {
     api_key: Option<ApiKeyEntry>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
-    load_task: Option<Task<()>>,
+    resource: Entity<AccountsResource>,
+    _resource: Subscription,
+    _cache: Subscription,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _observe: Subscription,
@@ -479,6 +487,11 @@ impl AccountsPage {
                 this.submit_code(cx);
             }
         });
+        let resource = AccountsResource::for_target(state.clone(), target_device.clone(), cx);
+        let resource_observation =
+            cx.observe(&resource, |page: &mut Self, _, cx| page.sync_resource(cx));
+        let cache_observation = cx
+            .observe_global::<AccountsSnapshotCache>(|page: &mut Self, cx| page.sync_resource(cx));
         let mut page = Self {
             state,
             embedded,
@@ -495,7 +508,9 @@ impl AccountsPage {
             api_key: None,
             error: None,
             code_input,
-            load_task: None,
+            resource,
+            _resource: resource_observation,
+            _cache: cache_observation,
             action_task: None,
             poll_task: None,
             _observe: observe,
@@ -504,7 +519,7 @@ impl AccountsPage {
         // Paint from the last list (this session) or the engine's persisted
         // usage, then force one probe to update in place — the skeleton only
         // ever shows on a genuinely first load.
-        page.load(force_usage_for(LoadTrigger::Mount), cx);
+        page.load(LoadTrigger::Mount, cx);
         page
     }
 
@@ -525,7 +540,7 @@ impl AccountsPage {
         self.api_key = None;
         self.busy_account = None;
         self.error = None;
-        self.load(force_usage_for(LoadTrigger::Mount), cx);
+        self.load(LoadTrigger::Mount, cx);
     }
 
     pub(crate) fn set_embedded_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
@@ -651,75 +666,39 @@ impl AccountsPage {
         .into_any_element()
     }
 
-    /// Stale-while-revalidate: a painted snapshot stays on screen while the
-    /// list runs. With nothing to paint yet, a forced load first takes the
-    /// engine's plain list (last known usage, no network) so rows appear at
-    /// once, then the probed list replaces it.
-    fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.snapshot = Loadable::Error("Engine not connected".into());
-            return;
+    /// Subscribe to the same target-scoped refresh used by the composer and sidebar.
+    fn load(&mut self, trigger: LoadTrigger, cx: &mut Context<Self>) {
+        self.resource =
+            AccountsResource::for_target(self.state.clone(), self.target_device.clone(), cx);
+        self._resource = cx.observe(&self.resource, |page, _, cx| page.sync_resource(cx));
+        let mode = if !force_usage_for(trigger) {
+            Refresh::Accounts
+        } else if trigger == LoadTrigger::Mount {
+            Refresh::Background
+        } else {
+            Refresh::Explicit
         };
-        let key = self.target_device.clone();
-        if !matches!(self.snapshot, Loadable::Ready(_)) {
-            self.snapshot = match cx
-                .try_global::<AccountsSnapshotCache>()
-                .and_then(|cache| cache.0.get(&key))
-            {
-                Some(cached) => Loadable::Ready(cached.clone()),
+        self.resource
+            .update(cx, |resource, cx| resource.refresh(mode, cx));
+        self.sync_resource(cx);
+    }
+
+    fn sync_resource(&mut self, cx: &mut Context<Self>) {
+        let resource = self.resource.read(cx);
+        self.refreshing = resource.refreshing;
+        self.snapshot = match cx
+            .try_global::<AccountsSnapshotCache>()
+            .and_then(|cache| cache.0.get(&self.target_device))
+        {
+            Some(snapshot) => Loadable::Ready(snapshot.clone()),
+            None => match &resource.error {
+                Some(error) => Loadable::Error(error.clone()),
                 None => Loadable::Loading,
-            };
+            },
+        };
+        if resource.error.is_some() && !resource.refreshing && self.snapshot.ready().is_some() {
+            self.error = resource.error.clone().map(Into::into);
         }
-        let paint_first = force_usage && !matches!(self.snapshot, Loadable::Ready(_));
-        self.refreshing = true;
-        let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
-        let plain = self.params(serde_json::json!({ "forceUsage": false }));
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let fetch = |params: serde_json::Value| {
-                let engine = engine.clone();
-                async move {
-                    engine
-                        .client()
-                        .call(methods::LIST_AGENT_ACCOUNTS, params)
-                        .await
-                        .map_err(|err| err.to_string())
-                        .and_then(|value| {
-                            serde_json::from_value::<AgentAccountsSnapshot>(value)
-                                .map_err(|err| err.to_string())
-                        })
-                }
-            };
-            if paint_first && let Ok(snapshot) = fetch(plain).await {
-                let key = key.clone();
-                this.update(cx, |page, cx| {
-                    cx.default_global::<AccountsSnapshotCache>()
-                        .0
-                        .insert(key, snapshot.clone());
-                    page.snapshot = Loadable::Ready(snapshot);
-                    cx.notify();
-                })
-                .ok();
-            }
-            let result = fetch(params).await;
-            this.update(cx, |page, cx| {
-                page.refreshing = false;
-                match result {
-                    Ok(snapshot) => {
-                        cx.default_global::<AccountsSnapshotCache>()
-                            .0
-                            .insert(key, snapshot.clone());
-                        page.snapshot = Loadable::Ready(snapshot);
-                    }
-                    // A failed revalidation keeps the painted rows.
-                    Err(err) if matches!(page.snapshot, Loadable::Ready(_)) => {
-                        page.error = Some(err.into());
-                    }
-                    Err(err) => page.snapshot = Loadable::Error(err),
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
         cx.notify();
     }
 
@@ -764,7 +743,7 @@ impl AccountsPage {
                         page.snapshot = Loadable::Ready(snapshot);
                     }
                     // An older engine's reply without the list: fetch it.
-                    Ok(Err(_)) => page.load(force_usage_for(LoadTrigger::PostAction), cx),
+                    Ok(Err(_)) => page.load(LoadTrigger::PostAction, cx),
                     Err(err) => {
                         if let Some(previous) = previous {
                             page.snapshot = Loadable::Ready(previous);
@@ -896,7 +875,7 @@ impl AccountsPage {
                 match result {
                     Ok(_) => {
                         page.login = None;
-                        page.load(force_usage_for(LoadTrigger::PostLogin), cx);
+                        page.load(LoadTrigger::PostLogin, cx);
                     }
                     Err(err) => {
                         flow.step = LoginStep::PasteCode {
@@ -967,7 +946,7 @@ impl AccountsPage {
             Ok(poll) => match poll.status {
                 AgentLoginStatus::Done => {
                     self.login = None;
-                    self.load(force_usage_for(LoadTrigger::PostLogin), cx);
+                    self.load(LoadTrigger::PostLogin, cx);
                     true
                 }
                 AgentLoginStatus::Error => {
@@ -1125,7 +1104,7 @@ impl AccountsPage {
                 match result {
                     Ok(_) => {
                         page.api_key = None;
-                        page.load(force_usage_for(LoadTrigger::PostAction), cx);
+                        page.load(LoadTrigger::PostAction, cx);
                     }
                     Err(error) => {
                         if let Some(entry) = page.api_key.as_mut() {
@@ -1845,106 +1824,105 @@ impl AccountsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let refreshing = self.refreshing || matches!(self.snapshot, Loadable::Loading);
-        let content: AnyElement =
-            match &self.snapshot {
-                Loadable::Idle | Loadable::Loading => self.render_embedded_skeleton(theme, cx),
-                Loadable::Error(message) => widgets::error_strip(theme, message.clone())
-                    .mt(px(4.0))
-                    .id("accounts-inline-retry")
-                    .role(gpui::Role::Button)
-                    .aria_label("Retry loading accounts")
-                    .tab_index(0)
-                    .cursor_pointer()
-                    .focus_visible(|s| s.border_2().border_color(theme.accent))
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.load(force_usage_for(LoadTrigger::Retry), cx)
-                    }))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from("Retry")),
-                    )
-                    .into_any_element(),
-                Loadable::Ready(snapshot) => {
-                    let rows: Vec<_> = provider_accounts(snapshot, harness)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, account)| {
-                            self.render_account_row(account, ix, ix == 0, theme, now, cx)
-                        })
-                        .collect();
-                    let empty = rows.is_empty();
-                    // Adding is the list's last row, not a header button —
-                    // it sits where the next account will appear. A
-                    // one-login agent that is connected has nothing to add.
-                    let api_key = self
-                        .targets_cloud()
-                        .then(|| cloud_api_key(harness))
-                        .flatten()
-                        .filter(|_| self.api_key.is_none());
-                    let add_row = (empty || !keeps_one_login(harness)).then(|| {
-                        div()
-                            .py(px(8.0))
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(px(4.0))
-                            .when(!empty, |el| {
-                                el.border_t_1().border_color(widgets::row_divider(theme))
-                            })
-                            .children(login_options(harness).into_iter().enumerate().map(
-                                |(ix, option)| {
-                                    let label = add_option_label(harness, option, empty);
-                                    widgets::action_button(theme, widgets::ActionTone::Quiet)
-                                        .id(("accounts-add", ix))
-                                        .when(ix == 0, |el| el.ml(px(-10.0)))
-                                        .role(gpui::Role::Button)
-                                        .aria_label(label.clone())
-                                        .tab_index(0)
-                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                        .on_click(cx.listener(move |page, _, _, cx| {
-                                            page.start_login(harness, option.provider, cx)
-                                        }))
-                                        .child(
-                                            crate::icons::icon(crate::icons::PLUS)
-                                                .size(px(14.0))
-                                                .text_color(theme.text_muted),
-                                        )
-                                        .child(SharedString::from(label))
-                                },
-                            ))
-                            .when_some(api_key, |el, (_, label)| {
-                                let label = format!("Add {label}");
-                                el.child(
-                                    widgets::action_button(theme, widgets::ActionTone::Quiet)
-                                        .id("accounts-add-api-key")
-                                        .role(gpui::Role::Button)
-                                        .aria_label(label.clone())
-                                        .tab_index(0)
-                                        .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                        .on_click(cx.listener(move |page, _, _, cx| {
-                                            page.open_api_key(harness, cx)
-                                        }))
-                                        .child(
-                                            crate::icons::icon(crate::icons::PLUS)
-                                                .size(px(14.0))
-                                                .text_color(theme.text_muted),
-                                        )
-                                        .child(SharedString::from(label)),
-                                )
-                            })
-                    });
+        let content: AnyElement = match &self.snapshot {
+            Loadable::Idle | Loadable::Loading => self.render_embedded_skeleton(theme, cx),
+            Loadable::Error(message) => widgets::error_strip(theme, message.clone())
+                .mt(px(4.0))
+                .id("accounts-inline-retry")
+                .role(gpui::Role::Button)
+                .aria_label("Retry loading accounts")
+                .tab_index(0)
+                .cursor_pointer()
+                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                .on_click(cx.listener(|page, _, _, cx| {
+                    page.load(LoadTrigger::Retry, cx);
+                }))
+                .child(div().flex_1())
+                .child(
                     div()
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("Retry")),
+                )
+                .into_any_element(),
+            Loadable::Ready(snapshot) => {
+                let rows: Vec<_> = provider_accounts(snapshot, harness)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, account)| {
+                        self.render_account_row(account, ix, ix == 0, theme, now, cx)
+                    })
+                    .collect();
+                let empty = rows.is_empty();
+                // Adding is the list's last row, not a header button —
+                // it sits where the next account will appear. A
+                // one-login agent that is connected has nothing to add.
+                let api_key = self
+                    .targets_cloud()
+                    .then(|| cloud_api_key(harness))
+                    .flatten()
+                    .filter(|_| self.api_key.is_none());
+                let add_row = (empty || !keeps_one_login(harness)).then(|| {
+                    div()
+                        .py(px(8.0))
                         .flex()
-                        .flex_col()
-                        .children(rows)
-                        .children(add_row)
-                        .children(self.render_api_key_entry(harness, theme, cx))
-                        .into_any_element()
-                }
-            };
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(4.0))
+                        .when(!empty, |el| {
+                            el.border_t_1().border_color(widgets::row_divider(theme))
+                        })
+                        .children(login_options(harness).into_iter().enumerate().map(
+                            |(ix, option)| {
+                                let label = add_option_label(harness, option, empty);
+                                widgets::action_button(theme, widgets::ActionTone::Quiet)
+                                    .id(("accounts-add", ix))
+                                    .when(ix == 0, |el| el.ml(px(-10.0)))
+                                    .role(gpui::Role::Button)
+                                    .aria_label(label.clone())
+                                    .tab_index(0)
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .on_click(cx.listener(move |page, _, _, cx| {
+                                        page.start_login(harness, option.provider, cx)
+                                    }))
+                                    .child(
+                                        crate::icons::icon(crate::icons::PLUS)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from(label))
+                            },
+                        ))
+                        .when_some(api_key, |el, (_, label)| {
+                            let label = format!("Add {label}");
+                            el.child(
+                                widgets::action_button(theme, widgets::ActionTone::Quiet)
+                                    .id("accounts-add-api-key")
+                                    .role(gpui::Role::Button)
+                                    .aria_label(label.clone())
+                                    .tab_index(0)
+                                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                    .on_click(cx.listener(move |page, _, _, cx| {
+                                        page.open_api_key(harness, cx)
+                                    }))
+                                    .child(
+                                        crate::icons::icon(crate::icons::PLUS)
+                                            .size(px(14.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from(label)),
+                            )
+                        })
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .children(add_row)
+                    .children(self.render_api_key_entry(harness, theme, cx))
+                    .into_any_element()
+            }
+        };
         div()
             .id("accounts-embedded")
             .w_full()
@@ -1978,9 +1956,9 @@ impl AccountsPage {
                             .tooltip(widgets::text_tooltip("Refresh usage"))
                             .tab_index(0)
                             .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.load(force_usage_for(LoadTrigger::Refresh), cx)
-                            }))
+                            .on_click(
+                                cx.listener(|page, _, _, cx| page.load(LoadTrigger::Refresh, cx)),
+                            )
                             .child(
                                 crate::icons::icon(crate::icons::REFRESH)
                                     .size(px(14.0))
@@ -2137,7 +2115,7 @@ impl Render for AccountsPage {
                         .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                         .on_click(cx.listener(|this, _, _, cx| {
                             // Retry IS the visit's first successful list — force usage.
-                            this.load(force_usage_for(LoadTrigger::Retry), cx)
+                            this.load(LoadTrigger::Retry, cx)
                         }))
                         .child(
                             div()
@@ -2316,7 +2294,7 @@ impl Render for AccountsPage {
 .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
 .on_click(cx.listener(|this, _, _, cx| {
                                                 this.load(
-                                                    force_usage_for(LoadTrigger::Refresh),
+                                                    LoadTrigger::Refresh,
                                                     cx,
                                                 )
                                             }))
