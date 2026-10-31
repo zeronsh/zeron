@@ -1144,6 +1144,7 @@ mod tests {
                 "ZERON_NO_LOGIN_SHELL",
                 "CLAUDE_CODE_EXECUTABLE",
                 "CLAUDE_CONFIG_DIR",
+                "CODEX_HOME",
                 "ZB_PROBE_SOCK",
                 "ZB_REPLAY_MODE",
             ]
