@@ -100,8 +100,9 @@ const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER salvage_outbox_delete AFTER DELETE ON chat_outbox BEGIN
        DELETE FROM salvage_checked WHERE doc_id = OLD.doc_id;
      END;",
-    // Delta rows preserve the legacy base's bytes/cursor. Old binaries also
-    // run these triggers: replacing/deleting a base clears a stale chain.
+    // Delta rows preserve the legacy base's bytes/cursor. These AFTER triggers
+    // are a backstop: migration 10's guard rejects a base write while deltas
+    // exist, so only a database that lost that guard reaches them.
     "CREATE TABLE snapshot_deltas (
         doc_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -125,6 +126,18 @@ const MIGRATIONS: &[&str] = &[
     CREATE TRIGGER salvage_delta_delete AFTER DELETE ON snapshot_deltas BEGIN
         DELETE FROM salvage_checked WHERE doc_id=OLD.doc_id;
     END;",
+    // Downgrade guard. An engine that predates the delta log reads only the
+    // base and would overwrite it, discarding the delta-only state. These
+    // triggers make its save/delete fail loudly while deltas exist; the delta
+    // engine always removes the deltas first, in the same transaction.
+    "CREATE TRIGGER snapshot_deltas_guard_replace BEFORE UPDATE ON snapshots
+     WHEN EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id=OLD.doc_id) BEGIN
+        SELECT RAISE(ABORT, 'snapshot has an unmerged delta log: run the newer engine to compact it');
+     END;
+     CREATE TRIGGER snapshot_deltas_guard_delete BEFORE DELETE ON snapshots
+     WHEN EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id=OLD.doc_id) BEGIN
+        SELECT RAISE(ABORT, 'snapshot has an unmerged delta log: run the newer engine to compact it');
+     END;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -613,13 +626,14 @@ impl DocsStore {
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        // Deltas first: the downgrade guard rejects a base write while any exist.
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
             params![doc_id, bytes, now_ms()],
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
-        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.commit()?;
         self.snapshot_payload_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -649,6 +663,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -656,7 +671,6 @@ impl DocsStore {
             params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
-        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.commit()?;
         self.snapshot_payload_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -685,6 +699,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -692,7 +707,6 @@ impl DocsStore {
             params![doc_id, bytes, now_ms(), cursor as i64, epoch as i64],
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
-        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.commit()?;
         self.snapshot_payload_bytes
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -785,11 +799,11 @@ impl DocsStore {
     fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
             "DELETE FROM snapshot_deltas WHERE doc_id = ?1",
             params![doc_id],
         )?;
+        tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
             "DELETE FROM chat_sync_jobs WHERE doc_id = ?1",
@@ -1602,11 +1616,11 @@ mod tests {
         doc.get_map("legacy").insert("key", 1).unwrap();
         doc.commit();
         let base = doc.export(loro::ExportMode::Snapshot).unwrap();
-        // Build the exact pre-delta schema, then apply only the new migration.
+        // Build the exact pre-delta schema, then apply only the new migrations.
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at INTEGER NOT NULL) STRICT").unwrap();
-            for (index, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1).enumerate() {
+            for (index, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 2).enumerate() {
                 conn.execute_batch(sql).unwrap();
                 conn.execute("INSERT INTO schema_migrations VALUES(?1,0)", [index + 1])
                     .unwrap();
@@ -1632,17 +1646,54 @@ mod tests {
             store.load_snapshot_with_cursor("chat").unwrap().unwrap(),
             (base.clone(), 10, 2)
         );
-        // Execute the old binary's actual SQL. The new trigger invalidates
-        // its stale delta chain even though that binary knows no such table.
+        // Execute the old binary's actual SQL. It must not be able to replace
+        // or delete a base while delta-only state exists: that state is the
+        // only copy of the newest edits, and the old engine cannot read it.
         let old = Connection::open(path).unwrap();
-        old.execute(
-            "UPDATE snapshots SET bytes=?1,cursor=12 WHERE doc_id='chat'",
-            [&base],
-        )
-        .unwrap();
+        for sql in [
+            "UPDATE snapshots SET bytes=x'00',cursor=12 WHERE doc_id='chat'",
+            "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES ('chat', x'00', 1, 12, 2, 1)
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
+                 cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 1",
+            "DELETE FROM snapshots WHERE doc_id='chat'",
+        ] {
+            let error = old.execute(sql, []).unwrap_err().to_string();
+            assert!(error.contains("unmerged delta log"), "{error}");
+        }
         let state = store.load_chat_state("chat").unwrap().unwrap();
-        assert_eq!(state.delta_count, 0);
-        assert_eq!(state.cursor, 12);
+        assert_eq!(state.delta_count, 1);
+        assert_eq!(state.cursor, 11);
+        assert_same_doc(&state.doc, &doc);
+        // Once the delta engine compacts, the old binary may save again.
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                11,
+                2,
+            )
+            .unwrap();
+        old.execute("UPDATE snapshots SET cursor=12 WHERE doc_id='chat'", [])
+            .unwrap();
+        assert_eq!(store.load_chat_state("chat").unwrap().unwrap().cursor, 12);
+        // Deleting a chat removes its deltas before the guarded base row.
+        let vv = doc.oplog_vv();
+        doc.get_map("more").insert("delta", 2).unwrap();
+        doc.commit();
+        store
+            .append_snapshot_delta(
+                "chat",
+                &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                13,
+                &DocsStore::snapshot_roots(&doc).unwrap(),
+            )
+            .unwrap();
+        store.delete_snapshot("chat").unwrap();
+        assert!(store.load_chat_state("chat").unwrap().is_none());
+        let rows: i64 = old
+            .query_row("SELECT count(*) FROM snapshot_deltas", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]

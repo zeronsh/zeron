@@ -49,18 +49,26 @@ and retries on the existing cadence.
 
 Existing snapshot-only databases load with the same state, cursor and epoch;
 there is no snapshot rewrite during migration. Older engines ignore the new
-table and read at least the last full snapshot, with that snapshot's own cursor.
-After a clean new-engine shutdown they see the compacted latest saved state.
-After a crash or forced stop, they cannot read newer delta-only changes: the
-base can lag by the bounded chain (including a long, slowly changing turn).
-An acknowledged remote update can be fetched again from the base's older room
-cursor. Unsynced delta-only state is unavailable to a downgraded binary.
+tables, so they still open the database and read the last full base with its own
+cursor. After a clean new-engine shutdown that base is the compacted latest
+state. After a crash or forced stop it can lag by the bounded chain: at most 256
+rows or `max(512 KiB, base/2)` bytes, and a chat that goes quiet is compacted
+after 30 seconds. An acknowledged remote update can be fetched again from the
+base's older room cursor, but unsynced delta-only state is invisible to a
+downgraded binary.
 
-If an older engine saves or deletes the base, the database triggers remove the
-stale delta chain in the same transaction, even though that engine does not know
-about it. A subsequent upgrade cannot merge that stale chain onto a replacement
-lineage. A save after a forced downgrade discards that delta-only chain;
-recovery of those changes then depends on the independent outbox/remote history.
+An older engine must not be able to destroy that state, so migration 10 installs
+`BEFORE UPDATE` and `BEFORE DELETE` triggers on `snapshots` that abort while the
+chat has delta rows. The old engine runs them without knowing about them: its
+save or chat delete fails with `snapshot has an unmerged delta log: run the newer
+engine to compact it`, the delta-only changes stay on disk, and the chat is not
+saved locally by the old engine until the newer engine has run once (it
+loads base + deltas and compacts). Its in-memory edits remain covered by the
+outbox and remote history. This is deliberate: a failed save is recoverable,
+an overwritten base is not. The new engine deletes the chat's deltas first and
+replaces the base second, in one transaction, so its own writes pass the guard
+(and a failure in either statement rolls back both). The AFTER triggers from
+migration 9 that clear a stale chain on base replacement stay as a backstop.
 Running two engines against the same data directory is unsupported.
 
 ## Publication outbox
