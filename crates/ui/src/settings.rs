@@ -27,6 +27,7 @@ pub mod composer;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
+pub mod mcp;
 pub mod notifications;
 pub mod search;
 pub mod shortcuts;

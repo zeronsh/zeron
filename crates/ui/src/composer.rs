@@ -6483,6 +6483,8 @@ pub struct Composer {
     dictation_activation: Option<Subscription>,
     dictation_blur: Option<Subscription>,
     dictation_focus: FocusHandle,
+    /// Wakes a hibernated chat's agent when the composer is used.
+    pub(crate) prewarm: crate::prewarm::PrewarmState,
     /// The last live frame of the voice pill, kept so it can settle away
     /// after the transcript lands instead of vanishing.
     voice_last: Option<VoiceFrame>,
@@ -6581,7 +6583,8 @@ impl Composer {
             ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
             ComposerInputEvent::Edited => {
                 this.sync_annotation_marks(cx);
-                this.on_input_edited(cx)
+                this.on_input_edited(cx);
+                this.prewarm_on_typing(cx);
             }
             ComposerInputEvent::CursorMoved => this.on_input_edited(cx),
             ComposerInputEvent::ViewportChanged => cx.notify(),
@@ -6748,6 +6751,7 @@ impl Composer {
             dictation_activation: None,
             dictation_blur: None,
             dictation_focus: cx.focus_handle(),
+            prewarm: Default::default(),
             voice_last: None,
             voice_tween: VoiceTween::default(),
         };
@@ -11294,6 +11298,7 @@ impl Render for Composer {
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
+        self.track_prewarm_focus(window, cx);
         let theme = Theme::of(cx).clone();
         let wizard_active = self.wizard.is_some();
         if self.mention.token.is_some()

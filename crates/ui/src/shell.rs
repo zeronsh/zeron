@@ -41,6 +41,7 @@ use crate::popover::{self, Loadable};
 use crate::pull_requests::PullRequestsPage;
 use crate::rail;
 use crate::settings::accounts::AccountsPage;
+use crate::settings::mcp::McpSettingsPage;
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
@@ -67,6 +68,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod actions_ui;
 mod chat_dropzone;
+mod chat_mcp;
 #[cfg(test)]
 mod chat_dropzone_tests;
 mod chat_pull_requests;
@@ -224,7 +226,8 @@ const CHAT_MENU_ROW_PIN: u8 = 1;
 const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
-const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_FULL_MCP: u8 = 5;
+const CHAT_MENU_ROW_TAB: u8 = 6;
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -631,6 +634,8 @@ pub enum SettingsSection {
     Harnesses,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
+    /// How agents start their MCP servers and when idle sessions sleep.
+    Mcp,
     Appearance,
     Files,
     Notifications,
@@ -645,13 +650,14 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
+        SettingsSection::Mcp,
         SettingsSection::Devices,
         SettingsSection::Cloud,
         SettingsSection::Billing,
@@ -705,6 +711,7 @@ impl SettingsSection {
             SettingsSection::Billing => "billing",
             SettingsSection::Harnesses => "providers",
             SettingsSection::Agents => "agents",
+            SettingsSection::Mcp => "mcp",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
             SettingsSection::Notifications => "notifications",
@@ -724,6 +731,7 @@ impl SettingsSection {
             "billing" => SettingsSection::Billing,
             "providers" | "harnesses" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
+            "mcp" | "mcp-servers" => SettingsSection::Mcp,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
             "notifications" => SettingsSection::Notifications,
@@ -751,6 +759,7 @@ impl SettingsSection {
             SettingsSection::Billing => "Billing",
             SettingsSection::Harnesses => "Providers",
             SettingsSection::Agents => "Accounts",
+            SettingsSection::Mcp => "MCP servers",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
@@ -770,6 +779,7 @@ impl SettingsSection {
             SettingsSection::Billing => icons::WALLET,
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
+            SettingsSection::Mcp => icons::HARD_DRIVE,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
             SettingsSection::Notifications => icons::BELL,
@@ -2232,6 +2242,7 @@ pub struct Shell {
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
+    mcp_page: Option<Entity<McpSettingsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
@@ -2805,6 +2816,7 @@ impl Shell {
             notifications_page: None,
             shortcuts_page: None,
             accounts_page: None,
+            mcp_page: None,
             harnesses_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
@@ -5965,6 +5977,16 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::Mcp => {
+                if self.mcp_page.is_none() {
+                    let state = self.state.clone();
+                    self.mcp_page = Some(cx.new(|cx| McpSettingsPage::new(state, cx)));
+                }
+                match &self.mcp_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
             SettingsSection::Agents => {
                 if self.accounts_page.is_none() {
                     let state = self.state.clone();
@@ -8941,6 +8963,13 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
+        // A hibernated agent has nothing running and resumes on the next
+        // message: its Idle mark wears a ring. Any other status speaks for
+        // itself.
+        let sleeping = status == zeron_proto::ChatIndicator::Idle
+            && !queued
+            && !undelivered
+            && self.state.read(cx).is_sleeping(&id);
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
@@ -8973,6 +9002,8 @@ impl Shell {
                     .size(px(11.0))
                     .text_color(status_color)
                     .into_any_element()
+            } else if sleeping {
+                spaces::sleeping_mark(&id).into_any_element()
             } else {
                 div()
                     .size(px(6.0))
@@ -8991,7 +9022,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
+                .aria_label(status_label.unwrap_or(if sleeping { "Sleeping" } else { "Idle" }))
                 .child(glyph)
                 .into_any_element()
         });
@@ -9118,6 +9149,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .children(subagent_pill("idle"))
+                    .children(sleeping.then(|| spaces::sleeping_mark(&id)))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
@@ -9145,7 +9177,7 @@ impl Shell {
                             "Session actions"
                         }
                     } else {
-                        status_label.unwrap_or("Idle")
+                        status_label.unwrap_or(if sleeping { "Sleeping" } else { "Idle" })
                     }
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
@@ -11279,6 +11311,28 @@ impl Shell {
                     menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                };
+                let menu = if self.chat_can_restart_with_all_mcp(&chat_id, cx) {
+                    let full_mcp_id = chat_id.clone();
+                    let full_mcp = popover::menu_row(
+                        &theme,
+                        false,
+                        format!("chat-menu-full-mcp-{chat_id}"),
+                    )
+                    .id("chat-menu-full-mcp")
+                    .debug_selector(|| "chat-menu-full-mcp".into())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.restart_chat_with_all_mcp(full_mcp_id.clone(), cx)
+                    }))
+                    .child(
+                        icon(icons::RESTART)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from("Restart with all MCP servers"));
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_FULL_MCP, full_mcp, cx))
+                } else {
+                    menu
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
@@ -19467,6 +19521,7 @@ mod settings_modal_regressions {
             ("settings/voice", SettingsSection::Voice),
             ("settings/conversations", SettingsSection::General),
             ("settings/files", SettingsSection::Files),
+            ("settings/mcp", SettingsSection::Mcp),
             ("settings/appshots", SettingsSection::Appshots),
             ("settings/archived", SettingsSection::Archived),
         ] {

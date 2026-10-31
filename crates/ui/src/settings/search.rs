@@ -153,6 +153,14 @@ settings_index! {
         "subagent delegate side chats tasks spawn"),
     (UpdatePolicy, Harnesses, Some("Updates"), "Update policy",
         "automatic upgrade version cli"),
+    (McpLazy, Mcp, None, "Lazy MCP servers",
+        "on demand start proxy memory ram servers tools"),
+    (McpIdleMinutes, Mcp, None, "Stop idle servers after",
+        "timeout minutes shut down unused"),
+    (SessionSleep, Mcp, None, "Put idle sessions to sleep after",
+        "hibernate hibernation memory never minutes suspend"),
+    (Prewarm, Mcp, None, "Wake sessions early",
+        "prewarm resume composer focus typing sleeping"),
     (CloudUsage, Cloud, None, "Usage",
         "hours consumption range"),
     (CloudGitHub, Cloud, None, "GitHub",
@@ -191,6 +199,7 @@ impl SettingId {
             SettingId::BackgroundEffect => Some(SettingId::NewThreadBackground),
             SettingId::Microphone | SettingId::SpeechModel => Some(SettingId::Dictation),
             SettingId::AutosaveDelay => Some(SettingId::Autosave),
+            SettingId::McpIdleMinutes => Some(SettingId::McpLazy),
             _ => None,
         }
     }
@@ -370,6 +379,10 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::Harnesses | SettingsSection::Agents => {
             "harnesses agents cli claude code codex cursor devin grok hermes pi opencode \
              antigravity muse install enable disable update policy accounts sign in login"
+        }
+        SettingsSection::Mcp => {
+            "mcp model context protocol servers tools plugins memory lazy hibernation sleep \
+             prewarm channel"
         }
         SettingsSection::Devices => "machines computers remote this device other devices rename",
         SettingsSection::Cloud => "machine remote github repositories usage",
