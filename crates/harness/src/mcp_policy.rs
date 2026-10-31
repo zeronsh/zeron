@@ -123,9 +123,7 @@ pub fn disposition(fact: &McpServerFact, ctx: PolicyContext) -> McpDisposition {
     if let Some(choice) = ctx.choice
         && let Some(mode) = choice.explicit_mode(ctx.worker)
     {
-        if matches!(mode, McpMode::Lazy | McpMode::LazyKeepAlive)
-            && (!fact.transport.trim().eq_ignore_ascii_case("stdio")
-                || fact.command.trim().is_empty())
+        if matches!(mode, McpMode::Lazy | McpMode::LazyKeepAlive) && class != McpClass::HeavyRuntime
         {
             return McpDisposition::Untouched;
         }
@@ -353,7 +351,7 @@ mod tests {
                 &native_small(),
                 ctx(false, false, Some(McpServerChoice::LazyKeepAlive))
             ),
-            McpDisposition::Mode(McpMode::LazyKeepAlive)
+            McpDisposition::Untouched
         );
     }
 
