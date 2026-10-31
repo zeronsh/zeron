@@ -81,7 +81,19 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Unix ms until which scheduled work (a wakeup, a cron job) is expected
+    /// to wake the runtime; 0 = none. Not a task in the roster, but retiring
+    /// the runtime before it fires loses it all the same.
+    scheduled_until: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Unix ms of the last change to the background task count.
+    background_changed: std::sync::Arc<std::sync::atomic::AtomicU64>,
     processes: std::sync::Arc<background::BackgroundWork>,
+}
+
+pub(crate) fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl TurnControl {
@@ -97,14 +109,42 @@ impl TurnControl {
 
     /// Driver: how many background tasks the runtime currently holds.
     pub fn set_background(&self, tasks: usize) {
-        self.background
-            .store(tasks, std::sync::atomic::Ordering::Release);
+        if self
+            .background
+            .swap(tasks, std::sync::atomic::Ordering::AcqRel)
+            != tasks
+        {
+            self.background_changed
+                .store(unix_ms(), std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Driver: the runtime holds scheduled work that will wake it until this
+    /// unix-ms time (0 clears it).
+    pub fn set_scheduled_until(&self, until_ms: u64) {
+        self.scheduled_until
+            .store(until_ms, std::sync::atomic::Ordering::Release);
     }
 
     /// Host: the runtime reports live background work, so retiring it now
-    /// would kill work nobody asked to stop.
+    /// would kill work nobody asked to stop. Scheduled work that has yet to
+    /// fire counts: its timer lives in the runtime.
     pub fn background_live(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+            || self
+                .scheduled_until
+                .load(std::sync::atomic::Ordering::Acquire)
+                > unix_ms()
+    }
+
+    /// Host: no background task started or ended within `quiet`. A task that
+    /// just finished is about to wake the agent with its result; a runtime
+    /// retired in that gap loses the wake.
+    pub fn background_settled(&self, quiet: std::time::Duration) -> bool {
+        let changed = self
+            .background_changed
+            .load(std::sync::atomic::Ordering::Acquire);
+        changed == 0 || unix_ms().saturating_sub(changed) >= quiet.as_millis() as u64
     }
 
     /// Driver: the background processes the runtime runs now, oldest first —

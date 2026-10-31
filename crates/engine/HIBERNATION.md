@@ -24,6 +24,17 @@ The final claim marks the runtime retiring under the steering ledger lock.
 Accepted prompts racing retirement retain the existing orphan replay guarantee.
 An open subagent sink holds the runtime indefinitely; silence is not completion.
 
+Claude's `ScheduleWakeup` and `CronCreate` timers live in the CLI process and are
+not in `background_tasks_changed` (2.1.316 lists shells, monitors, agents and
+workflows only), so the Claude driver reads them off the tool calls and holds the
+runtime through `TurnControl::background_live`: a wakeup until its clamped delay
+plus 15 minutes, a recurring job until `CronDelete`, an empty `CronList` or the
+CLI's seven-day expiry, a one-shot job until its pinned fire time plus 15
+minutes. Durable jobs from a previous process are not re-detected after a resume.
+A parked runtime must also have seen no background task start or end for 30
+seconds (`BACKGROUND_SETTLE`): a task that just ended is about to wake the agent
+with its result, and the pressure and manual paths have no deferred window.
+
 Channel servers remain eager and otherwise unchanged. Only Claude Code has
 channel delivery, so Codex and all other harnesses hibernate under the ordinary
 idle/work guards without a channel check. For Claude, H4 verification V-8 found

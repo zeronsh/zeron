@@ -164,6 +164,11 @@ impl HibernateReason {
     }
 }
 
+/// A background task that just ended is about to wake the agent with its
+/// result. Retiring the runtime inside that gap loses the wake, so a parked
+/// runtime must have seen no background change for this long.
+const BACKGROUND_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn session_idle_window(
     env: Option<&str>,
     voice: bool,
@@ -2069,6 +2074,7 @@ impl Inner {
             && !run.retiring.load(std::sync::atomic::Ordering::Acquire)
             && !run.voice_active.live()
             && !run.turn.background_live()
+            && run.turn.background_settled(BACKGROUND_SETTLE)
             && (run.runtime_config.harness_id != HarnessId::ClaudeCode
                 || run.hibernation_launch.as_ref().is_some_and(|launch| {
                     run.runtime_config.harness.hibernation_safe(
@@ -5794,6 +5800,39 @@ mod tests {
         lock(&t.core.sessions.inner.runs)["sleep"]
             .turn
             .set_background(1);
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_never_interrupts_scheduled_work() {
+        // A ScheduleWakeup or cron timer lives in the agent process; the task
+        // roster does not list it.
+        let t = HibernationTest::new(false, false).await;
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .turn
+            .set_scheduled_until(
+                ahead
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            );
+        t.rejects().await;
+        // Fired or cancelled: the runtime is free again.
+        lock(&t.core.sessions.inner.runs)["sleep"]
+            .turn
+            .set_scheduled_until(0);
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_waits_for_the_wake_a_finished_background_task_causes() {
+        let t = HibernationTest::new(false, false).await;
+        let turn = lock(&t.core.sessions.inner.runs)["sleep"].turn.clone();
+        turn.set_background(1);
+        turn.set_background(0);
+        // The roster just emptied: the agent's notification turn is on its way.
         t.rejects().await;
         t.core.sessions.shutdown().await;
     }

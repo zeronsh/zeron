@@ -622,6 +622,25 @@ case "$first" in
   cat >/dev/null
   ;;
 
+*scenario:scheduled-work*)
+  # A ScheduleWakeup and a recurring CronCreate: the CLI keeps both timers in
+  # its own process and lists neither in the task roster (2.1.316), so the
+  # tool calls are the only trace. CronDelete then drops the job.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["ScheduleWakeup","CronCreate","CronDelete"],"cwd":"/tmp","session_id":"sess-sched"}'
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_wake","name":"ScheduleWakeup","input":{"delaySeconds":1200,"reason":"check the build","prompt":"loop"}}]},"parent_tool_use_id":null}'
+  emit '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_wake","type":"tool_result","content":"{\"scheduledFor\":1}","is_error":false}]},"parent_tool_use_id":null}'
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_cron","name":"CronCreate","input":{"cron":"*/10 * * * *","prompt":"poll"}}]},"parent_tool_use_id":null}'
+  emit '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_cron","type":"tool_result","content":"Scheduled recurring job cronjob1 (every 10 minutes). Session-only (not written to disk, dies when Claude exits). Auto-expires after 7 days. Use CronDelete to cancel sooner.","is_error":false}]},"parent_tool_use_id":null}'
+  emit '{"type":"result","subtype":"success","result":"scheduled","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sched"}'
+  read -r next || exit 0
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_del","name":"CronDelete","input":{"id":"cronjob1"}}]},"parent_tool_use_id":null}'
+  emit '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_del","type":"tool_result","content":"Cancelled job cronjob1.","is_error":false}]},"parent_tool_use_id":null}'
+  emit '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_stop","name":"ScheduleWakeup","input":{"stop":true}}]},"parent_tool_use_id":null}'
+  emit '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_stop","type":"tool_result","content":"{\"stopped\":true}","is_error":false}]},"parent_tool_use_id":null}'
+  emit '{"type":"result","subtype":"success","result":"cleared","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sched"}'
+  cat >/dev/null
+  ;;
+
 *scenario:interrupt*)
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-int"}'
   # Wedge without reading stdin — forces the SIGTERM escalation path.
