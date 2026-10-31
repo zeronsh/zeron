@@ -402,6 +402,8 @@ fn entry_events(entry: &Value) -> Vec<AgentEvent> {
                     is_error: false,
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }

@@ -142,6 +142,9 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// Uploads copies of images embedded in a tool result (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_paths: Option<Vec<String>>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -194,6 +197,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            preview_paths,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -217,6 +221,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            preview_paths: (!preview_paths.is_empty()).then(|| preview_paths.clone()),
             ..Default::default()
         },
         MessagePart::Input {
@@ -303,6 +308,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                preview_paths: p.preview_paths.unwrap_or_default(),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1075,6 +1081,18 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     Ok(())
 }
 
@@ -1239,6 +1257,10 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: obj
+                .get("previewPaths")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1543,6 +1565,18 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(preview_paths) = &doc_part.preview_paths {
+        map.insert(
+            "previewPaths",
+            loro_value_from_json(&serde_json::Value::Array(
+                preview_paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )),
+        )?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1843,6 +1877,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -1907,6 +1942,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1959,6 +1995,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            preview_paths: Vec::new(),
         };
         let parts = vec![
             tool(
@@ -2141,6 +2178,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_preview_paths_round_trip_through_the_doc() {
+        let doc = SessionDoc::init("previews").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev", 1).unwrap();
+        let mut folded = Vec::new();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::ReadFile {
+                    path: "/tmp/shots/1.png".into(),
+                },
+            },
+        );
+        writer.sync(&folded).unwrap();
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: vec!["/uploads/abc-image.png".into()],
+                image_payloads: Vec::new(),
+            },
+        );
+        writer.finish(&folded, MessageStatus::Complete).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool { preview_paths, .. } => {
+                assert_eq!(preview_paths, &vec!["/uploads/abc-image.png".to_string()]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn segment_writer_streams_text_incrementally() {
         let doc = SessionDoc::init("chat-1").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
@@ -2167,6 +2240,8 @@ mod tests {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         );
         writer.sync(&folded).unwrap();
@@ -2284,6 +2359,8 @@ mod tests {
                     old_text: Some("old\n".into()),
                     new_text: "new\n".into(),
                 }),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         );
         crate::parts::apply_sidecar_refs("chat-2", &mut folded);
@@ -2347,6 +2424,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                preview_paths: Vec::new(),
             }],
             created_at: 1,
             device_id: "dev-a".into(),

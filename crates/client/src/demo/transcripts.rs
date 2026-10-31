@@ -38,6 +38,7 @@ pub(crate) fn tool(id: &str, call: ToolCall, is_error: bool, output: Option<&str
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        preview_paths: Vec::new(),
     }
 }
 

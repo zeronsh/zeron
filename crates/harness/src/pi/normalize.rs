@@ -144,6 +144,8 @@ impl Normalizer {
                     is_error: frame["isError"].as_bool().unwrap_or(false),
                     output: output.map(|s| cap(&s, 16384)),
                     diff,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
             "compaction_end" => {

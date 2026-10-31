@@ -439,6 +439,8 @@ async fn open_tool_call_never_quiesces() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         })
         .unwrap();
     rig.feed.send(text("Build done.")).unwrap();
@@ -479,6 +481,8 @@ async fn stale_tool_echo_stays_parked() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         })
         .unwrap();
     rig.feed

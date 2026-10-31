@@ -159,6 +159,8 @@ impl Normalizer {
                     || item["exitCode"].as_i64().is_some_and(|c| c != 0),
                 output,
                 diff,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             });
         }
         events
@@ -201,6 +203,8 @@ impl Normalizer {
                     is_error: status != "completed",
                     output,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }
@@ -233,6 +237,8 @@ impl Normalizer {
                         .or_else(|| item["failureReason"].as_str())
                         .map(|text| cap(text, 16384)),
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 });
             }
         }
