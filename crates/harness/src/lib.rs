@@ -232,10 +232,10 @@ pub trait Harness: Send + Sync {
     fn executable_path(&self) -> Option<std::path::PathBuf> {
         None
     }
-    /// Hibernation requires affirmative evidence that this launch has no channel
-    /// servers. Drivers without complete capability discovery stay awake.
+    /// Only Claude Code supports channel delivery. Its driver must establish
+    /// that marketplace-plugin servers cannot hold a live channel.
     fn hibernation_safe(&self, _request: &RunRequest, _data_dir: &std::path::Path) -> bool {
-        self.id() == HarnessId::Mock
+        self.id() != HarnessId::ClaudeCode
     }
 
     /// Whether every turn shape — user-prompted AND agent-initiated

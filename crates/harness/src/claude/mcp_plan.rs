@@ -106,8 +106,9 @@ fn declares_channel(v: &serde_json::Value) -> bool {
     }
 }
 
-/// A missing capture or omitted capabilities cannot prove absence of channels.
-/// This also checks eager/absolute/remote rows that never pass through the shim.
+/// V-8: channel_enable requires a marketplace plugin (source=plugin, even
+/// when scope=dynamic). Other server sources cannot deliver Claude channels.
+/// Missing/stale captures and plugin rows without per-run proof stay awake.
 pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path) -> bool {
     let load = || {
         let inputs = FingerprintInputs::for_run(
@@ -147,40 +148,18 @@ pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path
         SnapshotStore::new(data_dir).load(&key)
     };
     load().is_some_and(|snapshot| {
-        snapshot.servers.iter().all(|row| {
-            let caps = row.extra.get("capabilities");
-            let channel_meta_clear = row.extra.get("channelCapabilities").is_none_or(|v| {
-                v.as_object().is_some_and(|m| m.is_empty())
-                    || v.as_array().is_some_and(|a| a.is_empty())
-            });
-            if !channel_meta_clear || caps.is_some_and(declares_channel) {
-                return false;
-            }
-            // Proxy discovery covers the shim path on Claude versions whose
-            // mcp_status omits capabilities. Unknown eager/absolute/remote rows
-            // keep the runtime awake.
-            let proxy = request
-                .mcp_plan
-                .as_ref()
-                .filter(|_| row.transport.as_deref() == Some("stdio"))
-                .and_then(|plan| {
+        snapshot
+            .servers
+            .iter()
+            .filter(|row| row.source.as_deref() == Some("plugin"))
+            .all(|row| {
+                request.mcp_plan.as_ref().is_some_and(|plan| {
                     zeron_mcp_proxy::discovery::run_discovery(Path::new(&plan.run_dir), &row.name)
                         .ok()
                         .flatten()
-                });
-            match proxy {
-                Some(
-                    zeron_mcp_proxy::discovery::Discovery::Channel
-                    | zeron_mcp_proxy::discovery::Discovery::Failed,
-                ) => false,
-                Some(zeron_mcp_proxy::discovery::Discovery::NonChannel) => true,
-                None => caps.is_some_and(|caps| {
-                    zeron_mcp_proxy::cache::channel_capability(
-                        &serde_json::json!({"capabilities":caps}),
-                    ) == Some(false)
-                }),
-            }
-        })
+                        == Some(zeron_mcp_proxy::discovery::Discovery::NonChannel)
+                })
+            })
     })
 }
 
@@ -461,7 +440,7 @@ mod tests {
         );
     }
     #[test]
-    fn hibernation_requires_fresh_explicit_non_channel_capabilities_for_every_row() {
+    fn hibernation_requires_fresh_snapshot_and_per_run_proof_only_for_plugins() {
         let root = tempfile::tempdir().unwrap();
         let exe = root.path().join("claude");
         std::fs::write(&exe, "fake-cli").unwrap();
@@ -489,7 +468,7 @@ mod tests {
             .unwrap();
         assert!(hibernation_safe(&exe, &request, root.path()));
         for (caps, expected) in [
-            (serde_json::json!({"tools":{}}), true),
+            (serde_json::json!({"tools":{}}), false),
             (
                 serde_json::json!({"experimental":{"fake/channel":{}}}),
                 false,
@@ -500,7 +479,7 @@ mod tests {
             let mut row: super::super::mcp_capture::ClaudeMcpServer =
                 serde_json::from_value(serde_json::json!({
                     "name":"fake-channel", "status":"connected", "transport":"stdio",
-                    "config":{"command":"/absolute/eager-server","args":[]}
+                    "source":"plugin", "scope":"dynamic", "config":{"command":"/absolute/eager-server","args":[]}
                 }))
                 .unwrap();
             row.extra.insert("capabilities".into(), caps);
@@ -511,7 +490,7 @@ mod tests {
         }
         let row = serde_json::from_value(serde_json::json!({
             "name":"shimmed", "status":"connected", "transport":"stdio",
-            "config":{"command":"node","args":["server.js"]}
+            "source":"plugin", "scope":"dynamic", "config":{"command":"node","args":["server.js"]}
         }))
         .unwrap();
         store

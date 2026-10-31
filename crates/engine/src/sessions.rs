@@ -183,8 +183,8 @@ struct RunHandle {
     hibernate: Arc<tokio::sync::Notify>,
     hibernate_reason: Option<(HibernateReason, tokio::time::Instant)>,
     idle_since: Option<tokio::time::Instant>,
-    /// False until the driver has affirmative channel-free launch evidence.
-    hibernation_safe: bool,
+    /// The actual host-prepared launch, for Claude's fresh plugin/channel check.
+    hibernation_launch: Option<RunRequest>,
     voice: Option<zeron_harness::codex::realtime::RealtimeHandle>,
     voice_active: Arc<VoiceActivity>,
     run_id: String,
@@ -1218,7 +1218,7 @@ impl SessionsEngine {
                 hibernate: hibernate.clone(),
                 hibernate_reason: None,
                 idle_since: idle.then(tokio::time::Instant::now),
-                hibernation_safe: false,
+                hibernation_launch: None,
                 voice: (harness_id == HarnessId::Codex).then_some(voice_handle),
                 voice_active: voice_active.clone(),
                 run_id: run_id.clone(),
@@ -2069,12 +2069,16 @@ impl Inner {
             && !run.retiring.load(std::sync::atomic::Ordering::Acquire)
             && !run.voice_active.live()
             && !run.turn.background_live()
-            && run.hibernation_safe
-            && !self
-                .run_dir(&run.run_id)
-                .join("channel-live")
-                .try_exists()
-                .unwrap_or(true)
+            && (run.runtime_config.harness_id != HarnessId::ClaudeCode
+                || run.hibernation_launch.as_ref().is_some_and(|launch| {
+                    run.runtime_config.harness.hibernation_safe(
+                        launch,
+                        &self
+                            .registry
+                            .data_dir()
+                            .unwrap_or_else(zeron_mcp_proxy::data_dir),
+                    )
+                }))
             && lock(&run.pending_inputs).is_empty()
             && lock(&self.statuses)
                 .get(chat)
@@ -2123,26 +2127,30 @@ impl Inner {
         ))
     }
 
-    async fn refresh_hibernation_safety(
+    async fn remember_hibernation_launch(
         &self,
         chat: &str,
         run_id: &str,
         harness: Arc<dyn Harness>,
         launch: &RunRequest,
     ) {
+        let prepared = launch.clone();
         let launch = launch.clone();
         let data = self
             .registry
             .data_dir()
             .unwrap_or_else(zeron_mcp_proxy::data_dir);
-        let safe = tokio::task::spawn_blocking(move || harness.hibernation_safe(&launch, &data))
-            .await
-            .unwrap_or(false);
+        if harness.id() == HarnessId::ClaudeCode {
+            // Bind Claude's capture before launch. Final eligibility rechecks
+            // the snapshot and per-plugin records, including late discoveries.
+            let _ =
+                tokio::task::spawn_blocking(move || harness.hibernation_safe(&launch, &data)).await;
+        }
         if let Some(run) = lock(&self.runs)
             .get_mut(chat)
             .filter(|h| h.run_id == run_id)
         {
-            run.hibernation_safe = safe;
+            run.hibernation_launch = Some(prepared);
         }
     }
 
@@ -3879,7 +3887,6 @@ async fn drive_run(
 ) {
     let mut run_cleanup = RunCleanup::new(inner.run_dir(&run_id));
     let mut wake_pending = request.resume.is_some();
-    let mut hibernation_launch = None;
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
@@ -4073,14 +4080,13 @@ async fn drive_run(
                 {
                     Ok(()) => {
                         inner
-                            .refresh_hibernation_safety(
+                            .remember_hibernation_launch(
                                 &chat_id,
                                 &run_id,
                                 harness.clone(),
                                 &wire_request,
                             )
                             .await;
-                        hibernation_launch = Some(wire_request.clone());
                         if resume_state.idle {
                             harness.start_idle(wire_request, controls).await
                         } else {
@@ -4568,9 +4574,6 @@ async fn drive_run(
                         "turn quiesced: stream silent after completed output with no \
                          turn-end; parking (suspected missing harness Done)"
                     );
-                    if let Some(launch) = &hibernation_launch {
-                        inner.refresh_hibernation_safety(&chat_id, &run_id, harness.clone(), launch).await;
-                    }
                     // Some adapters close a completed response through this
                     // engine watchdog instead of a native Done. Preserve that
                     // completion notice, but never notify for an empty boundary
@@ -5286,15 +5289,6 @@ async fn drive_run(
             {
                 lock(&ledger).clear();
             }
-            if (*status == DoneStatus::Completed || stopped_in_place)
-                && steerable
-                && !interrupted
-                && let Some(launch) = &hibernation_launch
-            {
-                inner
-                    .refresh_hibernation_safety(&chat_id, &run_id, harness.clone(), launch)
-                    .await;
-            }
             // An accepted steer awaiting its boundary owns the continuation:
             // the previous Done is an internal handoff, not a completion ping.
             // So does a message the user already sent that is still on its
@@ -5494,13 +5488,16 @@ mod tests {
         launches: Arc<Mutex<Vec<RunRequest>>>,
         conversation: Arc<Mutex<Vec<String>>>,
         channel: bool,
+        harness_id: HarnessId,
+        claude_exe: Option<std::path::PathBuf>,
+        plugin_discovery: Option<zeron_mcp_proxy::discovery::Discovery>,
         hold_turn: bool,
         finish: Arc<tokio::sync::Notify>,
     }
     #[async_trait::async_trait]
     impl Harness for HibernationFixture {
         fn id(&self) -> HarnessId {
-            HarnessId::Mock
+            self.harness_id
         }
         fn display_name(&self) -> &str {
             "hibernation fixture"
@@ -5514,8 +5511,12 @@ mod tests {
         fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
             &[]
         }
-        fn hibernation_safe(&self, _: &RunRequest, _: &std::path::Path) -> bool {
-            !self.channel
+        fn hibernation_safe(&self, request: &RunRequest, data: &std::path::Path) -> bool {
+            self.claude_exe.as_ref().map_or(!self.channel, |exe| {
+                zeron_harness::ClaudeHarness::new()
+                    .with_executable(exe)
+                    .hibernation_safe(request, data)
+            })
         }
         async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
             Ok(vec![])
@@ -5529,6 +5530,9 @@ mod tests {
             zeron_harness::HarnessError,
         > {
             lock(&self.launches).push(request.clone());
+            if let Some(discovery) = self.plugin_discovery {
+                record_plugin_discovery(&request.mcp_plan.as_ref().unwrap().run_dir, discovery);
+            }
             if request.resume.is_none() {
                 lock(&self.conversation).clear();
             } else {
@@ -5537,13 +5541,14 @@ mod tests {
             lock(&self.conversation).push(request.prompt);
             let conversation = self.conversation.clone();
             let hold = self.hold_turn;
+            let harness_id = self.harness_id;
             let finish = self.finish.clone();
             let (tx, rx) = mpsc::unbounded_channel();
             tokio::spawn(async move {
                 // Retain the lease until the fake child has actually stopped.
                 let _lease = controls.execution_lease.take();
                 let _ = tx.send(Ok(AgentEvent::SessionStarted {
-                    harness: HarnessId::Mock,
+                    harness: harness_id,
                     model: "fake".into(),
                     tools: vec![],
                     cwd: request.cwd,
@@ -5589,12 +5594,40 @@ mod tests {
             Self::with_window(channel, hold_turn, 10).await
         }
         async fn with_window(channel: bool, hold_turn: bool, minutes: u32) -> Self {
+            let id = if channel {
+                HarnessId::ClaudeCode
+            } else {
+                HarnessId::Mock
+            };
+            Self::configured(channel, hold_turn, minutes, id, None, None).await
+        }
+        async fn configured(
+            channel: bool,
+            hold_turn: bool,
+            minutes: u32,
+            harness_id: HarnessId,
+            rows: Option<Vec<serde_json::Value>>,
+            plugin_discovery: Option<zeron_mcp_proxy::discovery::Discovery>,
+        ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let registry = Arc::new(HarnessRegistry::new());
+            let claude_exe = rows.as_ref().map(|_| {
+                let exe = dir.path().join(if cfg!(windows) { "claude.exe" } else { "claude" });
+                std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                exe
+            });
             let fixture = Arc::new(HibernationFixture {
                 launches: Default::default(),
                 conversation: Default::default(),
                 channel,
+                harness_id,
+                claude_exe,
+                plugin_discovery,
                 hold_turn,
                 finish: Default::default(),
             });
@@ -5602,7 +5635,7 @@ mod tests {
             let core = crate::EngineCore::assemble_with_profile(
                 crate::EngineProfile::local(dir.path()).unwrap(),
                 registry,
-                HarnessId::Mock,
+                harness_id,
                 None,
             )
             .unwrap();
@@ -5614,8 +5647,34 @@ mod tests {
             core.registry.set_mcp_prefs(prefs);
             let mut request = request();
             request.cwd = dir.path().to_string_lossy().into_owned();
+            if let Some(rows) = rows {
+                use zeron_harness::claude::mcp_capture::{
+                    ClaudeMcpSnapshot, FingerprintInputs, SnapshotStore,
+                };
+                let config = dir.path().join("claude-config");
+                std::fs::create_dir_all(&config).unwrap();
+                request.env.insert(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    config.to_string_lossy().into_owned(),
+                );
+                request
+                    .env
+                    .insert("HOME".into(), dir.path().to_string_lossy().into_owned());
+                let key = FingerprintInputs::for_run(Some(dir.path()), &request.env)
+                    .unwrap()
+                    .key(fixture.claude_exe.as_ref().unwrap())
+                    .unwrap();
+                SnapshotStore::new(&core.registry.data_dir().unwrap())
+                    .save(&ClaudeMcpSnapshot::new(
+                        key,
+                        rows.into_iter()
+                            .map(|row| serde_json::from_value(row).unwrap())
+                            .collect(),
+                    ))
+                    .unwrap();
+            }
             core.sessions
-                .dispatch("sleep", HarnessId::Mock, request.clone(), None)
+                .dispatch("sleep", harness_id, request.clone(), None)
                 .await
                 .unwrap();
             let test = Self {
@@ -5761,15 +5820,118 @@ mod tests {
         t.rejects().await;
         t.core.sessions.shutdown().await;
     }
+    fn record_plugin_discovery(run: &str, discovery: zeron_mcp_proxy::discovery::Discovery) {
+        let mut config = zeron_mcp_proxy::Config::parse(
+            [
+                "--server",
+                "plugin:fixture:server",
+                "--",
+                "node",
+                "server.js",
+            ]
+            .map(str::to_owned),
+            std::path::PathBuf::from(run)
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        config.run_dir = Some(run.into());
+        zeron_mcp_proxy::discovery::record_run_discovery(&config, discovery).unwrap();
+    }
+    fn plugin_rows() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"name":"plugin:fixture:server", "status":"connected",
+            "scope":"dynamic", "source":"plugin", "transport":"stdio",
+            "config":{"command":"node","args":["server.js"]}}),
+        ]
+    }
     #[tokio::test]
-    async fn hibernation_honors_a_channel_discovered_after_launch() {
-        let t = HibernationTest::new(false, false).await;
+    async fn hibernation_codex_ignores_channel_guards() {
+        // Neither a negative driver report nor a proxy-wide marker applies to Codex.
+        let t = HibernationTest::configured(true, false, 10, HarnessId::Codex, None, None).await;
         let dir = {
             let runs = lock(&t.core.sessions.inner.runs);
             t.core.sessions.inner.run_dir(&runs["sleep"].run_id)
         };
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("channel-live"), "channel").unwrap();
+        std::fs::write(dir.join("channel-live"), "irrelevant-to-codex").unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_non_plugin_servers_include_absolute_native_servers() {
+        let rows = ["user", "project", "local", "dynamic"]
+            .into_iter()
+            .map(|scope| {
+                serde_json::json!({"name":format!("non-plugin-{scope}"), "status":"connected",
+                "source":scope,"scope":scope,"transport":"stdio",
+                "config":{"command":"/absolute/reins","args":["mcp"]},
+                "capabilities":{"experimental":{"claude/channel":{}}}})
+            })
+            .collect();
+        let t =
+            HibernationTest::configured(false, false, 10, HarnessId::ClaudeCode, Some(rows), None)
+                .await;
+        let dir = {
+            let runs = lock(&t.core.sessions.inner.runs);
+            t.core.sessions.inner.run_dir(&runs["sleep"].run_id)
+        };
+        std::fs::write(dir.join("channel-live"), "non-plugin-advertisement").unwrap();
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_plugin_unknown_stays_awake() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            None,
+        )
+        .await;
+        t.rejects().await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_claude_plugin_confirmed_non_channel_hibernates() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            Some(zeron_mcp_proxy::discovery::Discovery::NonChannel),
+        )
+        .await;
+        assert!(t.core.sessions.hibernate("sleep"));
+        t.wait(zeron_proto::RuntimeState::Hibernated).await;
+        t.core.sessions.shutdown().await;
+    }
+    #[tokio::test]
+    async fn hibernation_honors_a_plugin_channel_discovered_after_launch() {
+        let t = HibernationTest::configured(
+            false,
+            false,
+            10,
+            HarnessId::ClaudeCode,
+            Some(plugin_rows()),
+            Some(zeron_mcp_proxy::discovery::Discovery::NonChannel),
+        )
+        .await;
+        let run = lock(&t.core.sessions.inner.runs)["sleep"].run_id.clone();
+        record_plugin_discovery(
+            t.core.sessions.inner.run_dir(&run).to_str().unwrap(),
+            zeron_mcp_proxy::discovery::Discovery::Channel,
+        );
         t.rejects().await;
         t.core.sessions.shutdown().await;
     }

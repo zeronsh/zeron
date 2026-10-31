@@ -18,22 +18,29 @@ park is discarded after intervening turn or voice activity. Both accept the exis
 
 All hibernation paths require a parked, non-retiring runtime with no pending
 steers or input resolvers, no approval/active turn, no background work, no live
-voice call, no open subagent sinks, and affirmative channel-free launch evidence.
+voice call, and no open subagent sinks. Claude Code also requires channel-safe
+marketplace-plugin evidence.
 The final claim marks the runtime retiring under the steering ledger lock.
 Accepted prompts racing retirement retain the existing orphan replay guarantee.
 An open subagent sink holds the runtime indefinitely; silence is not completion.
 
-Channel servers remain eager and otherwise unchanged. Drivers without complete
-channel discovery conservatively stay awake. Claude checks its fresh host-scoped
-MCP capture, including absolute-path, eager and remote servers; absent/unknown
-capabilities hold the runtime unless the shim/proxy supplies per-run non-channel
-evidence. That evidence is refreshed before publishing each park, including
-cache-hit launches. Evidence stays bound to the launch configuration; a later
-capture after a config edit cannot clear an older runtime's channel protection.
-Unknown eager/absolute/remote rows still hold the runtime.
-Proxy discovery also writes a sticky run-local `channel-live` hold before forwarding a discovered
-channel; known-channel and uncertain legacy exec handoffs write the same hold.
-No channel leases or ownership changes are introduced.
+Channel servers remain eager and otherwise unchanged. Only Claude Code has
+channel delivery, so Codex and all other harnesses hibernate under the ordinary
+idle/work guards without a channel check. For Claude, H4 verification V-8 found
+that channel_enable requires a marketplace-plugin server. The snapshot's
+source=plugin identifies those rows, including plugins whose scope is dynamic.
+User, project, local and dynamic non-plugin sources (including Zeron's own server
+and absolute-path native servers such as reins mcp) cannot hold Claude channels.
+
+A fresh Claude snapshot is required. Only plugin-sourced rows need affirmative
+per-run NonChannel evidence from the proxy; missing, failed or Channel records
+hold the runtime. Snapshot capability claims alone cannot clear a plugin row.
+The engine checks this policy again at selection and final claim, so late plugin
+channel discovery holds an already parked runtime. Proxy-wide channel-live
+markers do not gate hibernation: they can describe non-plugin advertisements.
+Evidence stays bound to the launch configuration; a later capture after a config
+edit cannot clear an older runtime's channel protection. No channel leases or
+ownership changes are introduced.
 
 Memory pressure is sampled every ten seconds. Linux uses MemAvailable below the
 larger of 2 GiB and ten percent of MemTotal, or PSI `some avg10 > 10`. Windows
