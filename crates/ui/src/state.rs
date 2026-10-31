@@ -4698,6 +4698,16 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
     })
 }
 
+fn transcript_history_pending(raw: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Marker {
+        #[serde(default)]
+        history_pending: bool,
+    }
+    serde_json::from_str::<Marker>(raw).is_ok_and(|marker| marker.history_pending)
+}
+
 fn spawn_transcript_watch(
     cx: &mut Context<AppState>,
     handle: EngineHandle,
@@ -4739,19 +4749,11 @@ fn spawn_transcript_watch(
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
-                        #[derive(serde::Deserialize)]
-                        #[serde(rename_all = "camelCase")]
-                        struct Marker {
-                            #[serde(default)]
-                            history_pending: bool,
-                        }
                         let update: zeron_doc::TranscriptUpdate =
                             serde_json::from_str(raw.get()).map_err(|e| e.to_string())?;
-                        // Only the opening preview carries the marker; skip the
-                        // second pass over every live frame.
-                        let history_pending = raw.get().contains("\"historyPending\"")
-                            && serde_json::from_str::<Marker>(raw.get())
-                                .is_ok_and(|marker| marker.history_pending);
+                        // JSON keys may use escapes, so a literal substring
+                        // check would miss a valid historyPending marker.
+                        let history_pending = transcript_history_pending(raw.get());
                         let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
                         Ok::<_, String>((update, history_pending, prepared, preparation))
                     })
@@ -4957,6 +4959,12 @@ fn spawn_subagent_watch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn history_pending_accepts_escaped_keys() {
+        assert!(super::transcript_history_pending(r#"{"history\u0050ending":true}"#));
+        assert!(!super::transcript_history_pending(r#"{"historyPending":null}"#));
+        assert!(!super::transcript_history_pending(r#"{"reset":[]}"#));
+    }
     use super::*;
     use chrono::TimeDelta;
     use gpui::AppContext;
