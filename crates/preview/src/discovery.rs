@@ -289,12 +289,37 @@ fn listen_sockets() -> Option<(HashMap<String, SocketAddr>, bool)> {
     use std::fs;
     let mut sockets = HashMap::new();
     let mut tables = 0;
+    let mut valid = true;
     for (file, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
         if let Ok(text) = fs::read_to_string(file) {
             tables += 1;
+            if !text.ends_with('\n')
+                || text
+                    .lines()
+                    .next()
+                    .is_none_or(|header| !header.contains("local_address"))
+            {
+                valid = false;
+            }
             for line in text.lines().skip(1) {
                 let parts: Vec<_> = line.split_whitespace().collect();
-                if parts.len() <= 9 || parts[3] != "0A" {
+                if parts.len() <= 9 {
+                    valid = false;
+                    continue;
+                }
+                if parts[3] != "0A" {
+                    continue;
+                }
+                let Some((host, port)) = parts[1].split_once(':') else {
+                    valid = false;
+                    continue;
+                };
+                if host.len() != if ipv6 { 32 } else { 8 }
+                    || !host.bytes().all(|b| b.is_ascii_hexdigit())
+                    || u16::from_str_radix(port, 16).is_err()
+                    || parts[9].parse::<u64>().is_err()
+                {
+                    valid = false;
                     continue;
                 }
                 if let Some(address) = proc_address(parts[1], ipv6) {
@@ -303,7 +328,7 @@ fn listen_sockets() -> Option<(HashMap<String, SocketAddr>, bool)> {
             }
         }
     }
-    (tables > 0).then_some((sockets, tables == 2))
+    (tables > 0).then_some((sockets, tables == 2 && valid))
 }
 
 /// This user's loopback-reachable TCP listeners, attributed to their origin
@@ -312,39 +337,51 @@ fn listen_sockets() -> Option<(HashMap<String, SocketAddr>, bool)> {
 /// so every scan walks the process descriptors.
 #[cfg(target_os = "linux")]
 pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
-    listeners_with_completeness(origins).map(|(listeners, _)| listeners)
+    listeners_with_completeness(origins).map(|(listeners, _, _)| listeners)
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn listeners_with_completeness(origins: &mut Origins) -> Option<(Vec<Listener>, bool)> {
+pub(crate) fn listeners_with_completeness(
+    origins: &mut Origins,
+) -> Option<(Vec<Listener>, bool, usize)> {
     let (sockets, tables_complete) = listen_sockets()?;
-    let (listeners, complete) = listeners_from(origins, &sockets)?;
+    let (listeners, complete, unreadable) =
+        listeners_from(origins, &sockets, Path::new("/proc"), &mut |path| {
+            std::fs::read_dir(path)
+        })?;
     let stable = listen_sockets().is_some_and(|(after, complete)| complete && after == sockets);
-    Some((listeners, complete && tables_complete && stable))
+    Some((listeners, complete && tables_complete && stable, unreadable))
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn listeners_with_completeness(origins: &mut Origins) -> Option<(Vec<Listener>, bool)> {
+pub(crate) fn listeners_with_completeness(
+    origins: &mut Origins,
+) -> Option<(Vec<Listener>, bool, usize)> {
     // The platform enumerator does not report every per-process read failure.
-    listeners(origins).map(|listeners| (listeners, false))
+    listeners(origins).map(|listeners| (listeners, false, 0))
 }
 
 #[cfg(target_os = "linux")]
-fn listeners_from(
+pub(crate) fn listeners_from(
     origins: &mut Origins,
     sockets: &HashMap<String, SocketAddr>,
-) -> Option<(Vec<Listener>, bool)> {
+    proc_root: &Path,
+    open_fds: &mut impl FnMut(&Path) -> std::io::Result<std::fs::ReadDir>,
+) -> Option<(Vec<Listener>, bool, usize)> {
     use std::{fs, os::unix::fs::MetadataExt};
     let mut complete = true;
+    let mut unreadable = HashSet::new();
     let (boot, ticks) = linux_clock();
     let uid = unsafe { libc::geteuid() };
     let mut result = Vec::new();
     let mut processes = HashMap::new();
-    for entry in fs::read_dir("/proc").ok()? {
+    'processes: for entry in fs::read_dir(proc_root).ok()? {
         let process = match entry {
             Ok(entry) => entry,
-            Err(_) => {
-                complete = false;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    complete = false;
+                }
                 continue;
             }
         };
@@ -355,14 +392,17 @@ fn listeners_from(
         match fs::metadata(&path) {
             Ok(meta) if meta.uid() != uid => continue,
             Ok(_) => {}
-            Err(_) => {
-                complete = false;
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
                 continue;
             }
         }
-        let Ok(stat) = fs::read_to_string(path.join("stat")) else {
-            complete = false;
-            continue;
+        let stat = match fs::read_to_string(path.join("stat")) {
+            Ok(stat) => stat,
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                continue;
+            }
         };
         let Some((_, tail)) = stat.rsplit_once(") ") else {
             complete = false;
@@ -385,23 +425,32 @@ fn listeners_from(
         processes.insert(pid, Process { parent, started_at });
         // Sockets first: most processes listen on nothing, and need neither
         // their cwd nor their arguments read.
-        let Ok(fds) = fs::read_dir(path.join("fd")) else {
-            complete = false;
-            continue;
+        let fds = match open_fds(&path.join("fd")) {
+            Ok(fds) => fds,
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                continue;
+            }
         };
         let mut addresses = Vec::new();
         for fd in fds {
             let fd = match fd {
                 Ok(fd) => fd,
-                Err(_) => {
-                    complete = false;
+                Err(error) => {
+                    note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                    if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
+                        continue 'processes;
+                    }
                     continue;
                 }
             };
             let link = match fs::read_link(fd.path()) {
                 Ok(link) => link,
-                Err(_) => {
-                    complete = false;
+                Err(error) => {
+                    note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                    if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
+                        continue 'processes;
+                    }
                     continue;
                 }
             };
@@ -417,15 +466,21 @@ fn listeners_from(
         if addresses.is_empty() {
             continue;
         }
-        let Ok(cwd) = fs::read_link(path.join("cwd")) else {
-            complete = false;
-            continue;
+        let cwd = match fs::read_link(path.join("cwd")) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                continue;
+            }
         };
-        let args = fs::read(path.join("cmdline"))
-            .unwrap_or_else(|_| {
-                complete = false;
-                Vec::new()
-            })
+        let args = match fs::read(path.join("cmdline")) {
+            Ok(args) => args,
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
+                continue;
+            }
+        };
+        let args = args
             .split(|b| *b == 0)
             .filter(|b| !b.is_empty())
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -445,17 +500,33 @@ fn listeners_from(
         }
     }
     origins.attribute(&mut result, &processes, |pid| {
-        match fs::read(format!("/proc/{pid}/environ")) {
+        match fs::read(proc_root.join(pid.to_string()).join("environ")) {
             Ok(env) => Some(env),
-            Err(_) => {
-                complete = false;
+            Err(error) => {
+                note_proc_error(&error, pid, &mut complete, &mut unreadable);
                 None
             }
         }
     });
     result.sort_by_key(|l| (l.address, l.pid));
     result.dedup_by_key(|l| (l.address, l.pid));
-    Some((result, complete))
+    Some((result, complete, unreadable.len()))
+}
+
+#[cfg(target_os = "linux")]
+fn note_proc_error(
+    error: &std::io::Error,
+    pid: u32,
+    complete: &mut bool,
+    unreadable: &mut HashSet<u32>,
+) {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => {}
+        Some(libc::EACCES | libc::EPERM) => {
+            unreadable.insert(pid);
+        }
+        _ => *complete = false,
+    }
 }
 
 #[cfg(target_os = "linux")]

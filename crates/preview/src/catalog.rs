@@ -921,6 +921,67 @@ mod tests {
         ));
         assert_eq!(names.projects["/missing"].services[0].id, "live");
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inaccessible_fake_proc_processes_are_counted_and_scan_clock_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let proc_root = temp.path().join("proc");
+        for pid in [1001, 1002, 1003] {
+            let path = proc_root.join(pid.to_string());
+            std::fs::create_dir_all(path.join("fd")).unwrap();
+            let fields = std::iter::once("S")
+                .chain(std::iter::once("1"))
+                .chain(std::iter::repeat_n("0", 17))
+                .chain(std::iter::once("100"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            std::fs::write(path.join("stat"), format!("{pid} (test) {fields}\n")).unwrap();
+        }
+        let scan = |errno| {
+            let mut origins = crate::discovery::Origins::default();
+            crate::discovery::listeners_from(
+                &mut origins,
+                &HashMap::new(),
+                &proc_root,
+                &mut |path| match path
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                {
+                    "1002" => Err(std::io::Error::from_raw_os_error(errno)),
+                    "1003" => Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
+                    _ => std::fs::read_dir(path),
+                },
+            )
+            .unwrap()
+        };
+        let (_, complete, unreadable) = scan(libc::EACCES);
+        assert!(complete);
+        assert_eq!(unreadable, 1);
+        let (_, complete_ep, unreadable_ep) = scan(libc::EPERM);
+        assert!(complete_ep);
+        assert_eq!(unreadable_ep, 1);
+        let (_, complete_io, _) = scan(libc::EIO);
+        assert!(!complete_io);
+
+        let catalog = Catalog::open(
+            temp.path().join("names.json"),
+            "device".into(),
+            "Mac".into(),
+        )
+        .unwrap();
+        catalog.replace_local_scanned(Vec::new(), complete).unwrap();
+        {
+            catalog.0.state.lock().unwrap().last_complete_scan =
+                Some(Instant::now() - std::time::Duration::from_secs(5));
+        }
+        let before = catalog.0.state.lock().unwrap().names.scan_clock_ms;
+        catalog.replace_local_scanned(Vec::new(), complete).unwrap();
+        assert!(catalog.0.state.lock().unwrap().names.scan_clock_ms >= before + 5_000);
+    }
     #[test]
     fn scan_clock_pauses_for_partial_scans_and_restarts() {
         let temp = tempfile::tempdir().unwrap();

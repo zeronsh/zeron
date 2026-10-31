@@ -198,7 +198,10 @@ fn candidates(
         return Some((Vec::new(), false));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    let (listeners, complete) = discovery::listeners_with_completeness(origins)?;
+    let (listeners, complete, unreadable) = discovery::listeners_with_completeness(origins)?;
+    if unreadable > 0 {
+        tracing::debug!(unreadable, "preview discovery skipped unreadable processes");
+    }
     Some((
         listeners
             .into_iter()
@@ -622,14 +625,17 @@ mod tests {
                     let start = Instant::now();
                     let mut count = 0;
                     let mut complete = 0;
+                    let mut skipped = 0;
                     let period = ScanCadence::default().period(watched, start);
                     while count < if watched { 10 } else { 2 } {
                         std::thread::sleep(period);
-                        if discovery::listeners_with_completeness(&mut origins).expect("process scan").1 { complete += 1; }
+                        let (_, scan_complete, unreadable) = discovery::listeners_with_completeness(&mut origins).expect("process scan");
+                        complete += usize::from(scan_complete);
+                        skipped += unreadable;
                         count += 1;
                     }
                     let seconds = start.elapsed().as_secs_f64();
-                    eprintln!("watched={watched} scans={count} complete={complete} seconds={seconds:.3} scans_per_minute={:.2}", count as f64 * 60.0 / seconds);
+                    eprintln!("watched={watched} scans={count} complete={complete} skipped_total={skipped} seconds={seconds:.3} scans_per_minute={:.2}", count as f64 * 60.0 / seconds);
                 });
             }
         });
