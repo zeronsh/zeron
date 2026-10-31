@@ -31,6 +31,14 @@ if (process.argv[2] === 'server') {
     try { return readFileSync(mark, 'utf8').split('\n').filter(Boolean).length; }
     catch { return 0; }
   };
+  const lastPid = () => Number(readFileSync(mark, 'utf8').trim().split('\n').at(-1));
+  const waitForExit = async pid => {
+    for (let i = 0; i < 100; i++) {
+      try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.fail(`server ${pid} survived session shutdown`);
+  };
   const catalog = JSON.parse(readFileSync(new URL('../../src/pi/mcp-tools.json', import.meta.url), 'utf8'));
   const {default: extension} = await import(process.argv[2]);
   let expected = 0;
@@ -76,6 +84,7 @@ if (process.argv[2] === 'server') {
       expected += 1;
       assert.equal(spawns(), expected, 'the first call of a new session starts the server');
     } finally { handlers.session_shutdown(); }
+    await waitForExit(lastPid());
     await assert.rejects(tools.zeron_whoami.execute('call',{}),/not connected/);
     assert.equal(spawns(), expected, 'a call after shutdown must not start the server');
   }
