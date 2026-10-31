@@ -7717,6 +7717,16 @@ mod salvage_tests {
         assert!(values_only.read_entries().unwrap().is_empty());
         emptiness_agrees(&values_only);
 
+        // Loro values can themselves be objects, without a map container.
+        // The decoder salvages these as entries too.
+        let object_value = SessionDoc::init("object-value").unwrap();
+        let value: loro::LoroValue =
+            std::collections::HashMap::<String, loro::LoroValue>::new().into();
+        object_value.doc().get_list("messages").push(value).unwrap();
+        object_value.doc().commit();
+        assert!(!object_value.read_entries().unwrap().is_empty());
+        emptiness_agrees(&object_value);
+
         let continuation = SessionDoc::init("continuation").unwrap();
         let mut entry = user_message("c1", "more");
         entry.continuation_of = Some("missing-root".into());
