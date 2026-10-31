@@ -746,10 +746,18 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
         Err(e) => return Err(e.into()),
     };
     let mut out = Vec::new();
-    for line in BufReader::new(file).lines() {
-        if let Some(parsed) = parse_line(path, &line?) {
-            out.push(parsed);
+    let mut reader = BufReader::new(file);
+    let mut raw = Vec::new();
+    while reader.read_until(b'\n', &mut raw)? != 0 {
+        match std::str::from_utf8(&raw) {
+            Ok(line) => {
+                if let Some(parsed) = parse_line(path, line) {
+                    out.push(parsed);
+                }
+            }
+            Err(_) => tracing::warn!(path = %path.display(), "journal: skipping non-UTF-8 line"),
         }
+        raw.clear();
     }
     Ok(out)
 }
@@ -1440,6 +1448,32 @@ mod tests {
         );
         assert_eq!(journal.append("chat-1", &commands("build")).unwrap(), 4);
         assert_eq!(journal.replay("chat-1", 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn replay_skips_torn_utf8_lines_in_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.jsonl");
+        let first = serde_json::to_vec(&JournalLine {
+            seq: 1,
+            event: text("first"),
+        })
+        .unwrap();
+        let last = serde_json::to_vec(&JournalLine {
+            seq: 2,
+            event: text("last"),
+        })
+        .unwrap();
+        let mut bytes = first;
+        bytes.extend_from_slice(b"\n{\"seq\":2,\"event\":\"\xc3\n");
+        bytes.extend_from_slice(&last);
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            replay_fast(&path, 1).unwrap(),
+            replay_full(&path, 1).unwrap()
+        );
+        assert_eq!(replay_full(&path, 0).unwrap().len(), 2);
     }
 
     #[test]
