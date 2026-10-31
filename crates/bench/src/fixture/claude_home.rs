@@ -44,18 +44,49 @@ pub fn setup(root: &Path) -> Result<PathBuf> {
     );
     let dir = super::fixture_dir(&root, &["cache", "claude-home"])?;
     let server = dir.join("synthetic-mcp.js");
-    let servers = json!({"mcpServers": {
-        "synthetic-one": {"type":"stdio", "command":"node", "args":[server]},
-        "synthetic-two": {"type":"stdio", "command":"node", "args":[server]}
-    }});
+    let plugin = super::fixture_dir(&root, &["cache", "claude-home", "plugin"])?;
+    let metadata =
+        super::fixture_dir(&root, &["cache", "claude-home", "plugin", ".claude-plugin"])?;
+    let marketplace = super::fixture_dir(&root, &["cache", "claude-home", ".claude-plugin"])?;
+    let plugins = super::fixture_dir(&root, &["cache", "claude-home", "plugins"])?;
+    let entry = json!({"type":"stdio", "command":"node", "args":[server, "entry"]});
+    let plugin_server = json!({"type":"stdio", "command":"node", "args":[server, "plugin"]});
     write_new(&server, SERVER.as_bytes())?;
     write_new(
         &dir.join(".claude.json"),
-        &serde_json::to_vec_pretty(&servers)?,
+        &serde_json::to_vec_pretty(&json!({"mcpServers":{"synthetic-entry":entry}}))?,
     )?;
     write_new(
         &dir.join("settings.json"),
-        &serde_json::to_vec_pretty(&json!({"disableAllHooks":true}))?,
+        &serde_json::to_vec_pretty(&json!({
+            "disableAllHooks":true, "enabledPlugins":{"synthetic@fixture":true}
+        }))?,
+    )?;
+    write_new(
+        &metadata.join("plugin.json"),
+        &serde_json::to_vec_pretty(&json!({"name":"synthetic", "version":"1.0.0"}))?,
+    )?;
+    write_new(
+        &plugin.join(".mcp.json"),
+        &serde_json::to_vec_pretty(&json!({"synthetic":plugin_server}))?,
+    )?;
+    write_new(
+        &marketplace.join("marketplace.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "name":"fixture", "owner":{"name":"Fixture"}, "plugins":[{"name":"synthetic", "source":"./plugin", "description":"Synthetic benchmark server"}]
+        }))?,
+    )?;
+    write_new(
+        &plugins.join("installed_plugins.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "version":2, "plugins":{"synthetic@fixture":[{"scope":"user", "installPath":plugin, "version":"1.0.0", "installedAt":"2026-01-01T00:00:00Z", "lastUpdated":"2026-01-01T00:00:00Z"}]}
+        }))?,
+    )?;
+    write_new(
+        &plugins.join("known_marketplaces.json"),
+        &serde_json::to_vec_pretty(&json!({
+            "fixture":{"source":{"source":"directory", "path":dir}, "installLocation":dir, "lastUpdated":"2026-01-01T00:00:00Z"}
+        }))?,
     )?;
     Ok(dir)
 }
@@ -79,10 +110,27 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         files.sort();
-        assert_eq!(files, [".claude.json", "settings.json", "synthetic-mcp.js"]);
+        assert_eq!(
+            files,
+            [
+                ".claude-plugin",
+                ".claude.json",
+                "plugin",
+                "plugins",
+                "settings.json",
+                "synthetic-mcp.js"
+            ]
+        );
         let config: serde_json::Value =
             serde_json::from_slice(&fs::read(home.join(".claude.json")).unwrap()).unwrap();
-        assert_eq!(config["mcpServers"].as_object().unwrap().len(), 2);
+        assert_eq!(config["mcpServers"].as_object().unwrap().len(), 1);
+        let plugin: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("plugin/.mcp.json")).unwrap()).unwrap();
+        assert_ne!(
+            config["mcpServers"]["synthetic-entry"]["args"],
+            plugin["synthetic"]["args"]
+        );
+        assert!(!home.join(".credentials.json").exists());
         assert!(setup(&root).is_err());
         let mut command = Command::new("/usr/bin/node");
         command.env_clear().arg(home.join("synthetic-mcp.js"));
