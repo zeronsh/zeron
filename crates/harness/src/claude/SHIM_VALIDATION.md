@@ -23,7 +23,10 @@ of their requested mode. Shell children, altered argv0, stale/missing/corrupt
 handoffs, unknown modes, mismatches and setup errors exec the next real command
 on PATH. Resolution excludes the shim directory and all symlink/hardlink aliases
 of the helper. Pass-through preserves literal argv0, non-UTF8 argv, environment,
-file descriptors and exit status. It starts no Tokio runtime or manifest IO on
+file descriptors and exit status. The one environment difference: the exec'd
+program's PATH lacks the shim directory (every other slot byte-identical), so a
+tool that searches PATH for its own argv0, such as a venv or standalone Python,
+finds itself instead of the shim. It starts no Tokio runtime or manifest IO on
 the ordinary shell path. `which node`/`which npx` in an agent shell can show the
 shim path.
 
@@ -128,7 +131,7 @@ GIT_CONFIG_GLOBAL from worker-rules.md.
 | Command | Result |
 |---|---|
 | `cargo test -p zeron-harness --lib claude::` | **98 passed, 0 failed**. Its capture subprocess runs one of those cases separately; do not double-count that child result. |
-| `cargo test -p zeron-mcp-proxy` | **17 unit + 16 process + 2 shim = 35 passed, 0 failed**; bin/doc targets have 0 tests. Includes inherited-cwd catalog/classification partition and known-channel pre-initialize exec. |
+| `cargo test -p zeron-mcp-proxy` | **19 unit + 16 process + 5 shim = 40 passed, 0 failed** after the review fixes below (35 before); bin/doc targets have 0 tests. Includes inherited-cwd catalog/classification partition and known-channel pre-initialize exec. |
 | `cargo test -p zeron-engine --lib sessions::tests::mcp_plan_prefs_change_replaces_runtime_and_unchanged_plan_reuses_it` | **1 passed, 0 failed**, 649 filtered out. Actual offline dispatch, not a comparison-only mock. |
 | `cargo test -p zeron-harness --features native-fixture --test claude_mcp_shim -- --ignored --nocapture` | **1 passed, 0 failed**, 11.92 s. Env exports below. |
 | `git diff --check` | Passed. |
@@ -205,6 +208,22 @@ The engine stamp fix is in `087a78dbb`; actual-dispatch coverage is in
 is `5ec93458a`; merge H5 through that commit to include its prerequisite Config
 changes. No push was performed.
 
+## Review fixes
+
+Found by the release review and fixed in separate commits, each with a test:
+
+- The shim directory stayed on the exec'd program's PATH, so a venv or
+  uv/standalone Python (which finds its prefix by searching PATH for argv0)
+  resolved the shim and lost its site-packages in every agent shell.
+- Teardown left an empty `run/mcp/<run>` directory per launch.
+- A plan change replaced a running CLI on macOS and Windows, where nothing is
+  intercepted; `same_plan` now reports no change off Linux.
+- A proxy setup failure (child-subreaper prctl, signal registration) failed the
+  MCP server instead of exec'ing the real command.
+- The shim's env identity hashed per-login/session variables (INVOCATION_ID,
+  SSH_AUTH_SOCK, `__MISE_DIFF`, TMUX_PANE...), forcing rediscovery and leaving
+  uncollected cache files.
+
 ## Limits
 
 Claude interception is Linux native only. macOS and Windows deliberately omit interception and
@@ -214,6 +233,15 @@ which has no exec, uses its existing keep-alive forwarding/Job cleanup.
 Script/wrapper Claude executables whose actual parent image differs also fail
 through eagerly. The packaged small helper is required; the GUI-linked app is
 never substituted into launcher symlinks.
+
+The helper is a Rust binary, which sets SIGPIPE to ignore at startup and resets
+it to default before exec. A caller that deliberately ignored SIGPIPE before
+spawning a shimmed tool loses that inherited disposition (the ordinary
+default-disposition case is identical). A failed discovery is remembered for the
+launch identity (`class-v1` and the H1 cache marker) with no expiry, so a
+transient first-run failure keeps that server eager until its identity changes.
+After an engine SIGKILL the run and shim directories remain until the H9a boot
+sweep.
 
 A shell deliberately execing the exact MCP argv with an identical environment
 and normal argv0 becomes indistinguishable from a direct MCP spawn. The
