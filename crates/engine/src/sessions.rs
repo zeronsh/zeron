@@ -4,7 +4,8 @@
 //! Pragmatic port of zeron's `sessions.ts` (spec: feature-inventory §3.2):
 //! - every `AgentEvent` is (a) appended to the on-disk run journal, (b) broadcast to
 //!   in-process subscribers, (c) folded via `fold_event_into_parts` and diffed into the
-//!   chat's `SessionDoc` through `SegmentWriter` on a coalesced `STREAM_COMMIT_MS` timer;
+//!   chat's `SessionDoc` through `SegmentWriter`: the first event after an idle
+//!   window commits immediately, and later events share one `STREAM_COMMIT_MS` window;
 //! - the user message entry is pushed to the doc immediately on dispatch (id = the
 //!   command's client-minted message id, so optimistic echoes never flicker);
 //! - a `Steered` event splits the assistant entry at the exact boundary;
@@ -3891,6 +3892,18 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
+    // A full window already behind us, so the run's first event commits
+    // immediately. Each commit moves this forward; `arm` then holds the next
+    // deadline on `last_commit + STREAM_COMMIT_MS`.
+    let mut last_commit =
+        tokio::time::Instant::now() - std::time::Duration::from_millis(STREAM_COMMIT_MS);
+    // Leading edge when the previous commit is already a window old;
+    // otherwise the deadline stays anchored there, so a burst still
+    // coalesces to one write per `STREAM_COMMIT_MS`.
+    fn arm(flush_at: &mut tokio::time::Instant, last_commit: tokio::time::Instant) {
+        let now = tokio::time::Instant::now();
+        *flush_at = now.max(last_commit + std::time::Duration::from_millis(STREAM_COMMIT_MS));
+    }
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
@@ -4174,7 +4187,8 @@ async fn drive_run(
                     #[cfg(test)]
                     FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
-                    // (parent + any dirty subagent docs).
+                    // (parent + any dirty subagent docs). A leading edge armed
+                    // this deadline at `now`, so that event does not wait.
                     if dirty {
                         if let Err(err) = sync_segment(
                             doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
@@ -4186,6 +4200,7 @@ async fn drive_run(
                     for sink in subagents.values_mut() {
                         sink.flush(&device_id);
                     }
+                    last_commit = tokio::time::Instant::now();
                     continue;
                 }
                 // Turn-quiesce watchdog (see the knob above). Armed only when the
@@ -4346,8 +4361,7 @@ async fn drive_run(
                 zeron_doc::fold_event_into_parts(&mut folded, &event);
                 if !dirty {
                     dirty = true;
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    arm(&mut flush_at, last_commit);
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
@@ -4413,10 +4427,10 @@ async fn drive_run(
                 // the parent's dirty flag does — `flush_at` is otherwise only
                 // rescheduled on the parent's flip, so a past deadline would
                 // fire the commit branch on every event instead of once per
-                // STREAM_COMMIT_MS window.
+                // STREAM_COMMIT_MS window. `arm` commits immediately when
+                // that window has already elapsed.
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    arm(&mut flush_at, last_commit);
                 }
                 if done {
                     let status = match sub_event.as_ref() {
@@ -4987,8 +5001,7 @@ async fn drive_run(
 
         if !folded.is_empty() && !dirty {
             dirty = true;
-            flush_at =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+            arm(&mut flush_at, last_commit);
         }
     };
 
@@ -5795,8 +5808,10 @@ mod tests {
         .unwrap();
         feed.send(done(DoneStatus::Completed)).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(3 * STREAM_COMMIT_MS)).await;
-        // Empty events trickling in inside one window: the first must arm it
-        // rather than commit, and no later one commits on its own.
+        // Empty events trickling in inside one window. The first arrives
+        // after the parent's window has elapsed, so it commits on the
+        // leading edge; the rest share one later commit. The loop must
+        // then idle, not spin on a past deadline.
         for _ in 0..12 {
             feed.send(AgentEvent::Subagent {
                 parent_tool_use_id: "tool-1".into(),
@@ -5822,6 +5837,150 @@ mod tests {
             Some((SessionStatus::Idle, 1)),
             "parked, with the subagent's sink open"
         );
+        core.sessions.shutdown().await;
+    }
+
+    /// The first text after an idle window is in the doc without waiting out
+    /// `STREAM_COMMIT_MS`. Deltas that arrive inside the following window
+    /// still share one commit, and a single delta once that window has
+    /// elapsed commits on the leading edge again.
+    #[tokio::test(start_paused = true)]
+    async fn leading_edge_commit_writes_the_first_delta_and_coalesces_a_burst() {
+        use super::*;
+        FLUSH_TICKS.with(|t| t.set(0));
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-leading-edge";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+
+        let assistant_text = || -> String {
+            core.doc_host
+                .open(chat)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.role == MessageRole::Assistant)
+                .flat_map(|e| e.parts)
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ticks = || FLUSH_TICKS.with(|t| t.get());
+
+        let started_at = tokio::time::Instant::now();
+        feed.send(started()).unwrap();
+        feed.send(text("A")).unwrap();
+        let mut landed = false;
+        for _ in 0..400 {
+            if assistant_text() == "A" {
+                landed = true;
+                break;
+            }
+            assert!(
+                started_at.elapsed() < std::time::Duration::from_millis(5),
+                "first delta waited {:?}, not under 5ms of virtual time",
+                started_at.elapsed()
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            landed,
+            "first delta never reached the doc (elapsed {:?})",
+            started_at.elapsed()
+        );
+        assert!(
+            started_at.elapsed() < std::time::Duration::from_millis(5),
+            "first delta waited {:?}",
+            started_at.elapsed()
+        );
+        assert_eq!(ticks(), 1, "the leading edge is one commit");
+
+        // 99 further deltas, one millisecond apart: still inside the window
+        // opened by the commit above, so none of them may write yet.
+        let burst_at = tokio::time::Instant::now();
+        for _ in 0..99 {
+            feed.send(text("x")).unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            burst_at.elapsed() < std::time::Duration::from_millis(STREAM_COMMIT_MS),
+            "burst spread past one window ({:?})",
+            burst_at.elapsed()
+        );
+        assert_eq!(
+            assistant_text(),
+            "A",
+            "deltas inside the window must coalesce"
+        );
+        assert_eq!(
+            ticks(),
+            1,
+            "a burst inside the window must not commit again"
+        );
+
+        let rest = std::time::Duration::from_millis(STREAM_COMMIT_MS) - burst_at.elapsed();
+        tokio::time::advance(rest + std::time::Duration::from_millis(1)).await;
+        let coalesced = format!("A{}", "x".repeat(99));
+        let mut coalesced_landed = false;
+        for _ in 0..50 {
+            if assistant_text() == coalesced {
+                coalesced_landed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            coalesced_landed,
+            "coalesced burst missing: {:?}",
+            assistant_text()
+        );
+        assert!(
+            ticks() <= 2,
+            "100 deltas in {}ms committed {} times",
+            STREAM_COMMIT_MS,
+            ticks()
+        );
+        assert_eq!(ticks(), 2, "the burst commits once, at the window boundary");
+
+        // The window has elapsed with nothing new: the next delta is a
+        // leading edge again and must not wait out another interval.
+        tokio::time::advance(std::time::Duration::from_millis(STREAM_COMMIT_MS)).await;
+        let again = tokio::time::Instant::now();
+        feed.send(text("Z")).unwrap();
+        let mut again_landed = false;
+        for _ in 0..400 {
+            if assistant_text() == format!("{coalesced}Z") {
+                again_landed = true;
+                break;
+            }
+            assert!(
+                again.elapsed() < std::time::Duration::from_millis(5),
+                "delta after an idle window waited {:?}",
+                again.elapsed()
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            again_landed,
+            "delta after an idle window never reached the doc (elapsed {:?}, text {:?})",
+            again.elapsed(),
+            assistant_text()
+        );
+        assert_eq!(ticks(), 3, "an idle-window delta commits on its own");
         core.sessions.shutdown().await;
     }
 
