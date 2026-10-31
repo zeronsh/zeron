@@ -163,14 +163,10 @@ impl ChatPersistence {
             if let Some(hook) = self.before_export.lock().unwrap().take() {
                 hook();
             }
-            zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
-            let result = {
-                let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
-                doc.export_snapshot()
-            }
+            let result = doc
+                .export_snapshot()
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| {
-                    zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
                     self.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
                     self.store
                         .save_verified_snapshot_with_cursor(

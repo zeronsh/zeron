@@ -946,9 +946,13 @@ impl SessionDoc {
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
-        self.doc
+        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
+        let bytes = self.doc
             .export(ExportMode::Snapshot)
-            .map_err(|e| DocError::Schema(e.to_string()))
+            .map_err(|e| DocError::Schema(e.to_string()))?;
+        zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
+        Ok(bytes)
     }
 }
 

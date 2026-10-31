@@ -6156,14 +6156,8 @@ impl DocHost {
             persistence.flush_sync();
             return;
         }
-        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
-        let snapshot = {
-            let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
-            handle.doc.export_snapshot()
-        };
-        match snapshot {
+        match handle.doc.export_snapshot() {
             Ok(bytes) => {
-                zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
                 handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
                 if let Err(err) = self.inner.store.save_snapshot(&handle.chat_id, &bytes) {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "snapshot save failed");
@@ -6177,12 +6171,7 @@ impl DocHost {
 
     /// A fork must be durable before publishing its discoverable registry row.
     pub(crate) fn persist_fork(&self, handle: &ChatDocHandle) -> Result<(), EngineError> {
-        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
-        let bytes = {
-            let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
-            handle.doc.export_snapshot()?
-        };
-        zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
+        let bytes = handle.doc.export_snapshot()?;
         self.inner.store.save_snapshot(&handle.chat_id, &bytes)?;
         handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
         Ok(())
