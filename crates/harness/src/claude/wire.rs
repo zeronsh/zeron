@@ -333,8 +333,7 @@ pub(crate) struct ControlRequestBody {
 /// Parse one stdout JSONL line. `Err` = not JSON; unknown types = `Other`.
 ///
 /// A plain, unique top-level `type` is deserialized straight into that frame.
-/// Anything else — lone surrogates, explicit nulls, a torn line, an escaped
-/// or repeated `type` — falls through to [`parse_frame_full`].
+/// Ambiguous or unreadable input falls through to [`parse_frame_full`].
 pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
     if let Some(frame) = parse_frame_direct(line) {
         return Ok(frame);
@@ -427,8 +426,9 @@ fn top_level_type(line: &str) -> Option<&str> {
 
 /// [`top_level_type`] when a direct `from_str` can trust it.
 ///
-/// `None` if that string is missing, escaped, repeated, or not a string.
-/// The value parse unescapes, and a duplicate key keeps the last value.
+/// Fall back when the value parser could see something the typed parser
+/// ignores: escaped strings, out-of-range numbers, or excessive nesting.
+/// The value parse also unescapes keys and keeps the last duplicate key.
 fn unambiguous_top_level_type(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
     let mut depth = 0usize;
@@ -436,11 +436,19 @@ fn unambiguous_top_level_type(line: &str) -> Option<&str> {
     let mut found: Option<&str> = None;
     while i < bytes.len() {
         match bytes[i] {
-            b'{' | b'[' => depth += 1,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth >= 128 {
+                    return None;
+                }
+            }
             b'}' | b']' => depth = depth.checked_sub(1)?,
             b'"' => {
                 let start = i + 1;
                 let end = string_end(bytes, start)?;
+                if bytes[start..end].contains(&b'\\') {
+                    return None;
+                }
                 i = end + 1;
                 if depth == 1 && &line[start..end] == "type" {
                     let value = json_string_after_colon(line, i)?;
@@ -451,6 +459,16 @@ fn unambiguous_top_level_type(line: &str) -> Option<&str> {
                     i = value.next;
                     continue;
                 }
+                continue;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
                 continue;
             }
             _ => {}
@@ -1180,10 +1198,34 @@ mod tests {
             r#"{"type" : "command_lifecycle", "command_uuid" : "c", "state" : "queued"}"#,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":-1}}"#,
             r#"{"ty\u0070e":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"system","ty\u0070e":"assistant","message":{"content":"hello"}}"#,
+            r#"{"type":"system","ignored":1e400}"#,
+            r#"{"type":"unknown","ignored":1e400}"#,
+            r#"{"type":"system","ignored":"\ud800"}"#,
+            r#"{"type":"system","attempt":18446744073709551615,"retry_delay_ms":18446744073709551615}"#,
+            r#"{"type":"system","attempt":18446744073709551616,"retry_delay_ms":-0.0}"#,
+            r#"{"type":"system","retry_delay_ms":9007199254740993}"#,
+            r#"{"type":"system","task_id":null,"prompt":{"a":null}}"#,
+            r#"{"type":"system","task_id":"first","task_id":"last"}"#,
             "\u{feff}{\"type\":\"system\",\"subtype\":\"init\"}",
         ] {
             lines.push(("inline".to_owned(), line.to_owned()));
         }
+        lines.push((
+            "deep ignored value".to_owned(),
+            format!(
+                "{{\"type\":\"system\",\"ignored\":{}0{}}}",
+                "[".repeat(130),
+                "]".repeat(130)
+            ),
+        ));
+        lines.push((
+            "long frame".to_owned(),
+            format!(
+                "{{\"type\":\"system\",\"model\":\"{}\"}}",
+                "x".repeat(64 * 1024 + 17)
+            ),
+        ));
 
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
