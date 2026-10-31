@@ -124,8 +124,12 @@ impl Process {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // Only still-populated groups: a finished group's number may already belong to
+        // an unrelated process group.
         for group in &self.groups {
-            signal_group(*group, true);
+            if group_alive(*group) {
+                signal_group(*group, true);
+            }
         }
         let _ = self.child.wait().await;
         #[cfg(target_os = "linux")]
@@ -280,11 +284,28 @@ fn start_id(pid: u32) -> String {
             })
             .unwrap_or_default();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        ps_start(pid)
+    }
+    #[cfg(not(unix))]
     {
         let _ = pid;
         String::new()
     }
+}
+/// Without /proc a recorded group is only trusted if the leader's start time still matches;
+/// a bare pgid in a marker left over from before a reboot could name any process group.
+#[cfg(unix)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn ps_start(pid: u32) -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 fn signal_group(group: u32, force: bool) {
     #[cfg(unix)]
@@ -348,7 +369,9 @@ pub async fn cleanup_run_dir(dir: &Path) -> io::Result<()> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     for group in groups {
-        signal_group(group, true);
+        if group_alive(group) {
+            signal_group(group, true);
+        }
         let _ = fs::remove_file(dir.join(group.to_string()));
     }
     Ok(())
@@ -426,5 +449,16 @@ mod windows {
                 TerminateJobObject(self.0.as_raw_handle(), 1);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn ps_start_identifies_a_process_by_its_start_time() {
+        let own = super::ps_start(std::process::id());
+        assert!(!own.is_empty());
+        assert_eq!(own, super::ps_start(std::process::id()));
+        assert!(super::ps_start(u32::MAX - 1).is_empty());
     }
 }

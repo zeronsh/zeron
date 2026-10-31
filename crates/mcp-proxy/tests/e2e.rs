@@ -1016,3 +1016,30 @@ async fn directories_are_private_and_the_lifecycle_log_is_bounded() {
     assert!(d.join("logs/mcp-proxy.jsonl.1").exists());
     assert!(fs::metadata(&log).unwrap().len() < 1 << 20);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn sweep_never_kills_a_group_whose_pid_was_reused() {
+    use std::os::unix::process::CommandExt;
+    let dir = temp();
+    let run = dir.path().join("run");
+    fs::create_dir_all(&run).unwrap();
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = bystander.id();
+    let marker = run.join(pgid.to_string());
+    // A marker from an earlier life of this pid: same number, different start time.
+    fs::write(&marker, json!({"pgid":pgid,"start":"1"}).to_string()).unwrap();
+    zeron_mcp_proxy::cleanup_run_dir(&run).await.unwrap();
+    assert!(alive(pgid), "an unrelated process group was killed");
+    assert!(!marker.exists(), "the stale marker is dropped");
+    // The same marker with the true start time is ours and is swept.
+    let stat = fs::read_to_string(format!("/proc/{pgid}/stat")).unwrap();
+    let start = stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19);
+    fs::write(&marker, json!({"pgid":pgid,"start":start}).to_string()).unwrap();
+    zeron_mcp_proxy::cleanup_run_dir(&run).await.unwrap();
+    assert!(!bystander.wait().unwrap().success());
+}
