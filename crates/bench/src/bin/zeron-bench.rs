@@ -5,15 +5,16 @@
 //! process's environment. `doctor` reports whether a user scope, smaps, perf,
 //! and RAPL are usable, and whether a live engine was detected (read-only).
 //!
-//! `exec-counted` is the argv shape the scope uses to start the engine. It is
-//! a passthrough until the perf unit wraps the command: it replaces this
-//! process with the given command and does not touch the environment.
+//! `exec-counted` is the argv shape the scope uses to start the engine. It
+//! forks, counts user-space instructions and cycles (and task-clock) for the
+//! command, forwards signals, and writes `perf.json` when the trial path or
+//! `ZB_PERF_JSON` says where. The command's environment is left unchanged.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -39,7 +40,7 @@ enum Command {
     },
     /// Report scope, smaps, perf, RAPL, and the live engine.
     Doctor,
-    /// Replace this process with `command`. Does not change the environment.
+    /// Run `command` under user-space perf counters. Does not change its environment.
     ExecCounted {
         /// Command and arguments. A leading `--` is ignored.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
@@ -56,15 +57,9 @@ fn main() -> ExitCode {
     #[cfg(unix)]
     {
         let cli = Cli::parse();
-        // `exec-counted` must run before a runtime exists: it replaces the process.
+        // `exec-counted` forks, so it runs before a runtime exists.
         match cli.command {
-            Command::ExecCounted { command } => match exec_counted(command) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    eprintln!("zeron-bench: {err:#}");
-                    ExitCode::from(127)
-                }
-            },
+            Command::ExecCounted { command } => exec_counted(command),
             other => match run(other) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
@@ -141,17 +136,30 @@ async fn launch_hold(engine: PathBuf, hold: u64, zb_root: Option<PathBuf>) -> Re
 }
 
 #[cfg(unix)]
-fn exec_counted(mut command: Vec<OsString>) -> Result<()> {
-    use std::os::unix::process::CommandExt;
+fn exec_counted(mut command: Vec<OsString>) -> ExitCode {
+    use std::os::unix::process::ExitStatusExt;
     if command.first().is_some_and(|arg| arg == "--") {
         command.remove(0);
     }
-    let Some(program) = command.first().cloned() else {
-        bail!("exec-counted needs a command");
+    if command.is_empty() {
+        eprintln!("zeron-bench: exec-counted needs a command");
+        return ExitCode::from(127);
+    }
+    let status = match zeron_bench::run_counted(&command) {
+        Ok(status) => status,
+        Err(err) => {
+            eprintln!("zeron-bench: {err:#}");
+            return ExitCode::from(127);
+        }
     };
-    command.remove(0);
-    // `exec` returns only on failure. The environment is whatever the scope
-    // (`env -i`) or the process-group spawn already set.
-    let err = std::process::Command::new(program).args(&command).exec();
-    Err(err).context("exec-counted")
+    if let Some(sig) = status.signal() {
+        // SAFETY: the default action reports the same signal the command died
+        // from. The perf report is already written.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+        return ExitCode::from(128u8.saturating_add(sig as u8));
+    }
+    ExitCode::from(status.code().unwrap_or(1) as u8)
 }

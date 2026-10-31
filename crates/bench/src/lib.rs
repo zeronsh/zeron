@@ -10,6 +10,8 @@
 mod env;
 #[cfg(unix)]
 mod launch;
+#[cfg(unix)]
+mod sample;
 
 #[cfg(unix)]
 pub use env::{
@@ -25,3 +27,8 @@ pub mod probe;
 pub mod replay;
 pub mod rpc;
 pub mod transcript;
+#[cfg(unix)]
+pub use sample::{
+    PerfTotals, RaplSample, energy_delta_uj, energy_j_net, read_package_at, run_counted,
+    sample_package,
+};
