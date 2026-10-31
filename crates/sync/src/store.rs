@@ -75,6 +75,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Boot salvage skips a chat once its transcript has been seen non-empty.
+    // The run journal is never deleted or rewritten from this marker.
+    "CREATE TABLE salvage_checked (
+        doc_id TEXT PRIMARY KEY
+    ) STRICT;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -116,6 +121,9 @@ pub struct DocsStore {
     /// Write transactions the outbox has taken: one per [`Self::enqueue_chat_updates`]
     /// batch, one per [`Self::enqueue_chat_update`] row.
     outbox_write_txs: AtomicU64,
+    /// `load_snapshot` and `load_snapshot_with_cursor` calls. Salvage tests
+    /// use this to prove a checked chat is not read again.
+    snapshot_load_count: AtomicU64,
     /// Run before any snapshot row is written; see [`Self::add_snapshot_barrier`].
     snapshot_barriers: Mutex<Vec<Weak<SnapshotBarrier>>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
@@ -153,6 +161,7 @@ impl DocsStore {
             reader: Mutex::new(reader),
             failed_publications: Mutex::new(HashSet::new()),
             outbox_write_txs: AtomicU64::new(0),
+            snapshot_load_count: AtomicU64::new(0),
             snapshot_barriers: Mutex::new(Vec::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -380,6 +389,7 @@ impl DocsStore {
     }
 
     fn load_snapshot_blocking(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.snapshot_load_count.fetch_add(1, Ordering::Relaxed);
         let bytes = self
             .reader()
             .query_row(
@@ -535,6 +545,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
+        self.snapshot_load_count.fetch_add(1, Ordering::Relaxed);
         let row = self
             .reader()
             .query_row(
@@ -571,8 +582,47 @@ impl DocsStore {
             "DELETE FROM chat_outbox_initialized WHERE doc_id = ?1",
             params![doc_id],
         )?;
+        tx.execute(
+            "DELETE FROM salvage_checked WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// How many times a snapshot blob was loaded. Diagnostic; salvage tests
+    /// assert a checked chat does not move it.
+    #[doc(hidden)]
+    pub fn snapshot_loads(&self) -> u64 {
+        self.snapshot_load_count.load(Ordering::Relaxed)
+    }
+
+    /// Whether boot salvage has already seen a non-empty transcript for `doc_id`.
+    pub fn salvage_checked(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            let hit = self
+                .reader()
+                .query_row(
+                    "SELECT 1 FROM salvage_checked WHERE doc_id = ?1",
+                    params![doc_id],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            Ok(hit.is_some())
+        })
+    }
+
+    /// Record that `doc_id`'s transcript was seen non-empty, so later boots
+    /// skip it. Does not touch the run journal.
+    pub fn mark_salvage_checked(&self, doc_id: &str) -> Result<(), StoreError> {
+        store_blocking(|| {
+            self.conn().execute(
+                "INSERT INTO salvage_checked (doc_id) VALUES (?1)
+                 ON CONFLICT(doc_id) DO NOTHING",
+                params![doc_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// Whether a snapshot row exists for `doc_id` — presence only, no blob read.
