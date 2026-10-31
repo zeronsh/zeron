@@ -13,9 +13,9 @@ use crate::project_actions::{
 struct ProjectActionContext {
     key: ProjectActionsKey,
     chat_id: String,
+    cwd: Option<String>,
     target_device_id: Option<String>,
 }
-
 
 impl Shell {
     pub(super) fn attach_worktree_setup(
@@ -27,7 +27,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(error) = setup_error {
-            self.show_notice(crate::toast::ToastKind::Error, format!("Setup action failed: {error}"), cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                format!("Setup action failed: {error}"),
+                cx,
+            );
         }
         let Some(run) = setup_action else {
             cx.notify();
@@ -43,7 +47,11 @@ impl Shell {
             panel.attach_reserved_session(&chat_id, tab, run.terminal, target_device_id, cx)
         });
         if !attached {
-            self.show_notice(crate::toast::ToastKind::Error, "Setup action started, but its terminal could not be attached", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                "Setup action started, but its terminal could not be attached",
+                cx,
+            );
         }
 
         let selected = self.active_chat == chat_id;
@@ -74,11 +82,13 @@ impl Shell {
                 space_id,
             },
             chat_id: chat.id.clone(),
+            cwd: chat.cwd.clone(),
             target_device_id,
         })
     }
 
     pub(super) fn ensure_project_actions(&mut self, cx: &mut Context<Self>) {
+        self.ensure_package_scripts(false, cx);
         let context = self.project_action_context(cx);
         let key = context.as_ref().map(|context| context.key.clone());
         let changed = self.project_actions.activate(key.clone());
@@ -125,13 +135,97 @@ impl Shell {
         cx.notify();
     }
 
+    /// Discover on session changes, and revalidate periodically while the card is rendered.
+    pub(super) fn ensure_package_scripts(&mut self, force: bool, cx: &mut Context<Self>) {
+        let context = self.project_action_context(cx);
+        let identity = context.as_ref().map(|context| {
+            (
+                context.key.clone(),
+                context.chat_id.clone(),
+                context.cwd.clone(),
+            )
+        });
+        let scripts = &mut self.project_actions.package_scripts;
+        if scripts.context != identity {
+            *scripts = crate::project_actions::PackageScriptsState::default();
+            scripts.context = identity.clone();
+        }
+        let Some(context) = context else {
+            return;
+        };
+        if scripts.loading
+            || (!force
+                && scripts
+                    .requested_at
+                    .is_some_and(|time| time.elapsed() < std::time::Duration::from_secs(10)))
+        {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        scripts.loading = true;
+        scripts.requested_at = Some(std::time::Instant::now());
+        let params = project_action_params(
+            serde_json::json!({
+                "spaceId": context.key.space_id,
+                "chatId": context.chat_id,
+            }),
+            &context.target_device_id,
+        );
+        scripts.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call_as::<Vec<zeron_proto::PackageScript>>(methods::LIST_PACKAGE_SCRIPTS, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                let scripts = &mut shell.project_actions.package_scripts;
+                if scripts.context != identity {
+                    return;
+                }
+                scripts.loading = false;
+                match result {
+                    Ok(found) => {
+                        scripts.scripts = found;
+                        scripts.error = None;
+                    }
+                    Err(err) => {
+                        scripts.error = Some(err.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(super) fn run_package_script(
+        &mut self,
+        key: &ProjectActionsKey,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_actions.package_scripts.expanded = false;
+        self.run_action_in_terminal(
+            key,
+            ProjectAction {
+                id: name.clone(),
+                name: format!("npm run {name}"),
+                command: String::new(), // The owning engine resolves the package script.
+                icon: ProjectActionIcon::Play,
+                run_on_worktree_create: false,
+            },
+            true,
+            cx,
+        );
+    }
+
     fn close_project_actions_menu(&mut self, cx: &mut Context<Self>) {
         if self.project_actions.menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Shell| &mut shell.project_actions.menu);
         }
         cx.notify();
     }
-
 
     pub(super) fn open_project_action_editor(
         &mut self,
@@ -404,15 +498,26 @@ impl Shell {
         action: ProjectAction,
         cx: &mut Context<Self>,
     ) {
+        self.run_action_in_terminal(key, action, false, cx);
+    }
+
+    fn run_action_in_terminal(
+        &mut self,
+        key: &ProjectActionsKey,
+        action: ProjectAction,
+        package_script: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(context) = self.project_action_context(cx) else {
             return;
         };
         if context.key != *key
             || self.project_actions.active.as_ref() != Some(key)
-            || !self
-                .project_actions
-                .active_status()
-                .is_some_and(ProjectActionsStatus::can_run)
+            || (!package_script
+                && !self
+                    .project_actions
+                    .active_status()
+                    .is_some_and(ProjectActionsStatus::can_run))
         {
             return;
         }
@@ -434,16 +539,23 @@ impl Shell {
             panel.select_tab_by_key(tab, cx);
         });
 
-        let params = project_action_params(
-            serde_json::json!({
-                "spaceId": context.key.space_id,
-                "chatId": context.chat_id,
-                "actionId": action.id,
-                "cols": 80,
-                "rows": 24,
-            }),
-            &context.target_device_id,
-        );
+        let method = if package_script {
+            methods::RUN_PACKAGE_SCRIPT
+        } else {
+            methods::RUN_PROJECT_ACTION
+        };
+        let mut params = serde_json::json!({
+            "spaceId": context.key.space_id,
+            "chatId": context.chat_id,
+            "actionId": action.id,
+            "cols": 80,
+            "rows": 24,
+        });
+        if package_script {
+            params["scriptName"] = params["actionId"].take();
+            params.as_object_mut().unwrap().remove("actionId");
+        }
+        let params = project_action_params(params, &context.target_device_id);
         let key = context.key.clone();
         let chat_id = context.chat_id.clone();
         let target = context.target_device_id.clone();
@@ -451,7 +563,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
-                .call_as::<ProjectActionRun>(methods::RUN_PROJECT_ACTION, params)
+                .call_as::<ProjectActionRun>(method, params)
                 .await;
             match result {
                 Ok(run) => {
@@ -478,11 +590,13 @@ impl Shell {
                             .await;
                     }
                     this.update(cx, |shell, cx| {
-                        shell
-                            .settings
-                            .last_project_action_by_space_id
-                            .insert(key.space_id, action_id);
-                        shell.schedule_save(cx);
+                        if !package_script {
+                            shell
+                                .settings
+                                .last_project_action_by_space_id
+                                .insert(key.space_id, action_id);
+                            shell.schedule_save(cx);
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -493,7 +607,11 @@ impl Shell {
                         panel.fail_reserved_tab(&chat_id, tab, &message, cx)
                     });
                     this.update(cx, |shell, cx| {
-                        shell.project_actions.mark_unavailable(&key, message);
+                        if !package_script {
+                            shell.project_actions.mark_unavailable(&key, message);
+                        } else {
+                            shell.ensure_package_scripts(true, cx);
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -502,8 +620,6 @@ impl Shell {
         })
         .detach();
     }
-
-
 
     pub(super) fn render_project_action_overlay(
         &mut self,
@@ -732,11 +848,6 @@ fn project_action_params(
     params
 }
 
-
-
-
-
-
 fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
     div()
         .mt(px(12.0))
@@ -746,4 +857,3 @@ fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
         .text_color(theme.text_muted)
         .child(SharedString::from(label.to_string()))
 }
-

@@ -1515,6 +1515,14 @@ pub struct ProjectActionsSnapshot {
     pub project_file_issue: Option<String>,
 }
 
+/// A script discovered in the selected checkout's package.json.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageScript {
+    pub name: String,
+    pub command: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectActionRun {

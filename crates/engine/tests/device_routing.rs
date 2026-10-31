@@ -1028,6 +1028,37 @@ async fn target_device_id_routes_over_the_relay() {
         .workspace
         .create_chat("chat-actions", Some("space-actions"), None, None, None)
         .expect("Action chat on B");
+
+    std::fs::write(
+        project_root.join("package.json"),
+        r#"{"scripts":{"dev":"echo remote-package-script"}}"#,
+    )
+    .unwrap();
+    let package_params = serde_json::json!({
+        "spaceId": "space-actions", "chatId": "chat-actions", "scriptName": "dev",
+        "cols": 80, "rows": 24, "targetDeviceId": "device-b",
+    });
+    let scripts = client
+        .call(methods::LIST_PACKAGE_SCRIPTS, package_params.clone())
+        .await
+        .expect("discover scripts on B");
+    assert_eq!(scripts[0]["name"], "dev");
+    let package_run = client
+        .call(methods::RUN_PACKAGE_SCRIPT, package_params)
+        .await
+        .expect("run package script on B");
+    let package_terminal = package_run["terminal"]["id"].as_str().unwrap();
+    assert!(core_b.terminals.chats().contains_key(package_terminal));
+    assert!(!core_a.terminals.chats().contains_key(package_terminal));
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({
+                "terminalId": package_terminal, "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("close package terminal on B");
     let run = client
         .call(
             methods::RUN_PROJECT_ACTION,

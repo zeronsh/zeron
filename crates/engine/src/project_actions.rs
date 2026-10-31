@@ -555,7 +555,7 @@ fn read_project_file(project_root: &Path) -> (Vec<ProjectActionDraft>, Option<St
     (actions, None)
 }
 
-fn open_project_file(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_project_file(path: &Path) -> std::io::Result<std::fs::File> {
     // Reject known special files before opening them. The handle check below
     // is still required: the repository can replace this path after metadata.
     // Windows metadata itself opens the target, so use the controlled open there.
