@@ -462,11 +462,12 @@ impl Proxy {
             self.forward(message)?;
         } else {
             if self.queue.len() >= 256 {
-                return self.client_out(rpc::error(
-                    message["id"].clone(),
-                    -32000,
-                    "MCP startup queue full",
-                ));
+                return match message.get("id") {
+                    Some(id) => {
+                        self.client_out(rpc::error(id.clone(), -32000, "MCP startup queue full"))
+                    }
+                    None => Ok(()),
+                };
             }
             self.queue.push_back(message);
             if self.process.is_none() {
@@ -481,6 +482,9 @@ impl Proxy {
         Ok(())
     }
     fn forward(&mut self, message: Value) -> io::Result<()> {
+        // The session is really using the server: leave stopping to the idle timer
+        // instead of restarting it for the next call.
+        self.stop_after_capture = false;
         if message["method"] == "logging/setLevel" {
             self.logging = Some(message["params"].clone());
         }

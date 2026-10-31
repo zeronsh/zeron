@@ -799,3 +799,26 @@ async fn paged_list_with_a_cursor_reaches_the_live_server() {
     assert_eq!(pids(&d.join("spawn")).len(), 2);
     peer.close().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_call_during_discovery_does_not_force_a_restart_for_the_second() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    peer.send(zeron_mcp_proxy::rpc::request(
+        1,
+        "initialize",
+        json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1"},"capabilities":{}}),
+    ))
+    .await;
+    peer.send(zeron_mcp_proxy::rpc::request(
+        2,
+        "tools/call",
+        json!({"name":"echo"}),
+    ))
+    .await;
+    peer.response(json!(2)).await;
+    peer.call(3, "echo").await;
+    assert_eq!(pids(&d.join("spawn")).len(), 1);
+    peer.close().await;
+}
