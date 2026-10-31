@@ -18,3 +18,8 @@ pub use env::{
 };
 #[cfg(unix)]
 pub use launch::{DoctorReport, Engine, ShutdownReport, StopHow, doctor, launch};
+
+#[cfg(unix)]
+pub mod probe;
+#[cfg(unix)]
+pub mod replay;

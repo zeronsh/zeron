@@ -31,3 +31,7 @@ rand_chacha = "0.9"
 
 [dev-dependencies]
 tokio.workspace = true
+
+[[bin]]
+name = "zb-replay"
+path = "src/bin/zb-replay.rs"
