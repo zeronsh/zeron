@@ -546,7 +546,11 @@ impl SessionDoc {
 
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
-    pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+    pub fn insert_message_before_last(
+        &self,
+        from_end: usize,
+        entry: &SessionMessageEntry,
+    ) -> Result<(), DocError> {
         let messages = self.doc.get_list("messages");
         let at = messages.len().saturating_sub(from_end);
         let map = messages.insert_container(at, LoroMap::new())?;
@@ -1304,18 +1308,79 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
 /// - new parts → pushed,
 /// - tool call refresh / resolution / input resolution → in-place map updates.
 ///
-/// Invariant relied upon: the fold only ever APPENDS parts or grows the trailing text; earlier
-/// text never mutates. Tool/input parts may update fields in place.
+/// The fold normally appends parts and text; defensive body corrections
+/// also take the full rewrite path. A segment clear starts a new writer
+/// (like the full sync, this writer does not delete parts). Tool and input
+/// parts may update fields in place.
+///
+/// Text growth is tracked by [`SegmentWriter::flushed_len`] (bytes already
+/// in the doc). A verified byte prefix appends only the new tail into
+/// `LoroText` and onto the mirror, without cloning the grown string.
 pub struct SegmentWriter<'a> {
     doc: &'a SessionDoc,
     /// Index of this entry in the `messages` list.
     entry_index: usize,
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
+    /// Bytes of each text/reasoning part already appended. `0` for other kinds.
+    /// Kept in lockstep with `written`'s text length so a resume can rebuild it.
+    flushed_len: Vec<usize>,
     created_at: i64,
     /// What `durationMs` counts from: `created_at`, or an earlier moment the
     /// turn really began ([`Self::count_duration_from`]).
     duration_from: i64,
+    /// Times the incremental path diverged and the full path was used instead.
+    mismatches: u64,
+    verify: Verify,
+}
+
+/// When [`SegmentWriter`] cross-checks the incremental sync against [`SegmentWriter::sync_full`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Verify {
+    /// Every sync in debug builds; in release only when `ZERON_PERF_VERIFY=1`,
+    /// sampled 1 in 32.
+    #[default]
+    Auto,
+    /// Skip the oracle. Equivalence tests set this so a fallback cannot hide a bad tail.
+    #[cfg(test)]
+    Never,
+    /// Exercise release sampling even in a debug test build.
+    #[cfg(test)]
+    Sampled,
+}
+
+const VERIFY_SAMPLE: u64 = 32;
+
+// Sinks resume a new writer each flush. A writer-local counter would never
+// reach the release sample, so count across resumes and segments.
+static VERIFY_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sample_verify_sync(syncs: &std::sync::atomic::AtomicU64) -> bool {
+    syncs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1)
+        .is_multiple_of(VERIFY_SAMPLE)
+}
+
+fn perf_verify_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|value| value == "1"))
+}
+
+fn part_flushed_len(part: &MessagePart) -> usize {
+    match part {
+        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => text.len(),
+        _ => 0,
+    }
+}
+
+/// `("text"|"reasoning", id, body)` when `part` is a text-bodied part.
+fn text_body(part: &MessagePart) -> Option<(&'static str, &str, &str)> {
+    match part {
+        MessagePart::Text { id, text } => Some(("text", id, text)),
+        MessagePart::Reasoning { id, text } => Some(("reasoning", id, text)),
+        _ => None,
+    }
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1348,8 +1413,11 @@ impl<'a> SegmentWriter<'a> {
             doc,
             entry_index,
             written: Vec::new(),
+            flushed_len: Vec::new(),
             created_at,
             duration_from: created_at,
+            mismatches: 0,
+            verify: Verify::Auto,
         })
     }
 
@@ -1377,12 +1445,16 @@ impl<'a> SegmentWriter<'a> {
             }
             _ => 0,
         };
+        let flushed_len = written.iter().map(part_flushed_len).collect();
         Self {
             doc,
             entry_index,
             written,
+            flushed_len,
             created_at,
             duration_from: created_at,
+            mismatches: 0,
+            verify: Verify::Auto,
         }
     }
 
@@ -1409,7 +1481,77 @@ impl<'a> SegmentWriter<'a> {
     }
 
     /// Diff `folded` (the full folded segment so far) into the doc.
+    ///
+    /// Incremental: text and reasoning append the unflushed tail, and other
+    /// parts are compared as before. [`Self::sync_full`] is the previous
+    /// whole-text path, kept as the oracle.
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
+        self.sync_indices(folded, 0..folded.len())
+    }
+
+    /// Write only `dirty` indices of `folded`, plus any part not yet pushed.
+    ///
+    /// `folded` is still the full segment. Clean indices are left untouched,
+    /// so a tick that grew one text part does not re-read the others.
+    pub fn sync_indices(
+        &mut self,
+        folded: &[MessagePart],
+        dirty: impl IntoIterator<Item = usize>,
+    ) -> Result<(), DocError> {
+        let verify = self.verify_due();
+        self.write_indices(folded, dirty)?;
+        // Compare the mirror to the full render. On a miss, rewrite the
+        // differing parts in place (LoroText::update, not a second append)
+        // and reset the mirror to that render. Never panics.
+        if verify && !self.mirror_matches(folded) {
+            self.mismatches += 1;
+            tracing::error!(
+                entry = self.entry_index,
+                written = self.written.len(),
+                folded = folded.len(),
+                "segment sync diverged from the full render; using the full result"
+            );
+            self.repair_from_full(folded)?;
+        }
+        Ok(())
+    }
+
+    fn mirror_matches(&self, folded: &[MessagePart]) -> bool {
+        self.written.len() >= folded.len() && self.written[..folded.len()] == folded[..]
+    }
+
+    /// Force the doc to the full render without re-appending text that the
+    /// incremental path already wrote.
+    fn repair_from_full(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
+        let parts = self.parts_list()?;
+        let mut dirty = false;
+        while self.written.len() < folded.len() {
+            let index = self.written.len();
+            push_part(&parts, &folded[index])?;
+            self.flushed_len.push(part_flushed_len(&folded[index]));
+            self.written.push(folded[index].clone());
+            dirty = true;
+        }
+        for (index, part) in folded.iter().enumerate() {
+            if &self.written[index] == part {
+                continue;
+            }
+            let part_map = part_map_at(&parts, index)?;
+            update_part_fields(&part_map, part)?;
+            self.written[index] = part.clone();
+            self.flushed_len[index] = part_flushed_len(part);
+            dirty = true;
+        }
+        if dirty {
+            self.doc.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// The pre-incremental sync: `PartialEq` and `starts_with` over each part,
+    /// cloning a grown text body into the mirror. The oracle falls back to
+    /// this, and equivalence tests run it beside [`Self::sync_indices`].
+    pub fn sync_full(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
         let parts = self.parts_list()?;
         let mut dirty = false;
 
@@ -1418,6 +1560,7 @@ impl<'a> SegmentWriter<'a> {
                 None => {
                     push_part(&parts, part)?;
                     self.written.push(part.clone());
+                    self.flushed_len.push(part_flushed_len(part));
                     dirty = true;
                 }
                 Some(prev) if prev == part => {}
@@ -1439,20 +1582,7 @@ impl<'a> SegmentWriter<'a> {
                         Some((field, old, new)) => {
                             let delta = &new[old.len()..];
                             if !delta.is_empty() {
-                                let part_map = part_map_at(&parts, i)?;
-                                match part_map.get(field) {
-                                    Some(loro::ValueOrContainer::Container(
-                                        loro::Container::Text(t),
-                                    )) => {
-                                        let len = t.len_unicode();
-                                        t.insert(len, delta)?;
-                                    }
-                                    _ => {
-                                        return Err(DocError::Schema(format!(
-                                            "{field} part missing LoroText"
-                                        )));
-                                    }
-                                }
+                                append_loro_text(&parts, i, field, delta)?;
                                 dirty = true;
                             }
                         }
@@ -1466,6 +1596,7 @@ impl<'a> SegmentWriter<'a> {
                         }
                     }
                     self.written[i] = part.clone();
+                    self.flushed_len[i] = part_flushed_len(part);
                 }
             }
         }
@@ -1474,6 +1605,125 @@ impl<'a> SegmentWriter<'a> {
             self.doc.doc.commit();
         }
         Ok(())
+    }
+
+    /// Cross-check failures seen by this writer.
+    pub fn mismatches(&self) -> u64 {
+        self.mismatches
+    }
+
+    fn verify_due(&self) -> bool {
+        match self.verify {
+            #[cfg(test)]
+            Verify::Never => false,
+            #[cfg(test)]
+            Verify::Sampled => sample_verify_sync(&VERIFY_SYNCS),
+            Verify::Auto => {
+                cfg!(debug_assertions)
+                    || (perf_verify_enabled() && sample_verify_sync(&VERIFY_SYNCS))
+            }
+        }
+    }
+
+    fn write_indices(
+        &mut self,
+        folded: &[MessagePart],
+        dirty: impl IntoIterator<Item = usize>,
+    ) -> Result<(), DocError> {
+        let mut indices: Vec<usize> = dirty
+            .into_iter()
+            .filter(|index| *index < folded.len())
+            .collect();
+        let tail = self.written.len();
+        if tail < folded.len() {
+            indices.extend(tail..folded.len());
+        }
+        if let Some(&max) = indices.iter().max()
+            && tail < max
+        {
+            indices.extend(tail..max);
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let parts = self.parts_list()?;
+        let mut dirty = false;
+        for index in indices {
+            if self.write_one(&parts, index, &folded[index])? {
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.doc.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// `Ok(true)` when the doc changed.
+    fn write_one(
+        &mut self,
+        parts: &LoroList,
+        index: usize,
+        part: &MessagePart,
+    ) -> Result<bool, DocError> {
+        if index > self.written.len() {
+            return Err(DocError::Schema(format!(
+                "segment sync gap at {index} (written {})",
+                self.written.len()
+            )));
+        }
+        if index == self.written.len() {
+            push_part(parts, part)?;
+            self.written.push(part.clone());
+            self.flushed_len.push(part_flushed_len(part));
+            return Ok(true);
+        }
+        if let Some(delta) = self.text_tail(index, part) {
+            if delta.is_empty() {
+                return Ok(false);
+            }
+            let field = text_body(&self.written[index])
+                .map(|(field, _, _)| field)
+                .unwrap_or("text");
+            append_loro_text(parts, index, field, delta)?;
+            let flushed = part_flushed_len(part);
+            match &mut self.written[index] {
+                MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                    text.push_str(delta);
+                }
+                _ => {}
+            }
+            self.flushed_len[index] = flushed;
+            return Ok(true);
+        }
+        if &self.written[index] == part {
+            return Ok(false);
+        }
+        let part_map = part_map_at(parts, index)?;
+        update_part_fields(&part_map, part)?;
+        self.written[index] = part.clone();
+        self.flushed_len[index] = part_flushed_len(part);
+        Ok(true)
+    }
+
+    /// The unflushed tail only when the old body is still a byte prefix.
+    /// Length alone cannot distinguish append from a provider correction.
+    fn text_tail<'p>(&self, index: usize, part: &'p MessagePart) -> Option<&'p str> {
+        let (old_field, old_id, old_text) = text_body(&self.written[index])?;
+        let (new_field, new_id, new_text) = text_body(part)?;
+        let flushed = self.flushed_len.get(index).copied().unwrap_or(0);
+        if old_field != new_field
+            || old_id != new_id
+            || flushed != old_text.len()
+            || !new_text.starts_with(old_text)
+        {
+            return None;
+        }
+        // A matching UTF-8 string prefix ends at a character boundary.
+        Some(&new_text[flushed..])
     }
 
     /// Finish the stream: sync final parts, stamp a terminal status, and
@@ -1491,6 +1741,23 @@ impl<'a> SegmentWriter<'a> {
         }
         self.doc.doc.commit();
         Ok(())
+    }
+}
+
+fn append_loro_text(
+    parts: &LoroList,
+    index: usize,
+    field: &str,
+    delta: &str,
+) -> Result<(), DocError> {
+    let part_map = part_map_at(parts, index)?;
+    match part_map.get(field) {
+        Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) => {
+            let len = text.len_unicode();
+            text.insert(len, delta)?;
+            Ok(())
+        }
+        _ => Err(DocError::Schema(format!("{field} part missing LoroText"))),
     }
 }
 
@@ -1835,7 +2102,11 @@ mod tests {
         w.count_duration_from(now - 1_000);
         w.finish(&[], MessageStatus::Complete).unwrap();
         let entry = &doc.read_entries().unwrap()[0];
-        assert_eq!(entry.created_at, now - 5_000, "the entry's own time is kept");
+        assert_eq!(
+            entry.created_at,
+            now - 5_000,
+            "the entry's own time is kept"
+        );
         let duration = entry.duration_ms.unwrap();
         assert!((60_000..65_000).contains(&duration), "{duration}");
     }
@@ -2499,6 +2770,651 @@ mod tests {
         });
         let entry = decode_entry_json(v).expect("strict");
         assert_eq!(entry.id, "m1");
+    }
+
+    /// `finish` stamps `durationMs` from the wall clock, so equivalence runs
+    /// drop the writer instead of finishing. `Verify::Never` keeps a bad tail
+    /// from being repaired into a passing doc.
+    fn open_incremental(doc: &SessionDoc, seg: u32) -> SegmentWriter<'_> {
+        let id = format!("s{seg}");
+        let mut writer = SegmentWriter::begin(doc, &id, "dev", 1_700_000_000_000).unwrap();
+        writer.verify = Verify::Never;
+        writer
+    }
+
+    struct SyncRng(u64);
+    impl SyncRng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    const TEXT_TAILS: &[&str] = &[
+        "a",
+        "Hello",
+        " ",
+        "café ",
+        "日本語",
+        "😀",
+        "\n",
+        "— ",
+        "line",
+    ];
+
+    fn text_tail(rng: &mut SyncRng) -> &'static str {
+        TEXT_TAILS[rng.below(TEXT_TAILS.len())]
+    }
+
+    fn touched_indices(touched: crate::parts::Touched, len: usize) -> Vec<usize> {
+        match touched {
+            crate::parts::Touched::None => Vec::new(),
+            crate::parts::Touched::Index(index) => vec![index],
+            crate::parts::Touched::All => (0..len).collect(),
+        }
+    }
+
+    fn indexes_of(parts: &[MessagePart], kind: fn(&MessagePart) -> bool) -> Vec<usize> {
+        parts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| kind(part).then_some(index))
+            .collect()
+    }
+
+    fn is_text_body(part: &MessagePart) -> bool {
+        matches!(
+            part,
+            MessagePart::Text { .. } | MessagePart::Reasoning { .. }
+        )
+    }
+
+    fn is_tool(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Tool { .. })
+    }
+
+    fn is_image(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Image { .. })
+    }
+
+    fn is_visual(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Visual { .. })
+    }
+
+    fn is_spawn(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Tool { call, .. } if call.is_subagent_spawn())
+    }
+
+    fn random_call(rng: &mut SyncRng, n: u32) -> ToolCall {
+        match rng.below(8) {
+            0 => ToolCall::Exec {
+                command: format!("echo café {n}"),
+            },
+            1 => ToolCall::ReadFile {
+                path: format!("/w/{n}.rs"),
+            },
+            2 => ToolCall::WriteFile {
+                path: format!("/w/{n}.rs"),
+                content: Some(format!("fn f{n}() {{}}\n")),
+            },
+            3 => ToolCall::EditFile {
+                path: format!("/w/{n}.rs"),
+                old_string: Some("old secret".into()),
+                new_string: Some("new secret".into()),
+            },
+            4 => ToolCall::WebFetch {
+                url: format!("https://example.test/{n}"),
+                prompt: Some("hidden prompt".into()),
+            },
+            5 => ToolCall::Search {
+                pattern: "fn ".into(),
+                path: Some("/w".into()),
+            },
+            6 => ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "Agent".into(),
+                input: Some(serde_json::json!({
+                    "prompt": "secret",
+                    "model": "haiku",
+                    "noise": n,
+                })),
+            },
+            _ => ToolCall::Unknown {
+                name: "Agent: scan".into(),
+                input: Some(serde_json::json!({
+                    "prompt": "secret",
+                    "model": "sonnet",
+                    "subagent_type": "explore",
+                })),
+            },
+        }
+    }
+
+    fn question() -> zeron_proto::UserInputQuestion {
+        zeron_proto::UserInputQuestion {
+            id: "q".into(),
+            header: "H".into(),
+            question: "Proceed?".into(),
+            options: vec!["yes".into(), "no".into()],
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+        }
+    }
+
+    /// `None` starts a new segment. Include defensive text corrections as
+    /// well as normal fold events; clears use a new writer, as in drive_run
+    /// (the old sync did not delete parts in place either).
+    fn apply_sync_op(
+        parts: &mut Vec<MessagePart>,
+        rng: &mut SyncRng,
+        chat: &str,
+        seq: &mut u32,
+    ) -> Option<Vec<usize>> {
+        if !parts.is_empty() && rng.below(16) == 0 {
+            return None;
+        }
+        let roll = if parts.is_empty() {
+            rng.below(3)
+        } else {
+            rng.below(11)
+        };
+        let dirty = match roll {
+            0 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::TextDelta {
+                        text: text_tail(rng).into(),
+                    },
+                ),
+                parts.len(),
+            ),
+            1 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::ReasoningDelta {
+                        text: text_tail(rng).into(),
+                    },
+                ),
+                parts.len(),
+            ),
+            2 => {
+                *seq += 1;
+                touched_indices(
+                    fold_event_into_parts(
+                        parts,
+                        &AgentEvent::ToolCall {
+                            id: format!("tool-{seq}"),
+                            call: random_call(rng, *seq),
+                        },
+                    ),
+                    parts.len(),
+                )
+            }
+            3 => {
+                let indexes = indexes_of(parts, is_text_body);
+                if indexes.is_empty() {
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::TextDelta {
+                                text: text_tail(rng).into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    match &mut parts[index] {
+                        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                            match rng.below(4) {
+                                0 => *text = text_tail(rng).to_owned(),
+                                1 => *text = format!("corrected {}", text_tail(rng)),
+                                _ => text.push_str(text_tail(rng)),
+                            }
+                        }
+                        _ => unreachable!("text index"),
+                    }
+                    vec![index]
+                }
+            }
+            4 => {
+                let indexes = indexes_of(parts, is_tool);
+                if indexes.is_empty() {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id: format!("tool-{seq}"),
+                                call: random_call(rng, *seq),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id,
+                                call: ToolCall::Exec {
+                                    command: format!("echo {}", text_tail(rng)),
+                                },
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            5 => {
+                let indexes = indexes_of(parts, is_tool);
+                if indexes.is_empty() {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id: format!("tool-{seq}"),
+                                call: random_call(rng, *seq),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    let diff = (rng.below(2) == 0).then(|| zeron_proto::ToolDiff {
+                        path: format!("/w/{id}.rs"),
+                        old_text: Some("a\n".into()),
+                        new_text: "b\nc\n".into(),
+                    });
+                    let touched = fold_event_into_parts(
+                        parts,
+                        &AgentEvent::ToolResult {
+                            id,
+                            is_error: rng.below(5) == 0,
+                            output: Some("full output\nline2".into()),
+                            diff,
+                        },
+                    );
+                    crate::parts::apply_sidecar_refs(chat, parts);
+                    touched_indices(touched, parts.len())
+                }
+            }
+            6 => {
+                let indexes = indexes_of(parts, is_image);
+                if !indexes.is_empty() && rng.below(2) == 0 {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::GeneratedImage {
+                                id,
+                                path: format!("/img/{seq}.png"),
+                                name: "pic".into(),
+                                mime_type: "image/png".into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::GeneratedImage {
+                                id: format!("img-{seq}"),
+                                path: format!("/img/{seq}.png"),
+                                name: "pic".into(),
+                                mime_type: "image/png".into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            7 => {
+                let indexes = indexes_of(parts, is_visual);
+                if !indexes.is_empty() && rng.below(2) == 0 {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Visual {
+                                id,
+                                path: format!("/vis/{seq}.luau"),
+                                title: format!("タイトル {seq}"),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Visual {
+                                id: format!("vis-{seq}"),
+                                path: format!("/vis/{seq}.luau"),
+                                title: format!("タイトル {seq}"),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            8 => {
+                let pending: Vec<String> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Input {
+                            request_id,
+                            resolved: false,
+                            ..
+                        } => Some(request_id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !pending.is_empty() && rng.below(2) == 0 {
+                    let request_id = pending[rng.below(pending.len())].clone();
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::InputResolved {
+                                request_id,
+                                answers: Some(vec![zeron_proto::UserInputAnswer {
+                                    question_id: "q".into(),
+                                    labels: vec!["yes".into(), "café".into()],
+                                }]),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::InputRequested {
+                                request_id: format!("req-{seq}"),
+                                questions: vec![question()],
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            9 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::Error {
+                        message: format!("boom {}", text_tail(rng)),
+                    },
+                ),
+                parts.len(),
+            ),
+            _ => {
+                let spawns = indexes_of(parts, is_spawn);
+                if spawns.is_empty() {
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::TextDelta {
+                                text: text_tail(rng).into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = spawns[rng.below(spawns.len())];
+                    let id = parts[index].id().to_owned();
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Subagent {
+                                parent_tool_use_id: id,
+                                event: Box::new(AgentEvent::Done {
+                                    status: zeron_proto::DoneStatus::Completed,
+                                    result: None,
+                                    error: None,
+                                    session_id: None,
+                                }),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+        };
+        Some(dirty)
+    }
+
+    #[test]
+    fn incremental_resume_matches_full_sync_on_a_multibyte_tail() {
+        let inc_doc = SessionDoc::init("resume-eq").unwrap();
+        let full_doc = SessionDoc::init("resume-eq").unwrap();
+        let mut inc = open_incremental(&inc_doc, 0);
+        let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "café ".into(),
+        }];
+        inc.sync_indices(&parts, [0]).unwrap();
+        full.sync_full(&parts).unwrap();
+        let (index, written) = inc.into_state();
+        let mut inc = SegmentWriter::resume(&inc_doc, index, written);
+        inc.verify = Verify::Never;
+        parts[0] = MessagePart::Text {
+            id: "t0".into(),
+            text: "café 日本語😀".into(),
+        };
+        inc.sync_indices(&parts, [0]).unwrap();
+        full.sync_full(&parts).unwrap();
+        assert_eq!(inc.mismatches(), 0);
+        assert_eq!(inc.written, parts);
+        assert_eq!(
+            inc_doc.doc().get_deep_value().to_json_value(),
+            full_doc.doc().get_deep_value().to_json_value()
+        );
+        match &inc_doc.read_entries().unwrap()[0].parts[0] {
+            MessagePart::Text { text, .. } => assert_eq!(text, "café 日本語😀"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn segment_sync_oracle_repairs_a_missed_dirty_index() {
+        let doc = SessionDoc::init("missed-dirty").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "before".into(),
+        }];
+        writer.sync(&parts).unwrap();
+        parts[0] = MessagePart::Text {
+            id: "t0".into(),
+            text: "after😀".into(),
+        };
+        writer.sync_indices(&parts, []).unwrap();
+        assert_eq!(writer.mismatches(), 1);
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        assert_eq!(writer.written, parts);
+    }
+
+    #[test]
+    fn release_sync_sampling_survives_writer_resumes() {
+        let doc = SessionDoc::init("resume-sampling").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut samples = 0;
+        for _ in 0..64 {
+            let (index, written) = writer.into_state();
+            writer = SegmentWriter::resume(&doc, index, written);
+            writer.verify = Verify::Sampled;
+            samples += usize::from(writer.verify_due());
+        }
+        assert_eq!(samples, 2);
+    }
+
+    #[test]
+    fn incremental_sync_matches_full_on_text_corrections_without_oracle() {
+        for reasoning in [false, true] {
+            let inc_doc = SessionDoc::init("corrections").unwrap();
+            let full_doc = SessionDoc::init("corrections").unwrap();
+            let mut inc = open_incremental(&inc_doc, 0);
+            let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+            // Equal length, longer replacement, shrink, a former byte offset
+            // inside a new code point, astral characters and combining marks.
+            for body in [
+                "draft",
+                "fixed",
+                "rewritten😀",
+                "é",
+                "😀tail",
+                "e\u{301}",
+                "e\u{301}🦀",
+            ] {
+                let parts = vec![if reasoning {
+                    MessagePart::Reasoning {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                } else {
+                    MessagePart::Text {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                }];
+                inc.sync_indices(&parts, [0]).unwrap();
+                full.sync_full(&parts).unwrap();
+                assert_eq!(inc.written, parts, "{body}");
+                assert_eq!(inc.mismatches(), 0);
+                assert_eq!(inc_doc.read_entries().unwrap()[0].parts, parts);
+                assert_eq!(
+                    inc_doc.doc().get_deep_value().to_json_value(),
+                    full_doc.doc().get_deep_value().to_json_value(),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_sync_preserves_full_sync_structural_semantics() {
+        let inc_doc = SessionDoc::init("structural-eq").unwrap();
+        let full_doc = SessionDoc::init("structural-eq").unwrap();
+        let mut inc = open_incremental(&inc_doc, 0);
+        let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+        let a = MessagePart::Text {
+            id: "a".into(),
+            text: "first😀".into(),
+        };
+        let b = MessagePart::Text {
+            id: "b".into(),
+            text: "lasté".into(),
+        };
+        let snapshots = [
+            vec![a.clone(), b.clone()],
+            vec![b.clone(), a.clone()],
+            vec![b],
+            vec![MessagePart::Text {
+                id: "a".into(),
+                text: "lastéfirst😀".into(),
+            }],
+            Vec::new(),
+            vec![a],
+        ];
+        for parts in snapshots {
+            inc.sync_indices(&parts, 0..parts.len()).unwrap();
+            full.sync_full(&parts).unwrap();
+            // Both APIs retain the trailing doc parts on a shortened
+            // snapshot. Production clears close the segment and start a
+            // new writer; do not silently change the legacy sync contract.
+            assert_eq!(inc.written, full.written);
+            assert_eq!(inc.flushed_len, full.flushed_len);
+            assert_eq!(
+                inc_doc.doc().get_deep_value().to_json_value(),
+                full_doc.doc().get_deep_value().to_json_value()
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_sync_matches_full_sync_on_seeded_ops() {
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = SyncRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let chat = format!("eq-{seed}");
+            let inc_doc = SessionDoc::init(&chat).unwrap();
+            let full_doc = SessionDoc::init(&chat).unwrap();
+            let mut seg = 0u32;
+            let mut seq = 0u32;
+            let mut parts = Vec::new();
+            let mut inc = Some(open_incremental(&inc_doc, seg));
+            let mut full =
+                Some(SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap());
+            for step in 0..150 {
+                match apply_sync_op(&mut parts, &mut rng, &chat, &mut seq) {
+                    None => {
+                        seg += 1;
+                        parts.clear();
+                        // Drop the previous writers before the next `begin`
+                        // borrows the same docs.
+                        drop(inc.take());
+                        drop(full.take());
+                        inc = Some(open_incremental(&inc_doc, seg));
+                        let id = format!("s{seg}");
+                        full = Some(
+                            SegmentWriter::begin(&full_doc, &id, "dev", 1_700_000_000_000).unwrap(),
+                        );
+                    }
+                    Some(dirty) => {
+                        inc.as_mut().unwrap().sync_indices(&parts, dirty).unwrap();
+                        full.as_mut().unwrap().sync_full(&parts).unwrap();
+                        let inc_w = inc.as_ref().unwrap();
+                        assert_eq!(inc_w.mismatches(), 0, "seed {seed} step {step}");
+                        assert_eq!(
+                            inc_w.written, parts,
+                            "incremental mirror seed {seed} step {step}"
+                        );
+                        assert_eq!(
+                            inc_w.flushed_len.len(),
+                            parts.len(),
+                            "seed {seed} step {step}"
+                        );
+                        for (part, flushed) in parts.iter().zip(&inc_w.flushed_len) {
+                            assert_eq!(*flushed, part_flushed_len(part), "seed {seed} step {step}");
+                        }
+                        assert_eq!(
+                            full.as_ref().unwrap().written,
+                            parts,
+                            "full mirror seed {seed} step {step}"
+                        );
+                        assert_eq!(
+                            inc_doc.doc().get_deep_value().to_json_value(),
+                            full_doc.doc().get_deep_value().to_json_value(),
+                            "seed {seed} step {step} seg {seg}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

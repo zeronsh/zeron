@@ -258,7 +258,12 @@ impl Chat<'_> {
             .core
             .sessions
             .subscribe(&self.id, 0)
-            .map(|(events, _)| events.into_iter().map(|e| e.event).collect())
+            .map(|(events, _)| {
+                events
+                    .into_iter()
+                    .map(|e| std::sync::Arc::unwrap_or_clone(e.event))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1098,8 +1103,8 @@ fn text_of(core: &EngineCore) -> String {
         .map(|(events, _)| {
             events
                 .into_iter()
-                .filter_map(|e| match e.event {
-                    AgentEvent::TextDelta { text } => Some(text),
+                .filter_map(|e| match e.event.as_ref() {
+                    AgentEvent::TextDelta { text } => Some(text.clone()),
                     _ => None,
                 })
                 .collect()
@@ -1115,7 +1120,7 @@ fn completed_of(core: &EngineCore) -> usize {
                 .iter()
                 .filter(|e| {
                     matches!(
-                        e.event,
+                        e.event.as_ref(),
                         AgentEvent::Done {
                             status: zeron_proto::DoneStatus::Completed,
                             ..
@@ -1151,13 +1156,13 @@ fn resumed_to_end(core: &EngineCore) -> bool {
             events
                 .iter()
                 .position(|e| {
-                    matches!(&e.event, AgentEvent::Done { error: Some(note), .. }
+                    matches!(e.event.as_ref(), AgentEvent::Done { error: Some(note), .. }
                         if note.contains("resuming"))
                 })
                 .is_some_and(|at| {
                     events[at..].iter().any(|e| {
                         matches!(
-                            e.event,
+                            e.event.as_ref(),
                             AgentEvent::Done {
                                 status: zeron_proto::DoneStatus::Completed,
                                 ..
@@ -1219,7 +1224,7 @@ fn dump(core: &EngineCore) -> String {
                 .into_iter()
                 .filter(|e| {
                     !matches!(
-                        e.event,
+                        e.event.as_ref(),
                         AgentEvent::TextDelta { .. } | AgentEvent::ReasoningDelta { .. }
                     )
                 })

@@ -1117,8 +1117,8 @@ async fn a_side_chat_keeps_its_subagent_tools_when_native_subagents_are_off() {
         let (journal, _) = core.sessions.subscribe(chat, 0).unwrap();
         let tools = journal
             .into_iter()
-            .find_map(|e| match e.event {
-                AgentEvent::SessionStarted { tools, .. } => Some(tools),
+            .find_map(|e| match e.event.as_ref() {
+                AgentEvent::SessionStarted { tools, .. } => Some(tools.clone()),
                 _ => None,
             })
             .expect("the session starts");

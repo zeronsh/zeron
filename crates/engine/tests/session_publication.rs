@@ -322,7 +322,7 @@ async fn regression(live: bool) {
         let (events, _) = core.sessions.subscribe(CHAT, 0).unwrap();
         let native_sessions: Vec<_> = events
             .iter()
-            .filter_map(|e| match &e.event {
+            .filter_map(|e| match e.event.as_ref() {
                 zeron_proto::AgentEvent::SessionStarted { session_id, .. } => Some(session_id),
                 _ => None,
             })

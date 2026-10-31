@@ -4,7 +4,8 @@
 //! Pragmatic port of zeron's `sessions.ts` (spec: feature-inventory §3.2):
 //! - every `AgentEvent` is (a) appended to the on-disk run journal, (b) broadcast to
 //!   in-process subscribers, (c) folded via `fold_event_into_parts` and diffed into the
-//!   chat's `SessionDoc` through `SegmentWriter` on a coalesced `STREAM_COMMIT_MS` timer;
+//!   chat's `SessionDoc` through `SegmentWriter`: the first event after an idle
+//!   window commits immediately, and later events share one `STREAM_COMMIT_MS` window;
 //! - the user message entry is pushed to the doc immediately on dispatch (id = the
 //!   command's client-minted message id, so optimistic echoes never flicker);
 //! - a `Steered` event splits the assistant entry at the exact boundary;
@@ -17,7 +18,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -26,7 +27,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
+    SessionMessageEntry, Touched, fold_event_into_parts, sanitize_tool_call,
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
 use zeron_proto::{
@@ -43,10 +44,11 @@ use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
 
 /// One journaled event: the durable seq plus the event, as broadcast to subscribers.
+/// The event is shared so a hub with many receivers does not clone the payload per receiver.
 #[derive(Debug, Clone)]
 pub struct JournaledEvent {
     pub seq: u64,
-    pub event: AgentEvent,
+    pub event: Arc<AgentEvent>,
 }
 
 /// Outcome of a steer attempt.
@@ -557,7 +559,9 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return None;
         }
-        lock(&self.inner.runs).get(chat_id).map(|h| h.runtime_config.harness_id)
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.runtime_config.harness_id)
     }
 
     /// Mark the provider-switch seam for a send about to run on `harness_id`
@@ -608,7 +612,10 @@ impl SessionsEngine {
             .journal
             .replay(chat_id, after_seq)?
             .into_iter()
-            .map(|(seq, event)| JournaledEvent { seq, event })
+            .map(|(seq, event)| JournaledEvent {
+                seq,
+                event: Arc::new(event),
+            })
             .collect();
         Ok((replay, rx))
     }
@@ -1888,6 +1895,10 @@ impl SessionsEngine {
                 tracing::warn!(chat = %chat_id, error = %err, "shutdown interrupt failed");
             }
         }
+        // The writer thread may still hold the last events of the turns just stopped.
+        if let Err(err) = self.inner.journal.flush() {
+            tracing::warn!(error = %err, "journal flush on shutdown failed");
+        }
     }
 
     /// The engine is going down because its account signed out: the turns
@@ -1996,23 +2007,35 @@ impl Inner {
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
-        let seq = match self.journal.append(chat_id, event) {
+        let seq = match self.journal.enqueue(chat_id, event) {
             Ok(seq) => seq,
             Err(err) => {
                 tracing::error!(chat = %chat_id, error = %err, "journal append failed");
                 0
             }
         };
+        // SessionStarted carries the resume id; Done closes the turn. Both have
+        // to be on disk before publish returns (crash recovery reads the tail).
+        if matches!(
+            event,
+            AgentEvent::Done { .. } | AgentEvent::SessionStarted { .. }
+        ) && let Err(err) = self.journal.flush()
+        {
+            tracing::error!(chat = %chat_id, error = %err, "journal flush failed");
+        }
         // The journal now closes the turn a Stop marked (see
         // `SessionsEngine::note_user_stop`).
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
+        // With no receivers there is nothing to clone for.
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
-            let _ = hub.send(JournaledEvent {
-                seq,
-                event: event.clone(),
-            });
+            if hub.receiver_count() > 0 {
+                let _ = hub.send(JournaledEvent {
+                    seq,
+                    event: Arc::new(event.clone()),
+                });
+            }
         }
         seq
     }
@@ -3181,6 +3204,9 @@ struct SubagentSink {
     entry_index: Option<usize>,
     written: Vec<MessagePart>,
     folded: Vec<MessagePart>,
+    /// Sanitized parts already rendered for the doc. A flush re-renders only
+    /// [`SegmentRender::dirty`] instead of cloning every part.
+    render: SegmentRender,
     dirty: bool,
 }
 
@@ -3196,11 +3222,12 @@ impl SubagentSink {
         if self.folded.is_empty() {
             return;
         }
-        let rendered = render_parts(&self.folded);
+        self.render.refresh(&self.folded);
+        let dirty: Vec<usize> = self.render.dirty.iter().copied().collect();
         let result = match self.entry_index {
             Some(ix) => {
                 let mut w = SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written));
-                let r = w.sync(&rendered);
+                let r = w.sync_indices(&self.render.rendered, dirty);
                 let (ix, written) = w.into_state();
                 self.entry_index = Some(ix);
                 self.written = written;
@@ -3209,7 +3236,7 @@ impl SubagentSink {
             None => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
                     Ok(mut w) => {
-                        let r = w.sync(&rendered);
+                        let r = w.sync_indices(&self.render.rendered, dirty);
                         let (ix, written) = w.into_state();
                         self.entry_index = Some(ix);
                         self.written = written;
@@ -3219,7 +3246,12 @@ impl SubagentSink {
                 }
             }
         };
+        if result.is_ok() {
+            self.render.dirty.clear();
+        }
         if let Err(err) = result {
+            // Retain pending indices for the next event's flush, without
+            // keeping the deadline armed and spinning on a broken doc.
             // Fail soft: a broken subagent doc degrades to chip-only, never
             // errors the chat.
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent sink flush failed");
@@ -3232,13 +3264,16 @@ impl SubagentSink {
     /// opens a fresh assistant entry below it — the subagent transcript then
     /// reads like any steered chat.
     fn push_user(&mut self, device_id: &str, text: &str) {
-        let rendered = render_parts(&self.folded);
+        self.render.refresh(&self.folded);
         let closed = match self.entry_index.take() {
-            Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish(&rendered, MessageStatus::Complete),
+            Some(ix) => {
+                let written = std::mem::take(&mut self.written);
+                SegmentWriter::resume(&self.doc, ix, written)
+                    .finish(&self.render.rendered, MessageStatus::Complete)
+            }
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish(&rendered, MessageStatus::Complete),
+                    Ok(w) => w.finish(&self.render.rendered, MessageStatus::Complete),
                     Err(e) => Err(e),
                 }
             }
@@ -3267,19 +3302,22 @@ impl SubagentSink {
         self.started_at = now_ms();
         self.written = Vec::new();
         self.folded = Vec::new();
+        self.render.clear();
         self.dirty = false;
     }
 
     /// Final flush + entry finalize; returns the transcript JSON for the
     /// frozen blob (entries as the client renders them).
     fn finish(mut self, device_id: &str, status: MessageStatus) -> Option<String> {
-        let rendered = render_parts(&self.folded);
+        self.render.refresh(&self.folded);
         let finished = match self.entry_index {
-            Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
-                .finish(&rendered, status),
+            Some(ix) => {
+                let written = std::mem::take(&mut self.written);
+                SegmentWriter::resume(&self.doc, ix, written).finish(&self.render.rendered, status)
+            }
             None if !self.folded.is_empty() => {
                 match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
-                    Ok(w) => w.finish(&rendered, status),
+                    Ok(w) => w.finish(&self.render.rendered, status),
                     Err(e) => Err(e),
                 }
             }
@@ -3306,48 +3344,163 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     }
 }
 
-/// Apply the render-parts privacy policy: strip heavy/sensitive tool inputs before doc
-/// entry. Full inputs live only in the local run journal.
-fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
-    parts
-        .iter()
-        .map(|part| match part {
-            MessagePart::Tool {
-                id,
-                call,
-                is_error,
-                resolved,
-                output,
-                diff,
-                output_ref,
-                output_bytes,
-                diff_ref,
-                diff_stats,
-                subagent_ref,
-                subagent_status,
-                subagent_tail,
-            } => MessagePart::Tool {
-                id: id.clone(),
-                call: sanitize_tool_call(call),
-                is_error: *is_error,
-                resolved: *resolved,
-                // Output summaries, diff stats, and sidecar refs are
-                // deliberately kept: unlike raw tool inputs they are the
-                // transcript's record of what happened, and the strip already
-                // bounded them (docs/chat2-sync.md A1).
-                output: output.clone(),
-                diff: diff.clone(),
-                output_ref: output_ref.clone(),
-                output_bytes: *output_bytes,
-                diff_ref: diff_ref.clone(),
-                diff_stats: diff_stats.clone(),
-                subagent_ref: subagent_ref.clone(),
-                subagent_status: *subagent_status,
-                subagent_tail: subagent_tail.clone(),
-            },
-            other => other.clone(),
-        })
-        .collect()
+/// Sanitized parts for one streaming segment, kept across ticks.
+///
+/// A tick re-renders only the indices the fold touched. Text and reasoning
+/// grow by appending the new tail, so the long body is not cloned again.
+#[derive(Default)]
+struct SegmentRender {
+    rendered: Vec<MessagePart>,
+    dirty: BTreeSet<usize>,
+    refreshes: u64,
+}
+
+impl SegmentRender {
+    fn clear(&mut self) {
+        self.rendered.clear();
+        self.dirty.clear();
+    }
+
+    fn note(&mut self, touched: Touched, folded_len: usize) {
+        match touched {
+            Touched::None => {}
+            Touched::Index(index) => {
+                self.dirty.insert(index);
+            }
+            Touched::All => {
+                self.rendered.clear();
+                self.dirty.clear();
+                self.dirty.extend(0..folded_len);
+            }
+        }
+    }
+
+    /// The whole segment was replaced (a setup snapshot), not edited in place.
+    fn invalidate_all(&mut self, folded_len: usize) {
+        self.note(Touched::All, folded_len);
+    }
+
+    fn refresh(&mut self, folded: &[MessagePart]) {
+        self.refreshes = self.refreshes.wrapping_add(1);
+        let verify = cfg!(debug_assertions) || {
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            *ENABLED.get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|v| v == "1"))
+                && self.refreshes.is_multiple_of(32)
+        };
+        self.refresh_indices(folded);
+        if verify {
+            let full = render_parts_full(folded);
+            if self.rendered != full {
+                tracing::error!("segment render diverged from the full render; resetting cache");
+                self.rendered = full;
+                // The writer needs every repaired slot, including indices
+                // that an invalidation bug mistakenly left clean.
+                self.dirty = (0..folded.len()).collect();
+            }
+        }
+    }
+
+    fn refresh_indices(&mut self, folded: &[MessagePart]) {
+        if self.rendered.len() > folded.len() {
+            self.rendered.truncate(folded.len());
+            self.dirty.retain(|index| *index < folded.len());
+        }
+        while self.rendered.len() < folded.len() {
+            let index = self.rendered.len();
+            self.rendered.push(render_part(&folded[index]));
+            self.dirty.insert(index);
+        }
+        let pending: Vec<usize> = self
+            .dirty
+            .iter()
+            .copied()
+            .filter(|index| *index < folded.len())
+            .collect();
+        for index in pending {
+            assign_rendered(&mut self.rendered[index], &folded[index]);
+        }
+    }
+}
+
+/// Apply the render-parts privacy policy to one part: strip heavy/sensitive
+/// tool inputs before doc entry. Full inputs live only in the local run journal.
+fn render_part(part: &MessagePart) -> MessagePart {
+    match part {
+        MessagePart::Tool {
+            id,
+            call,
+            is_error,
+            resolved,
+            output,
+            diff,
+            output_ref,
+            output_bytes,
+            diff_ref,
+            diff_stats,
+            subagent_ref,
+            subagent_status,
+            subagent_tail,
+        } => MessagePart::Tool {
+            id: id.clone(),
+            call: sanitize_tool_call(call),
+            is_error: *is_error,
+            resolved: *resolved,
+            // Output summaries, diff stats, and sidecar refs are
+            // deliberately kept: unlike raw tool inputs they are the
+            // transcript's record of what happened, and the strip already
+            // bounded them (docs/chat2-sync.md A1).
+            output: output.clone(),
+            diff: diff.clone(),
+            output_ref: output_ref.clone(),
+            output_bytes: *output_bytes,
+            diff_ref: diff_ref.clone(),
+            diff_stats: diff_stats.clone(),
+            subagent_ref: subagent_ref.clone(),
+            subagent_status: *subagent_status,
+            subagent_tail: subagent_tail.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Apply the render-parts privacy policy. Prefer [`SegmentRender`] on the
+/// streaming tick; this full pass remains for segment finish.
+fn render_parts_full(parts: &[MessagePart]) -> Vec<MessagePart> {
+    parts.iter().map(render_part).collect()
+}
+
+/// Grow a text/reasoning slot by its new tail. Anything else is re-rendered,
+/// which is where [`sanitize_tool_call`] runs.
+fn assign_rendered(slot: &mut MessagePart, source: &MessagePart) {
+    if let Some(delta) = rendered_text_tail(slot, source) {
+        if !delta.is_empty() {
+            match slot {
+                MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                    text.push_str(delta);
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+    *slot = render_part(source);
+}
+
+fn rendered_text_tail<'a>(slot: &MessagePart, source: &'a MessagePart) -> Option<&'a str> {
+    let (old_kind, old_id, old_text) = match slot {
+        MessagePart::Text { id, text } => ("text", id.as_str(), text.as_str()),
+        MessagePart::Reasoning { id, text } => ("reasoning", id.as_str(), text.as_str()),
+        _ => return None,
+    };
+    let (new_kind, new_id, new_text) = match source {
+        MessagePart::Text { id, text } => ("text", id.as_str(), text.as_str()),
+        MessagePart::Reasoning { id, text } => ("reasoning", id.as_str(), text.as_str()),
+        _ => return None,
+    };
+    if old_kind != new_kind || old_id != new_id || !new_text.starts_with(old_text) {
+        return None;
+    }
+    Some(&new_text[old_text.len()..])
 }
 
 /// The persisted assistant text of a folded segment (workspace preview source).
@@ -3369,17 +3522,20 @@ fn sync_segment<'a>(
     device_id: &str,
     started_at: i64,
     folded: &[MessagePart],
+    render: &mut SegmentRender,
 ) -> Result<(), DocError> {
     if folded.is_empty() {
         return Ok(());
     }
-    let rendered = render_parts(folded);
+    render.refresh(folded);
+    let dirty: Vec<usize> = render.dirty.iter().copied().collect();
     if writer.is_none() {
         *writer = Some(SegmentWriter::begin(doc, entry_id, device_id, started_at)?);
     }
     if let Some(w) = writer.as_mut() {
-        w.sync(&rendered)?;
+        w.sync_indices(&render.rendered, dirty)?;
     }
+    render.dirty.clear();
     Ok(())
 }
 
@@ -3392,7 +3548,7 @@ fn finish_segment<'a>(
     folded: &[MessagePart],
     status: MessageStatus,
 ) -> Result<(), DocError> {
-    let rendered = render_parts(folded);
+    let rendered = render_parts_full(folded);
     match writer {
         Some(w) => w.finish(&rendered, status),
         None if !folded.is_empty() => {
@@ -3563,6 +3719,7 @@ async fn drive_run(
     // a fresh session needs all prior user text, not just the latest tail.
     let doc_ref: &SessionDoc = &doc;
     let mut folded: Vec<MessagePart> = Vec::new();
+    let mut segment_render = SegmentRender::default();
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -3617,6 +3774,7 @@ async fn drive_run(
         loop {
             let (parts, done) = crate::runner::setup_snapshot(&user_id, waited);
             folded = parts;
+            segment_render.invalidate_all(folded.len());
             if let Err(err) = sync_segment(
                 doc_ref,
                 &mut writer,
@@ -3624,6 +3782,7 @@ async fn drive_run(
                 &device_id,
                 segment_started,
                 &folded,
+                &mut segment_render,
             ) {
                 tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
             }
@@ -3891,6 +4050,18 @@ async fn drive_run(
 
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
+    // No previous commit means the first event is due immediately, without
+    // subtracting from the clock (which may be paused in tests).
+    let mut last_commit: Option<tokio::time::Instant> = None;
+    // Leading edge when the previous commit is already a window old;
+    // otherwise the deadline stays anchored there, so a burst still
+    // coalesces to one write per `STREAM_COMMIT_MS`.
+    fn arm(flush_at: &mut tokio::time::Instant, last_commit: Option<tokio::time::Instant>) {
+        let now = tokio::time::Instant::now();
+        *flush_at = last_commit
+            .and_then(|at| at.checked_add(std::time::Duration::from_millis(STREAM_COMMIT_MS)))
+            .map_or(now, |deadline| now.max(deadline));
+    }
     // Set when the engine interrupts the run: the harness gets this long to end its own
     // stream (its token was cancelled); past it, a terminal Done is synthesized.
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
@@ -4023,6 +4194,31 @@ async fn drive_run(
     let mut final_completed_turn = None;
     let mut final_outcome = None;
     let final_status = loop {
+        // Flush even when prepared events or the harness stream stay ready.
+        if (dirty || subagents.values().any(|s| s.dirty)) && flush_at <= tokio::time::Instant::now()
+        {
+            #[cfg(test)]
+            FLUSH_TICKS.with(|t| t.set(t.get() + 1));
+            if dirty {
+                if let Err(err) = sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                    &mut segment_render,
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
+                }
+                dirty = false;
+            }
+            for sink in subagents.values_mut() {
+                sink.flush(&device_id);
+            }
+            last_commit = Some(tokio::time::Instant::now());
+            continue;
+        }
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
@@ -4133,6 +4329,9 @@ async fn drive_run(
                 }
                 // Engine-made events are final: a `show_image` image is
                 // already in uploads, outside the generated-image intake root.
+                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
+                    continue;
+                }
                 Some(event) = engine_rx.recv() => {
                     prepared_events.push_back(event);
                     continue;
@@ -4170,24 +4369,6 @@ async fn drive_run(
                         session_id: None,
                     },
                 },
-                _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
-                    #[cfg(test)]
-                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
-                    // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
-                    // (parent + any dirty subagent docs).
-                    if dirty {
-                        if let Err(err) = sync_segment(
-                            doc_ref, &mut writer, &entry_id, &device_id, segment_started, &folded,
-                        ) {
-                            tracing::warn!(chat = %chat_id, error = %err, "segment sync failed");
-                        }
-                        dirty = false;
-                    }
-                    for sink in subagents.values_mut() {
-                        sink.flush(&device_id);
-                    }
-                    continue;
-                }
                 // Turn-quiesce watchdog (see the knob above). Armed only when the
                 // fold says nothing is in flight: an unresolved tool part is a
                 // command still running (legitimately silent for minutes — the
@@ -4245,6 +4426,7 @@ async fn drive_run(
                         inner.note_message(&chat_id, &folded_text(&folded));
                     }
                     folded.clear();
+                    segment_render.clear();
                     dirty = false;
                     entry_id = new_id();
                     segment_started = now_ms();
@@ -4325,7 +4507,10 @@ async fn drive_run(
                 };
             if chip_streaming {
                 if !sink_known && !done_only {
-                    for p in folded.iter_mut() {
+                    // `note` only needs the length. Reading it inside the
+                    // loop overlaps the `iter_mut` borrow.
+                    let folded_len = folded.len();
+                    for (index, p) in folded.iter_mut().enumerate() {
                         if let MessagePart::Tool {
                             id,
                             call,
@@ -4340,14 +4525,15 @@ async fn drive_run(
                             && call.is_subagent_spawn()
                         {
                             *subagent_ref = Some(sub_id.clone());
+                            segment_render.note(Touched::Index(index), folded_len);
                         }
                     }
                 }
-                zeron_doc::fold_event_into_parts(&mut folded, &event);
+                let touched = zeron_doc::fold_event_into_parts(&mut folded, &event);
+                segment_render.note(touched, folded.len());
                 if !dirty {
                     dirty = true;
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    arm(&mut flush_at, last_commit);
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
@@ -4370,6 +4556,7 @@ async fn drive_run(
                             entry_index: None,
                             written: Vec::new(),
                             folded: Vec::new(),
+                            render: SegmentRender::default(),
                             dirty: false,
                         },
                     );
@@ -4407,16 +4594,17 @@ async fn drive_run(
                     continue;
                 }
                 let was_clean = !sink.dirty;
-                zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
+                let touched = zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
+                sink.render.note(touched, sink.folded.len());
                 sink.dirty = true;
                 // A sink waking on its own must arm the same commit window
                 // the parent's dirty flag does — `flush_at` is otherwise only
                 // rescheduled on the parent's flip, so a past deadline would
                 // fire the commit branch on every event instead of once per
-                // STREAM_COMMIT_MS window.
+                // STREAM_COMMIT_MS window. `arm` commits immediately when
+                // that window has already elapsed.
                 if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
-                    flush_at = tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    arm(&mut flush_at, last_commit);
                 }
                 if done {
                     let status = match sub_event.as_ref() {
@@ -4762,6 +4950,7 @@ async fn drive_run(
             }
             inner.note_message(&chat_id, &folded_text(&folded));
             folded.clear();
+            segment_render.clear();
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
@@ -4838,7 +5027,8 @@ async fn drive_run(
         // background re-invocations) must not wipe the segment being written.
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
-            fold_event_into_parts(&mut folded, &event);
+            let touched = fold_event_into_parts(&mut folded, &event);
+            segment_render.note(touched, folded.len());
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run
@@ -4953,6 +5143,7 @@ async fn drive_run(
                 && !inner.registry.update_pending(harness_id)
             {
                 folded.clear();
+                segment_render.clear();
                 dirty = false;
                 entry_id = new_id();
                 segment_started = now_ms();
@@ -4987,8 +5178,7 @@ async fn drive_run(
 
         if !folded.is_empty() && !dirty {
             dirty = true;
-            flush_at =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+            arm(&mut flush_at, last_commit);
         }
     };
 
@@ -5392,7 +5582,11 @@ mod tests {
         std::io::Write::write_all(&mut f, b"{\"seq\":3,\"event\":{\"type\":\"done\"").unwrap();
         assert_eq!(
             sessions.inner.journal_harness_session("started-only"),
-            Some(("s1".into(), "/a".into(), Some(zeron_proto::HarnessId::ClaudeCode)))
+            Some((
+                "s1".into(),
+                "/a".into(),
+                Some(zeron_proto::HarnessId::ClaudeCode)
+            ))
         );
     }
 
@@ -5514,9 +5708,12 @@ mod tests {
             .unwrap();
         let mut request = request();
         request.prompt.clear();
-        core.sessions
-            .inner
-            .remember_harness_session("idle", "old-native-thread", &request.cwd, HarnessId::Codex);
+        core.sessions.inner.remember_harness_session(
+            "idle",
+            "old-native-thread",
+            &request.cwd,
+            HarnessId::Codex,
+        );
         core.sessions.start_idle("idle", request).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -5560,7 +5757,10 @@ mod tests {
                 SessionStatus::Idle
             );
             assert_eq!(
-                core.workspace.chat_harness_session("idle").unwrap().session_id,
+                core.workspace
+                    .chat_harness_session("idle")
+                    .unwrap()
+                    .session_id,
                 "new-native-thread"
             );
             let events = core.sessions.inner.journal.replay("idle", 0).unwrap();
@@ -5700,12 +5900,88 @@ mod tests {
             entry_index: None,
             written: Vec::new(),
             folded: Vec::new(),
+            render: SegmentRender::default(),
             dirty: true,
         };
         // Nothing to write is still a completed flush — left set, the flag
         // holds the run loop's commit guard open on a past deadline.
         sink.flush("dev-test");
         assert!(!sink.dirty);
+    }
+
+    #[tokio::test]
+    async fn subagent_flush_retains_pending_indices_after_a_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "dev-test".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("chat-sub-retry").unwrap();
+        let mut sink = SubagentSink {
+            doc_id: "chat-sub-retry".into(),
+            doc: handle.writer(),
+            entry_id: "entry-1".into(),
+            started_at: 0,
+            entry_index: None,
+            written: Vec::new(),
+            folded: Vec::new(),
+            render: SegmentRender::default(),
+            dirty: true,
+        };
+        let touched = fold_event_into_parts(&mut sink.folded, &text("A"));
+        sink.render.note(touched, sink.folded.len());
+        sink.flush("dev-test");
+        let part_map = match sink.doc.doc().get_list("messages").get(0).unwrap() {
+            loro::ValueOrContainer::Container(loro::Container::Map(entry)) => {
+                match entry.get("parts").unwrap() {
+                    loro::ValueOrContainer::Container(loro::Container::List(parts)) => {
+                        match parts.get(0).unwrap() {
+                            loro::ValueOrContainer::Container(loro::Container::Map(part)) => part,
+                            _ => panic!("part map"),
+                        }
+                    }
+                    _ => panic!("parts list"),
+                }
+            }
+            _ => panic!("entry map"),
+        };
+        part_map.delete("text").unwrap();
+        let touched = fold_event_into_parts(&mut sink.folded, &text("B"));
+        sink.render.note(touched, sink.folded.len());
+        sink.dirty = true;
+        sink.flush("dev-test");
+        assert!(!sink.dirty, "a write error must not spin the run loop");
+        assert!(
+            sink.render.dirty.contains(&0),
+            "the unwritten tail needs retrying"
+        );
+        let restored = part_map
+            .insert_container("text", loro::LoroText::new())
+            .unwrap();
+        restored.insert(0, "A").unwrap();
+        let touched = fold_event_into_parts(
+            &mut sink.folded,
+            &AgentEvent::ToolCall {
+                id: "write".into(),
+                call: zeron_proto::ToolCall::WriteFile {
+                    path: "private.txt".into(),
+                    content: Some("hidden".into()),
+                },
+            },
+        );
+        sink.render.note(touched, sink.folded.len());
+        sink.dirty = true;
+        sink.flush("dev-test");
+        assert!(sink.render.dirty.is_empty());
+        assert_eq!(
+            sink.doc.read_entries().unwrap()[0].parts,
+            render_parts_full(&sink.folded)
+        );
     }
 
     /// Feed-by-hand harness: the test pushes wire events through a channel
@@ -5795,8 +6071,10 @@ mod tests {
         .unwrap();
         feed.send(done(DoneStatus::Completed)).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(3 * STREAM_COMMIT_MS)).await;
-        // Empty events trickling in inside one window: the first must arm it
-        // rather than commit, and no later one commits on its own.
+        // Empty events trickling in inside one window. The first arrives
+        // after the parent's window has elapsed, so it commits on the
+        // leading edge; the rest share one later commit. The loop must
+        // then idle, not spin on a past deadline.
         for _ in 0..12 {
             feed.send(AgentEvent::Subagent {
                 parent_tool_use_id: "tool-1".into(),
@@ -5822,6 +6100,387 @@ mod tests {
             Some((SessionStatus::Idle, 1)),
             "parked, with the subagent's sink open"
         );
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leading_commit_is_not_starved_by_ready_events() {
+        FLUSH_TICKS.with(|t| t.set(0));
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-ready-stream";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        for _ in 0..100 {
+            feed.send(text("x")).unwrap();
+        }
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        for _ in 0..400 {
+            if core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            FLUSH_TICKS.with(|t| t.get()),
+            1,
+            "a ready stream must not starve the leading commit"
+        );
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn steer_finalizes_pending_delta_before_starting_next_segment() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-steer-pending";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        feed.send(text("A")).unwrap();
+        feed.send(text("B")).unwrap();
+        feed.send(AgentEvent::Steered {
+            assistant_message_id: None,
+            next_assistant_message_id: Some("next".into()),
+        })
+        .unwrap();
+        feed.send(text("C")).unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        let read = || {
+            core.doc_host
+                .open(chat)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.role == MessageRole::Assistant)
+                .map(|e| {
+                    e.parts
+                        .into_iter()
+                        .filter_map(|p| match p {
+                            MessagePart::Text { text, .. } => Some(text),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..400 {
+            if read() == ["AB", "C"] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read(), ["AB", "C"]);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subagent_leading_and_terminal_deltas_reach_its_doc() {
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-subagent-leading";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        feed.send(started()).unwrap();
+        feed.send(AgentEvent::ToolCall {
+            id: "tool-1".into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "Agent: probe".into(),
+                input: None,
+            },
+        })
+        .unwrap();
+        feed.send(done(DoneStatus::Completed)).unwrap();
+        for _ in 0..400 {
+            if core
+                .sessions
+                .session_status(chat)
+                .is_some_and(|s| s.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(STREAM_COMMIT_MS)).await;
+        let sub_id = subagent_doc_id(chat, "tool-1");
+        let read_text = || -> String {
+            core.doc_host
+                .open(&sub_id)
+                .unwrap()
+                .doc()
+                .read_entries()
+                .unwrap()
+                .into_iter()
+                .flat_map(|e| e.parts)
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let tagged = |event| AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(event),
+        };
+        let start = tokio::time::Instant::now();
+        feed.send(tagged(text("A"))).unwrap();
+        for _ in 0..400 {
+            if read_text() == "A" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read_text(), "A");
+        assert!(start.elapsed() < std::time::Duration::from_millis(5));
+        feed.send(tagged(text("B"))).unwrap();
+        feed.send(tagged(done(DoneStatus::Completed))).unwrap();
+        for _ in 0..400 {
+            if read_text() == "AB" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(read_text(), "AB");
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_delta_is_finalized_on_done_interrupt_and_stream_end() {
+        for case in 0..4 {
+            let (feed, rx) = mpsc::unbounded_channel();
+            let registry = HarnessRegistry::new();
+            registry.register(Arc::new(FeedHarness {
+                feed: Mutex::new(Some(rx)),
+            }));
+            let dir = tempfile::tempdir().unwrap();
+            let core =
+                crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                    .unwrap();
+            let chat = "chat-pending-final";
+            core.sessions
+                .dispatch(chat, HarnessId::Mock, request(), None)
+                .await
+                .unwrap();
+            feed.send(started()).unwrap();
+            feed.send(text("A")).unwrap();
+            let read_text = || -> String {
+                core.doc_host
+                    .open(chat)
+                    .unwrap()
+                    .doc()
+                    .read_entries()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|e| e.role == MessageRole::Assistant)
+                    .flat_map(|e| e.parts)
+                    .filter_map(|p| match p {
+                        MessagePart::Text { text, .. } => Some(text),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for _ in 0..400 {
+                if read_text() == "A" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(read_text(), "A");
+            feed.send(text("B")).unwrap();
+            match case {
+                0 => feed.send(done(DoneStatus::Completed)).unwrap(),
+                1 => feed.send(done(DoneStatus::Errored)).unwrap(),
+                2 => {
+                    core.sessions.interrupt(chat).await.unwrap();
+                }
+                _ => drop(feed),
+            }
+            for _ in 0..400 {
+                if read_text() == "AB" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(read_text(), "AB", "case {case} lost the pending delta");
+            core.sessions.shutdown().await;
+        }
+    }
+
+    /// The first text after an idle window is in the doc without waiting out
+    /// `STREAM_COMMIT_MS`. Deltas that arrive inside the following window
+    /// still share one commit, and a single delta once that window has
+    /// elapsed commits on the leading edge again.
+    #[tokio::test(start_paused = true)]
+    async fn leading_edge_commit_writes_the_first_delta_and_coalesces_a_burst() {
+        use super::*;
+        FLUSH_TICKS.with(|t| t.set(0));
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+                .unwrap();
+        let chat = "chat-leading-edge";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+
+        let assistant_text = || -> String {
+            core.doc_host
+                .open(chat)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.role == MessageRole::Assistant)
+                .flat_map(|e| e.parts)
+                .filter_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ticks = || FLUSH_TICKS.with(|t| t.get());
+
+        let started_at = tokio::time::Instant::now();
+        feed.send(started()).unwrap();
+        feed.send(text("A")).unwrap();
+        let mut landed = false;
+        for _ in 0..400 {
+            if assistant_text() == "A" {
+                landed = true;
+                break;
+            }
+            assert!(
+                started_at.elapsed() < std::time::Duration::from_millis(5),
+                "first delta waited {:?}, not under 5ms of virtual time",
+                started_at.elapsed()
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            landed,
+            "first delta never reached the doc (elapsed {:?})",
+            started_at.elapsed()
+        );
+        assert!(
+            started_at.elapsed() < std::time::Duration::from_millis(5),
+            "first delta waited {:?}",
+            started_at.elapsed()
+        );
+        assert_eq!(ticks(), 1, "the leading edge is one commit");
+
+        // 99 further deltas, one millisecond apart: still inside the window
+        // opened by the commit above, so none of them may write yet.
+        let burst_at = tokio::time::Instant::now();
+        for _ in 0..99 {
+            feed.send(text("x")).unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            burst_at.elapsed() < std::time::Duration::from_millis(STREAM_COMMIT_MS),
+            "burst spread past one window ({:?})",
+            burst_at.elapsed()
+        );
+        assert_eq!(
+            assistant_text(),
+            "A",
+            "deltas inside the window must coalesce"
+        );
+        assert_eq!(
+            ticks(),
+            1,
+            "a burst inside the window must not commit again"
+        );
+
+        let rest = std::time::Duration::from_millis(STREAM_COMMIT_MS) - burst_at.elapsed();
+        tokio::time::advance(rest + std::time::Duration::from_millis(1)).await;
+        let coalesced = format!("A{}", "x".repeat(99));
+        let mut coalesced_landed = false;
+        for _ in 0..50 {
+            if assistant_text() == coalesced {
+                coalesced_landed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            coalesced_landed,
+            "coalesced burst missing: {:?}",
+            assistant_text()
+        );
+        assert!(
+            ticks() <= 2,
+            "100 deltas in {}ms committed {} times",
+            STREAM_COMMIT_MS,
+            ticks()
+        );
+        assert_eq!(ticks(), 2, "the burst commits once, at the window boundary");
+
+        // The window has elapsed with nothing new: the next delta is a
+        // leading edge again and must not wait out another interval.
+        tokio::time::advance(std::time::Duration::from_millis(STREAM_COMMIT_MS)).await;
+        let again = tokio::time::Instant::now();
+        feed.send(text("Z")).unwrap();
+        let mut again_landed = false;
+        for _ in 0..400 {
+            if assistant_text() == format!("{coalesced}Z") {
+                again_landed = true;
+                break;
+            }
+            assert!(
+                again.elapsed() < std::time::Duration::from_millis(5),
+                "delta after an idle window waited {:?}",
+                again.elapsed()
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            again_landed,
+            "delta after an idle window never reached the doc (elapsed {:?}, text {:?})",
+            again.elapsed(),
+            assistant_text()
+        );
+        assert_eq!(ticks(), 3, "an idle-window delta commits on its own");
         core.sessions.shutdown().await;
     }
 
@@ -6156,5 +6815,655 @@ mod tests {
         assert!(nudge.contains("check before repeating it"));
         assert!(nudge.contains("if it is not in your history yet, handle it now"));
         assert!(nudge.ends_with("<request>\nrefactor the parser\n</request>"));
+    }
+
+    struct RenderRng(u64);
+    impl RenderRng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn assert_render(render: &mut SegmentRender, folded: &[MessagePart]) {
+        render.refresh_indices(folded);
+        assert_eq!(render.rendered, render_parts_full(folded));
+    }
+
+    fn assert_render_sync(
+        render: &mut SegmentRender,
+        folded: &[MessagePart],
+        inc: &mut SegmentWriter<'_>,
+        full: &mut SegmentWriter<'_>,
+        inc_doc: &SessionDoc,
+        full_doc: &SessionDoc,
+    ) {
+        use loro::ToJson;
+
+        // Bypass the render oracle; neither fallback may hide a bad cache
+        // or a missed dirty index in the equivalence test.
+        assert_render(render, folded);
+        inc.sync_indices(&render.rendered, render.dirty.iter().copied())
+            .unwrap();
+        full.sync_full(&render_parts_full(folded)).unwrap();
+        assert_eq!(inc.mismatches(), 0);
+        assert_eq!(
+            inc_doc.doc().get_deep_value().to_json_value(),
+            full_doc.doc().get_deep_value().to_json_value()
+        );
+        render.dirty.clear();
+    }
+
+    fn note_fold(render: &mut SegmentRender, folded: &mut Vec<MessagePart>, event: &AgentEvent) {
+        let touched = fold_event_into_parts(folded, event);
+        render.note(touched, folded.len());
+        assert_render(render, folded);
+    }
+
+    fn tool_call(id: &str, call: zeron_proto::ToolCall) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call,
+            is_error: false,
+            resolved: false,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn render_oracle_repairs_missed_invalidations_and_sanitizes() {
+        let mut render = SegmentRender::default();
+        let folded = vec![
+            tool_call(
+                "write",
+                zeron_proto::ToolCall::WriteFile {
+                    path: "secret.txt".into(),
+                    content: Some("private body".into()),
+                },
+            ),
+            MessagePart::Text {
+                id: "t1".into(),
+                text: "corrected😀".into(),
+            },
+        ];
+        render.refresh(&folded);
+        render.dirty.clear();
+        // Simulate a missed invalidation, including an unsanitized slot.
+        render.rendered = folded.clone();
+        render.rendered[1] = MessagePart::Text {
+            id: "t1".into(),
+            text: "stale".into(),
+        };
+        render.refresh(&folded);
+        assert_eq!(render.rendered, render_parts_full(&folded));
+        assert_eq!(render.dirty, BTreeSet::from([0, 1]));
+    }
+
+    #[test]
+    fn render_cache_invalidates_reorders_removals_and_merges() {
+        let mut folded = vec![
+            MessagePart::Text {
+                id: "a".into(),
+                text: "first😀".into(),
+            },
+            tool_call(
+                "write",
+                zeron_proto::ToolCall::WriteFile {
+                    path: "private.txt".into(),
+                    content: Some("secret".into()),
+                },
+            ),
+            MessagePart::Reasoning {
+                id: "b".into(),
+                text: "thinking🦀".into(),
+            },
+            MessagePart::Text {
+                id: "c".into(),
+                text: "lasté".into(),
+            },
+        ];
+        let mut render = SegmentRender::default();
+        assert_render(&mut render, &folded);
+        render.dirty.clear();
+        folded.swap(0, 3);
+        render.note(Touched::All, folded.len());
+        assert_render(&mut render, &folded);
+        render.dirty.clear();
+        folded.remove(1);
+        render.note(Touched::All, folded.len());
+        assert_render(&mut render, &folded);
+        folded = vec![MessagePart::Text {
+            id: "a".into(),
+            text: "lastéfirst😀".into(),
+        }];
+        render.invalidate_all(folded.len());
+        assert_render(&mut render, &folded);
+        folded.clear();
+        render.invalidate_all(0);
+        assert_render(&mut render, &folded);
+    }
+
+    #[test]
+    fn incremental_render_tracks_text_corrections() {
+        for reasoning in [false, true] {
+            let mut render = SegmentRender::default();
+            for body in [
+                "draft",
+                "fixed",
+                "rewritten😀",
+                "é",
+                "😀tail",
+                "e\u{301}",
+                "e\u{301}🦀",
+            ] {
+                let folded = vec![if reasoning {
+                    MessagePart::Reasoning {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                } else {
+                    MessagePart::Text {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                }];
+                render.note(Touched::Index(0), folded.len());
+                assert_render(&mut render, &folded);
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_render_matches_full_render() {
+        use zeron_proto::ToolCall;
+
+        let mut folded = Vec::new();
+        let mut render = SegmentRender::default();
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "write".into(),
+                call: ToolCall::WriteFile {
+                    path: "secret.txt".into(),
+                    content: Some("SECRET FILE BODY".into()),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "edit".into(),
+                call: ToolCall::EditFile {
+                    path: "secret.txt".into(),
+                    old_string: Some("old secret".into()),
+                    new_string: Some("new secret".into()),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "fetch".into(),
+                call: ToolCall::WebFetch {
+                    url: "https://example.test/a".into(),
+                    prompt: Some("hidden prompt".into()),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "spawn".into(),
+                call: ToolCall::Unknown {
+                    name: "Agent: scan".into(),
+                    input: Some(serde_json::json!({
+                        "prompt": "hide me",
+                        "model": "haiku",
+                        "subagent_type": "explore",
+                        "noise": 1,
+                    })),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "mcp".into(),
+                call: ToolCall::Mcp {
+                    server: "zeron".into(),
+                    tool: "Agent".into(),
+                    input: Some(serde_json::json!({
+                        "prompt": "hide me",
+                        "modelId": "sonnet",
+                        "subagent_type": "explore",
+                    })),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::ToolCall {
+                id: "bash".into(),
+                call: ToolCall::Unknown {
+                    name: "Bash".into(),
+                    input: Some(serde_json::json!({
+                        "prompt": "hide me",
+                        "model": "haiku",
+                    })),
+                },
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "café ".into(),
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "日本語".into(),
+            },
+        );
+        note_fold(
+            &mut render,
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "😀".into()
+            },
+        );
+        // Re-rendering the write chip must stay stripped. The source still
+        // holds the secret; only the cache is allowed into the doc.
+        render.note(Touched::Index(0), folded.len());
+        assert_render(&mut render, &folded);
+
+        let rendered_call = |id: &str| match render.rendered.iter().find(|part| part.id() == id) {
+            Some(MessagePart::Tool { call, .. }) => call.clone(),
+            other => panic!("{id} missing from render: {other:?}"),
+        };
+        match rendered_call("write") {
+            ToolCall::WriteFile { path, content } => {
+                assert_eq!(path, "secret.txt");
+                assert!(content.is_none(), "write content stripped");
+            }
+            other => panic!("{other:?}"),
+        }
+        match rendered_call("edit") {
+            ToolCall::EditFile {
+                path,
+                old_string,
+                new_string,
+            } => {
+                assert_eq!(path, "secret.txt");
+                assert!(old_string.is_none() && new_string.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match rendered_call("fetch") {
+            ToolCall::WebFetch { url, prompt } => {
+                assert_eq!(url, "https://example.test/a");
+                assert!(prompt.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match rendered_call("spawn") {
+            ToolCall::Unknown { name, input } => {
+                assert_eq!(name, "Agent: scan");
+                let input = input.expect("spawn model kept");
+                assert_eq!(input["model"], "haiku");
+                assert_eq!(input["subagent_type"], "explore");
+                assert!(input.get("prompt").is_none());
+                assert!(input.get("noise").is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match rendered_call("mcp") {
+            ToolCall::Mcp {
+                server,
+                tool,
+                input,
+            } => {
+                assert_eq!(server, "zeron");
+                assert_eq!(tool, "Agent");
+                let input = input.expect("mcp model kept");
+                assert_eq!(input["modelId"], "sonnet");
+                assert_eq!(input["subagent_type"], "explore");
+                assert!(input.get("prompt").is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match rendered_call("bash") {
+            ToolCall::Unknown { name, input } => {
+                assert_eq!(name, "Bash");
+                assert!(input.is_none(), "a non-spawn input is dropped");
+            }
+            other => panic!("{other:?}"),
+        }
+        match render.rendered.iter().find(|part| part.id() == "t6") {
+            Some(MessagePart::Text { text, .. }) => assert_eq!(text, "café 日本語😀"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_render_and_sync_match_full_on_seeded_ops() {
+        use zeron_proto::ToolCall;
+
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let tails = ["a", "Hello", " ", "café ", "日本語", "😀", "\n", "— "];
+        for seed in 1..=seeds {
+            let mut rng = RenderRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut folded = Vec::new();
+            let mut render = SegmentRender::default();
+            let mut seq = 0u32;
+            let inc_doc = SessionDoc::init("render-eq").unwrap();
+            let full_doc = SessionDoc::init("render-eq").unwrap();
+            let mut segment = 0;
+            let mut inc = SegmentWriter::begin(&inc_doc, "s0", "dev", 0).unwrap();
+            let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 0).unwrap();
+            for step in 0..150 {
+                if !folded.is_empty() && rng.below(20) == 0 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
+                    note_fold(
+                        &mut render,
+                        &mut folded,
+                        &AgentEvent::Steered {
+                            assistant_message_id: None,
+                            next_assistant_message_id: None,
+                        },
+                    );
+                    assert!(folded.is_empty());
+                    assert!(render.rendered.is_empty());
+                    segment += 1;
+                    let id = format!("s{segment}");
+                    inc = SegmentWriter::begin(&inc_doc, &id, "dev", 0).unwrap();
+                    full = SegmentWriter::begin(&full_doc, &id, "dev", 0).unwrap();
+                    continue;
+                }
+                if !folded.is_empty() && rng.below(24) == 0 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
+                    // Snapshot replacements cross a segment boundary, like
+                    // steer clears. In-place structural cache edits are
+                    // exercised separately below.
+                    segment += 1;
+                    let id = format!("s{segment}");
+                    inc = SegmentWriter::begin(&inc_doc, &id, "dev", 0).unwrap();
+                    full = SegmentWriter::begin(&full_doc, &id, "dev", 0).unwrap();
+                    seq += 1;
+                    folded = vec![tool_call(
+                        &format!("setup-{seq}"),
+                        ToolCall::Exec {
+                            command: "provision".into(),
+                        },
+                    )];
+                    render.invalidate_all(folded.len());
+                    assert_render(&mut render, &folded);
+                    continue;
+                }
+                let roll = if folded.is_empty() {
+                    rng.below(3)
+                } else {
+                    rng.below(10)
+                };
+                match roll {
+                    0 => note_fold(
+                        &mut render,
+                        &mut folded,
+                        &AgentEvent::TextDelta {
+                            text: tails[rng.below(tails.len())].into(),
+                        },
+                    ),
+                    1 => note_fold(
+                        &mut render,
+                        &mut folded,
+                        &AgentEvent::ReasoningDelta {
+                            text: tails[rng.below(tails.len())].into(),
+                        },
+                    ),
+                    2 => {
+                        seq += 1;
+                        note_fold(
+                            &mut render,
+                            &mut folded,
+                            &AgentEvent::ToolCall {
+                                id: format!("tool-{seq}"),
+                                call: ToolCall::WriteFile {
+                                    path: format!("/w/{seq}.txt"),
+                                    content: Some(format!("secret {seq}")),
+                                },
+                            },
+                        );
+                    }
+                    3 => {
+                        let indexes: Vec<usize> = folded
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, part)| {
+                                matches!(
+                                    part,
+                                    MessagePart::Text { .. } | MessagePart::Reasoning { .. }
+                                )
+                                .then_some(index)
+                            })
+                            .collect();
+                        if indexes.is_empty() {
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::TextDelta {
+                                    text: tails[rng.below(tails.len())].into(),
+                                },
+                            );
+                        } else {
+                            let index = indexes[rng.below(indexes.len())];
+                            match &mut folded[index] {
+                                MessagePart::Text { text, .. }
+                                | MessagePart::Reasoning { text, .. } => match rng.below(4) {
+                                    0 => *text = tails[rng.below(tails.len())].to_owned(),
+                                    1 => {
+                                        *text =
+                                            format!("corrected {}", tails[rng.below(tails.len())])
+                                    }
+                                    _ => text.push_str(tails[rng.below(tails.len())]),
+                                },
+                                _ => unreachable!("text index"),
+                            }
+                            render.note(Touched::Index(index), folded.len());
+                            assert_render(&mut render, &folded);
+                        }
+                    }
+                    4 => {
+                        let tools: Vec<usize> = folded
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, part)| {
+                                matches!(part, MessagePart::Tool { .. }).then_some(index)
+                            })
+                            .collect();
+                        if tools.is_empty() {
+                            seq += 1;
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::ToolCall {
+                                    id: format!("tool-{seq}"),
+                                    call: ToolCall::EditFile {
+                                        path: format!("/w/{seq}.txt"),
+                                        old_string: Some("old".into()),
+                                        new_string: Some("new".into()),
+                                    },
+                                },
+                            );
+                        } else {
+                            let index = tools[rng.below(tools.len())];
+                            let id = folded[index].id().to_owned();
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::ToolCall {
+                                    id,
+                                    call: ToolCall::WebFetch {
+                                        url: "https://example.test/b".into(),
+                                        prompt: Some("hidden".into()),
+                                    },
+                                },
+                            );
+                        }
+                    }
+                    5 => {
+                        let spawns: Vec<usize> = folded
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, part)| match part {
+                                MessagePart::Tool { call, .. } if call.is_subagent_spawn() => {
+                                    Some(index)
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        if spawns.is_empty() {
+                            seq += 1;
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::ToolCall {
+                                    id: format!("tool-{seq}"),
+                                    call: ToolCall::Unknown {
+                                        name: "Agent: scan".into(),
+                                        input: Some(serde_json::json!({
+                                            "prompt": "hide",
+                                            "model": "haiku",
+                                        })),
+                                    },
+                                },
+                            );
+                        } else {
+                            let index = spawns[rng.below(spawns.len())];
+                            if let MessagePart::Tool { subagent_ref, .. } = &mut folded[index] {
+                                seq += 1;
+                                *subagent_ref = Some(format!("sub-{seq}"));
+                            }
+                            render.note(Touched::Index(index), folded.len());
+                            assert_render(&mut render, &folded);
+                        }
+                    }
+                    6 => note_fold(
+                        &mut render,
+                        &mut folded,
+                        &AgentEvent::Error {
+                            message: format!("boom {}", tails[rng.below(tails.len())]),
+                        },
+                    ),
+                    7 => {
+                        seq += 1;
+                        note_fold(
+                            &mut render,
+                            &mut folded,
+                            &AgentEvent::GeneratedImage {
+                                id: format!("img-{seq}"),
+                                path: format!("/img/{seq}.png"),
+                                name: "pic".into(),
+                                mime_type: "image/png".into(),
+                            },
+                        );
+                    }
+                    8 => {
+                        let tools: Vec<_> = folded
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::Tool { id, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        if !tools.is_empty() {
+                            let id = tools[rng.below(tools.len())].clone();
+                            note_fold(
+                                &mut render,
+                                &mut folded,
+                                &AgentEvent::ToolResult {
+                                    id,
+                                    is_error: rng.below(2) == 0,
+                                    output: Some("journal only".into()),
+                                    diff: None,
+                                },
+                            );
+                        }
+                    }
+                    _ => {
+                        let pending = folded.iter().find_map(|part| match part {
+                            MessagePart::Input {
+                                request_id,
+                                resolved: false,
+                                ..
+                            } => Some(request_id.clone()),
+                            _ => None,
+                        });
+                        let event = if let Some(request_id) = pending {
+                            AgentEvent::InputResolved {
+                                request_id,
+                                answers: Some(Vec::new()),
+                            }
+                        } else {
+                            seq += 1;
+                            AgentEvent::InputRequested {
+                                request_id: format!("q{seq}"),
+                                questions: Vec::new(),
+                            }
+                        };
+                        note_fold(&mut render, &mut folded, &event);
+                    }
+                }
+                // Exercise several dirty events coalescing before a sync.
+                if rng.below(4) == 0 || step == 149 {
+                    assert_render_sync(
+                        &mut render,
+                        &folded,
+                        &mut inc,
+                        &mut full,
+                        &inc_doc,
+                        &full_doc,
+                    );
+                }
+            }
+        }
     }
 }
