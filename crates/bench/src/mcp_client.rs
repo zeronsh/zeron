@@ -9,7 +9,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 pub struct Client {
     child: Child,
-    input: ChildStdin,
+    input: Option<ChildStdin>,
     output: BufReader<ChildStdout>,
     next_id: u64,
     timeout: Duration,
@@ -28,7 +28,7 @@ impl Client {
         let output = BufReader::new(child.stdout.take().context("MCP stdout")?);
         Ok(Self {
             child,
-            input,
+            input: Some(input),
             output,
             next_id: 1,
             timeout,
@@ -38,8 +38,9 @@ impl Client {
     async fn send(&mut self, value: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(value)?;
         bytes.push(b'\n');
-        self.input.write_all(&bytes).await?;
-        self.input.flush().await?;
+        let input = self.input.as_mut().context("MCP stdin is closed")?;
+        input.write_all(&bytes).await?;
+        input.flush().await?;
         Ok(())
     }
 
@@ -91,8 +92,16 @@ impl Client {
     }
 
     pub async fn stop(mut self) -> Result<()> {
-        self.child.start_kill().ok();
-        self.child.wait().await?;
+        // EOF lets a proxy reap its backend before it exits.
+        drop(self.input.take());
+        match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            Ok(status) => ensure!(status?.success(), "MCP server exited unsuccessfully"),
+            Err(_) => {
+                self.child.start_kill()?;
+                self.child.wait().await?;
+                bail!("MCP server did not stop after EOF");
+            }
+        }
         Ok(())
     }
 }

@@ -148,4 +148,82 @@ mod tests {
         client.stop().await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an explicitly built zeron-mcp-proxy"]
+    async fn client_calls_a_warm_lazy_proxy() {
+        let proxy =
+            PathBuf::from(std::env::var_os("ZERON_TEST_MCP_PROXY").expect("explicit proxy binary"));
+        let root =
+            PathBuf::from(std::env::var_os("TMPDIR").expect("scratch TMPDIR")).join(format!(
+                "mcp-proxy-client-{}-{}",
+                std::process::id(),
+                crate::mono_now()
+            ));
+        fs::create_dir(&root).unwrap();
+        let home = setup(&root).unwrap();
+        let script = home.join("synthetic-mcp.js");
+        let data = root.join("data");
+        fs::create_dir(&data).unwrap();
+        let mut command = Command::new(&proxy);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("ZERON_DATA_DIR", &data)
+            .env("HOME", &root)
+            .env("CLAUDE_CONFIG_DIR", &home)
+            .env("CODEX_HOME", root.join("codex"))
+            .args([
+                "--server",
+                "synthetic-entry",
+                "--mode",
+                "lazy",
+                "--data-dir",
+            ])
+            .arg(&data)
+            .arg("--run-dir")
+            .arg(data.join("run"))
+            .args(["--", "node"])
+            .arg(&script)
+            .arg("entry");
+        let mut client =
+            crate::mcp_client::Client::start(&mut command, Duration::from_secs(30)).unwrap();
+        client.initialize().await.unwrap();
+        client.request("tools/list", json!({})).await.unwrap();
+        let before = crate::scenario::mcp_process::measure(
+            std::process::id(),
+            &script,
+            Path::new("/usr/bin/node"),
+            Some(&proxy),
+        )
+        .unwrap();
+        assert_eq!(
+            before.servers, 0,
+            "proxy should have stopped its discovery backend"
+        );
+        assert_eq!(before.roots.len(), 1, "proxy must remain live");
+        let (_, cold_ms) = client.timed_call("echo", json!({})).await.unwrap();
+        let (_, warm_ms) = client.timed_call("echo", json!({})).await.unwrap();
+        let after = crate::scenario::mcp_process::measure(
+            std::process::id(),
+            &script,
+            Path::new("/usr/bin/node"),
+            Some(&proxy),
+        )
+        .unwrap();
+        assert_eq!(after.servers, 1, "first call should start the backend");
+        eprintln!("synthetic proxy call: cold={cold_ms:.2} ms warm={warm_ms:.2} ms");
+        client.stop().await.unwrap();
+        let stopped = crate::scenario::mcp_process::measure(
+            std::process::id(),
+            &script,
+            Path::new("/usr/bin/node"),
+            Some(&proxy),
+        )
+        .unwrap();
+        assert_eq!(stopped.servers, 0);
+        assert!(stopped.roots.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
