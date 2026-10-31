@@ -2397,6 +2397,8 @@ mod access_tests {
 
     #[test]
     fn mcp_plan_change_cannot_reconfigure_in_place() {
+        // Only Linux intercepts launches; elsewhere a plan change keeps the CLI.
+        let intercepts = cfg!(target_os = "linux");
         let harness = ClaudeHarness::new();
         let mut live = request(AccessMode::Supervised, false, false);
         live.mcp_plan = Some(zeron_proto::McpPlan::default());
@@ -2408,11 +2410,11 @@ mod access_tests {
             .unwrap()
             .modes
             .insert("srv".into(), zeron_proto::McpMode::Eager);
-        assert!(!harness.same_runtime(&live, &next));
-        assert!(!harness.reconfigures_in_place(&live, &next));
+        assert_eq!(harness.same_runtime(&live, &next), !intercepts);
+        assert_eq!(harness.reconfigures_in_place(&live, &next), !intercepts);
         next.mcp_plan = None;
-        assert!(!harness.same_runtime(&live, &next));
-        assert!(!harness.reconfigures_in_place(&live, &next));
+        assert_eq!(harness.same_runtime(&live, &next), !intercepts);
+        assert_eq!(harness.reconfigures_in_place(&live, &next), !intercepts);
     }
 
     #[test]

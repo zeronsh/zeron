@@ -241,6 +241,11 @@ pub(super) fn prepare(
 }
 
 pub(super) fn same_plan(a: &Option<McpPlan>, b: &Option<McpPlan>) -> bool {
+    // Only Linux intercepts launches. Elsewhere the plan cannot change the
+    // running CLI, so a different one must not replace it (upstream reuse).
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
     // A new run directory does not change policy; modes and ownership do.
     match (a, b) {
         (Some(a), Some(b)) => {
@@ -404,6 +409,16 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn plan_changes_never_replace_a_cli_that_launches_without_interception() {
+        let a = Some(McpPlan::default());
+        let mut b = a.clone();
+        b.as_mut().unwrap().default_mode = McpMode::Eager;
+        assert!(same_plan(&a, &b));
+        assert!(same_plan(&a, &None));
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
     fn plan_changes_require_relaunch_but_run_directory_does_not() {
         let a = Some(McpPlan::default());
         let mut b = a.clone();

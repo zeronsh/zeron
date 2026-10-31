@@ -5700,6 +5700,8 @@ mod tests {
         }
     }
 
+    // Claude only replaces a runtime over a plan change where it intercepts launches.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn mcp_plan_prefs_change_replaces_runtime_and_unchanged_plan_reuses_it() {
         let temp = tempfile::tempdir().unwrap();
