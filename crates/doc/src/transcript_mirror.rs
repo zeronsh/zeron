@@ -44,6 +44,19 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The `Verify::Auto` policy shared by the incremental caches: always in
+/// debug builds; in release only when `ZERON_PERF_VERIFY=1`, on every
+/// [`VERIFY_SAMPLE`]th call.
+pub(crate) fn verify_sampled(count: u64) -> bool {
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled =
+        *ENABLED.get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|v| v == "1"));
+    enabled && count % VERIFY_SAMPLE == 0
+}
+
 /// When [`TranscriptMirror::refresh`] cross-checks against the full rebuild.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Verify {
@@ -252,15 +265,7 @@ impl TranscriptMirror {
         match self.verify {
             Verify::Never => false,
             Verify::Always => true,
-            Verify::Auto => {
-                if cfg!(debug_assertions) {
-                    return true;
-                }
-                static ENABLED: OnceLock<bool> = OnceLock::new();
-                let enabled = *ENABLED
-                    .get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|v| v == "1"));
-                enabled && self.refreshes.load(Ordering::Relaxed) % VERIFY_SAMPLE == 0
-            }
+            Verify::Auto => verify_sampled(self.refreshes.load(Ordering::Relaxed)),
         }
     }
 }

@@ -573,6 +573,19 @@ pub struct ChatDocHandle {
     /// The joined transcript, kept current from doc diff events while watched
     /// so a commit costs the entries it touched, not the whole transcript.
     transcript_mirror: Arc<zeron_doc::TranscriptMirror>,
+    /// What the doc callback saw change since the publisher last woke. Set
+    /// before `changed_tx` fires; the publisher takes it, so a wake that finds
+    /// no `messages`/`queue` bit republishes nothing.
+    publish_bits: Arc<zeron_doc::AtomicChangeMask>,
+    /// The same for the dispatcher (drains + snapshot deadline), kept apart so
+    /// one consumer taking its bits never hides a change from the other.
+    dispatch_bits: Arc<zeron_doc::AtomicChangeMask>,
+    /// Bumped only when the `commands` ledger changed. The control worker and
+    /// the prompt/control wait loops wake on this instead of every doc change
+    /// or a 20 ms poll.
+    commands_tx: watch::Sender<u64>,
+    /// The decoded ledger, re-read only after a `commands` change.
+    commands_cache: Arc<zeron_doc::CommandsCache>,
     /// Pending-message queue watch (WatchQueue). Cheap to rebuild — a handful
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
@@ -668,6 +681,35 @@ impl Drop for ResetFlag {
     }
 }
 
+/// Upper bound on one wait for a ledger change in the command wait loops; the
+/// loop then re-checks its non-ledger conditions (deadline, claim set, turn
+/// state) from the cached ledger. Not a poll: a ledger change wakes it at once.
+const WAIT_RECHECK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Wait until the ledger generation moves or `limit` passes. `false` when the
+/// sender is gone (the handle is being torn down).
+async fn wait_for_ledger(rx: &mut watch::Receiver<u64>, limit: std::time::Duration) -> bool {
+    match tokio::time::timeout(limit, rx.changed()).await {
+        Ok(changed) => changed.is_ok(),
+        Err(_) => true,
+    }
+}
+
+/// How a command drain pass ended. `complete` only when it ran to "no eligible
+/// pending command"; every early exit (not host, quiesced, no sessions, an
+/// attachment wait, a ledger write failure) is incomplete, so the change worker
+/// retries it on the next doc change of ANY kind, exactly as it did when every
+/// change ran a drain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrainOutcome {
+    pub complete: bool,
+}
+
+impl DrainOutcome {
+    const COMPLETE: Self = Self { complete: true };
+    const INCOMPLETE: Self = Self { complete: false };
+}
+
 /// One drain counted in [`DocHostInner::dispatching`] until dropped.
 struct DispatchGuard(Arc<AtomicUsize>);
 impl Drop for DispatchGuard {
@@ -717,6 +759,28 @@ pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<Ha
 }
 
 impl ChatDocHandle {
+    /// The command ledger, shared until the next `commands` change. Every
+    /// reader of this chat's ledger goes through here instead of a deep
+    /// `read_commands`, which scales with chat age.
+    pub(crate) fn commands(
+        &self,
+    ) -> Result<Arc<Vec<SessionCommandEntry>>, DocError> {
+        self.commands_cache.get(&self.doc)
+    }
+
+    /// Deep ledger reads the commands cache has performed (perf tests assert
+    /// that a stream of message commits leaves it untouched).
+    #[doc(hidden)]
+    pub fn commands_cache_fills(&self) -> u64 {
+        self.commands_cache.fills()
+    }
+
+    /// Cross-check failures of the commands cache against `read_commands`.
+    #[doc(hidden)]
+    pub fn commands_cache_mismatches(&self) -> u64 {
+        self.commands_cache.mismatches()
+    }
+
     /// The turn ending now is followed at once by a message the user has
     /// already sent: one still on its way through the command log (a burst
     /// the agent outran), or one held for a turn-boundary agent's turn end.
@@ -725,7 +789,7 @@ impl ChatDocHandle {
         // Not yet in the transcript: delivery writes the user's message
         // before dispatching it, so the command that started the turn now
         // ending (still marked pending a moment longer) never counts.
-        let in_flight = self.doc.read_commands().is_ok_and(|commands| {
+        let in_flight = self.commands().is_ok_and(|commands| {
             let pending: Vec<&str> = commands
                 .iter()
                 .filter(|c| c.status == SessionCommandStatus::Pending)
@@ -1230,7 +1294,7 @@ impl DocHost {
         let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
         handles.iter().any(|handle| {
             self.is_host(&handle.chat_id)
-                && handle.doc.read_commands().is_ok_and(|commands| {
+                && handle.commands().is_ok_and(|commands| {
                     commands
                         .iter()
                         .any(|c| c.status == SessionCommandStatus::Pending && !is_processed(&c.id))
@@ -1741,6 +1805,10 @@ impl DocHost {
         let changed_persistence = persistence.clone();
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
+        let (commands_tx, _) = watch::channel(0u64);
+        let publish_bits = Arc::new(zeron_doc::AtomicChangeMask::default());
+        let dispatch_bits = Arc::new(zeron_doc::AtomicChangeMask::default());
+        let commands_cache = Arc::new(zeron_doc::CommandsCache::new());
         let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
         let transcript_history = Arc::new(Mutex::new(
             crate::transcript_history::TranscriptHistory::default(),
@@ -1750,6 +1818,8 @@ impl DocHost {
         let mirror = transcript_mirror.clone();
         let watched = messages_tx.clone();
         let weak_doc = Arc::downgrade(&doc);
+        let (callback_publish, callback_dispatch) = (publish_bits.clone(), dispatch_bits.clone());
+        let (callback_cache, callback_commands) = (commands_cache.clone(), commands_tx.clone());
         let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
             // This callback runs before the change worker can publish. The
             // import origin belongs to the event, so concurrent local commits
@@ -1762,6 +1832,15 @@ impl DocHost {
             } else {
                 *lock(&history) = Default::default();
                 mirror.reset();
+            }
+            // Bits and cache first, wakes last: a consumer that wakes must
+            // find its bit set and the ledger cache already stale.
+            let mask = zeron_doc::ChangeMask::of_event(&diff);
+            callback_publish.set(mask);
+            callback_dispatch.set(mask);
+            if mask.contains(zeron_doc::ChangeMask::COMMANDS) {
+                callback_cache.invalidate();
+                callback_commands.send_modify(|v| *v = v.wrapping_add(1));
             }
             if let Some(persistence) = &changed_persistence {
                 persistence.dirty(false);
@@ -1787,6 +1866,10 @@ impl DocHost {
             transcript_import: Mutex::default(),
             transcript_history,
             transcript_mirror,
+            publish_bits,
+            dispatch_bits,
+            commands_tx,
+            commands_cache,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             command_drain_lock: tokio::sync::Mutex::new(()),
@@ -2372,7 +2455,7 @@ impl DocHost {
             return false;
         }
         if self.is_host(&handle.chat_id) {
-            let Ok(commands) = handle.doc.read_commands() else {
+            let Ok(commands) = handle.commands() else {
                 return false;
             };
             if commands.iter().any(|c| {
@@ -3257,7 +3340,7 @@ impl DocHost {
         }
         if self.is_host(&handle.chat_id) {
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
-            match handle.doc.read_commands() {
+            match handle.commands() {
                 Ok(commands) => commands
                     .iter()
                     .any(|c| c.status == SessionCommandStatus::Pending && !is_processed(&c.id)),
@@ -3287,7 +3370,7 @@ impl DocHost {
         }
         if self.is_host(&handle.chat_id) {
             let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
-            match handle.doc.read_commands() {
+            match handle.commands() {
                 Ok(commands) => commands
                     .iter()
                     .any(|c| c.status == SessionCommandStatus::Pending && !is_processed(&c.id)),
@@ -4339,6 +4422,9 @@ impl DocHost {
         handle: &Arc<ChatDocHandle>,
         stop_id: &str,
     ) {
+        // Subscribe BEFORE the first read: a ledger change after it flags the
+        // receiver, so a wake can never be lost between read and wait.
+        let mut ledger = handle.commands_tx.subscribe();
         let started = tokio::time::Instant::now();
         loop {
             let bound = if sessions.turn_in_flight(&handle.chat_id) {
@@ -4346,10 +4432,11 @@ impl DocHost {
             } else {
                 std::time::Duration::from_secs(15)
             };
-            if started.elapsed() >= bound {
+            let remaining = bound.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
                 return;
             }
-            let Ok(commands) = handle.doc.read_commands() else {
+            let Ok(commands) = handle.commands() else {
                 return;
             };
             let Some(at) = commands.iter().position(|c| c.id == stop_id) else {
@@ -4365,7 +4452,11 @@ impl DocHost {
             if !earlier_prompt {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // Wake on a ledger change. The tick only re-evaluates the bound
+            // above (a turn starting shortens it); it reads nothing.
+            if !wait_for_ledger(&mut ledger, remaining.min(WAIT_RECHECK)).await {
+                return;
+            }
         }
     }
 
@@ -4373,9 +4464,10 @@ impl DocHost {
     /// tearing the runtime down) waits for it: running ahead of it put the
     /// user's next message into the runtime the Stop was killing.
     async fn await_earlier_controls(&self, handle: &Arc<ChatDocHandle>, prompt_id: &str) {
+        let mut ledger = handle.commands_tx.subscribe();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         while tokio::time::Instant::now() < deadline {
-            let Ok(commands) = handle.doc.read_commands() else {
+            let Ok(commands) = handle.commands() else {
                 return;
             };
             let Some(at) = commands.iter().position(|c| c.id == prompt_id) else {
@@ -4395,7 +4487,13 @@ impl DocHost {
             if !earlier_control {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // A control leaves `executing` right after it resolves, and the
+            // resolve is a ledger change; the tick covers a control whose
+            // outcome write failed, which only the claim set can tell us.
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !wait_for_ledger(&mut ledger, remaining.min(WAIT_RECHECK)).await {
+                return;
+            }
         }
     }
 
@@ -4765,7 +4863,7 @@ impl DocHost {
             chat2.redial();
         }
         self.nudge_remote_host(chat_id);
-        let commands = handle.doc.read_commands()?;
+        let commands = handle.commands()?;
         let pending: Vec<SessionCommandEntry> = commands
             .iter()
             .filter(|c| {
@@ -4914,7 +5012,7 @@ impl DocHost {
         } else {
             None
         };
-        let commands = handle.doc.read_commands()?;
+        let commands = handle.commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
         let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
@@ -5198,11 +5296,15 @@ impl DocHost {
 
     /// Drain pending commands (host-only): evaluate → mark processed BEFORE execute →
     /// execute → write the outcome as the sole outcome writer.
-    pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) {
-        self.drain_command_kind(handle, false).await;
+    pub async fn drain_commands(&self, handle: &Arc<ChatDocHandle>) -> DrainOutcome {
+        self.drain_command_kind(handle, false).await
     }
 
-    async fn drain_command_kind(&self, handle: &Arc<ChatDocHandle>, controls_only: bool) {
+    async fn drain_command_kind(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        controls_only: bool,
+    ) -> DrainOutcome {
         // A quiesced engine still serves controls (interrupt, answers): only
         // new work waits for the machine to wake.
         let _dispatch = if controls_only {
@@ -5210,14 +5312,14 @@ impl DocHost {
         } else {
             match self.dispatch_guard() {
                 Some(guard) => Some(guard),
-                None => return, // quiesced for a Cloud sleep; lifting it re-drains
+                None => return DrainOutcome::INCOMPLETE, // quiesced for a Cloud sleep; lifting it re-drains
             }
         };
         let Some(sessions) = self.sessions() else {
-            return; // executor not wired yet (or retired); the set_sessions kick re-drains
+            return DrainOutcome::INCOMPLETE; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
         if !self.is_host(&handle.chat_id) {
-            return;
+            return DrainOutcome::INCOMPLETE;
         }
         // Do not let another drain overtake a prompt waiting for mailbox
         // capacity (or preflight). Controls bypass this lock so a stalled
@@ -5229,15 +5331,29 @@ impl DocHost {
         };
         // Entries this pass decided to leave alone (processed dedupe hits).
         let mut skipped: HashSet<String> = HashSet::new();
+        // Ledger ids already seen processed. A processed command never becomes
+        // unprocessed, so a positive is remembered for the rest of the pass
+        // instead of costing a SQLite read per command per loop. Negatives are
+        // never cached: they flip when this or another drain claims the id.
+        let processed_seen: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+        let is_processed = |id: &str| {
+            if lock(&processed_seen).contains(id) {
+                return true;
+            }
+            let hit = self.inner.store.is_processed(id).unwrap_or(false);
+            if hit {
+                lock(&processed_seen).insert(id.to_string());
+            }
+            hit
+        };
         loop {
-            let commands = match handle.doc.read_commands() {
+            let commands = match handle.commands() {
                 Ok(commands) => commands,
                 Err(err) => {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "command read failed");
-                    return;
+                    return DrainOutcome::INCOMPLETE;
                 }
             };
-            let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
             // Dead-command sweep: Pending in the doc, consumed by the ledger,
             // and NOT mid-execution in this process — the crash window
             // between mark-processed and the outcome write. Left alone it is
@@ -5248,12 +5364,12 @@ impl DocHost {
             // its claim (resolve comes first), so once no claim is seen the
             // status is read again rather than overwriting that outcome.
             let still_pending = |id: &str| {
-                handle.doc.read_commands().is_ok_and(|now| {
+                handle.commands().is_ok_and(|now| {
                     now.iter()
                         .any(|c| c.id == id && c.status == SessionCommandStatus::Pending)
                 })
             };
-            for c in &commands {
+            for c in commands.iter() {
                 if c.status == SessionCommandStatus::Pending
                     && !skipped.contains(&c.id)
                     && is_processed(&c.id)
@@ -5292,7 +5408,7 @@ impl DocHost {
                     prompt_guard = Some(handle.command_drain_lock.lock().await);
                     continue;
                 }
-                return;
+                return DrainOutcome::COMPLETE;
             };
             let messages = handle.doc.read_entries().unwrap_or_default();
             let current_turn_id = messages.last().map(|m| m.id.clone());
@@ -5319,12 +5435,12 @@ impl DocHost {
                         tracing::info!(chat = %handle.chat_id, command = %entry.id,
                             missing = missing.len(), "command deferred: attachment bytes in transit");
                         self.arm_attachment_wait(handle);
-                        return; // preserve order; UploadCommit / the wait timer re-kick
+                        return DrainOutcome::INCOMPLETE; // preserve order; UploadCommit / the wait timer re-kick
                     }
                     if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                         tracing::error!(chat = %handle.chat_id, error = %err,
                             "processed-ledger write failed; halting drain");
-                        return;
+                        return DrainOutcome::INCOMPLETE;
                     }
                     tracing::warn!(chat = %handle.chat_id, command = %entry.id,
                         "command rejected: attachments never arrived");
@@ -5349,7 +5465,7 @@ impl DocHost {
             if let Err(err) = self.inner.store.mark_processed(&entry.id) {
                 tracing::error!(chat = %handle.chat_id, error = %err, "processed-ledger write failed; halting drain");
                 lock(&self.inner.executing).remove(&entry.id);
-                return;
+                return DrainOutcome::INCOMPLETE;
             }
             match disposition {
                 CommandDisposition::Skip => {
@@ -5436,7 +5552,7 @@ impl DocHost {
 
     /// True while some pending, unprocessed command still waits on bytes.
     fn awaiting_attachments(&self, handle: &Arc<ChatDocHandle>) -> bool {
-        let commands = handle.doc.read_commands().unwrap_or_default();
+        let commands = handle.commands().unwrap_or_default();
         let command_waiting = commands.iter().any(|c| {
             c.status == SessionCommandStatus::Pending
                 && !self.inner.store.is_processed(&c.id).unwrap_or(false)
@@ -5546,7 +5662,7 @@ impl DocHost {
             _ => return None,
         };
         let stop = lock(&handle.stopped_by).clone()?;
-        let commands = handle.doc.read_commands().ok()?;
+        let commands = handle.commands().ok()?;
         let at = commands.iter().position(|c| c.id == entry.id)?;
         let stop_at = commands.iter().position(|c| c.id == stop)?;
         (at < stop_at).then_some(message_id)
@@ -5725,7 +5841,7 @@ impl DocHost {
                 *lock(&handle.stopped_by) = Some(entry.id.clone());
                 // Sends before this Stop that are still on their way (a slow
                 // dispatch the wait above gave up on) are cancelled with it.
-                if let Ok(commands) = handle.doc.read_commands()
+                if let Ok(commands) = handle.commands()
                     && let Some(at) = commands.iter().position(|c| c.id == entry.id)
                 {
                     let earlier = commands[..at]
@@ -6683,32 +6799,44 @@ mod queued_message_prompt_tests {
     }
 }
 
-/// Per-chat background task: reacts to doc changes (local commits and remote imports)
-/// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
-/// Holds only a weak handle so a dropped host tears the task down.
+/// Per-chat background tasks. A doc change (local commit or remote import)
+/// carries a [`zeron_doc::ChangeMask`] of the roots it touched, and each task
+/// reacts only to the roots it owns:
+///
+/// - the **publisher** republishes the transcript watch when `messages`
+///   changed and the queue watch when `queue` changed, and never waits on a
+///   drain;
+/// - the **dispatcher** drains commands when `commands` changed (or its last
+///   pass was incomplete), drains the queue, and debounces snapshots;
+/// - the **control worker** (below) waits on the ledger generation, not on
+///   every doc change.
+///
+/// A streaming turn commits to `messages` only, so it no longer pays for the
+/// ledger. Each holds only a weak handle so a dropped host tears it down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
     // for interrupt/question controls so that wait cannot block recovery.
     let control_host = host.clone();
     let control_weak = weak.clone();
-    let mut control_changes = changed_rx.clone();
-    host.spawn_worker(async move {
-        loop {
-            let Some(handle) = control_weak.upgrade() else {
-                break;
-            };
-            control_host.drain_command_kind(&handle, true).await;
-            drop(handle);
-            if control_changes.changed().await.is_err() {
-                break;
-            }
-        }
-    });
+    let control_ledger = match weak.upgrade() {
+        Some(handle) => handle.commands_tx.subscribe(),
+        None => return,
+    };
+    host.spawn_worker(control_task(
+        control_host,
+        control_weak,
+        control_ledger,
+        changed_rx.clone(),
+    ));
+    // The publisher runs on its own so a drain that waits (mailbox capacity,
+    // an attachment, the drain lock) never delays the transcript or the queue.
+    host.spawn_worker(publish_task(weak.clone(), changed_rx.clone()));
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
+    let mut last_pass_incomplete;
     {
         let Some(handle) = weak.upgrade() else { return };
-        host.drain_commands(&handle).await;
+        last_pass_incomplete = !host.drain_commands(&handle).await.complete;
         host.drain_queue(&handle).await;
     }
     let mut save_deadline: Option<tokio::time::Instant> = None;
@@ -6720,12 +6848,14 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                     break; // doc handle (and its change sender) is gone
                 }
                 let Some(handle) = weak.upgrade() else { break };
-                let publishing = handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    publishing.publish_messages_if_watched();
-                    publishing.publish_queue();
-                }).await;
-                host.drain_commands(&handle).await;
+                let mask = handle.dispatch_bits.take();
+                // A pass that left work behind (not host yet, quiesced, an
+                // attachment in transit) retries on any change, as it did
+                // when every change drained; otherwise only a ledger change
+                // can have made a command eligible.
+                if last_pass_incomplete || mask.contains(zeron_doc::ChangeMask::COMMANDS) {
+                    last_pass_incomplete = !host.drain_commands(&handle).await.complete;
+                }
                 host.drain_queue(&handle).await;
                 if save_deadline.is_none() {
                     save_deadline = Some(
@@ -6746,6 +6876,56 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 // Post-quiesce eviction pass: sizes just refreshed.
                 host.evict_over_budget();
             }
+        }
+    }
+}
+
+/// Republish what changed: the transcript when `messages` did, the queue when
+/// `queue` did. Runs on the blocking pool; never awaits a drain.
+async fn publish_task(weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
+    use zeron_doc::ChangeMask;
+    while changed_rx.changed().await.is_ok() {
+        let Some(handle) = weak.upgrade() else { break };
+        let mask = handle.publish_bits.take();
+        if !mask.intersects(ChangeMask::MESSAGES.union(ChangeMask::QUEUE)) {
+            continue;
+        }
+        let _ = tokio::task::spawn_blocking(move || {
+            if mask.contains(ChangeMask::MESSAGES) {
+                handle.publish_messages_if_watched();
+            }
+            if mask.contains(ChangeMask::QUEUE) {
+                handle.publish_queue();
+            }
+        })
+        .await;
+    }
+}
+
+/// Interrupts and answers: drained apart from prompts so a prompt waiting for
+/// mailbox capacity cannot block them. Wakes on a ledger change; only a pass
+/// that left work behind also retries on other doc changes.
+async fn control_task(
+    host: DocHost,
+    weak: Weak<ChatDocHandle>,
+    mut ledger: watch::Receiver<u64>,
+    mut changes: watch::Receiver<u64>,
+) {
+    loop {
+        let Some(handle) = weak.upgrade() else { break };
+        // Mark everything up to here seen BEFORE the pass: a change during or
+        // after it flags the receiver and wakes the wait below.
+        ledger.borrow_and_update();
+        changes.borrow_and_update();
+        let outcome = host.drain_command_kind(&handle, true).await;
+        drop(handle);
+        let woke = if outcome.complete {
+            ledger.changed().await
+        } else {
+            changes.changed().await
+        };
+        if woke.is_err() {
+            break;
         }
     }
 }
@@ -7019,6 +7199,220 @@ mod publication_eviction_tests {
         );
         assert_eq!(store.pending_chat_updates("evicted").unwrap(), before);
         drop(reopened);
+        host.shutdown_workers().await;
+    }
+}
+
+#[cfg(test)]
+mod change_mask_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn host(dir: &Path) -> DocHost {
+        DocHost::new(
+            Arc::new(DocsStore::open(dir).unwrap()),
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        )
+    }
+
+    fn command(id: &str, payload: SessionCommandPayload) -> SessionCommandEntry {
+        SessionCommandEntry {
+            id: id.into(),
+            payload,
+            issued_by: "viewer".into(),
+            issued_at: now_ms(),
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    }
+
+    fn steer(id: &str) -> SessionCommandEntry {
+        command(
+            id,
+            SessionCommandPayload::Steer {
+                prompt: "go".into(),
+                message_id: None,
+            },
+        )
+    }
+
+    fn message(id: &str) -> zeron_doc::SessionMessageEntry {
+        zeron_doc::SessionMessageEntry {
+            id: id.into(),
+            role: zeron_doc::MessageRole::User,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: format!("{id}-t"),
+                text: "hello".into(),
+            }],
+            created_at: 1,
+            device_id: "host".into(),
+            status: Some(zeron_doc::MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    /// Let the change workers run behind a commit.
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_roots_that_changed_wake_their_consumers() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("masks").unwrap();
+        let mut messages = handle.watch_messages();
+        let mut queue = handle.watch_queue();
+        settle().await;
+        messages.borrow_and_update();
+        queue.borrow_and_update();
+        let ledger_before = *handle.commands_tx.borrow();
+
+        // A streaming-style burst: messages only.
+        for i in 0..50 {
+            handle.doc.push_message(&message(&format!("m{i}"))).unwrap();
+        }
+        settle().await;
+        assert!(messages.has_changed().unwrap(), "messages republished");
+        assert!(!queue.has_changed().unwrap(), "queue untouched");
+        assert_eq!(*handle.commands_tx.borrow(), ledger_before, "ledger untouched");
+        messages.borrow_and_update();
+
+        // A command: neither watch moves, the ledger generation does.
+        handle.doc.queue_command(&steer("c1")).unwrap();
+        settle().await;
+        assert!(!messages.has_changed().unwrap(), "messages not republished");
+        assert!(!queue.has_changed().unwrap());
+        assert_eq!(*handle.commands_tx.borrow(), ledger_before + 1);
+
+        // A queue row: only the queue watch moves.
+        handle
+            .doc
+            .push_queued(&zeron_doc::QueuedMessage::new("q1", "text", "host"))
+            .unwrap();
+        settle().await;
+        assert!(queue.has_changed().unwrap(), "queue republished");
+        assert!(!messages.has_changed().unwrap());
+        assert_eq!(*handle.commands_tx.borrow(), ledger_before + 1);
+        host.shutdown_workers().await;
+    }
+
+    /// Plan D3 test (a): a stream of commits that never touches the ledger
+    /// reads it zero times after the first pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_commits_do_not_re_read_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("stream").unwrap();
+        handle.doc.queue_command(&steer("c1")).unwrap();
+        let _watch = handle.watch_messages();
+        assert_eq!(handle.commands().unwrap().len(), 1);
+        let fills = handle.commands_cache_fills();
+        for i in 0..50 {
+            handle.doc.push_message(&message(&format!("m{i}"))).unwrap();
+            // Every reader the tick hits: eviction, durability, the drains.
+            assert_eq!(handle.commands().unwrap().len(), 1);
+            assert!(host.has_waiting_commands());
+        }
+        settle().await;
+        assert_eq!(handle.commands_cache_fills(), fills, "no ledger re-read");
+        // A real ledger write is seen by the very next read.
+        handle.doc.queue_command(&steer("c2")).unwrap();
+        assert_eq!(handle.commands().unwrap().len(), 2);
+        assert_eq!(handle.commands_cache_fills(), fills + 1);
+        assert_eq!(handle.commands_cache_mismatches(), 0);
+        host.shutdown_workers().await;
+    }
+
+    /// A control that is executing holds up a later prompt only until its
+    /// outcome lands: the wait wakes on the ledger write, not on a poll.
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_an_earlier_control_wakes_on_its_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("waits").unwrap();
+        handle
+            .doc
+            .queue_command(&command("stop", SessionCommandPayload::Interrupt {}))
+            .unwrap();
+        handle.doc.queue_command(&steer("prompt")).unwrap();
+        lock(&host.inner.executing).insert("stop".into());
+
+        let started = tokio::time::Instant::now();
+        let waiter = {
+            let (host, handle) = (host.clone(), handle.clone());
+            tokio::spawn(async move { host.await_earlier_controls(&handle, "prompt").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "the control is still executing");
+        let fills = handle.commands_cache_fills();
+
+        handle
+            .doc
+            .set_command_status("stop", SessionCommandStatus::Applied, None)
+            .unwrap();
+        waiter.await.unwrap();
+        assert!(
+            started.elapsed() < WAIT_RECHECK,
+            "woke on the ledger change, not the recheck tick: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            handle.commands_cache_fills(),
+            fills + 1,
+            "one re-read for the one ledger write"
+        );
+        host.shutdown_workers().await;
+    }
+
+    /// The claim set is not in the ledger, so a control that finishes without
+    /// an outcome write is noticed by the recheck tick, not missed.
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_an_earlier_control_notices_a_released_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("claims").unwrap();
+        handle
+            .doc
+            .queue_command(&command("stop", SessionCommandPayload::Interrupt {}))
+            .unwrap();
+        handle.doc.queue_command(&steer("prompt")).unwrap();
+        lock(&host.inner.executing).insert("stop".into());
+        let waiter = {
+            let (host, handle) = (host.clone(), handle.clone());
+            tokio::spawn(async move { host.await_earlier_controls(&handle, "prompt").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished());
+        lock(&host.inner.executing).remove("stop");
+        tokio::time::timeout(WAIT_RECHECK * 2, waiter)
+            .await
+            .expect("the recheck tick sees the released claim")
+            .unwrap();
+        host.shutdown_workers().await;
+    }
+
+    #[test]
+    fn drain_outcome_is_complete_only_for_a_finished_pass() {
+        assert!(DrainOutcome::COMPLETE.complete);
+        assert!(!DrainOutcome::INCOMPLETE.complete);
+    }
+
+    /// Without a wired sessions engine a pass cannot run, which is the
+    /// "retry on the next change" case the dispatcher must keep.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pass_that_cannot_run_is_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host(dir.path());
+        let handle = host.open_local("incomplete").unwrap();
+        assert!(!host.drain_commands(&handle).await.complete);
         host.shutdown_workers().await;
     }
 }
