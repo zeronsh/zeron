@@ -132,6 +132,9 @@ const CLAUDE_LOOPBACK_SCOPES: &str = "org:create_api_key user:profile user:infer
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// The Cursor dashboard's current-period usage RPC (Connect-style POST).
 const CURSOR_CURRENT_PERIOD_USAGE: &str = "aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+/// The Grok Bot ("sand") quota: its own weekly window, separate from the plan's
+/// monthly buckets.
+const CURSOR_SAND_USAGE: &str = "aiserver.v1.DashboardService/GetSandUsageStatus";
 const CURSOR_DEFAULT_BACKEND: &str = "https://api2.cursor.sh";
 
 /// Claude Code stores these next to `claudeAiOauth` in the same credential
@@ -3240,12 +3243,34 @@ impl AgentAccounts {
                 .json(&serde_json::json!({})),
         )
         .await?;
-        cursor_usage_window(&body)
-            .map(|window| UsageSnapshot {
-                windows: vec![window],
-                plan_label: None,
-            })
-            .ok_or_else(|| schema_error("cursor", &body))
+        let mut windows = cursor_bucket_windows(&body);
+        if windows.is_empty() {
+            windows.extend(cursor_usage_window(&body));
+        }
+        if windows.is_empty() {
+            return Err(schema_error("cursor", &body));
+        }
+        // Best effort: a failed or absent Grok quota never hides the plan meters.
+        let sand = probe_json(
+            "cursor",
+            "grok",
+            self.inner
+                .http
+                .post(format!("{backend}/{CURSOR_SAND_USAGE}"))
+                .bearer_auth(&access_token)
+                .header("Connect-Protocol-Version", "1")
+                .json(&serde_json::json!({})),
+        )
+        .await
+        .ok();
+        // Cursor, Grok, Other: the weekly Grok quota sits between the two monthly buckets.
+        if let Some(grok) = sand.as_ref().and_then(cursor_grok_window) {
+            windows.insert(1.min(windows.len()), grok);
+        }
+        Ok(UsageSnapshot {
+            windows,
+            plan_label: None,
+        })
     }
 
     /// Whether `slot` is provably NOT the grant Claude Code runs on, so zeron
@@ -4166,6 +4191,48 @@ fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     })
 }
 
+/// The plan's two monthly buckets as Cursor itself reports them: first-party
+/// models (Composer, Grok, ...; `autoPercentUsed`) and third-party API models
+/// (`apiPercentUsed`). `totalSpend / limit` is wrong once bonus usage is
+/// granted on top of the paid allowance (it counts the bonus against the limit:
+/// 63989 / 7000 = 914% when Cursor shows 49%), so these are read as given.
+fn cursor_bucket_windows(body: &serde_json::Value) -> Vec<AgentUsageWindow> {
+    let Some(plan) = body.get("planUsage") else {
+        return Vec::new();
+    };
+    let resets_at = json_ms(body.get("billingCycleEnd"));
+    [
+        (zeron_proto::CURSOR_USAGE_CURSOR, "autoPercentUsed"),
+        (zeron_proto::CURSOR_USAGE_OTHER, "apiPercentUsed"),
+    ]
+    .into_iter()
+    .filter_map(|(label, field)| {
+        let percent = plan.get(field).and_then(|v| v.as_f64())?;
+        Some(AgentUsageWindow {
+            label: label.to_string(),
+            used_fraction: (percent / 100.0).clamp(0.0, 1.0) as f32,
+            resets_at,
+        })
+    })
+    .collect()
+}
+
+/// `GetSandUsageStatus`: the Grok Bot plan's weekly quota. `usagePercent` is
+/// read on the same 0-100 scale as the plan buckets (observed 0.177784 an hour
+/// into a fresh period), not as a 0-1 fraction.
+fn cursor_grok_window(body: &serde_json::Value) -> Option<AgentUsageWindow> {
+    let percent = body.get("usagePercent").and_then(|v| v.as_f64())?;
+    Some(AgentUsageWindow {
+        label: zeron_proto::CURSOR_USAGE_GROK.to_string(),
+        used_fraction: (percent / 100.0).clamp(0.0, 1.0) as f32,
+        resets_at: body
+            .get("nextResetTimestampUtc")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&Utc)),
+    })
+}
+
 /// The billing-cycle window from Cursor's `GetCurrentPeriodUsage`. The blended
 /// percent is derived from spend/limit in cents: the payload's own
 /// `totalPercentUsed` disagrees with the number Cursor's UI narrates ("You've
@@ -4954,6 +5021,41 @@ mod tests {
         // the UI then says "Usage unavailable" instead of showing nothing.
         assert!(claude_usage_windows(&serde_json::json!({ "extra_usage": {} })).is_none());
         assert!(claude_usage_windows(&serde_json::json!({ "five_hour": {} })).is_none());
+    }
+
+    #[test]
+    fn cursor_buckets_read_cursors_own_percentages_not_spend_over_limit() {
+        // Observed Pro+ payload: $570 of bonus spend on a $70 allowance.
+        let body = serde_json::json!({
+            "billingCycleEnd": "1794158314000",
+            "planUsage": {
+                "totalSpend": 63989, "includedSpend": 7000, "bonusSpend": 56989,
+                "limit": 7000,
+                "autoPercentUsed": 48.918, "apiPercentUsed": 48.064,
+                "totalPercentUsed": 48.847,
+            },
+        });
+        let windows = cursor_bucket_windows(&body);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Cursor");
+        assert!((windows[0].used_fraction - 0.48918).abs() < 1e-4);
+        assert_eq!(windows[1].label, "Other");
+        assert!((windows[1].used_fraction - 0.48064).abs() < 1e-4);
+        assert!(windows[0].resets_at.is_some());
+        assert!(cursor_bucket_windows(&serde_json::json!({ "planUsage": {} })).is_empty());
+    }
+
+    #[test]
+    fn cursor_grok_window_is_weekly_percent() {
+        let window = cursor_grok_window(&serde_json::json!({
+            "usagePercent": 0.177784,
+            "nextResetTimestampUtc": "2026-11-04T18:46:22.484Z",
+        }))
+        .expect("window");
+        assert_eq!(window.label, "Grok");
+        assert!((window.used_fraction - 0.00177784).abs() < 1e-7);
+        assert_eq!(window.resets_at.unwrap().timestamp(), 1_793_817_982);
+        assert!(cursor_grok_window(&serde_json::json!({})).is_none());
     }
 
     #[test]
