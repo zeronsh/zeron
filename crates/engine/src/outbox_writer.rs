@@ -66,6 +66,8 @@ struct Shared {
     batches: AtomicU64,
     #[cfg(test)]
     gate: Gate,
+    #[cfg(test)]
+    panic_write_once: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -107,6 +109,8 @@ impl OutboxWriter {
             batches: AtomicU64::new(0),
             #[cfg(test)]
             gate: Gate::default(),
+            #[cfg(test)]
+            panic_write_once: std::sync::atomic::AtomicBool::new(false),
         });
         let thread_store = store.clone();
         let thread_shared = shared.clone();
@@ -275,6 +279,11 @@ fn run(
 /// unwritable row (and its doc's failed-publication record) does not take the
 /// rest down with it. Then, per item in order, the hand-off to its chat.
 fn write_rows(store: &DocsStore, shared: &Shared, items: &[Item]) -> Vec<bool> {
+    #[cfg(test)]
+    assert!(
+        !shared.panic_write_once.swap(false, Ordering::SeqCst),
+        "injected write panic"
+    );
     let rows: Vec<_> = items
         .iter()
         .map(|item| {
@@ -583,6 +592,19 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_write_keeps_its_batch_and_flush_watermark() {
+        let (_dir, store) = store();
+        let writer = OutboxWriter::new(store.clone());
+        let sink = Recorder::new(&store, "chat");
+        writer.shared.panic_write_once.store(true, Ordering::SeqCst);
+        writer.submit("chat", sink.weak(), "kept".into(), vec![1]);
+        writer.flush();
+        assert_eq!(ids(&store, "chat"), ["kept"]);
+        assert_eq!(*lock(&sink.seen), [("kept".into(), true)]);
+        assert!(!writer.has_in_flight("chat"));
+    }
+
+    #[test]
     fn panicking_delivery_is_retried_before_flush_completes() {
         struct PanicOnce(std::sync::atomic::AtomicBool, AtomicUsize);
         impl OutboxSink for PanicOnce {
@@ -607,14 +629,24 @@ mod tests {
     #[test]
     fn a_stalled_writer_does_not_block_more_than_1024_submits() {
         let (_dir, store) = store();
-        let writer = OutboxWriter::new(store.clone());
+        let writer = Arc::new(OutboxWriter::new(store.clone()));
         let sink = Recorder::new(&store, "chat");
         let pause = writer.pause();
-        for i in 0..4096 {
-            writer.submit("chat", sink.weak(), format!("b{i:04}"), vec![0]);
-        }
+        let (done_tx, done_rx) = channel();
+        let producer = {
+            let (writer, sink) = (writer.clone(), sink.clone());
+            std::thread::spawn(move || {
+                for i in 0..4096 {
+                    writer.submit("chat", sink.weak(), format!("b{i:04}"), vec![0]);
+                }
+                done_tx.send(()).unwrap();
+            })
+        };
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(5));
         assert!(ids(&store, "chat").is_empty());
         drop(pause);
+        producer.join().unwrap();
+        result.expect("committing thread waited for the stalled writer");
         writer.flush();
         assert_eq!(ids(&store, "chat").len(), 4096);
     }
