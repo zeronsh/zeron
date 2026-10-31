@@ -1308,14 +1308,14 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
 /// - new parts → pushed,
 /// - tool call refresh / resolution / input resolution → in-place map updates.
 ///
-/// Invariant relied upon: the fold only ever APPENDS parts or grows text by
-/// appending. Earlier text is not rewritten in place. Tool and input parts
-/// may update fields in place.
+/// The fold normally appends parts and text; defensive body corrections
+/// also take the full rewrite path. A segment clear starts a new writer
+/// (like the full sync, this writer does not delete parts). Tool and input
+/// parts may update fields in place.
 ///
 /// Text growth is tracked by [`SegmentWriter::flushed_len`] (bytes already
-/// in the doc). A longer body appends only the new tail into `LoroText` and
-/// onto the mirror. It does not `PartialEq` or `starts_with` the whole text,
-/// and it does not clone the grown string into `written`.
+/// in the doc). A verified byte prefix appends only the new tail into
+/// `LoroText` and onto the mirror, without cloning the grown string.
 pub struct SegmentWriter<'a> {
     doc: &'a SessionDoc,
     /// Index of this entry in the `messages` list.
@@ -1488,7 +1488,7 @@ impl<'a> SegmentWriter<'a> {
         dirty: impl IntoIterator<Item = usize>,
     ) -> Result<(), DocError> {
         let verify = self.verify_due();
-        self.write_indices(folded, dirty, verify)?;
+        self.write_indices(folded, dirty)?;
         // Compare the mirror to the full render. On a miss, rewrite the
         // differing parts in place (LoroText::update, not a second append)
         // and reset the mirror to that render. Never panics.
@@ -1618,7 +1618,6 @@ impl<'a> SegmentWriter<'a> {
         &mut self,
         folded: &[MessagePart],
         dirty: impl IntoIterator<Item = usize>,
-        verify: bool,
     ) -> Result<(), DocError> {
         let mut indices: Vec<usize> = dirty
             .into_iter()
@@ -1642,7 +1641,7 @@ impl<'a> SegmentWriter<'a> {
         let parts = self.parts_list()?;
         let mut dirty = false;
         for index in indices {
-            if self.write_one(&parts, index, &folded[index], verify)? {
+            if self.write_one(&parts, index, &folded[index])? {
                 dirty = true;
             }
         }
@@ -1658,7 +1657,6 @@ impl<'a> SegmentWriter<'a> {
         parts: &LoroList,
         index: usize,
         part: &MessagePart,
-        verify: bool,
     ) -> Result<bool, DocError> {
         if index > self.written.len() {
             return Err(DocError::Schema(format!(
@@ -1672,7 +1670,7 @@ impl<'a> SegmentWriter<'a> {
             self.flushed_len.push(part_flushed_len(part));
             return Ok(true);
         }
-        if let Some(delta) = self.text_tail(index, part, verify) {
+        if let Some(delta) = self.text_tail(index, part) {
             if delta.is_empty() {
                 return Ok(false);
             }
@@ -1700,30 +1698,20 @@ impl<'a> SegmentWriter<'a> {
         Ok(true)
     }
 
-    /// The unflushed tail of a text/reasoning part, or `None` when this is not
-    /// an in-place append (kind/id change, shrink, or — when verifying — a
-    /// body that is not a byte prefix of what was flushed).
-    ///
-    /// The hot path trusts [`Self::flushed_len`] and does not scan the body.
-    /// The oracle scan runs only when [`Self::verify_due`] is set.
-    fn text_tail<'p>(&self, index: usize, part: &'p MessagePart, verify: bool) -> Option<&'p str> {
+    /// The unflushed tail only when the old body is still a byte prefix.
+    /// Length alone cannot distinguish append from a provider correction.
+    fn text_tail<'p>(&self, index: usize, part: &'p MessagePart) -> Option<&'p str> {
         let (old_field, old_id, old_text) = text_body(&self.written[index])?;
         let (new_field, new_id, new_text) = text_body(part)?;
-        if old_field != new_field || old_id != new_id {
-            return None;
-        }
         let flushed = self.flushed_len.get(index).copied().unwrap_or(0);
-        if verify {
-            if flushed != old_text.len()
-                || new_text.len() < flushed
-                || !new_text.is_char_boundary(flushed)
-                || new_text.as_bytes()[..flushed] != *old_text.as_bytes()
-            {
-                return None;
-            }
-        } else if new_text.len() < flushed || !new_text.is_char_boundary(flushed) {
+        if old_field != new_field
+            || old_id != new_id
+            || flushed != old_text.len()
+            || !new_text.starts_with(old_text)
+        {
             return None;
         }
+        // A matching UTF-8 string prefix ends at a character boundary.
         Some(&new_text[flushed..])
     }
 
@@ -2908,9 +2896,9 @@ mod tests {
         }
     }
 
-    /// One invariant-respecting edit. `None` starts a new segment: the fold
-    /// never rewrites or shrinks text, and a clear is a new writer, not an
-    /// in-place truncate (the old sync did not delete parts either).
+    /// `None` starts a new segment. Include defensive text corrections as
+    /// well as normal fold events; clears use a new writer, as in drive_run
+    /// (the old sync did not delete parts in place either).
     fn apply_sync_op(
         parts: &mut Vec<MessagePart>,
         rng: &mut SyncRng,
@@ -2973,7 +2961,11 @@ mod tests {
                     let index = indexes[rng.below(indexes.len())];
                     match &mut parts[index] {
                         MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
-                            text.push_str(text_tail(rng));
+                            match rng.below(4) {
+                                0 => *text = text_tail(rng).to_owned(),
+                                1 => *text = format!("corrected {}", text_tail(rng)),
+                                _ => text.push_str(text_tail(rng)),
+                            }
                         }
                         _ => unreachable!("text index"),
                     }
@@ -3229,6 +3221,49 @@ mod tests {
         match &inc_doc.read_entries().unwrap()[0].parts[0] {
             MessagePart::Text { text, .. } => assert_eq!(text, "café 日本語😀"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_sync_matches_full_on_text_corrections_without_oracle() {
+        for reasoning in [false, true] {
+            let inc_doc = SessionDoc::init("corrections").unwrap();
+            let full_doc = SessionDoc::init("corrections").unwrap();
+            let mut inc = open_incremental(&inc_doc, 0);
+            let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+            // Equal length, longer replacement, shrink, a former byte offset
+            // inside a new code point, astral characters and combining marks.
+            for body in [
+                "draft",
+                "fixed",
+                "rewritten😀",
+                "é",
+                "😀tail",
+                "e\u{301}",
+                "e\u{301}🦀",
+            ] {
+                let parts = vec![if reasoning {
+                    MessagePart::Reasoning {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                } else {
+                    MessagePart::Text {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                }];
+                inc.sync_indices(&parts, [0]).unwrap();
+                full.sync_full(&parts).unwrap();
+                assert_eq!(inc.written, parts, "{body}");
+                assert_eq!(inc.mismatches(), 0);
+                assert_eq!(inc_doc.read_entries().unwrap()[0].parts, parts);
+                assert_eq!(
+                    inc_doc.doc().get_deep_value().to_json_value(),
+                    full_doc.doc().get_deep_value().to_json_value(),
+                    "{body}"
+                );
+            }
         }
     }
 

@@ -3442,9 +3442,9 @@ fn assign_rendered(slot: &mut MessagePart, source: &MessagePart) {
 }
 
 fn rendered_text_tail<'a>(slot: &MessagePart, source: &'a MessagePart) -> Option<&'a str> {
-    let (old_kind, old_id, old_len) = match slot {
-        MessagePart::Text { id, text } => ("text", id.as_str(), text.len()),
-        MessagePart::Reasoning { id, text } => ("reasoning", id.as_str(), text.len()),
+    let (old_kind, old_id, old_text) = match slot {
+        MessagePart::Text { id, text } => ("text", id.as_str(), text.as_str()),
+        MessagePart::Reasoning { id, text } => ("reasoning", id.as_str(), text.as_str()),
         _ => return None,
     };
     let (new_kind, new_id, new_text) = match source {
@@ -3452,14 +3452,10 @@ fn rendered_text_tail<'a>(slot: &MessagePart, source: &'a MessagePart) -> Option
         MessagePart::Reasoning { id, text } => ("reasoning", id.as_str(), text.as_str()),
         _ => return None,
     };
-    if old_kind != new_kind
-        || old_id != new_id
-        || new_text.len() < old_len
-        || !new_text.is_char_boundary(old_len)
-    {
+    if old_kind != new_kind || old_id != new_id || !new_text.starts_with(old_text) {
         return None;
     }
-    Some(&new_text[old_len..])
+    Some(&new_text[old_text.len()..])
 }
 
 /// The persisted assistant text of a folded segment (workspace preview source).
@@ -6745,6 +6741,36 @@ mod tests {
     }
 
     #[test]
+    fn incremental_render_tracks_text_corrections() {
+        for reasoning in [false, true] {
+            let mut render = SegmentRender::default();
+            for body in [
+                "draft",
+                "fixed",
+                "rewritten😀",
+                "é",
+                "😀tail",
+                "e\u{301}",
+                "e\u{301}🦀",
+            ] {
+                let folded = vec![if reasoning {
+                    MessagePart::Reasoning {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                } else {
+                    MessagePart::Text {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                }];
+                render.note(Touched::Index(0), folded.len());
+                assert_render(&mut render, &folded);
+            }
+        }
+    }
+
+    #[test]
     fn incremental_render_matches_full_render() {
         use zeron_proto::ToolCall;
 
@@ -7017,9 +7043,14 @@ mod tests {
                             let index = indexes[rng.below(indexes.len())];
                             match &mut folded[index] {
                                 MessagePart::Text { text, .. }
-                                | MessagePart::Reasoning { text, .. } => {
-                                    text.push_str(tails[rng.below(tails.len())]);
-                                }
+                                | MessagePart::Reasoning { text, .. } => match rng.below(4) {
+                                    0 => *text = tails[rng.below(tails.len())].to_owned(),
+                                    1 => {
+                                        *text =
+                                            format!("corrected {}", tails[rng.below(tails.len())])
+                                    }
+                                    _ => text.push_str(tails[rng.below(tails.len())]),
+                                },
                                 _ => unreachable!("text index"),
                             }
                             render.note(Touched::Index(index), folded.len());
