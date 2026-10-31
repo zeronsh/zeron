@@ -19,13 +19,13 @@ pub(super) struct ShimRun {
 impl ShimRun {
     pub async fn cleanup(mut self) {
         let _ = zeron_mcp_proxy::cleanup_run_dir(&self.run_dir).await;
-        let _ = std::fs::remove_dir_all(&self.dir);
+        remove_run(&self.dir, &self.run_dir);
         self.cleaned = true;
     }
 }
 impl Drop for ShimRun {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        remove_run(&self.dir, &self.run_dir);
         // Also cover cancellation/panic before the normal awaited teardown.
         if !self.cleaned
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
@@ -33,9 +33,16 @@ impl Drop for ShimRun {
             let dir = self.run_dir.clone();
             runtime.spawn(async move {
                 let _ = zeron_mcp_proxy::cleanup_run_dir(&dir).await;
+                let _ = std::fs::remove_dir(&dir);
             });
         }
     }
+}
+/// The shim directory, then the run directory itself once nothing (such as a
+/// live server-group marker) is left in it. `remove_dir` never removes contents.
+fn remove_run(shim: &Path, run: &Path) {
+    let _ = std::fs::remove_dir_all(shim);
+    let _ = std::fs::remove_dir(run);
 }
 
 fn servers(snapshot: &ClaudeMcpSnapshot, plan: &McpPlan, path: &std::ffi::OsStr) -> Vec<Server> {
@@ -327,6 +334,20 @@ mod tests {
         assert_eq!(std::env::split_paths(path).next().unwrap(), dir);
         guard.cleanup().await;
         assert!(!dir.exists());
+        // No empty run directory is left behind for every launch.
+        let run = data.join("run/mcp/test");
+        assert!(!run.exists());
+        // A dropped (cancelled) guard leaves nothing either.
+        let dropped = prepare(&mut command(), &exe, &request, false).expect("fresh again");
+        assert!(run.exists());
+        drop(dropped);
+        for _ in 0..200 {
+            if !run.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!run.exists());
         assert!(prepare(&mut command(), &exe, &request, true).is_none());
         request.env.insert("ZERON_MCP_LAZY".into(), "0".into());
         assert!(prepare(&mut command(), &exe, &request, false).is_none());
