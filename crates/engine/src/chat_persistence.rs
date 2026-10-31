@@ -433,4 +433,44 @@ mod tests {
         persistence.flush_sync();
         assert_eq!(store.snapshot_cursor("whale").unwrap(), 2);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialized_outbox_keeps_snapshot_deadline_and_shutdown_flush() {
+        let (_dir, doc, store, persistence) = fixture();
+        store.initialize_chat_outbox("whale", &[]).unwrap();
+        doc.doc().get_map("test").insert("remote", 1).unwrap();
+        doc.doc().commit();
+        persistence.applied(1, false);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let start = std::time::Instant::now();
+        while persistence.writes.load(Ordering::Relaxed) == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "snapshot did not finish"
+            );
+            tokio::task::yield_now().await;
+        }
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("whale").unwrap().unwrap();
+        assert_eq!(cursor, 1);
+        let restored = loro::LoroDoc::new();
+        restored.import(&bytes).unwrap();
+        assert_eq!(
+            restored.get_map("test").get_deep_value(),
+            doc.doc().get_map("test").get_deep_value()
+        );
+
+        doc.doc().get_map("test").insert("shutdown", 2).unwrap();
+        doc.doc().commit();
+        persistence.applied(2, false);
+        persistence.flush_sync();
+        let (bytes, cursor, _) = store.load_snapshot_with_cursor("whale").unwrap().unwrap();
+        assert_eq!(cursor, 2);
+        let restored = loro::LoroDoc::new();
+        restored.import(&bytes).unwrap();
+        assert_eq!(
+            restored.get_map("test").get_deep_value(),
+            doc.doc().get_map("test").get_deep_value()
+        );
+    }
 }
