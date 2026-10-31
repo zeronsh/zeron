@@ -34,57 +34,6 @@ pub struct Server {
     pub owner_legacy: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Discovery {
-    NonChannel,
-    Channel,
-    Failed,
-}
-#[derive(Serialize, Deserialize)]
-struct Evidence {
-    identity: String,
-    discovery: Discovery,
-}
-fn evidence_path(data: &Path, identity: &str) -> PathBuf {
-    data.join("mcp-cache/shim-v1")
-        .join(format!("{identity}.json"))
-}
-pub fn discovery(data: &Path, identity: &str) -> io::Result<Option<Discovery>> {
-    let raw = match std::fs::read(evidence_path(data, identity)) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let evidence: Evidence = serde_json::from_slice(&raw)?;
-    if evidence.identity != identity {
-        return Err(io::Error::other("invalid shim identity"));
-    }
-    Ok(Some(evidence.discovery))
-}
-pub fn record_discovery(config: &crate::Config, outcome: Discovery) -> io::Result<()> {
-    let Some(identity) = &config.shim_identity else {
-        return Ok(());
-    };
-    let path = evidence_path(&config.data_dir, identity);
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    let _lock = crate::cache::FileLock::new(&path.with_extension("lock"))?;
-    // Positive channel evidence is never overwritten by a concurrent failed or
-    // non-channel capture. Only a changed launch identity permits re-discovery.
-    let outcome = if discovery(&config.data_dir, identity)? == Some(Discovery::Channel) {
-        Discovery::Channel
-    } else {
-        outcome
-    };
-    crate::cache::atomic_write(
-        &path,
-        &serde_json::to_vec(&Evidence {
-            identity: identity.clone(),
-            discovery: outcome,
-        })?,
-    )
-}
-
 /// Ambiguous command lines stay eager, including a lazy/eager duplicate.
 pub fn decide<'a>(
     launch: &'a Launch,
@@ -261,38 +210,15 @@ pub fn run(argv: Vec<OsString>) -> io::Result<()> {
             .ok()?,
         );
         config.plugin_root = std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from);
-        let effective_env: std::collections::BTreeMap<_, _> = config
-            .identity_env
-            .iter()
-            .map(|k| {
-                let value = if k == "PATH" {
-                    config.identity_path.clone()
-                } else {
-                    std::env::var(k).ok()
-                };
-                Some((k.clone(), value?))
-            })
-            .collect::<Option<_>>()?;
-        let identity = crate::cache::hash(&serde_json::json!({"v":1,"snapshot":launch.key,
-            "command":real.canonicalize().ok()?,"binary":crate::cache::binary_id(&real.canonicalize().ok()?),
-            "args":config.args,"env":effective_env}));
-        match discovery(&config.data_dir, &identity).ok()? {
-            Some(Discovery::Channel | Discovery::Failed) => return None,
-            Some(Discovery::NonChannel) | None => {}
+        // JSON cache identities cannot faithfully represent non-UTF8 env.
+        for key in &config.identity_env {
+            std::env::var(key).ok()?;
         }
-        config.shim_identity = Some(identity);
+        config.child_argv0 = Some(arg0.clone());
         Some(config)
     })();
     if let Some(config) = selected {
-        // Creating the runtime is the last fallible step before protocol IO.
-        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            let result = runtime.block_on(crate::proxy::run(config));
-            runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-            return result;
-        }
+        return crate::run_config(config);
     }
     #[cfg(unix)]
     {
@@ -350,41 +276,6 @@ mod tests {
         )
         .is_some()
     }
-    #[cfg(unix)]
-    #[test]
-    fn channel_evidence_is_sticky_private_and_failed_or_corrupt_evidence_falls_back() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = tempfile::tempdir().unwrap();
-        let mut config = crate::Config::parse(
-            ["--server", "test", "--", "node", "srv.js"].map(str::to_owned),
-            root.path().into(),
-        )
-        .unwrap();
-        config.shim_identity = Some("digest".into());
-        assert_eq!(discovery(root.path(), "digest").unwrap(), None);
-        record_discovery(&config, Discovery::NonChannel).unwrap();
-        assert_eq!(
-            discovery(root.path(), "digest").unwrap(),
-            Some(Discovery::NonChannel)
-        );
-        record_discovery(&config, Discovery::Failed).unwrap();
-        assert_eq!(
-            discovery(root.path(), "digest").unwrap(),
-            Some(Discovery::Failed)
-        );
-        record_discovery(&config, Discovery::Channel).unwrap();
-        record_discovery(&config, Discovery::NonChannel).unwrap();
-        record_discovery(&config, Discovery::Failed).unwrap();
-        assert_eq!(
-            discovery(root.path(), "digest").unwrap(),
-            Some(Discovery::Channel)
-        );
-        let path = evidence_path(root.path(), "digest");
-        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
-        std::fs::write(path, "corrupt").unwrap();
-        assert!(discovery(root.path(), "digest").is_err());
-    }
-
     #[test]
     fn shim_requires_all_three_conditions() {
         let l = launch();

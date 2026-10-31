@@ -64,6 +64,17 @@ impl Peer {
         args: &[&str],
         proxy_args: &[&str],
     ) -> Self {
+        Self::spawn_command_at(dir, mode, env, command, args, proxy_args, None)
+    }
+    fn spawn_command_at(
+        dir: &Path,
+        mode: &str,
+        env: &[(&str, &str)],
+        command: &str,
+        args: &[&str],
+        proxy_args: &[&str],
+        cwd: Option<&Path>,
+    ) -> Self {
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -88,6 +99,9 @@ impl Peer {
             .stdout(Stdio::piped())
             .stderr(stderr)
             .kill_on_drop(true);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         let mut child = cmd.spawn().unwrap();
         Self {
             input: child.stdin.take(),
@@ -478,9 +492,15 @@ async fn failed_discovery_next_session_is_transparent() {
     let dir = temp();
     let d = dir.path();
     let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
-    assert_eq!(peer.init().await["error"]["code"], -32000);
+    assert_eq!(peer.init().await["error"]["message"], "fake init failure");
+    assert_eq!(
+        pids(&d.join("spawn")).len(),
+        2,
+        "failed discovery retries in eager forwarding"
+    );
     peer.close().await;
     let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
+    eventually(|| pids(&d.join("spawn")).len() == 3).await;
     assert_eq!(peer.init().await["error"]["message"], "fake init failure");
     peer.close().await;
 }
@@ -604,7 +624,7 @@ async fn npx_resolves_without_wrapper_composes_path_and_has_an_escape_hatch() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_timeout_and_first_call_queued_during_discovery() {
+async fn discovery_timeout_falls_back_and_first_call_queues_during_fresh_discovery() {
     let dir = temp();
     let d = dir.path();
     let mut peer = Peer::spawn(
@@ -615,10 +635,22 @@ async fn startup_timeout_and_first_call_queued_during_discovery() {
             ("ZERON_MCP_PROXY_START_TIMEOUT_MS", "30"),
         ],
     );
-    assert_eq!(peer.init().await["error"]["code"], -32000);
+    assert!(
+        peer.init().await.get("result").is_some(),
+        "eager fallback retains the real server's timing"
+    );
+    assert_eq!(pids(&d.join("spawn")).len(), 2);
     peer.close().await;
-    // A different identity (different client major) bypasses the failure marker.
-    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_DELAY_MS", "100")]);
+    // Change the server identity, not just its client: classification is shared
+    // across clients, while their catalogs are partitioned independently.
+    let mut peer = Peer::spawn_command(
+        d,
+        "lazy",
+        &[("FAKE_INIT_DELAY_MS", "100")],
+        env!("CARGO_BIN_EXE_fake-mcp"),
+        &["new-identity"],
+        &[],
+    );
     peer.send(zeron_mcp_proxy::rpc::request(1,"initialize",json!({"protocolVersion":"v","clientInfo":{"name":"queued","version":"2"},"capabilities":{}}))).await;
     peer.send(zeron_mcp_proxy::rpc::request(
         2,
@@ -716,8 +748,16 @@ async fn channel_capability_never_idles_and_cached_channel_starts_eagerly() {
     );
     first.close().await;
     let mut second = Peer::spawn(dir.path(), "lazy", &[("FAKE_CHANNEL", "1")]);
-    second.init().await;
+    // Shared core must exec the known channel before any client initialize.
     eventually(|| pids(&dir.path().join("spawn")).len() == 2).await;
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        fs::read_link(format!("/proc/{}/exe", second.child.id().unwrap())).unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_fake-mcp"))
+            .canonicalize()
+            .unwrap()
+    );
+    second.init().await;
     assert!(alive(*pids(&dir.path().join("spawn")).last().unwrap()));
     assert_eq!(
         second.call(2, "echo").await["result"]["content"][0]["text"],
@@ -730,4 +770,70 @@ async fn channel_capability_never_idles_and_cached_channel_starts_eagerly() {
             .any(|v| v["method"] == "notifications/claude/channel")
     );
     second.close().await;
+}
+
+#[tokio::test]
+async fn inherited_runtime_cwd_partitions_catalogs_without_explicit_cwd() {
+    let dir = temp();
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    for (cwd, count) in [(&a, 1), (&b, 2), (&a, 2)] {
+        let mut peer = Peer::spawn_command_at(
+            dir.path(),
+            "lazy",
+            &[],
+            env!("CARGO_BIN_EXE_fake-mcp"),
+            &[],
+            &[],
+            Some(cwd),
+        );
+        assert!(peer.init().await.get("result").is_some());
+        eventually(|| {
+            pids(&dir.path().join("spawn")).len() == count
+                && pids(&dir.path().join("spawn"))
+                    .into_iter()
+                    .all(|p| !alive(p))
+        })
+        .await;
+        peer.close().await;
+    }
+}
+
+#[tokio::test]
+async fn inherited_runtime_cwd_also_partitions_channel_classification() {
+    let dir = temp();
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    let spawn = |cwd: &Path| {
+        Peer::spawn_command_at(
+            dir.path(),
+            "lazy",
+            &[("FAKE_CHANNEL", "1")],
+            env!("CARGO_BIN_EXE_fake-mcp"),
+            &[],
+            &[],
+            Some(cwd),
+        )
+    };
+    let mut first = spawn(&a);
+    first.init().await;
+    first.close().await;
+    let mut other = spawn(&b);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        pids(&dir.path().join("spawn")).len(),
+        1,
+        "another cwd needs its own discovery"
+    );
+    other.init().await;
+    assert_eq!(pids(&dir.path().join("spawn")).len(), 2);
+    other.close().await;
+    let mut known = spawn(&a);
+    eventually(|| pids(&dir.path().join("spawn")).len() == 3).await;
+    known.init().await;
+    known.close().await;
 }

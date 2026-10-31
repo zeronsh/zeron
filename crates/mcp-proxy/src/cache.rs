@@ -68,8 +68,21 @@ pub fn binary_id(path: &Path) -> String {
     )
 }
 pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Value) -> String {
-    let env: BTreeMap<_, _> = c
-        .identity_env
+    let env = identity_env(c);
+    key_fields(
+        command,
+        &c.args,
+        &json!(env),
+        c.plugin_root.as_deref(),
+        c.cwd.as_deref(),
+        &c.runtime_cwd,
+        bin,
+        npx,
+        initialize,
+    )
+}
+fn identity_env(c: &Config) -> BTreeMap<String, Option<String>> {
+    c.identity_env
         .iter()
         .map(|k| {
             (
@@ -81,18 +94,25 @@ pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Valu
                 },
             )
         })
-        .collect();
-    key_fields(
-        command,
-        &c.args,
-        &json!(env),
-        c.plugin_root.as_deref(),
-        c.cwd.as_deref(),
-        bin,
-        npx,
-        initialize,
-    )
+        .collect()
 }
+
+/// Independent of MCP client identity so a known channel can exec before IO.
+pub fn launch_key(c: &Config) -> io::Result<String> {
+    let command = executable(&c.command, std::env::var_os("PATH").as_deref());
+    let utf8 = |p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| io::Error::other("non-UTF8 launch identity path"))
+    };
+    Ok(hash(
+        &json!({"v":1,"command":utf8(&command)?,"binary":binary_id(&command),
+        "args":c.args,"identity_env":identity_env(c),"runtime_cwd":utf8(&c.runtime_cwd)?,
+        "configured_cwd":c.cwd.as_deref().map(utf8).transpose()?,
+        "plugin_root":c.plugin_root.as_deref().map(utf8).transpose()?}),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn key_fields(
     command: &Path,
@@ -100,12 +120,13 @@ fn key_fields(
     env: &Value,
     plugin_root: Option<&Path>,
     cwd: Option<&Path>,
+    runtime_cwd: &Path,
     bin: &Path,
     npx: Value,
     init: &Value,
 ) -> String {
     hash(
-        &json!({"v":1,"command":command,"args":args,"identity_env":env,"plugin_root":plugin_root,"cwd_if_configured":cwd,
+        &json!({"v":2,"command":command,"args":args,"identity_env":env,"plugin_root":plugin_root,"cwd_if_configured":cwd,"runtime_cwd":runtime_cwd,
         "npx":npx,"bin_id":binary_id(bin),"client":{"name":init["clientInfo"]["name"],
         "version_major":init["clientInfo"]["version"].as_str().unwrap_or("").split('.').next().unwrap_or(""),
         "protocolVersion":init["protocolVersion"],"capabilities_hash":hash(&init["capabilities"])}}),
@@ -308,7 +329,17 @@ mod tests {
         let init = json!({"clientInfo":{"name":"client","version":"2.1"},"protocolVersion":"2025-03-26","capabilities":{"roots":{},"sampling":{}}});
         let path = Path::new("/fake/bin");
         let compute = |cmd, args: &[String], env: Value, npx: Value, init: &Value| {
-            key_fields(cmd, args, &env, None, None, path, npx, init)
+            key_fields(
+                cmd,
+                args,
+                &env,
+                None,
+                None,
+                Path::new("/cwd"),
+                path,
+                npx,
+                init,
+            )
         };
         let original = compute(path, &[], json!({"A":"secret","B":"2"}), Value::Null, &init);
         assert_eq!(
@@ -393,6 +424,37 @@ mod tests {
             )
         );
     }
+    #[test]
+    fn actual_runtime_cwd_is_part_of_both_identities_without_configured_cwd() {
+        let mut a = Config::parse(
+            ["--server", "demo", "--", "/fake"].map(str::to_owned),
+            "data".into(),
+        )
+        .unwrap();
+        a.runtime_cwd = "/project-a".into();
+        let mut b = a.clone();
+        b.runtime_cwd = "/project-b".into();
+        assert!(a.cwd.is_none() && b.cwd.is_none());
+        assert_ne!(launch_key(&a).unwrap(), launch_key(&b).unwrap());
+        let init = json!({"protocolVersion":"v","clientInfo":{"name":"client","version":"1"},"capabilities":{}});
+        assert_ne!(
+            key(
+                &a,
+                &init,
+                Path::new("/fake"),
+                Path::new("/fake"),
+                Value::Null
+            ),
+            key(
+                &b,
+                &init,
+                Path::new("/fake"),
+                Path::new("/fake"),
+                Value::Null
+            )
+        );
+    }
+
     #[test]
     fn concurrent_writers_keep_newest_and_private_is_never_persisted() {
         let dir = dir();

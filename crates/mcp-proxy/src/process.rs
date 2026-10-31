@@ -43,6 +43,12 @@ impl Process {
         }
         #[cfg(unix)]
         {
+            if command == c.command
+                && let Some(arg0) = &c.child_argv0
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.as_std_mut().arg0(arg0);
+            }
             cmd.process_group(0);
             #[cfg(target_os = "linux")]
             {

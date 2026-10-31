@@ -261,8 +261,11 @@ impl Proxy {
         self.event("stop", json!({"reason":reason}));
     }
     async fn fail(&mut self, reason: String) -> io::Result<()> {
-        if self.discovery && self.config.shim_identity.is_some() {
-            let _ = crate::shim::record_discovery(&self.config, crate::shim::Discovery::Failed);
+        if self.discovery && self.config.launch_identity.is_some() {
+            let _ = crate::discovery::record_discovery(
+                &self.config,
+                crate::discovery::Discovery::Failed,
+            );
             if let Some(id) = self.initialize_id.take() {
                 // No response has reached the client yet. Restart eagerly and
                 // replay its original initialize, then forward normal traffic.
@@ -409,6 +412,15 @@ impl Proxy {
             };
             self.key = cache::key(&self.config, &message["params"], &command, &bin, npx);
             let disk = cache::read(&self.config.data_dir, &self.key);
+            if disk
+                .as_ref()
+                .is_some_and(|e| cache::channel_capability(&e.initialize) == Some(true))
+            {
+                let _ = crate::discovery::record_discovery(
+                    &self.config,
+                    crate::discovery::Discovery::Channel,
+                );
+            }
             if disk.as_ref().is_some_and(|e| {
                 e.discovery_failed || cache::channel_capability(&e.initialize) != Some(false)
             }) {
@@ -562,7 +574,10 @@ impl Proxy {
             return self.capture(capture.entry.initialize);
         }
         let entry = capture.entry;
-        let _ = crate::shim::record_discovery(&self.config, crate::shim::Discovery::NonChannel);
+        let _ = crate::discovery::record_discovery(
+            &self.config,
+            crate::discovery::Discovery::NonChannel,
+        );
         self.save(&entry);
         self.event(
             "cache",
@@ -668,8 +683,10 @@ impl Proxy {
             };
             if channel {
                 self.stop_after_capture = false;
-                let _ =
-                    crate::shim::record_discovery(&self.config, crate::shim::Discovery::Channel);
+                let _ = crate::discovery::record_discovery(
+                    &self.config,
+                    crate::discovery::Discovery::Channel,
+                );
                 let entry =
                     Entry::new(self.key.clone(), self.config.server.clone(), result.clone());
                 self.save(&entry);

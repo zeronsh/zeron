@@ -16,7 +16,11 @@ pub struct Config {
     /// Shim-only PATH identity, with its per-run interception directory removed.
     pub identity_path: Option<String>,
     /// Launch identity shared across client-specific catalog cache entries.
-    pub shim_identity: Option<String>,
+    pub launch_identity: Option<String>,
+    /// Actual getcwd at proxy startup, even without an explicit --cwd.
+    pub runtime_cwd: PathBuf,
+    /// Literal argv0 of a launcher intercepted by the multicall entry.
+    pub child_argv0: Option<std::ffi::OsString>,
     pub plugin_root: Option<PathBuf>,
     pub cwd: Option<PathBuf>,
     pub run_dir: Option<PathBuf>,
@@ -49,7 +53,9 @@ impl Config {
             idle: Duration::from_secs(600),
             identity_env: Vec::new(),
             identity_path: None,
-            shim_identity: None,
+            launch_identity: None,
+            runtime_cwd: std::env::current_dir()?,
+            child_argv0: None,
             plugin_root: None,
             cwd: None,
             run_dir: None,
