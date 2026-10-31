@@ -199,12 +199,29 @@ fn codex_proxy_overrides(
             continue;
         };
         // Do not reconstruct incomplete or unrepresentable launch data.
-        if !row.get("args").and_then(Value::as_array).is_some_and(|a| a.iter().all(Value::is_string))
-            || row.get("env").is_some_and(|v| !v.is_null() && !v.as_object().is_some_and(|e| e.iter().all(|(k, v)| !k.is_empty() && !k.contains(',') && v.is_string())))
-            || row.get("env_vars").is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(|a| a.iter().all(|v| v.as_str().is_some_and(|k| !k.is_empty() && !k.contains(',')))))
-            // Missing cwd is not represented in the proxy cache key; a
-            // relative cwd cannot safely be applied a second time.
-            || !row.get("cwd").and_then(Value::as_str).is_some_and(|cwd| std::path::Path::new(cwd).is_absolute())
+        if !row
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().all(Value::is_string))
+            || row.get("env").is_some_and(|v| {
+                !v.is_null()
+                    && !v.as_object().is_some_and(|e| {
+                        e.iter()
+                            .all(|(k, v)| !k.is_empty() && !k.contains(',') && v.is_string())
+                    })
+            })
+            || row.get("env_vars").is_some_and(|v| {
+                !v.is_null()
+                    && !v.as_array().is_some_and(|a| {
+                        a.iter().all(|v| {
+                            v.as_str()
+                                .is_some_and(|k| !k.is_empty() && !k.contains(','))
+                        })
+                    })
+            })
+            || row
+                .get("cwd")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
         {
             continue;
         }
@@ -213,11 +230,8 @@ fn codex_proxy_overrides(
         if row.get("enabled").and_then(Value::as_bool) == Some(false) {
             continue;
         }
-        // A missing capability snapshot is unknown, not proof of non-channel.
-        // Probing here would itself start a potentially channel-owning server.
-        if !row.get("capabilities").and_then(Value::as_object).is_some() {
-            continue;
-        }
+        // The proxy discovers unknown channels and keeps them forwarding;
+        // known channel identities launch the real command directly.
         let Some(mode) = codex_server_mode(name, row, plan) else {
             continue;
         };
@@ -369,7 +383,12 @@ fn codex_proxy_args(
     }
     if let Some(cwd) = row.get("cwd").and_then(Value::as_str) {
         args.push("--cwd".to_owned());
-        args.push(cwd.to_owned());
+        // Codex already applied a relative cwd when it launched the proxy.
+        args.push(if std::path::Path::new(cwd).is_absolute() {
+            cwd.to_owned()
+        } else {
+            ".".to_owned()
+        });
     }
     args.push("--run-dir".to_owned());
     args.push(plan.run_dir.clone());
@@ -3827,15 +3846,21 @@ mod mcp_injection_tests {
     }
 
     #[test]
-    fn unknown_or_channel_capabilities_stay_eager() {
+    fn unknown_capabilities_and_unset_cwd_are_proxied_but_channels_are_not() {
         let servers = json!({
-            "unknown": {"command": "node"},
-            "channel": {"command": "node", "capabilities": {"experimental": {"vendor/channel": {}}}},
-            "ordinary": {"command": "node", "args": [], "cwd": "/work", "capabilities": {"tools": {}}}
+            "unknown": {"command": "node", "args": []},
+            "channel": {"command": "node", "args": [], "capabilities": {"experimental": {"vendor/channel": {}}}},
+            "relative": {"command": "node", "args": [], "cwd": "relative"},
+            "invalid-cwd": {"command": "node", "args": [], "cwd": 4}
         }).as_object().unwrap().clone();
         let overrides = override_map(&servers, &sample_plan());
-        assert_eq!(overrides.len(), 2);
-        assert!(overrides.contains_key("mcp_servers.ordinary.command"));
+        assert_eq!(overrides.len(), 4);
+        assert!(overrides.contains_key("mcp_servers.unknown.command"));
+        let unknown = arg_list(&overrides, "mcp_servers.unknown.args");
+        assert!(!unknown.iter().any(|arg| arg == "--cwd"));
+        let relative = arg_list(&overrides, "mcp_servers.relative.args");
+        let cwd = relative.iter().position(|arg| arg == "--cwd").unwrap();
+        assert_eq!(relative[cwd + 1], ".");
     }
 
     #[test]
