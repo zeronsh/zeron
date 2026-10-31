@@ -1691,7 +1691,7 @@ mod tests {
         let value = serde_json::to_value(&live).unwrap();
         assert!(value.get("runtime").is_none());
         assert_eq!(
-            serde_json::from_value::<Session>(value).unwrap().runtime,
+            serde_json::from_value::<Session>(value.clone()).unwrap().runtime,
             None
         );
         let mut injected = value;
