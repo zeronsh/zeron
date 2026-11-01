@@ -348,7 +348,7 @@ impl Repos {
 
     /// Async existence probe with a timeout: a wedged network mount just reads
     /// as "gone" instead of hanging every caller.
-    async fn path_exists(path: &Path) -> bool {
+    pub(crate) async fn path_exists(path: &Path) -> bool {
         let path = path.to_path_buf();
         matches!(
             tokio::time::timeout(PATH_EXISTS_TIMEOUT, tokio::fs::metadata(path)).await,

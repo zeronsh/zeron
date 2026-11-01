@@ -349,6 +349,15 @@ struct FileSearchParams {
     path: Option<String>,
 }
 
+/// `requested`'s canonical form when it names the same folder as `folder`.
+fn same_folder(
+    folder: &std::path::Path,
+    requested: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let requested = std::fs::canonicalize(requested).ok()?;
+    (std::fs::canonicalize(folder).ok()? == requested).then_some(requested)
+}
+
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
         ToolCall::ReadFile { path }
@@ -1350,8 +1359,21 @@ impl EngineRpc {
 
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
+    ///
+    /// Clients watch a chat's `sourceContext.repoRoot`, which the engine
+    /// captured from that chat's own checkout, so it is accepted like the
+    /// chat's cwd without asking git. That root is canonical (`\\?\C:\…` on
+    /// Windows) and never equals the cwd there, so before this every watch
+    /// ran `git worktree list` once per local space, and a chat outside every
+    /// space failed and was retried that way for as long as it stayed open.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
         let requested = std::path::PathBuf::from(cwd);
+        let unknown = || RpcError::BadParams("cwd is not a known checkout on this device".into());
+        // A removed worktree is still named by its chats; it has no checkout
+        // to resolve and no PR to watch.
+        if !crate::repos::Repos::path_exists(&requested).await {
+            return Err(unknown());
+        }
         let local_device = self.doc_host.device_id();
         let mut chats_rx = self.workspace.watch_chats();
         let mut spaces_rx = self.workspace.watch_spaces();
@@ -1360,7 +1382,10 @@ impl EngineRpc {
             let chats = chats_rx.borrow_and_update().clone();
             if chats.iter().any(|chat| {
                 chat.device_id == local_device
-                    && chat.cwd.as_deref().map(std::path::Path::new) == Some(requested.as_path())
+                    && (chat.cwd.as_deref().map(std::path::Path::new) == Some(requested.as_path())
+                        || chat.source_context.as_ref().is_some_and(|source| {
+                            std::path::Path::new(&source.repo_root) == requested.as_path()
+                        }))
             }) {
                 return Ok(requested);
             }
@@ -1370,10 +1395,17 @@ impl EngineRpc {
                 .iter()
                 .filter(|space| space.device_id == local_device)
             {
-                if let Some(checkout) = self
-                    .repos
-                    .workspace_checkout(std::path::Path::new(&space.path), &requested)
-                    .await
+                let space_path = std::path::Path::new(&space.path);
+                // A plain folder has no linked worktrees: only the folder
+                // itself can match, and `git worktree list` there walks every
+                // parent directory looking for a repository first.
+                if !space.git_detected {
+                    if let Some(folder) = same_folder(space_path, &requested) {
+                        return Ok(folder);
+                    }
+                    continue;
+                }
+                if let Some(checkout) = self.repos.workspace_checkout(space_path, &requested).await
                 {
                     return Ok(checkout);
                 }
@@ -1388,9 +1420,7 @@ impl EngineRpc {
                 _ = tokio::time::sleep_until(deadline) => break,
             }
         }
-        Err(RpcError::BadParams(
-            "cwd is not a known checkout on this device".into(),
-        ))
+        Err(unknown())
     }
 
     /// Most-recent-first paths the current chat actually touched, followed by

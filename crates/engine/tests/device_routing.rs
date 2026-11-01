@@ -516,6 +516,77 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
     core_b.shutdown().await;
 }
 
+/// Clients watch a chat's `sourceContext.repoRoot`. It is canonical, so it can
+/// differ from the chat's cwd (always on Windows, where it is `\\?\C:\…`). A
+/// chat outside every project must still resolve, without a space scan, and
+/// a root that is gone must be rejected rather than resolved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_change_request_accepts_a_local_chats_source_root() {
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let checkout = dirs.path().join("checkout");
+    init_git_repo(&checkout);
+    let app = checkout.join("app");
+    std::fs::create_dir_all(&app).expect("app folder");
+    let repo_root = std::fs::canonicalize(&checkout).expect("canonical checkout");
+
+    let mut core = assemble(&dirs.path().join("b"), "device-b");
+    core.change_requests = CheckoutChangeRequests::new(
+        core.repos.clone(),
+        "device-b",
+        change_request_lookup(&checkout),
+    );
+    core.workspace
+        .create_chat(
+            "chat-outside-projects",
+            None,
+            Some("device-b"),
+            None,
+            Some(app.to_string_lossy().into_owned()),
+        )
+        .expect("chat");
+    core.workspace
+        .set_chat_source_context(
+            "chat-outside-projects",
+            &zeron_proto::ConversationSourceContext {
+                checkout_id: "checkout".into(),
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                cwd: app.to_string_lossy().into_owned(),
+                branch: "feature/status".into(),
+                head_sha: None,
+                observed_at: chrono::Utc::now(),
+            },
+        )
+        .expect("source context");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let mut watch = client
+        .subscribe_checked(
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            serde_json::json!({ "cwd": repo_root }),
+        )
+        .await
+        .expect("a local chat's source root is a known checkout");
+    tokio::time::timeout(Duration::from_secs(5), watch.recv())
+        .await
+        .expect("frame before timeout")
+        .expect("initial frame");
+
+    std::fs::remove_dir_all(&checkout).expect("remove checkout");
+    let rejected = match client
+        .subscribe_checked(
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            serde_json::json!({ "cwd": repo_root }),
+        )
+        .await
+    {
+        Ok(_) => panic!("a removed checkout must be rejected"),
+        Err(error) => error,
+    };
+    assert!(rejected.to_string().contains("not a known checkout"));
+
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() {
     let (relay_url, _relay) = fake_device_room().await;
