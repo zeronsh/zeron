@@ -31,7 +31,8 @@
 //!   real multi-account auth in M6.
 //! - Agent accounts (§3.7): `ListAgentAccounts {forceUsage?}` →
 //!   `AgentAccountsSnapshot`, `ActivateAgentAccount`/`ForgetAgentAccount`
-//!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
+//!   `{harness, accountId}` → snapshot, `SetAgentAccountRotation {harness,
+//!   enabled}` → snapshot, `StartAgentLogin {harness}` →
 //!   `{loginId, url, mode}`, `CompleteAgentLogin {loginId, code}` → snapshot,
 //!   `PollAgentLogin {loginId}`, `CancelAgentLogin {loginId}`.
 //! - Uploads (§3.7): `UploadChunk {uploadId, data, seq?}`,
@@ -505,6 +506,13 @@ struct ListAgentAccountsParams {
 struct AgentAccountParams {
     harness: HarnessId,
     account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAccountRotationParams {
+    harness: HarnessId,
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1883,11 +1891,15 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
-            MutateParams::SetChatArchived { chat_id, archived } => self
-                .workspace
-                .set_chat_archived(&chat_id, archived)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatArchived { chat_id, archived } => {
+                if archived {
+                    self.agent_accounts.release_chat_routes(&chat_id);
+                }
+                self.workspace
+                    .set_chat_archived(&chat_id, archived)
+                    .map_err(failed)
+                    .map(drop)
+            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
@@ -1947,8 +1959,10 @@ impl EngineRpc {
                 self.voice.retire_chat(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
                 self.doc_host.purge_chat(&chat_id);
+                self.agent_accounts.release_chat_routes(&chat_id);
                 for child in &children {
                     self.voice.retire_chat(child);
+                    self.agent_accounts.release_chat_routes(child);
                     if let Err(err) = self.workspace.delete_chat(child) {
                         tracing::warn!(chat = %child, error = %err, "deleting a Cloud chat's child failed");
                     }
@@ -2221,6 +2235,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_AGENT_ACCOUNTS
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
+            | methods::SET_AGENT_ACCOUNT_ROTATION
             | methods::START_AGENT_LOGIN
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
@@ -4586,6 +4601,15 @@ impl RpcService for EngineRpc {
                 let snapshot = self
                     .agent_accounts
                     .forget(p.harness, &p.account_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&snapshot)
+            }
+            methods::SET_AGENT_ACCOUNT_ROTATION => {
+                let p: AgentAccountRotationParams = parse_params(params)?;
+                let snapshot = self
+                    .agent_accounts
+                    .set_rotation(p.harness, p.enabled)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)

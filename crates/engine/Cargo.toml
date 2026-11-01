@@ -13,6 +13,7 @@ zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-sync.workspace = true
 zeron-harness.workspace = true
+zeron-account-proxy.workspace = true
 semver = "1"
 zeron-rpc.workspace = true
 zeron-update.workspace = true

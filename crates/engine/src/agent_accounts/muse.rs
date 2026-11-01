@@ -38,6 +38,52 @@ const HOMES_DIR: &str = "muse-homes";
 /// The run-credential fingerprint of Muse's own login (no zeron account).
 pub(crate) const OWN_LOGIN: &str = "muse-own-login";
 
+/// Link every entry of `from` into `into` except those `skip` names: stale
+/// links (an entry since removed) are pruned, and real entries in `into` (an
+/// account's own file, anything the CLI wrote in place of a link) are left
+/// alone. Shared by account rotation's per-account homes.
+#[cfg(unix)]
+pub(super) fn link_entries(
+    from: &Path,
+    into: &Path,
+    skip: impl Fn(&str) -> bool,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(into)?;
+    let wanted: std::collections::HashSet<std::ffi::OsString> = match std::fs::read_dir(from) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| !skip(&name.to_string_lossy()))
+            .collect(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(err) => return Err(err),
+    };
+    for entry in std::fs::read_dir(into)?.flatten() {
+        let name = entry.file_name();
+        let is_link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+        if is_link && !wanted.contains(&name) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    for name in wanted {
+        let link = into.join(&name);
+        let target = from.join(&name);
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
+                    continue;
+                }
+                std::fs::remove_file(&link)?;
+            }
+            // A real entry the CLI wrote here: the account's own now.
+            Ok(_) => continue,
+            Err(_) => {}
+        }
+        std::os::unix::fs::symlink(&target, &link)?;
+    }
+    Ok(())
+}
+
 /// Make `root` mirror `real` (see module docs): links to every entry of
 /// `real` except `muse`, and `root/muse/` linking every entry of `real/muse`
 /// except `auth.json`. Stale links (an entry since removed) are pruned; real
@@ -45,42 +91,6 @@ pub(crate) const OWN_LOGIN: &str = "muse-own-login";
 /// of a link) are left alone.
 #[cfg(unix)]
 fn mirror_config(real: &Path, root: &Path) -> std::io::Result<()> {
-    fn link_entries(from: &Path, into: &Path, skip: impl Fn(&str) -> bool) -> std::io::Result<()> {
-        std::fs::create_dir_all(into)?;
-        let wanted: std::collections::HashSet<std::ffi::OsString> = match std::fs::read_dir(from) {
-            Ok(entries) => entries
-                .flatten()
-                .map(|entry| entry.file_name())
-                .filter(|name| !skip(&name.to_string_lossy()))
-                .collect(),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(err) => return Err(err),
-        };
-        for entry in std::fs::read_dir(into)?.flatten() {
-            let name = entry.file_name();
-            let is_link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
-            if is_link && !wanted.contains(&name) {
-                std::fs::remove_file(entry.path())?;
-            }
-        }
-        for name in wanted {
-            let link = into.join(&name);
-            let target = from.join(&name);
-            match std::fs::symlink_metadata(&link) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
-                        continue;
-                    }
-                    std::fs::remove_file(&link)?;
-                }
-                // A real entry Muse wrote here: the account's own now.
-                Ok(_) => continue,
-                Err(_) => {}
-            }
-            std::os::unix::fs::symlink(&target, &link)?;
-        }
-        Ok(())
-    }
     link_entries(real, root, |name| name == "muse")?;
     let muse = root.join("muse");
     if std::fs::symlink_metadata(&muse).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -391,6 +401,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
     async fn prepare(
         &self,
         harness: HarnessId,
+        _chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
         if harness != HarnessId::Muse {
@@ -404,7 +415,7 @@ impl crate::registry::RunEnvironment for MuseRunEnvironment {
         Ok(())
     }
 
-    async fn credential(&self, harness: HarnessId) -> Option<String> {
+    async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         (harness == HarnessId::Muse)
             .then(|| {
                 self.0
@@ -606,7 +617,7 @@ for line in sys.stdin:
 
         // None kept yet: Muse runs on its own login.
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
 
@@ -657,14 +668,16 @@ for line in sys.stdin:
 
         // A run gets the selected account's root; switching changes it.
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request)
+            .await
+            .unwrap();
         let root_a = request.env["XDG_CONFIG_HOME"].clone();
         assert_eq!(request.env["TBH_CREDENTIAL_BACKEND"], "file");
         assert_eq!(
             std::fs::read_to_string(Path::new(&root_a).join("muse/auth.json")).unwrap(),
             r#"{"email": "a@example.com"}"#
         );
-        let before = env.credential(HarnessId::Muse).await;
+        let before = env.credential(HarnessId::Muse, None).await;
         let listed = rows(
             accounts
                 .activate(HarnessId::Muse, &listed[1].2)
@@ -672,13 +685,15 @@ for line in sys.stdin:
                 .unwrap(),
         );
         assert!(listed[1].1 && !listed[0].1);
-        assert_ne!(env.credential(HarnessId::Muse).await, before);
+        assert_ne!(env.credential(HarnessId::Muse, None).await, before);
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, &mut request).await.unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request)
+            .await
+            .unwrap();
         assert_ne!(request.env["XDG_CONFIG_HOME"], root_a);
         // Other agents are untouched; the user's own login never moved.
         let mut other = run_request();
-        env.prepare(HarnessId::ClaudeCode, &mut other)
+        env.prepare(HarnessId::ClaudeCode, None, &mut other)
             .await
             .unwrap();
         assert!(other.env.is_empty());
@@ -697,7 +712,7 @@ for line in sys.stdin:
         assert_eq!(listed.len(), 1);
         assert_eq!(std::fs::read_to_string(fake.join("logouts")).unwrap(), "1");
         assert_eq!(
-            env.credential(HarnessId::Muse).await.as_deref(),
+            env.credential(HarnessId::Muse, None).await.as_deref(),
             Some(OWN_LOGIN)
         );
     }

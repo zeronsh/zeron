@@ -911,7 +911,8 @@ impl Server {
         crate::compose_child_path(&mut cmd, exe);
         crate::apply_run_env(&mut cmd, run_env);
         let restricted = !access.is_full_access();
-        if mcp.is_some() || restricted {
+        let proxy = crate::account_proxy::opencode_openai_base_url(run_env);
+        if mcp.is_some() || restricted || proxy.is_some() {
             // The config shape differs by generation. If even the cold probe
             // can't tell, run without the Zeron MCP server rather than fail,
             // but never without the rules a restricted mode relies on: the
@@ -932,6 +933,12 @@ impl Server {
                             access_config(inline.as_deref(), access, protocol).map_err(fatal)?,
                         );
                     }
+                    if let Some(base) = &proxy {
+                        inline = Some(
+                            account_proxy_config(inline.as_deref(), base, protocol)
+                                .map_err(fatal)?,
+                        );
+                    }
                     if let Some(inline) = inline {
                         cmd.env("OPENCODE_CONFIG_CONTENT", inline);
                     }
@@ -945,7 +952,8 @@ impl Server {
                 }
                 None => tracing::warn!(
                     binary_path = %exe.display(),
-                    "opencode version unknown; starting without the Zeron MCP server"
+                    "opencode version unknown; starting without the Zeron MCP server \
+                     or account rotation"
                 ),
             }
         }
@@ -5705,6 +5713,49 @@ async fn opencode_version(exe: &std::path::Path) -> Option<semver::Version> {
 }
 
 /// The inherited inline config (none is an empty one), to add ours to.
+/// Points OpenCode's ChatGPT provider (`openai`) at a rotating chat's
+/// account-proxy route ([`crate::account_proxy`]); the login stays OpenCode's
+/// own, swapped per request by the proxy. 2.x: `providers.openai.settings`,
+/// with HTTP transport (no WebSocket, so every turn can fail over) and zstd
+/// bodies set explicitly (a custom `baseURL` turns OpenCode's own zstd off,
+/// and the backend refuses large uncompressed bodies). 1.x: the AI SDK's
+/// `provider.openai.options.baseURL`.
+fn account_proxy_config(
+    inherited: Option<&str>,
+    base: &str,
+    protocol: Protocol,
+) -> Result<String, HarnessError> {
+    let mut config = inline_config(inherited)?;
+    let shape = || {
+        HarnessError::Protocol("OPENCODE_CONFIG_CONTENT provider config must be an object".into())
+    };
+    let (root, settings) = match protocol {
+        Protocol::V2 => ("providers", "settings"),
+        Protocol::V1 => ("provider", "options"),
+    };
+    let openai = config
+        .as_object_mut()
+        .expect("inline config is an object")
+        .entry(root)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(shape)?
+        .entry("openai")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(shape)?
+        .entry(settings)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(shape)?;
+    openai.insert("baseURL".into(), json!(base));
+    if protocol == Protocol::V2 {
+        openai.insert("transport".into(), json!("http"));
+        openai.insert("encoding".into(), json!("zstd"));
+    }
+    Ok(config.to_string())
+}
+
 fn inline_config(inherited: Option<&str>) -> Result<Value, HarnessError> {
     let config: Value = match inherited.filter(|s| !s.trim().is_empty()) {
         Some(raw) => deser_hjson::from_str(raw).map_err(|_| {
@@ -5786,7 +5837,16 @@ const ASKED_PERMISSIONS: [&str; 3] = ["bash", "webfetch", "websearch"];
 /// live on 1.19.4): looking around, the agent's own todo list and
 /// questions, and subagents, whose tools answer to the same rules.
 const UNASKED_PERMISSIONS: [&str; 10] = [
-    "read", "glob", "grep", "list", "lsp", "todoread", "todowrite", "question", "task", "skill",
+    "read",
+    "glob",
+    "grep",
+    "list",
+    "lsp",
+    "todoread",
+    "todowrite",
+    "question",
+    "task",
+    "skill",
 ];
 
 /// Where the `plan` agent writes its plan: `.opencode/plans/` in a

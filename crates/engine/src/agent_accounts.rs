@@ -73,6 +73,10 @@
 //! (shown instead of "Usage unavailable"), and backs off — honouring
 //! `Retry-After` — before that account is probed again. Only 401/403 counts
 //! as a rejected token (and only then is a saved Claude slot refreshed).
+//!
+//! Account rotation ([`rotation`], off by default) spreads new chats across
+//! a harness's saved logins without ever swapping the live one: each rotated
+//! chat's process gets its account in its own environment.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -108,7 +112,13 @@ mod muse;
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
+mod proxy;
 pub use muse::MuseRunEnvironment;
+mod rotation;
+pub use rotation::{
+    AccountsRunEnvironment, Lease, RotationMechanism, default_rotation_mechanism,
+    rotation_supported,
+};
 mod stores;
 mod usage;
 
@@ -298,6 +308,10 @@ impl AgentAccountsConfig {
 
     fn usage_cache_file(&self) -> PathBuf {
         self.root_dir().join("usage-cache.json")
+    }
+
+    fn rotation_file(&self) -> PathBuf {
+        self.root_dir().join("rotation.json")
     }
 }
 
@@ -778,7 +792,17 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// Account rotation's settings and chat assignments; mirrored to disk.
+    rotation: Mutex<rotation::RotationState>,
+    /// The account proxy rotating chats talk through, and their routes.
+    proxy: proxy::ProxyState,
+    /// The chats with a turn in flight, as the sessions engine sees them
+    /// ([`AgentAccounts::set_running_chats`]); unset: none known.
+    running_chats: Mutex<Option<RunningChats>>,
 }
+
+/// Reports the chats with a turn in flight (see [`Inner::running_chats`]).
+pub type RunningChats = Arc<dyn Fn() -> std::collections::HashSet<String> + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -855,6 +879,7 @@ impl AgentAccounts {
             .and_then(|raw| serde_json::from_str::<UsageCacheFile>(&raw).ok())
             .map(|file| file.entries)
             .unwrap_or_default();
+        let rotation = rotation::RotationState::load(&config.rotation_file());
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -869,8 +894,23 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                rotation: Mutex::new(rotation),
+                proxy: Default::default(),
+                running_chats: Mutex::new(None),
             }),
         }
+    }
+
+    /// Where the rotation view learns which chats are running now (the
+    /// sessions engine's live turns), so an account's chat count can mean
+    /// running chats rather than recently used ones.
+    pub fn set_running_chats(&self, probe: RunningChats) {
+        *lock(&self.inner.running_chats) = Some(probe);
+    }
+
+    fn running_chats(&self) -> std::collections::HashSet<String> {
+        let probe = lock(&self.inner.running_chats).clone();
+        probe.map(|probe| probe()).unwrap_or_default()
     }
 
     /// Test seam: run `harness`'s sign-in with the CLI at `path` instead of
@@ -946,6 +986,8 @@ impl AgentAccounts {
             live(HarnessId::Codex, &detected);
             self.snapshot_detected(HarnessId::Codex, &detected)?;
         }
+        // Logins Codex refreshed in rotated chats' homes.
+        self.retire_rotation_homes();
         if let Some(detected) = self.detect_cursor() {
             live(HarnessId::Cursor, &detected);
             self.snapshot_detected(HarnessId::Cursor, &detected)?;
@@ -1104,7 +1146,21 @@ impl AgentAccounts {
         if let Some(login) = antigravity {
             accounts.push(login.account());
         }
-        Ok(AgentAccountsSnapshot { accounts, warnings })
+        let mut rotating: Vec<HarnessId> = Vec::new();
+        for harness in HarnessId::ALL {
+            if self.rotation_mechanism(harness) != RotationMechanism::None
+                || rotation_supported(harness)
+                || accounts.iter().any(|a| a.harness == harness)
+            {
+                rotating.push(harness);
+            }
+        }
+        let rotation = self.rotation_view(&rotating);
+        Ok(AgentAccountsSnapshot {
+            accounts,
+            warnings,
+            rotation,
+        })
     }
 
     // ── swap ────────────────────────────────────────────────────────────────
@@ -1511,6 +1567,7 @@ impl AgentAccounts {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
+        self.forget_rotation(harness, account_id);
         self.list_locked(false).await
     }
 

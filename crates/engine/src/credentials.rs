@@ -1036,11 +1036,16 @@ fn classify_grant_failure(status: u16, body: &EdgeErrorBody) -> GrantOutcome {
 
 #[async_trait::async_trait]
 impl crate::registry::RunEnvironment for CredentialBroker {
-    async fn prepare(&self, harness: HarnessId, request: &mut RunRequest) -> Result<(), String> {
+    async fn prepare(
+        &self,
+        harness: HarnessId,
+        _chat_id: Option<&str>,
+        request: &mut RunRequest,
+    ) -> Result<(), String> {
         CredentialBroker::prepare(self, harness, request).await
     }
 
-    async fn credential(&self, harness: HarnessId) -> Option<String> {
+    async fn credential(&self, harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         CredentialBroker::credential(self, harness).await
     }
 }

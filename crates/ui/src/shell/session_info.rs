@@ -488,6 +488,18 @@ impl Shell {
                 .map(|branch| SharedString::from(branch.to_owned()));
             (chat, device, glyph, presence, project, branch)
         };
+        // The account rotation started this chat on, from the accounts list
+        // its device last sent (the composer's usage ring keeps it fresh).
+        let rotated_account = {
+            let key = {
+                let state = self.state.read(cx);
+                (state.local_device_id.as_deref() != Some(chat.device_id.as_str()))
+                    .then(|| chat.device_id.clone())
+            };
+            cx.try_global::<crate::settings::accounts::AccountsSnapshotCache>()
+                .and_then(|cache| cache.0.get(&key))
+                .and_then(|snapshot| crate::account_rotation::chat_account(snapshot, &chat.id))
+        };
 
         // ── Where it runs.
         let device_row = info_row(&theme, row_glyph(glyph, &theme), device)
@@ -507,6 +519,31 @@ impl Shell {
                         "Asleep — wakes when you send",
                     ))
             });
+        // ── Which account it runs on, when rotation picked it.
+        // A limit that moved it on shows as a quiet "moved" beside it.
+        let account_row = rotated_account.map(|account| {
+            // The account's own agent: rotation only pins a chat to an
+            // account of the agent it runs.
+            let (mark, _) = crate::pickers::harness_brand_icon(account.harness);
+            let moved = account.moved_from.is_some();
+            info_row(
+                &theme,
+                row_glyph(mark, &theme),
+                SharedString::from(account.label.clone()),
+            )
+            .id("session-info-account")
+            .debug_selector(|| "session-info-account".into())
+            .tooltip(crate::settings::widgets::text_tooltip(account.tooltip()))
+            .when(moved, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("moved")),
+                )
+            })
+        });
         let project_row = match project {
             Some((name, path)) => info_row(
                 &theme,
@@ -578,6 +615,7 @@ impl Shell {
             .flex_col()
             .gap(px(popover::MENU_GAP))
             .child(device_row)
+            .children(account_row)
             .child(project_row)
             .children(branch_row)
             .children(actions);
