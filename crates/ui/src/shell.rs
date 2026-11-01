@@ -12981,6 +12981,7 @@ impl Shell {
             );
         if plus_open {
             let closing = self.right_plus.closing_since();
+            let has_chat = self.state.read(cx).selected_chat_row().is_some();
             let menu = popover::popover_card(&theme)
                 .w(px(168.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
@@ -12989,6 +12990,23 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
+                        // A fresh side chat under the active conversation.
+                        .when(has_chat, |menu| {
+                            menu.child(
+                                popover::menu_row(&theme, false, "right-plus-side-chat")
+                                    .id("right-plus-side-chat-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.create_child_chat(None, cx);
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::CHAT_ROUND_LINE)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(SharedString::from("Side chat")),
+                            )
+                        })
                         .child(
                             popover::menu_row(&theme, false, "right-plus-files")
                                 .id("right-plus-files-row")
