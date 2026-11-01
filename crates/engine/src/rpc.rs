@@ -1601,7 +1601,22 @@ impl EngineRpc {
                 });
                 return Ok(RpcReply::Stream(stream.boxed()));
             }
-            let rx = match client.subscribe_scoped(method, params).await {
+            if !matches!(method, methods::WATCH_DOC_MESSAGES | methods::WATCH_QUEUE) {
+                let rx = match client.subscribe_scoped(method, params).await {
+                    Ok(rx) => rx,
+                    Err(err) => {
+                        if should_invalidate_link(&err) {
+                            links.invalidate(target);
+                        }
+                        return Err(err);
+                    }
+                };
+                let stream = futures::stream::unfold((rx, client), |(mut rx, client)| async move {
+                    rx.recv().await.map(|item| (item, (rx, client)))
+                });
+                return Ok(RpcReply::Stream(stream.boxed()));
+            }
+            let rx = match client.subscribe_scoped_raw(method, params).await {
                 Ok(rx) => rx,
                 Err(err) => {
                     if should_invalidate_link(&err) {
@@ -1610,13 +1625,15 @@ impl EngineRpc {
                     return Err(err);
                 }
             };
-            // Pipe remote items; the held client keeps the link's RpcClient alive for
-            // the stream's lifetime. A remote error just ends the stream (the relay
-            // link-down path fails pending calls; stream receivers close).
+            // Pipe remote items as the bytes they arrived in (a transcript
+            // update is not re-encoded per hop); the held client keeps the
+            // link's RpcClient alive for the stream's lifetime. A remote error
+            // just ends the stream (the relay link-down path fails pending
+            // calls; stream receivers close).
             let stream = futures::stream::unfold((rx, client), |(mut rx, client)| async move {
                 rx.recv().await.map(|item| (item, (rx, client)))
             });
-            return Ok(RpcReply::Stream(stream.boxed()));
+            return Ok(RpcReply::RawStream(stream.boxed()));
         }
         let deadline = forward_deadline(method);
         match tokio::time::timeout(deadline, client.call(method, params)).await {
@@ -2284,11 +2301,15 @@ where
 /// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
+///
+/// Items are serialized straight to bytes (`RpcReply::RawStream`): the frame
+/// writer splices them in, so a transcript update is encoded once instead of
+/// through a `Value` tree and again as text.
 fn doc_messages_stream(
     rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<zeron_doc::SessionDoc>,
-) -> BoxStream<'static, serde_json::Value> {
-    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+) -> BoxStream<'static, Box<serde_json::value::RawValue>> {
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript_shared};
     futures::stream::unfold(
         (
             rx,
@@ -2306,12 +2327,13 @@ fn doc_messages_stream(
                 // connection used to deep-copy the entire transcript here.
                 let current = rx.borrow_and_update().clone();
                 let frame = match prev.as_ref() {
-                    None => TranscriptFrame::reset(&current.entries),
-                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
+                    None => TranscriptFrame::reset_shared(&current.entries),
+                    Some(prev) => diff_transcript_shared(&prev.entries, &current.entries),
                 };
                 let replay_baseline = match prev.as_ref() {
                     None => {
-                        opening_baseline = zeron_doc::TranscriptBaseline::capture(&current.entries);
+                        opening_baseline =
+                            zeron_doc::TranscriptBaseline::capture_shared(&current.entries);
                         Some(opening_baseline.clone())
                     }
                     Some(prev)
@@ -2345,7 +2367,7 @@ fn doc_messages_stream(
                     continue;
                 }
                 previous_usage = usage;
-                let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                let value = serde_json::value::to_raw_value(&zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
                     replay_baseline,
@@ -2358,22 +2380,33 @@ fn doc_messages_stream(
     .boxed()
 }
 
+/// The first paint: an ordinary update marked as a tail, not the history.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpeningPreview {
+    #[serde(flatten)]
+    update: zeron_doc::TranscriptUpdate,
+    history_pending: bool,
+}
+
 /// First paint reads only the local tail; full history is deferred until the
 /// next stream poll. No network dependency or persisted truncation.
 async fn opening_doc_messages_stream(
     host: crate::doc_host::DocHost,
     chat_id: String,
-) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+) -> Result<BoxStream<'static, Box<serde_json::value::RawValue>>, RpcError> {
     let (handle, preview) = tokio::task::spawn_blocking(move || {
         let handle = host.open(&chat_id)?;
         let entries = handle.doc().read_opening_tail(128)?;
-        let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
-            frame: zeron_doc::TranscriptFrame::reset(&entries),
-            context_usage: handle.doc().context_usage(),
-            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+        let preview = serde_json::value::to_raw_value(&OpeningPreview {
+            update: zeron_doc::TranscriptUpdate {
+                frame: zeron_doc::TranscriptFrame::reset(&entries),
+                context_usage: handle.doc().context_usage(),
+                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+            },
+            history_pending: true,
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
-        preview["historyPending"] = serde_json::Value::Bool(true);
         Ok::<_, crate::EngineError>((handle, preview))
     })
     .await
@@ -2508,7 +2541,9 @@ impl crate::remote_terminals::Relay for EngineRpc {
     ) -> Result<serde_json::Value, RpcError> {
         match self.forward(target, method, params).await? {
             RpcReply::Value(value) => Ok(value),
-            RpcReply::Stream(_) => Err(RpcError::Failed(format!("{method} replied with a stream"))),
+            RpcReply::Stream(_) | RpcReply::RawStream(_) => {
+                Err(RpcError::Failed(format!("{method} replied with a stream")))
+            }
         }
     }
     async fn subscribe(
@@ -2517,16 +2552,19 @@ impl crate::remote_terminals::Relay for EngineRpc {
         method: &str,
         params: serde_json::Value,
     ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
-        match self.forward(target, method, params).await? {
-            RpcReply::Stream(stream) => Ok(stream),
-            RpcReply::Value(_) => Err(RpcError::Failed(format!("{method} replied with a value"))),
-        }
+        self.forward(target, method, params)
+            .await?
+            .into_value_stream()
+            .map_err(|_| RpcError::Failed(format!("{method} replied with a value")))
     }
 }
 
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::ENGINE_COUNTERS && params.get("targetDeviceId").is_some() {
+            return Err(RpcError::Failed("EngineCounters is IPC-only".into()));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
@@ -2610,6 +2648,15 @@ impl RpcService for EngineRpc {
             .await;
         }
         match method {
+            methods::ENGINE_COUNTERS => {
+                let metrics = tokio::runtime::Handle::current().metrics();
+                RpcReply::value(&serde_json::json!({
+                    "counters": zeron_counters::snapshot().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+                    "malloc": tokio::task::spawn_blocking(crate::counter_metrics::malloc).await.ok().flatten(),
+                    "docHost": self.doc_host.sync_resources(),
+                    "tokio": { "workers": metrics.num_workers(), "alive_tasks": metrics.num_alive_tasks() },
+                }))
+            }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::LIST_CLOUD_BRANCHES => Box::pin(self.cloud_branches(params)).await,
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
@@ -2966,7 +3013,7 @@ impl RpcService for EngineRpc {
                         .map_err(|e| RpcError::Failed(e.to_string()))?;
                     doc_messages_stream(handle.watch_messages(), handle.doc_arc())
                 };
-                Ok(RpcReply::Stream(
+                Ok(RpcReply::RawStream(
                     stream
                         .map(move |frame| {
                             let _held = &interest;
@@ -2982,13 +3029,17 @@ impl RpcService for EngineRpc {
                     .open(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
-                Ok(RpcReply::Stream(
+                #[derive(serde::Serialize)]
+                struct QueueFrame<T> {
+                    items: T,
+                }
+                Ok(RpcReply::RawStream(
                     futures::stream::unfold((rx, true), |(mut rx, first)| async move {
                         if !first {
                             rx.changed().await.ok()?;
                         }
                         let items = rx.borrow_and_update().clone();
-                        let value = serde_json::json!({ "items": items });
+                        let value = serde_json::value::to_raw_value(&QueueFrame { items }).ok()?;
                         Some((value, (rx, false)))
                     })
                     .boxed(),
@@ -4822,8 +4873,23 @@ impl RpcService for EngineRpc {
 }
 
 #[cfg(test)]
+#[path = "rpc_counter_tests.rs"]
+mod counter_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production stream carries serialized bytes; these tests read values.
+    async fn opening_doc_messages_stream(
+        host: crate::doc_host::DocHost,
+        chat_id: String,
+    ) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+        Ok(super::opening_doc_messages_stream(host, chat_id)
+            .await?
+            .map(|raw| serde_json::from_str(raw.get()).unwrap())
+            .boxed())
+    }
 
     #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
@@ -5607,6 +5673,16 @@ mod context_usage_tests {
     use futures::StreamExt;
     use std::sync::Arc;
 
+    /// The production stream carries serialized bytes; these tests read values.
+    fn doc_messages_stream(
+        rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
+        doc: Arc<zeron_doc::SessionDoc>,
+    ) -> BoxStream<'static, serde_json::Value> {
+        super::doc_messages_stream(rx, doc)
+            .map(|raw| serde_json::from_str(raw.get()).unwrap())
+            .boxed()
+    }
+
     #[tokio::test]
     async fn replay_cutoff_travels_with_coalesced_backfill_and_live_content() {
         use crate::doc_host::{DocHost, DocHostConfig};
@@ -5951,6 +6027,141 @@ mod context_usage_tests {
             "live plus recovered".len()
         );
         host.shutdown_workers().await;
+    }
+
+    /// A service whose only method streams a doc's transcript as raw bytes.
+    struct RawTranscript(
+        watch::Receiver<crate::doc_host::TranscriptSnapshot>,
+        Arc<zeron_doc::SessionDoc>,
+    );
+
+    #[async_trait]
+    impl RpcService for RawTranscript {
+        async fn handle(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            Ok(RpcReply::RawStream(super::doc_messages_stream(
+                self.0.clone(),
+                self.1.clone(),
+            )))
+        }
+    }
+
+    fn entry(id: &str, role: zeron_doc::MessageRole, text: &str) -> zeron_doc::SharedEntry {
+        Arc::new(zeron_doc::SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![
+                zeron_doc::MessagePart::Reasoning {
+                    id: format!("{id}-r"),
+                    text: "thinking \"hard\"\nabout it".into(),
+                },
+                zeron_doc::MessagePart::Text {
+                    id: format!("{id}-t"),
+                    text: text.into(),
+                },
+            ],
+            created_at: 1_700_000_000_000,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: Some(12),
+        })
+    }
+
+    /// The transcript watch used to be `to_value` + `to_string`; the bytes now
+    /// come straight from the typed update. Same JSON on the wire, read by an
+    /// old (`Value`) client, a new (raw) client, and the frame-level old reader.
+    #[tokio::test]
+    async fn raw_transcript_frames_decode_like_the_value_encoding() {
+        let doc = Arc::new(zeron_doc::SessionDoc::init("raw-chat").unwrap());
+        doc.update_context_usage(Some(42000), Some(200000)).unwrap();
+        let entries = vec![
+            entry("u1", zeron_doc::MessageRole::User, "hello"),
+            entry("a1", zeron_doc::MessageRole::Assistant, "caf\u{e9} \u{1F600}"),
+        ];
+        let snapshot = crate::doc_host::TranscriptSnapshot {
+            entries: Arc::new(entries.clone()),
+            ..Default::default()
+        };
+        let (tx, rx) = watch::channel(snapshot);
+        let baseline = zeron_doc::TranscriptBaseline::capture_shared(&entries);
+        // The old engine's item: the typed update through a `Value` tree.
+        let oracle = serde_json::to_value(zeron_doc::TranscriptUpdate {
+            frame: zeron_doc::transcript_delta::TranscriptFrame::reset_shared(&entries),
+            context_usage: doc.context_usage(),
+            replay_baseline: Some(baseline),
+        })
+        .unwrap();
+
+        // Frame level: what a pre-raw client's `ServerFrame` reader sees.
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<String>(8);
+        tokio::spawn(zeron_rpc::serve_connection(
+            Arc::new(RawTranscript(rx.clone(), doc.clone())),
+            out_tx,
+            in_rx,
+        ));
+        in_tx
+            .send(r#"{"id":3,"method":"WatchDocMessages"}"#.into())
+            .await
+            .unwrap();
+        let line = out_rx.recv().await.unwrap();
+        assert!(!line.contains('\n'));
+        let frame: zeron_rpc::ServerFrame = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame.id, 3);
+        assert_eq!(frame.item.as_ref(), Some(&oracle));
+        // Typed decode straight from the frame text, as the viewport does.
+        let item_text = line
+            .strip_prefix(r#"{"id":3,"item":"#)
+            .and_then(|rest| rest.strip_suffix('}'))
+            .unwrap();
+        let typed: zeron_doc::TranscriptUpdate = serde_json::from_str(item_text).unwrap();
+        assert_eq!(serde_json::to_value(&typed).unwrap(), oracle);
+
+        // Client level: an old subscription and a raw one on the same service.
+        let client = zeron_rpc::memory_client(Arc::new(RawTranscript(rx, doc)));
+        let mut old = client
+            .subscribe("WatchDocMessages", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(old.recv().await.unwrap(), oracle);
+        let mut new = client
+            .subscribe_checked_raw("WatchDocMessages", serde_json::Value::Null)
+            .await
+            .unwrap();
+        let raw = new.recv().await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(raw.get()).unwrap(),
+            oracle
+        );
+        drop(tx);
+    }
+
+    /// `historyPending` rides beside the update's own fields, as it did when it
+    /// was patched into the value tree.
+    #[test]
+    fn opening_preview_is_the_update_plus_history_pending() {
+        let entries = vec![(*entry("u1", zeron_doc::MessageRole::User, "hi")).clone()];
+        let update = || zeron_doc::TranscriptUpdate {
+            frame: zeron_doc::TranscriptFrame::reset(&entries),
+            context_usage: None,
+            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+        };
+        let mut oracle = serde_json::to_value(update()).unwrap();
+        oracle["historyPending"] = serde_json::Value::Bool(true);
+        let raw = serde_json::value::to_raw_value(&OpeningPreview {
+            update: update(),
+            history_pending: true,
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(raw.get()).unwrap(),
+            oracle
+        );
+        assert!(raw.get().ends_with(r#","historyPending":true}"#), "{}", raw.get());
     }
 
     #[tokio::test]

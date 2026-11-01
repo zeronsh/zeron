@@ -6,13 +6,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+zeron-counters.workspace = true
 zeron-proto.workspace = true
 zeron-sync.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `raw_value`: stream items travel as pre-serialized bytes (`RpcReply::RawStream`).
+# serde_json 1.0.151 also treats an object's first key named
+# `$serde_json::private::RawValue` as an internal marker when decoding Value.
+# This feature therefore changes arbitrary JSON decoding in standalone users.
+serde_json = { workspace = true, features = ["raw_value"] }
 anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

@@ -546,7 +546,11 @@ impl SessionDoc {
 
     /// [`push_message`](Self::push_message), but inserted before the last
     /// `from_end` entries of the messages list (clamped to its start).
-    pub fn insert_message_before_last(&self, from_end: usize, entry: &SessionMessageEntry) -> Result<(), DocError> {
+    pub fn insert_message_before_last(
+        &self,
+        from_end: usize,
+        entry: &SessionMessageEntry,
+    ) -> Result<(), DocError> {
         let messages = self.doc.get_list("messages");
         let at = messages.len().saturating_sub(from_end);
         let map = messages.insert_container(at, LoroMap::new())?;
@@ -567,6 +571,7 @@ impl SessionDoc {
     /// whole transcript — one bad entry took down every publish for the chat
     /// (2026-07-31, "missing field `id`" during a multi-update import).
     pub fn read_entries(&self) -> Result<Vec<SessionMessageEntry>, DocError> {
+        zeron_counters::add(zeron_counters::C::DocReadEntriesCalls, 1);
         // Materialize only the messages container — a whole-doc deep value
         // here also serialized the commands ledger on every 120ms commit tick.
         let messages = self
@@ -574,10 +579,11 @@ impl SessionDoc {
             .get_list("messages")
             .get_deep_value()
             .to_json_value();
-        let raw: Vec<serde_json::Value> = serde_json::from_value(messages)?;
+        let raw = json_array(messages)?;
+        zeron_counters::add(zeron_counters::C::DocReadEntriesEntries, raw.len() as u64);
         Ok(raw
-            .into_iter()
-            .filter_map(|v| match entry_from_json(v) {
+            .iter()
+            .filter_map(|v| match decode_entry_value(v) {
                 Ok(entry) => Some(entry),
                 Err(err) => {
                     tracing::warn!(
@@ -589,6 +595,28 @@ impl SessionDoc {
                 }
             })
             .collect())
+    }
+
+    /// Whether an assistant entry among the last [`TAIL_MESSAGE_COUNT`] raw
+    /// entries is still `streaming`. Reads only each entry's scalar fields, and
+    /// only a bounded suffix: a live turn is always at the tail, and a stale
+    /// `streaming` row deep in a whale's history must neither cost a full scan
+    /// on every wake nor throttle the sidecar forever.
+    pub fn has_streaming_assistant(&self) -> bool {
+        use loro::{Container, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        let len = messages.len();
+        (len.saturating_sub(TAIL_MESSAGE_COUNT)..len)
+            .rev()
+            .any(|index| {
+                let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index)
+                else {
+                    return false;
+                };
+                let entry = map.get_value().to_json_value();
+                entry.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                    && entry.get("status").and_then(|v| v.as_str()) == Some("streaming")
+            })
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -624,7 +652,7 @@ impl SessionDoc {
                 remaining -= 1;
             }
             value["parts"] = serde_json::Value::Array(tail);
-            if let Ok(entry) = entry_from_json(value) {
+            if let Ok(entry) = decode_entry_value(&value) {
                 entries.push(entry);
             }
         }
@@ -652,7 +680,7 @@ impl SessionDoc {
             .get_list("commands")
             .get_deep_value()
             .to_json_value();
-        let raw: Vec<serde_json::Value> = serde_json::from_value(commands)?;
+        let raw = json_array(commands)?;
         Ok(raw
             .into_iter()
             .filter_map(|v| match serde_json::from_value(v) {
@@ -944,9 +972,14 @@ impl SessionDoc {
 
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
-        self.doc
+        zeron_counters::add(zeron_counters::C::SnapshotExports, 1);
+        let _timer = zeron_counters::timer(zeron_counters::C::SnapshotExportNanos);
+        let bytes = self
+            .doc
             .export(ExportMode::Snapshot)
-            .map_err(|e| DocError::Schema(e.to_string()))
+            .map_err(|e| DocError::Schema(e.to_string()))?;
+        zeron_counters::add(zeron_counters::C::SnapshotExportBytes, bytes.len() as u64);
+        Ok(bytes)
     }
 }
 
@@ -1078,15 +1111,30 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     Ok(())
 }
 
+/// The elements of a list container's deep value. A non-array stays the same
+/// `Json` error `from_value::<Vec<Value>>` raised, without rebuilding the tree
+/// on the happy path.
+fn json_array(v: serde_json::Value) -> Result<Vec<serde_json::Value>, DocError> {
+    match v {
+        serde_json::Value::Array(items) => Ok(items),
+        other => serde_json::from_value(other).map_err(DocError::from),
+    }
+}
+
 /// Decode ONE `messages` entry map's deep JSON value (same strict-then-salvage
 /// policy as [`SessionDoc::read_entries`]). The per-entry seam for viewers
 /// that keep an incremental transcript mirror: they re-decode only the entry
 /// maps a commit touched instead of materializing the whole list.
 pub fn decode_entry_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
-    entry_from_json(v)
+    decode_entry_value(&v)
 }
 
-fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
+/// [`decode_entry_json`] over a borrowed value: the strict parse reads through
+/// `&Value` instead of cloning the whole entry tree first, and the salvage
+/// path reuses the same borrow. This is the one decoder behind
+/// [`SessionDoc::read_entries`] and the incremental transcript mirror, so both
+/// produce identical entries by construction.
+pub fn decode_entry_value(v: &serde_json::Value) -> Result<SessionMessageEntry, DocError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct RawEntry {
@@ -1103,7 +1151,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
         #[serde(default)]
         duration_ms: Option<i64>,
     }
-    match serde_json::from_value::<RawEntry>(v.clone()) {
+    match RawEntry::deserialize(v) {
         Ok(raw) => Ok(SessionMessageEntry {
             id: raw.id,
             role: raw.role,
@@ -1129,7 +1177,7 @@ fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError
 /// salvaged individually — a part missing `kind` is inferred from its
 /// content shape, and only truly contentless parts are dropped.
 fn salvage_entry(
-    v: serde_json::Value,
+    v: &serde_json::Value,
     strict_err: serde_json::Error,
 ) -> Result<SessionMessageEntry, DocError> {
     let Some(obj) = v.as_object() else {
@@ -1145,13 +1193,13 @@ fn salvage_entry(
     let id = str_field("id").unwrap_or_else(|| format!("recovered-{stable_hash:016x}"));
     let role = obj
         .get("role")
-        .and_then(|r| serde_json::from_value::<MessageRole>(r.clone()).ok())
+        .and_then(|r| MessageRole::deserialize(r).ok())
         .unwrap_or(MessageRole::Assistant);
     let mut parts = Vec::new();
     let mut dropped_parts = 0usize;
     if let Some(raw_parts) = obj.get("parts").and_then(|p| p.as_array()) {
         for (ix, part) in raw_parts.iter().enumerate() {
-            match serde_json::from_value::<DocPartJson>(part.clone()) {
+            match DocPartJson::deserialize(part) {
                 Ok(p) => parts.push(from_doc_part(p)),
                 Err(_) => match salvage_part(part, &id, ix) {
                     Some(p) => parts.push(p),
@@ -1175,7 +1223,7 @@ fn salvage_entry(
         device_id: str_field("deviceId").unwrap_or_default(),
         status: obj
             .get("status")
-            .and_then(|s| serde_json::from_value(s.clone()).ok()),
+            .and_then(|s| MessageStatus::deserialize(s).ok()),
         continuation_of: str_field("continuationOf"),
         duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
     })
@@ -1214,7 +1262,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
     }
     if let Some(call) = obj
         .get("call")
-        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .and_then(|c| Deserialize::deserialize(c).ok())
     {
         return Some(MessagePart::Tool {
             id,
@@ -1289,18 +1337,79 @@ pub fn join_continuation_entries(entries: Vec<SessionMessageEntry>) -> Vec<Sessi
 /// - new parts → pushed,
 /// - tool call refresh / resolution / input resolution → in-place map updates.
 ///
-/// Invariant relied upon: the fold only ever APPENDS parts or grows the trailing text; earlier
-/// text never mutates. Tool/input parts may update fields in place.
+/// The fold normally appends parts and text; defensive body corrections
+/// also take the full rewrite path. A segment clear starts a new writer
+/// (like the full sync, this writer does not delete parts). Tool and input
+/// parts may update fields in place.
+///
+/// Text growth is tracked by [`SegmentWriter::flushed_len`] (bytes already
+/// in the doc). A verified byte prefix appends only the new tail into
+/// `LoroText` and onto the mirror, without cloning the grown string.
 pub struct SegmentWriter<'a> {
     doc: &'a SessionDoc,
     /// Index of this entry in the `messages` list.
     entry_index: usize,
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
+    /// Bytes of each text/reasoning part already appended. `0` for other kinds.
+    /// Kept in lockstep with `written`'s text length so a resume can rebuild it.
+    flushed_len: Vec<usize>,
     created_at: i64,
     /// What `durationMs` counts from: `created_at`, or an earlier moment the
     /// turn really began ([`Self::count_duration_from`]).
     duration_from: i64,
+    /// Times the incremental path diverged and the full path was used instead.
+    mismatches: u64,
+    verify: Verify,
+}
+
+/// When [`SegmentWriter`] cross-checks the incremental sync against [`SegmentWriter::sync_full`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Verify {
+    /// Every sync in debug builds; in release only when `ZERON_PERF_VERIFY=1`,
+    /// sampled 1 in 32.
+    #[default]
+    Auto,
+    /// Skip the oracle. Equivalence tests set this so a fallback cannot hide a bad tail.
+    #[cfg(test)]
+    Never,
+    /// Exercise release sampling even in a debug test build.
+    #[cfg(test)]
+    Sampled,
+}
+
+const VERIFY_SAMPLE: u64 = 32;
+
+// Sinks resume a new writer each flush. A writer-local counter would never
+// reach the release sample, so count across resumes and segments.
+static VERIFY_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sample_verify_sync(syncs: &std::sync::atomic::AtomicU64) -> bool {
+    syncs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1)
+        .is_multiple_of(VERIFY_SAMPLE)
+}
+
+fn perf_verify_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ZERON_PERF_VERIFY").is_ok_and(|value| value == "1"))
+}
+
+fn part_flushed_len(part: &MessagePart) -> usize {
+    match part {
+        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => text.len(),
+        _ => 0,
+    }
+}
+
+/// `("text"|"reasoning", id, body)` when `part` is a text-bodied part.
+fn text_body(part: &MessagePart) -> Option<(&'static str, &str, &str)> {
+    match part {
+        MessagePart::Text { id, text } => Some(("text", id, text)),
+        MessagePart::Reasoning { id, text } => Some(("reasoning", id, text)),
+        _ => None,
+    }
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1333,8 +1442,11 @@ impl<'a> SegmentWriter<'a> {
             doc,
             entry_index,
             written: Vec::new(),
+            flushed_len: Vec::new(),
             created_at,
             duration_from: created_at,
+            mismatches: 0,
+            verify: Verify::Auto,
         })
     }
 
@@ -1362,12 +1474,16 @@ impl<'a> SegmentWriter<'a> {
             }
             _ => 0,
         };
+        let flushed_len = written.iter().map(part_flushed_len).collect();
         Self {
             doc,
             entry_index,
             written,
+            flushed_len,
             created_at,
             duration_from: created_at,
+            mismatches: 0,
+            verify: Verify::Auto,
         }
     }
 
@@ -1394,7 +1510,77 @@ impl<'a> SegmentWriter<'a> {
     }
 
     /// Diff `folded` (the full folded segment so far) into the doc.
+    ///
+    /// Incremental: text and reasoning append the unflushed tail, and other
+    /// parts are compared as before. [`Self::sync_full`] is the previous
+    /// whole-text path, kept as the oracle.
     pub fn sync(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
+        self.sync_indices(folded, 0..folded.len())
+    }
+
+    /// Write only `dirty` indices of `folded`, plus any part not yet pushed.
+    ///
+    /// `folded` is still the full segment. Clean indices are left untouched,
+    /// so a tick that grew one text part does not re-read the others.
+    pub fn sync_indices(
+        &mut self,
+        folded: &[MessagePart],
+        dirty: impl IntoIterator<Item = usize>,
+    ) -> Result<(), DocError> {
+        let verify = self.verify_due();
+        self.write_indices(folded, dirty)?;
+        // Compare the mirror to the full render. On a miss, rewrite the
+        // differing parts in place (LoroText::update, not a second append)
+        // and reset the mirror to that render. Never panics.
+        if verify && !self.mirror_matches(folded) {
+            self.mismatches += 1;
+            tracing::error!(
+                entry = self.entry_index,
+                written = self.written.len(),
+                folded = folded.len(),
+                "segment sync diverged from the full render; using the full result"
+            );
+            self.repair_from_full(folded)?;
+        }
+        Ok(())
+    }
+
+    fn mirror_matches(&self, folded: &[MessagePart]) -> bool {
+        self.written.len() >= folded.len() && self.written[..folded.len()] == folded[..]
+    }
+
+    /// Force the doc to the full render without re-appending text that the
+    /// incremental path already wrote.
+    fn repair_from_full(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
+        let parts = self.parts_list()?;
+        let mut dirty = false;
+        while self.written.len() < folded.len() {
+            let index = self.written.len();
+            push_part(&parts, &folded[index])?;
+            self.flushed_len.push(part_flushed_len(&folded[index]));
+            self.written.push(folded[index].clone());
+            dirty = true;
+        }
+        for (index, part) in folded.iter().enumerate() {
+            if &self.written[index] == part {
+                continue;
+            }
+            let part_map = part_map_at(&parts, index)?;
+            update_part_fields(&part_map, part)?;
+            self.written[index] = part.clone();
+            self.flushed_len[index] = part_flushed_len(part);
+            dirty = true;
+        }
+        if dirty {
+            self.doc.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// The pre-incremental sync: `PartialEq` and `starts_with` over each part,
+    /// cloning a grown text body into the mirror. The oracle falls back to
+    /// this, and equivalence tests run it beside [`Self::sync_indices`].
+    pub fn sync_full(&mut self, folded: &[MessagePart]) -> Result<(), DocError> {
         let parts = self.parts_list()?;
         let mut dirty = false;
 
@@ -1403,6 +1589,7 @@ impl<'a> SegmentWriter<'a> {
                 None => {
                     push_part(&parts, part)?;
                     self.written.push(part.clone());
+                    self.flushed_len.push(part_flushed_len(part));
                     dirty = true;
                 }
                 Some(prev) if prev == part => {}
@@ -1424,20 +1611,7 @@ impl<'a> SegmentWriter<'a> {
                         Some((field, old, new)) => {
                             let delta = &new[old.len()..];
                             if !delta.is_empty() {
-                                let part_map = part_map_at(&parts, i)?;
-                                match part_map.get(field) {
-                                    Some(loro::ValueOrContainer::Container(
-                                        loro::Container::Text(t),
-                                    )) => {
-                                        let len = t.len_unicode();
-                                        t.insert(len, delta)?;
-                                    }
-                                    _ => {
-                                        return Err(DocError::Schema(format!(
-                                            "{field} part missing LoroText"
-                                        )));
-                                    }
-                                }
+                                append_loro_text(&parts, i, field, delta)?;
                                 dirty = true;
                             }
                         }
@@ -1451,6 +1625,7 @@ impl<'a> SegmentWriter<'a> {
                         }
                     }
                     self.written[i] = part.clone();
+                    self.flushed_len[i] = part_flushed_len(part);
                 }
             }
         }
@@ -1459,6 +1634,125 @@ impl<'a> SegmentWriter<'a> {
             self.doc.doc.commit();
         }
         Ok(())
+    }
+
+    /// Cross-check failures seen by this writer.
+    pub fn mismatches(&self) -> u64 {
+        self.mismatches
+    }
+
+    fn verify_due(&self) -> bool {
+        match self.verify {
+            #[cfg(test)]
+            Verify::Never => false,
+            #[cfg(test)]
+            Verify::Sampled => sample_verify_sync(&VERIFY_SYNCS),
+            Verify::Auto => {
+                cfg!(debug_assertions)
+                    || (perf_verify_enabled() && sample_verify_sync(&VERIFY_SYNCS))
+            }
+        }
+    }
+
+    fn write_indices(
+        &mut self,
+        folded: &[MessagePart],
+        dirty: impl IntoIterator<Item = usize>,
+    ) -> Result<(), DocError> {
+        let mut indices: Vec<usize> = dirty
+            .into_iter()
+            .filter(|index| *index < folded.len())
+            .collect();
+        let tail = self.written.len();
+        if tail < folded.len() {
+            indices.extend(tail..folded.len());
+        }
+        if let Some(&max) = indices.iter().max()
+            && tail < max
+        {
+            indices.extend(tail..max);
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let parts = self.parts_list()?;
+        let mut dirty = false;
+        for index in indices {
+            if self.write_one(&parts, index, &folded[index])? {
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.doc.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// `Ok(true)` when the doc changed.
+    fn write_one(
+        &mut self,
+        parts: &LoroList,
+        index: usize,
+        part: &MessagePart,
+    ) -> Result<bool, DocError> {
+        if index > self.written.len() {
+            return Err(DocError::Schema(format!(
+                "segment sync gap at {index} (written {})",
+                self.written.len()
+            )));
+        }
+        if index == self.written.len() {
+            push_part(parts, part)?;
+            self.written.push(part.clone());
+            self.flushed_len.push(part_flushed_len(part));
+            return Ok(true);
+        }
+        if let Some(delta) = self.text_tail(index, part) {
+            if delta.is_empty() {
+                return Ok(false);
+            }
+            let field = text_body(&self.written[index])
+                .map(|(field, _, _)| field)
+                .unwrap_or("text");
+            append_loro_text(parts, index, field, delta)?;
+            let flushed = part_flushed_len(part);
+            match &mut self.written[index] {
+                MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                    text.push_str(delta);
+                }
+                _ => {}
+            }
+            self.flushed_len[index] = flushed;
+            return Ok(true);
+        }
+        if &self.written[index] == part {
+            return Ok(false);
+        }
+        let part_map = part_map_at(parts, index)?;
+        update_part_fields(&part_map, part)?;
+        self.written[index] = part.clone();
+        self.flushed_len[index] = part_flushed_len(part);
+        Ok(true)
+    }
+
+    /// The unflushed tail only when the old body is still a byte prefix.
+    /// Length alone cannot distinguish append from a provider correction.
+    fn text_tail<'p>(&self, index: usize, part: &'p MessagePart) -> Option<&'p str> {
+        let (old_field, old_id, old_text) = text_body(&self.written[index])?;
+        let (new_field, new_id, new_text) = text_body(part)?;
+        let flushed = self.flushed_len.get(index).copied().unwrap_or(0);
+        if old_field != new_field
+            || old_id != new_id
+            || flushed != old_text.len()
+            || !new_text.starts_with(old_text)
+        {
+            return None;
+        }
+        // A matching UTF-8 string prefix ends at a character boundary.
+        Some(&new_text[flushed..])
     }
 
     /// Finish the stream: sync final parts, stamp a terminal status, and
@@ -1476,6 +1770,23 @@ impl<'a> SegmentWriter<'a> {
         }
         self.doc.doc.commit();
         Ok(())
+    }
+}
+
+fn append_loro_text(
+    parts: &LoroList,
+    index: usize,
+    field: &str,
+    delta: &str,
+) -> Result<(), DocError> {
+    let part_map = part_map_at(parts, index)?;
+    match part_map.get(field) {
+        Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) => {
+            let len = text.len_unicode();
+            text.insert(len, delta)?;
+            Ok(())
+        }
+        _ => Err(DocError::Schema(format!("{field} part missing LoroText"))),
     }
 }
 
@@ -1599,10 +1910,95 @@ pub fn materialize_tail(
     })
 }
 
+/// Materialize only the entries belonging to the last joined groups.
+pub fn materialize_tail_fast(
+    doc: &SessionDoc,
+    now: i64,
+    tail_count: usize,
+) -> Result<SessionTail, DocError> {
+    use loro::{Container, ValueOrContainer};
+    if doc.doc.get_pending_txn_len() != 0 {
+        return materialize_tail(doc, now, tail_count);
+    }
+    let version = doc.doc.state_vv();
+    let list = doc.doc.get_list("messages");
+    let mut roots: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in 0..list.len() {
+        let Some(ValueOrContainer::Container(Container::Map(map))) = list.get(index) else {
+            return materialize_tail(doc, now, tail_count);
+        };
+        let scalar = map.get_value().to_json_value();
+        // Salvaged identities can depend on the whole entry; retain the oracle
+        // for unusual or incomplete entries.
+        let Some(id) = scalar.get("id").and_then(|v| v.as_str()) else {
+            return materialize_tail(doc, now, tail_count);
+        };
+        let continuation = scalar.get("continuationOf").and_then(|v| v.as_str());
+        if let Some(root) = continuation {
+            if let Some(&group) = roots.get(root) {
+                groups[group].push(index);
+            } else {
+                groups.push(vec![index]);
+            }
+        } else {
+            roots.insert(id.to_owned(), groups.len());
+            groups.push(vec![index]);
+        }
+    }
+    let total = groups.len();
+    let count = if tail_count == 0 {
+        TAIL_MESSAGE_COUNT
+    } else {
+        tail_count
+    };
+    let mut indices: Vec<_> = groups[total.saturating_sub(count)..]
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    indices.sort_unstable();
+    let entries = indices
+        .into_iter()
+        .filter_map(|index| {
+            list.get(index)
+                .and_then(|v| decode_entry_json(v.get_deep_value().to_json_value()).ok())
+        })
+        .collect();
+    if doc.doc.get_pending_txn_len() != 0 || doc.doc.state_vv() != version {
+        return materialize_tail(doc, now, tail_count);
+    }
+    Ok(SessionTail {
+        chat_id: doc.chat_id().unwrap_or_default(),
+        schema_version: SESSION_SCHEMA_VERSION,
+        messages: join_continuation_entries(entries),
+        total_messages: total,
+        updated_at: now,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
+
+    #[test]
+    fn snapshot_export_counters_include_all_callers() {
+        let before = zeron_counters::snapshot();
+        let bytes = SessionDoc::init("counter-test")
+            .unwrap()
+            .export_snapshot()
+            .unwrap();
+        let after = zeron_counters::snapshot();
+        assert!(
+            after[zeron_counters::C::SnapshotExports as usize].1
+                >= before[zeron_counters::C::SnapshotExports as usize].1 + 1
+        );
+        assert!(
+            after[zeron_counters::C::SnapshotExportBytes as usize].1
+                >= before[zeron_counters::C::SnapshotExportBytes as usize].1 + bytes.len() as u64
+        );
+    }
 
     #[test]
     fn fork_seam_round_trips_through_the_doc() {
@@ -1820,7 +2216,11 @@ mod tests {
         w.count_duration_from(now - 1_000);
         w.finish(&[], MessageStatus::Complete).unwrap();
         let entry = &doc.read_entries().unwrap()[0];
-        assert_eq!(entry.created_at, now - 5_000, "the entry's own time is kept");
+        assert_eq!(
+            entry.created_at,
+            now - 5_000,
+            "the entry's own time is kept"
+        );
         let duration = entry.duration_ms.unwrap();
         assert!((60_000..65_000).contains(&duration), "{duration}");
     }
@@ -2425,6 +2825,118 @@ mod tests {
         assert_eq!(tail.chat_id, "chat-1");
     }
 
+    #[test]
+    fn fast_tail_matches_oracle_on_seeded_docs() {
+        for seed in 0..12 {
+            let doc = SessionDoc::init(&format!("tail-{seed}")).unwrap();
+            for i in 0usize..90 {
+                let mut entry = user_entry(&format!("m{i}"), &format!("{seed}-{i}"));
+                if i % 7 == 0 {
+                    entry.continuation_of = Some(format!("m{}", i.saturating_sub(3)));
+                }
+                doc.push_message(&entry).unwrap();
+            }
+            for count in [0, 1, 2, 10, 64, 200] {
+                assert_eq!(
+                    materialize_tail_fast(&doc, 42, count).unwrap(),
+                    materialize_tail(&doc, 42, count).unwrap(),
+                    "seed {seed}, count {count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_tail_matches_oracle_on_irregular_continuations() {
+        // Orphans, duplicate roots, continuations of continuations, a
+        // continuation before its root, and entries the strict decoder rejects.
+        let build = |shape: &[(&str, Option<&str>)], raw: &[usize]| {
+            let doc = SessionDoc::init("irregular").unwrap();
+            for (i, (id, cont)) in shape.iter().enumerate() {
+                let mut entry = user_entry(id, &format!("t{i}"));
+                entry.continuation_of = cont.map(str::to_owned);
+                entry.duration_ms = Some(i as i64);
+                doc.push_message(&entry).unwrap();
+            }
+            for &at in raw {
+                let map = doc.doc.get_list("messages").get(at).unwrap();
+                let loro::ValueOrContainer::Container(loro::Container::Map(map)) = map else {
+                    panic!("not a map")
+                };
+                map.delete("deviceId").unwrap();
+                map.delete("continuationOf").ok();
+            }
+            doc.doc.commit();
+            doc
+        };
+        let shapes: &[&[(&str, Option<&str>)]] = &[
+            &[
+                ("a", None),
+                ("b", Some("a")),
+                ("c", Some("b")),
+                ("d", Some("a")),
+            ],
+            &[
+                ("x", Some("r")),
+                ("r", None),
+                ("y", Some("r")),
+                ("z", Some("nope")),
+            ],
+            &[
+                ("a", None),
+                ("a", None),
+                ("b", Some("a")),
+                ("c", None),
+                ("d", Some("a")),
+            ],
+            &[
+                ("a", None),
+                ("b", None),
+                ("c", Some("a")),
+                ("d", Some("b")),
+                ("e", Some("a")),
+            ],
+        ];
+        for (n, shape) in shapes.iter().enumerate() {
+            for raw in [&[][..], &[1][..], &[0, 2][..]] {
+                if raw.iter().any(|&at| at >= shape.len()) {
+                    continue;
+                }
+                let doc = build(shape, raw);
+                for count in [0, 1, 2, 3, 64] {
+                    assert_eq!(
+                        materialize_tail_fast(&doc, 7, count).unwrap(),
+                        materialize_tail(&doc, 7, count).unwrap(),
+                        "shape {n}, salvaged {raw:?}, count {count}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_scan_is_bounded_to_the_tail() {
+        let doc = SessionDoc::init("scan").unwrap();
+        let mut stale = user_entry("old", "x");
+        stale.role = MessageRole::Assistant;
+        stale.status = Some(MessageStatus::Streaming);
+        doc.push_message(&stale).unwrap();
+        assert!(doc.has_streaming_assistant());
+        for i in 0..TAIL_MESSAGE_COUNT {
+            doc.push_message(&user_entry(&format!("m{i}"), "y"))
+                .unwrap();
+        }
+        assert!(
+            !doc.has_streaming_assistant(),
+            "a stale streaming row beyond the tail must not throttle the sidecar"
+        );
+        let mut live = user_entry("live", "z");
+        live.role = MessageRole::Assistant;
+        live.status = Some(MessageStatus::Streaming);
+        doc.push_message(&live).unwrap();
+        assert!(doc.has_streaming_assistant());
+    }
+
     /// 2026-08-10 incident: entries/parts missing strict fields must salvage
     /// field-by-field — a fresh reader importing a room's merged doc must
     /// never render a BLANK transcript because some writer (old app version,
@@ -2442,12 +2954,12 @@ mod tests {
                 { "id": "p3", "kind": "text", "text": "well-formed" }
             ]
         });
-        let entry = entry_from_json(v.clone()).expect("salvaged");
+        let entry = decode_entry_json(v.clone()).expect("salvaged");
         assert!(
             entry.id.starts_with("recovered-"),
             "deterministic stand-in id"
         );
-        let again = entry_from_json(v).expect("salvaged again");
+        let again = decode_entry_json(v).expect("salvaged again");
         assert_eq!(entry.id, again.id, "recovered id is stable across reads");
         assert_eq!(entry.role, MessageRole::Assistant);
         assert_eq!(entry.created_at, 123);
@@ -2467,23 +2979,668 @@ mod tests {
             "createdAt": 1,
             "parts": [ { "id": "t1", "call": { "kind": "exec", "command": "ls" }, "output": "x" } ]
         });
-        let entry = entry_from_json(v).expect("salvaged");
+        let entry = decode_entry_json(v).expect("salvaged");
         assert!(matches!(
             &entry.parts[0],
             MessagePart::Tool { resolved: true, .. }
         ));
 
         // Only non-objects are truly unsalvageable.
-        assert!(entry_from_json(serde_json::json!("garbage")).is_err());
-        assert!(entry_from_json(serde_json::json!(42)).is_err());
+        assert!(decode_entry_json(serde_json::json!("garbage")).is_err());
+        assert!(decode_entry_json(serde_json::json!(42)).is_err());
 
         // Well-formed entries take the strict path unchanged.
         let v = serde_json::json!({
             "id": "m1", "role": "user", "createdAt": 5, "deviceId": "d",
             "parts": [ { "id": "p", "kind": "text", "text": "hi" } ]
         });
-        let entry = entry_from_json(v).expect("strict");
+        let entry = decode_entry_json(v).expect("strict");
         assert_eq!(entry.id, "m1");
+    }
+
+    /// `finish` stamps `durationMs` from the wall clock, so equivalence runs
+    /// drop the writer instead of finishing. `Verify::Never` keeps a bad tail
+    /// from being repaired into a passing doc.
+    fn open_incremental(doc: &SessionDoc, seg: u32) -> SegmentWriter<'_> {
+        let id = format!("s{seg}");
+        let mut writer = SegmentWriter::begin(doc, &id, "dev", 1_700_000_000_000).unwrap();
+        writer.verify = Verify::Never;
+        writer
+    }
+
+    struct SyncRng(u64);
+    impl SyncRng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    const TEXT_TAILS: &[&str] = &[
+        "a",
+        "Hello",
+        " ",
+        "café ",
+        "日本語",
+        "😀",
+        "\n",
+        "— ",
+        "line",
+    ];
+
+    fn text_tail(rng: &mut SyncRng) -> &'static str {
+        TEXT_TAILS[rng.below(TEXT_TAILS.len())]
+    }
+
+    fn touched_indices(touched: crate::parts::Touched, len: usize) -> Vec<usize> {
+        match touched {
+            crate::parts::Touched::None => Vec::new(),
+            crate::parts::Touched::Index(index) => vec![index],
+            crate::parts::Touched::All => (0..len).collect(),
+        }
+    }
+
+    fn indexes_of(parts: &[MessagePart], kind: fn(&MessagePart) -> bool) -> Vec<usize> {
+        parts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| kind(part).then_some(index))
+            .collect()
+    }
+
+    fn is_text_body(part: &MessagePart) -> bool {
+        matches!(
+            part,
+            MessagePart::Text { .. } | MessagePart::Reasoning { .. }
+        )
+    }
+
+    fn is_tool(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Tool { .. })
+    }
+
+    fn is_image(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Image { .. })
+    }
+
+    fn is_visual(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Visual { .. })
+    }
+
+    fn is_spawn(part: &MessagePart) -> bool {
+        matches!(part, MessagePart::Tool { call, .. } if call.is_subagent_spawn())
+    }
+
+    fn random_call(rng: &mut SyncRng, n: u32) -> ToolCall {
+        match rng.below(8) {
+            0 => ToolCall::Exec {
+                command: format!("echo café {n}"),
+            },
+            1 => ToolCall::ReadFile {
+                path: format!("/w/{n}.rs"),
+            },
+            2 => ToolCall::WriteFile {
+                path: format!("/w/{n}.rs"),
+                content: Some(format!("fn f{n}() {{}}\n")),
+            },
+            3 => ToolCall::EditFile {
+                path: format!("/w/{n}.rs"),
+                old_string: Some("old secret".into()),
+                new_string: Some("new secret".into()),
+            },
+            4 => ToolCall::WebFetch {
+                url: format!("https://example.test/{n}"),
+                prompt: Some("hidden prompt".into()),
+            },
+            5 => ToolCall::Search {
+                pattern: "fn ".into(),
+                path: Some("/w".into()),
+            },
+            6 => ToolCall::Mcp {
+                server: "zeron".into(),
+                tool: "Agent".into(),
+                input: Some(serde_json::json!({
+                    "prompt": "secret",
+                    "model": "haiku",
+                    "noise": n,
+                })),
+            },
+            _ => ToolCall::Unknown {
+                name: "Agent: scan".into(),
+                input: Some(serde_json::json!({
+                    "prompt": "secret",
+                    "model": "sonnet",
+                    "subagent_type": "explore",
+                })),
+            },
+        }
+    }
+
+    fn question() -> zeron_proto::UserInputQuestion {
+        zeron_proto::UserInputQuestion {
+            id: "q".into(),
+            header: "H".into(),
+            question: "Proceed?".into(),
+            options: vec!["yes".into(), "no".into()],
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+        }
+    }
+
+    /// `None` starts a new segment. Include defensive text corrections as
+    /// well as normal fold events; clears use a new writer, as in drive_run
+    /// (the old sync did not delete parts in place either).
+    fn apply_sync_op(
+        parts: &mut Vec<MessagePart>,
+        rng: &mut SyncRng,
+        chat: &str,
+        seq: &mut u32,
+    ) -> Option<Vec<usize>> {
+        if !parts.is_empty() && rng.below(16) == 0 {
+            return None;
+        }
+        let roll = if parts.is_empty() {
+            rng.below(3)
+        } else {
+            rng.below(11)
+        };
+        let dirty = match roll {
+            0 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::TextDelta {
+                        text: text_tail(rng).into(),
+                    },
+                ),
+                parts.len(),
+            ),
+            1 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::ReasoningDelta {
+                        text: text_tail(rng).into(),
+                    },
+                ),
+                parts.len(),
+            ),
+            2 => {
+                *seq += 1;
+                touched_indices(
+                    fold_event_into_parts(
+                        parts,
+                        &AgentEvent::ToolCall {
+                            id: format!("tool-{seq}"),
+                            call: random_call(rng, *seq),
+                        },
+                    ),
+                    parts.len(),
+                )
+            }
+            3 => {
+                let indexes = indexes_of(parts, is_text_body);
+                if indexes.is_empty() {
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::TextDelta {
+                                text: text_tail(rng).into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    match &mut parts[index] {
+                        MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => {
+                            match rng.below(4) {
+                                0 => *text = text_tail(rng).to_owned(),
+                                1 => *text = format!("corrected {}", text_tail(rng)),
+                                _ => text.push_str(text_tail(rng)),
+                            }
+                        }
+                        _ => unreachable!("text index"),
+                    }
+                    vec![index]
+                }
+            }
+            4 => {
+                let indexes = indexes_of(parts, is_tool);
+                if indexes.is_empty() {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id: format!("tool-{seq}"),
+                                call: random_call(rng, *seq),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id,
+                                call: ToolCall::Exec {
+                                    command: format!("echo {}", text_tail(rng)),
+                                },
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            5 => {
+                let indexes = indexes_of(parts, is_tool);
+                if indexes.is_empty() {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::ToolCall {
+                                id: format!("tool-{seq}"),
+                                call: random_call(rng, *seq),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    let diff = (rng.below(2) == 0).then(|| zeron_proto::ToolDiff {
+                        path: format!("/w/{id}.rs"),
+                        old_text: Some("a\n".into()),
+                        new_text: "b\nc\n".into(),
+                    });
+                    let touched = fold_event_into_parts(
+                        parts,
+                        &AgentEvent::ToolResult {
+                            id,
+                            is_error: rng.below(5) == 0,
+                            output: Some("full output\nline2".into()),
+                            diff,
+                        },
+                    );
+                    crate::parts::apply_sidecar_refs(chat, parts);
+                    touched_indices(touched, parts.len())
+                }
+            }
+            6 => {
+                let indexes = indexes_of(parts, is_image);
+                if !indexes.is_empty() && rng.below(2) == 0 {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::GeneratedImage {
+                                id,
+                                path: format!("/img/{seq}.png"),
+                                name: "pic".into(),
+                                mime_type: "image/png".into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::GeneratedImage {
+                                id: format!("img-{seq}"),
+                                path: format!("/img/{seq}.png"),
+                                name: "pic".into(),
+                                mime_type: "image/png".into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            7 => {
+                let indexes = indexes_of(parts, is_visual);
+                if !indexes.is_empty() && rng.below(2) == 0 {
+                    let index = indexes[rng.below(indexes.len())];
+                    let id = parts[index].id().to_owned();
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Visual {
+                                id,
+                                path: format!("/vis/{seq}.luau"),
+                                title: format!("タイトル {seq}"),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Visual {
+                                id: format!("vis-{seq}"),
+                                path: format!("/vis/{seq}.luau"),
+                                title: format!("タイトル {seq}"),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            8 => {
+                let pending: Vec<String> = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Input {
+                            request_id,
+                            resolved: false,
+                            ..
+                        } => Some(request_id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !pending.is_empty() && rng.below(2) == 0 {
+                    let request_id = pending[rng.below(pending.len())].clone();
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::InputResolved {
+                                request_id,
+                                answers: Some(vec![zeron_proto::UserInputAnswer {
+                                    question_id: "q".into(),
+                                    labels: vec!["yes".into(), "café".into()],
+                                }]),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    *seq += 1;
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::InputRequested {
+                                request_id: format!("req-{seq}"),
+                                questions: vec![question()],
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+            9 => touched_indices(
+                fold_event_into_parts(
+                    parts,
+                    &AgentEvent::Error {
+                        message: format!("boom {}", text_tail(rng)),
+                    },
+                ),
+                parts.len(),
+            ),
+            _ => {
+                let spawns = indexes_of(parts, is_spawn);
+                if spawns.is_empty() {
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::TextDelta {
+                                text: text_tail(rng).into(),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                } else {
+                    let index = spawns[rng.below(spawns.len())];
+                    let id = parts[index].id().to_owned();
+                    touched_indices(
+                        fold_event_into_parts(
+                            parts,
+                            &AgentEvent::Subagent {
+                                parent_tool_use_id: id,
+                                event: Box::new(AgentEvent::Done {
+                                    status: zeron_proto::DoneStatus::Completed,
+                                    result: None,
+                                    error: None,
+                                    session_id: None,
+                                }),
+                            },
+                        ),
+                        parts.len(),
+                    )
+                }
+            }
+        };
+        Some(dirty)
+    }
+
+    #[test]
+    fn incremental_resume_matches_full_sync_on_a_multibyte_tail() {
+        let inc_doc = SessionDoc::init("resume-eq").unwrap();
+        let full_doc = SessionDoc::init("resume-eq").unwrap();
+        let mut inc = open_incremental(&inc_doc, 0);
+        let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "café ".into(),
+        }];
+        inc.sync_indices(&parts, [0]).unwrap();
+        full.sync_full(&parts).unwrap();
+        let (index, written) = inc.into_state();
+        let mut inc = SegmentWriter::resume(&inc_doc, index, written);
+        inc.verify = Verify::Never;
+        parts[0] = MessagePart::Text {
+            id: "t0".into(),
+            text: "café 日本語😀".into(),
+        };
+        inc.sync_indices(&parts, [0]).unwrap();
+        full.sync_full(&parts).unwrap();
+        assert_eq!(inc.mismatches(), 0);
+        assert_eq!(inc.written, parts);
+        assert_eq!(
+            inc_doc.doc().get_deep_value().to_json_value(),
+            full_doc.doc().get_deep_value().to_json_value()
+        );
+        match &inc_doc.read_entries().unwrap()[0].parts[0] {
+            MessagePart::Text { text, .. } => assert_eq!(text, "café 日本語😀"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn segment_sync_oracle_repairs_a_missed_dirty_index() {
+        let doc = SessionDoc::init("missed-dirty").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut parts = vec![MessagePart::Text {
+            id: "t0".into(),
+            text: "before".into(),
+        }];
+        writer.sync(&parts).unwrap();
+        parts[0] = MessagePart::Text {
+            id: "t0".into(),
+            text: "after😀".into(),
+        };
+        writer.sync_indices(&parts, []).unwrap();
+        assert_eq!(writer.mismatches(), 1);
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+        assert_eq!(writer.written, parts);
+    }
+
+    #[test]
+    fn release_sync_sampling_survives_writer_resumes() {
+        let doc = SessionDoc::init("resume-sampling").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "s0", "dev", 0).unwrap();
+        let mut samples = 0;
+        for _ in 0..64 {
+            let (index, written) = writer.into_state();
+            writer = SegmentWriter::resume(&doc, index, written);
+            writer.verify = Verify::Sampled;
+            samples += usize::from(writer.verify_due());
+        }
+        assert_eq!(samples, 2);
+    }
+
+    #[test]
+    fn incremental_sync_matches_full_on_text_corrections_without_oracle() {
+        for reasoning in [false, true] {
+            let inc_doc = SessionDoc::init("corrections").unwrap();
+            let full_doc = SessionDoc::init("corrections").unwrap();
+            let mut inc = open_incremental(&inc_doc, 0);
+            let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+            // Equal length, longer replacement, shrink, a former byte offset
+            // inside a new code point, astral characters and combining marks.
+            for body in [
+                "draft",
+                "fixed",
+                "rewritten😀",
+                "é",
+                "😀tail",
+                "e\u{301}",
+                "e\u{301}🦀",
+            ] {
+                let parts = vec![if reasoning {
+                    MessagePart::Reasoning {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                } else {
+                    MessagePart::Text {
+                        id: "p".into(),
+                        text: body.into(),
+                    }
+                }];
+                inc.sync_indices(&parts, [0]).unwrap();
+                full.sync_full(&parts).unwrap();
+                assert_eq!(inc.written, parts, "{body}");
+                assert_eq!(inc.mismatches(), 0);
+                assert_eq!(inc_doc.read_entries().unwrap()[0].parts, parts);
+                assert_eq!(
+                    inc_doc.doc().get_deep_value().to_json_value(),
+                    full_doc.doc().get_deep_value().to_json_value(),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_sync_preserves_full_sync_structural_semantics() {
+        let inc_doc = SessionDoc::init("structural-eq").unwrap();
+        let full_doc = SessionDoc::init("structural-eq").unwrap();
+        let mut inc = open_incremental(&inc_doc, 0);
+        let mut full = SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap();
+        let a = MessagePart::Text {
+            id: "a".into(),
+            text: "first😀".into(),
+        };
+        let b = MessagePart::Text {
+            id: "b".into(),
+            text: "lasté".into(),
+        };
+        let snapshots = [
+            vec![a.clone(), b.clone()],
+            vec![b.clone(), a.clone()],
+            vec![b],
+            vec![MessagePart::Text {
+                id: "a".into(),
+                text: "lastéfirst😀".into(),
+            }],
+            Vec::new(),
+            vec![a],
+        ];
+        for parts in snapshots {
+            inc.sync_indices(&parts, 0..parts.len()).unwrap();
+            full.sync_full(&parts).unwrap();
+            // Both APIs retain the trailing doc parts on a shortened
+            // snapshot. Production clears close the segment and start a
+            // new writer; do not silently change the legacy sync contract.
+            assert_eq!(inc.written, full.written);
+            assert_eq!(inc.flushed_len, full.flushed_len);
+            assert_eq!(
+                inc_doc.doc().get_deep_value().to_json_value(),
+                full_doc.doc().get_deep_value().to_json_value()
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_sync_matches_full_sync_on_seeded_ops() {
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = SyncRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let chat = format!("eq-{seed}");
+            let inc_doc = SessionDoc::init(&chat).unwrap();
+            let full_doc = SessionDoc::init(&chat).unwrap();
+            let mut seg = 0u32;
+            let mut seq = 0u32;
+            let mut parts = Vec::new();
+            let mut inc = Some(open_incremental(&inc_doc, seg));
+            let mut full =
+                Some(SegmentWriter::begin(&full_doc, "s0", "dev", 1_700_000_000_000).unwrap());
+            for step in 0..150 {
+                match apply_sync_op(&mut parts, &mut rng, &chat, &mut seq) {
+                    None => {
+                        seg += 1;
+                        parts.clear();
+                        // Drop the previous writers before the next `begin`
+                        // borrows the same docs.
+                        drop(inc.take());
+                        drop(full.take());
+                        inc = Some(open_incremental(&inc_doc, seg));
+                        let id = format!("s{seg}");
+                        full = Some(
+                            SegmentWriter::begin(&full_doc, &id, "dev", 1_700_000_000_000).unwrap(),
+                        );
+                    }
+                    Some(dirty) => {
+                        inc.as_mut().unwrap().sync_indices(&parts, dirty).unwrap();
+                        full.as_mut().unwrap().sync_full(&parts).unwrap();
+                        let inc_w = inc.as_ref().unwrap();
+                        assert_eq!(inc_w.mismatches(), 0, "seed {seed} step {step}");
+                        assert_eq!(
+                            inc_w.written, parts,
+                            "incremental mirror seed {seed} step {step}"
+                        );
+                        assert_eq!(
+                            inc_w.flushed_len.len(),
+                            parts.len(),
+                            "seed {seed} step {step}"
+                        );
+                        for (part, flushed) in parts.iter().zip(&inc_w.flushed_len) {
+                            assert_eq!(*flushed, part_flushed_len(part), "seed {seed} step {step}");
+                        }
+                        assert_eq!(
+                            full.as_ref().unwrap().written,
+                            parts,
+                            "full mirror seed {seed} step {step}"
+                        );
+                        assert_eq!(
+                            inc_doc.doc().get_deep_value().to_json_value(),
+                            full_doc.doc().get_deep_value().to_json_value(),
+                            "seed {seed} step {step} seg {seg}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2522,5 +3679,334 @@ mod context_usage_tests {
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();
         assert_eq!(rebuilt.context_usage(), None);
+    }
+}
+
+/// D1 oracle: the pre-optimization decoder (clone + `from_value` at every
+/// level) kept verbatim as the reference the borrowed decoder must match on
+/// malformed, torn and newer-schema entries.
+#[cfg(test)]
+mod decoder_equivalence_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn legacy_decode(v: Value) -> Result<SessionMessageEntry, DocError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawEntry {
+            id: String,
+            role: MessageRole,
+            #[serde(default)]
+            parts: Vec<DocPartJson>,
+            created_at: i64,
+            device_id: String,
+            #[serde(default)]
+            status: Option<MessageStatus>,
+            #[serde(default)]
+            continuation_of: Option<String>,
+            #[serde(default)]
+            duration_ms: Option<i64>,
+        }
+        match serde_json::from_value::<RawEntry>(v.clone()) {
+            Ok(raw) => Ok(SessionMessageEntry {
+                id: raw.id,
+                role: raw.role,
+                parts: raw.parts.into_iter().map(from_doc_part).collect(),
+                created_at: raw.created_at,
+                device_id: raw.device_id,
+                status: raw.status,
+                continuation_of: raw.continuation_of,
+                duration_ms: raw.duration_ms,
+            }),
+            Err(strict_err) => legacy_salvage(v, strict_err),
+        }
+    }
+
+    fn legacy_salvage(
+        v: Value,
+        strict_err: serde_json::Error,
+    ) -> Result<SessionMessageEntry, DocError> {
+        let Some(obj) = v.as_object() else {
+            return Err(DocError::Json(strict_err));
+        };
+        let stable_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            v.to_string().hash(&mut hasher);
+            hasher.finish()
+        };
+        let str_field = |key: &str| obj.get(key).and_then(|x| x.as_str()).map(str::to_owned);
+        let id = str_field("id").unwrap_or_else(|| format!("recovered-{stable_hash:016x}"));
+        let role = obj
+            .get("role")
+            .and_then(|r| serde_json::from_value::<MessageRole>(r.clone()).ok())
+            .unwrap_or(MessageRole::Assistant);
+        let mut parts = Vec::new();
+        if let Some(raw_parts) = obj.get("parts").and_then(|p| p.as_array()) {
+            for (ix, part) in raw_parts.iter().enumerate() {
+                match serde_json::from_value::<DocPartJson>(part.clone()) {
+                    Ok(p) => parts.push(from_doc_part(p)),
+                    Err(_) => {
+                        if let Some(p) = legacy_salvage_part(part, &id, ix) {
+                            parts.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(SessionMessageEntry {
+            id,
+            role,
+            parts,
+            created_at: obj.get("createdAt").and_then(|x| x.as_i64()).unwrap_or(0),
+            device_id: str_field("deviceId").unwrap_or_default(),
+            status: obj
+                .get("status")
+                .and_then(|s| serde_json::from_value(s.clone()).ok()),
+            continuation_of: str_field("continuationOf"),
+            duration_ms: obj.get("durationMs").and_then(|x| x.as_i64()),
+        })
+    }
+
+    fn legacy_salvage_part(part: &Value, entry_id: &str, ix: usize) -> Option<MessagePart> {
+        let obj = part.as_object()?;
+        let id = obj
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{entry_id}#recovered-{ix}"));
+        if obj.get("kind").and_then(|v| v.as_str()) == Some("image") {
+            let field = |key| obj.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+            return Some(image_part(
+                id,
+                field("path"),
+                field("name"),
+                field("mimeType"),
+            ));
+        }
+        if let Some(reasoning) = obj.get("reasoning").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Reasoning {
+                id,
+                text: reasoning.to_owned(),
+            });
+        }
+        if let Some(text) = obj.get("text").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Text {
+                id,
+                text: text.to_owned(),
+            });
+        }
+        if let Some(call) = obj
+            .get("call")
+            .and_then(|c| serde_json::from_value(c.clone()).ok())
+        {
+            return Some(MessagePart::Tool {
+                id,
+                call,
+                is_error: obj
+                    .get("isError")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+                resolved: obj
+                    .get("resolved")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true),
+                output: obj
+                    .get("output")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned),
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            });
+        }
+        if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
+            return Some(MessagePart::Error {
+                id,
+                message: message.to_owned(),
+            });
+        }
+        None
+    }
+
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn valid_entry() -> Value {
+        json!({
+            "id": "m1", "role": "assistant", "createdAt": 5, "deviceId": "d1",
+            "status": "streaming", "continuationOf": "m0", "durationMs": 12,
+            "parts": [
+                { "id": "p1", "kind": "text", "text": "héllo wörld" },
+                { "id": "p2", "kind": "reasoning", "reasoning": "hmm" },
+                { "id": "p3", "kind": "tool", "call": { "id": "c", "name": "Bash", "input": {"cmd": "ls"} },
+                  "resolved": true, "isError": false, "output": "ok", "outputBytes": 2 },
+                { "id": "p4", "kind": "image", "path": "/a.png", "name": "a", "mimeType": "image/png" },
+                { "id": "p5", "kind": "error", "message": "boom" }
+            ]
+        })
+    }
+
+    fn junk(rng: &mut Xorshift) -> Value {
+        match rng.below(9) {
+            0 => Value::Null,
+            1 => json!(true),
+            2 => json!(-7),
+            3 => json!(1.5),
+            4 => json!("späce"),
+            5 => json!([]),
+            6 => json!({}),
+            7 => json!([1, "a", null]),
+            _ => json!({ "nested": { "deep": [1, 2, { "x": null }] } }),
+        }
+    }
+
+    fn mutate(v: &mut Value, rng: &mut Xorshift, depth: usize) {
+        match v {
+            Value::Object(map) => {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                if keys.is_empty() {
+                    return;
+                }
+                let key = keys[rng.below(keys.len())].clone();
+                match rng.below(5) {
+                    0 => {
+                        map.remove(&key);
+                    }
+                    1 => {
+                        map.insert(key, junk(rng));
+                    }
+                    2 if depth < 3 => {
+                        if let Some(child) = map.get_mut(&key) {
+                            mutate(child, rng, depth + 1);
+                        }
+                    }
+                    3 => {
+                        map.insert(format!("extra{}", rng.below(4)), junk(rng));
+                    }
+                    _ => {
+                        if let Some(child) = map.get_mut(&key) {
+                            *child = Value::String(format!("{key}-\u{1F600}"));
+                        }
+                    }
+                }
+            }
+            Value::Array(items) => {
+                if items.is_empty() {
+                    items.push(junk(rng));
+                    return;
+                }
+                let ix = rng.below(items.len());
+                match rng.below(4) {
+                    0 => {
+                        items.remove(ix);
+                    }
+                    1 => items[ix] = junk(rng),
+                    2 if depth < 3 => mutate(&mut items[ix], rng, depth + 1),
+                    _ => items.push(junk(rng)),
+                }
+            }
+            other => *other = junk(rng),
+        }
+    }
+
+    fn assert_same(v: &Value) {
+        let old = legacy_decode(v.clone());
+        let new = decode_entry_value(v);
+        match (&old, &new) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b, "decoders diverged on {v}"),
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "errors diverged on {v}"),
+            _ => panic!("decoders diverged on {v}: old={old:?} new={new:?}"),
+        }
+        // The owned entry point must stay a thin wrapper.
+        let owned = decode_entry_json(v.clone());
+        assert_eq!(owned.is_ok(), new.is_ok());
+    }
+
+    #[test]
+    fn borrowed_decoder_matches_legacy_on_malformed_and_torn_entries() {
+        let torn = [
+            // Entry map imported before the update that fills its fields.
+            json!({}),
+            json!({ "parts": [] }),
+            json!({ "id": "only-id" }),
+            json!({ "id": "x", "role": "user" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1 }),
+            // Part map imported before its fields.
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ {} ] }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p" } ] }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "tool" } ] }),
+            // Newer-schema role/status/kind.
+            json!({ "id": "x", "role": "alien", "createdAt": 1, "deviceId": "d", "status": "warp" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "hologram", "text": "t" } ] }),
+            // Wrong scalar types.
+            json!({ "id": 5, "role": "user", "createdAt": "1", "deviceId": null }),
+            json!({ "id": "x", "role": "user", "createdAt": 1.5, "deviceId": "d", "durationMs": "long" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": "none" }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": { "0": {} } }),
+            json!({ "id": "x", "role": "user", "createdAt": 1, "deviceId": "d", "parts": [ { "id": "p", "kind": "tool", "outputBytes": -1 } ] }),
+            // Salvage branches: reasoning, image, call (parseable and not), message.
+            json!({ "role": "assistant", "parts": [
+                { "id": "a", "reasoning": "r" }, { "kind": "image", "path": "/p" },
+                { "id": "c", "call": { "id": "1", "name": "Bash", "input": {} } },
+                { "id": "c2", "call": "garbage" }, { "id": "m", "message": "oops" },
+                { "id": "e", "text": 7 }, { "opaque": [1, 2] }, 5, null, "str"
+            ] }),
+            // Non-objects are unsalvageable.
+            Value::Null,
+            json!("garbage"),
+            json!(42),
+            json!([1, 2]),
+            json!(true),
+        ];
+        for v in &torn {
+            assert_same(v);
+        }
+        assert_same(&valid_entry());
+    }
+
+    #[test]
+    fn borrowed_decoder_matches_legacy_on_mutated_corpus() {
+        let seeds: u64 = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        for seed in 1..=seeds {
+            let mut rng = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            for _ in 0..150 {
+                let mut v = valid_entry();
+                for _ in 0..1 + rng.below(4) {
+                    mutate(&mut v, &mut rng, 0);
+                }
+                assert_same(&v);
+            }
+        }
+    }
+
+    #[test]
+    fn read_paths_reject_non_arrays_like_from_value() {
+        for v in [Value::Null, json!({}), json!("s"), json!(3)] {
+            let err = json_array(v.clone()).unwrap_err().to_string();
+            let old = serde_json::from_value::<Vec<Value>>(v)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, format!("json: {old}"));
+        }
+        assert_eq!(json_array(json!([1, 2])).unwrap().len(), 2);
     }
 }

@@ -28,7 +28,7 @@ fn processes(core: &EngineCore) -> usize {
         .map(|(events, _)| {
             events
                 .iter()
-                .filter(|e| matches!(e.event, AgentEvent::SessionStarted { .. }))
+                .filter(|e| matches!(e.event.as_ref(), AgentEvent::SessionStarted { .. }))
                 .count()
         })
         .unwrap_or(0)
@@ -42,7 +42,7 @@ fn completed_turns(core: &EngineCore) -> usize {
                 .iter()
                 .filter(|e| {
                     matches!(
-                        e.event,
+                        e.event.as_ref(),
                         AgentEvent::Done {
                             status: zeron_proto::DoneStatus::Completed,
                             ..
@@ -66,11 +66,11 @@ fn journal(core: &EngineCore) -> Vec<AgentEvent> {
                 .into_iter()
                 .filter(|e| {
                     !matches!(
-                        e.event,
+                        e.event.as_ref(),
                         AgentEvent::TextDelta { .. } | AgentEvent::ReasoningDelta { .. }
                     )
                 })
-                .map(|e| e.event)
+                .map(|e| std::sync::Arc::unwrap_or_clone(e.event))
                 .collect()
         })
         .unwrap_or_default()
@@ -205,7 +205,7 @@ async fn agent_process_survives_sends_and_cancel() {
                 core.sessions.subscribe(CHAT, 0).is_ok_and(|(events, _)| {
                     events
                         .iter()
-                        .any(|e| matches!(e.event, AgentEvent::Subagent { .. }))
+                        .any(|e| matches!(e.event.as_ref(), AgentEvent::Subagent { .. }))
                 })
             },
             "the background subagent to start",
@@ -296,8 +296,8 @@ async fn agent_process_survives_sends_and_cancel() {
                     events
                         .iter()
                         .rev()
-                        .take_while(|e| !matches!(e.event, AgentEvent::Done { .. }))
-                        .filter(|e| matches!(&e.event, AgentEvent::TextDelta { .. }))
+                        .take_while(|e| !matches!(e.event.as_ref(), AgentEvent::Done { .. }))
+                        .filter(|e| matches!(e.event.as_ref(), AgentEvent::TextDelta { .. }))
                         .count()
                         > 5
                 })
@@ -477,7 +477,7 @@ async fn resume_after_killed_background_work_is_not_done_early() {
             core.sessions.subscribe(CHAT, 0).is_ok_and(|(events, _)| {
                 events
                     .iter()
-                    .any(|e| matches!(e.event, AgentEvent::Subagent { .. }))
+                    .any(|e| matches!(e.event.as_ref(), AgentEvent::Subagent { .. }))
             })
         },
         "the background subagent to start",
@@ -515,7 +515,7 @@ async fn resume_after_killed_background_work_is_not_done_early() {
             events
                 .iter()
                 .skip(before_events)
-                .filter_map(|e| match &e.event {
+                .filter_map(|e| match e.event.as_ref() {
                     AgentEvent::TextDelta { text } => Some(text.as_str()),
                     _ => None,
                 })

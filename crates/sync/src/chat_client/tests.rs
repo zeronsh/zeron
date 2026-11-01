@@ -1875,6 +1875,73 @@ async fn edits_do_not_retransmit_batches_waiting_for_slow_acknowledgments() {
     client.shutdown().await;
 }
 
+/// Counts outbox INSERT attempts the client makes through the sink.
+#[derive(Default)]
+struct CountingSink {
+    inner: RecordingSink,
+    persisted: Mutex<Vec<String>>,
+}
+impl ChatDocSink for CountingSink {
+    fn persist_update(&self, id: &str, _bytes: &[u8]) -> Result<(), String> {
+        lock(&self.persisted).push(id.to_string());
+        Ok(())
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.inner.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.inner.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, bytes: &[u8]) -> bool {
+        self.inner.contains_frontier(bytes)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.inner.advance_cursor(cursor);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_journaled_batch_is_not_inserted_a_second_time() {
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, empty_state_json(), &[], vec![], false).await;
+        end
+    });
+    let sink = Arc::new(CountingSink::default());
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "sender",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+
+    // Already in the outbox: pushed with no further write.
+    client.enqueue_batch_journaled("written".into(), vec![1], true);
+    let push = expect_kind(&mut end, frame_type::PUSH).await;
+    assert_eq!(push.header["batchId"], "written");
+    assert!(lock(&sink.persisted).is_empty(), "journaled batch re-inserted");
+
+    // The legacy entry point still writes exactly once.
+    client.enqueue_batch("legacy".into(), vec![2]);
+    let push = expect_kind(&mut end, frame_type::PUSH).await;
+    assert_eq!(push.header["batchId"], "legacy");
+    assert_eq!(*lock(&sink.persisted), vec!["legacy"]);
+
+    // A failed write is held back from the wire until the client's own
+    // retry gets the row written.
+    client.enqueue_batch_journaled("unwritten".into(), vec![3], false);
+    let push = expect_kind(&mut end, frame_type::PUSH).await;
+    assert_eq!(push.header["batchId"], "unwritten");
+    assert_eq!(*lock(&sink.persisted), vec!["legacy", "unwritten"]);
+    client.shutdown().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn verified_snapshot_does_not_replay_thirteen_thousand_checkpoint_rows() {
     let (pipe, mut end) = pipe_pair();

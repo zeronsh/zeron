@@ -322,7 +322,7 @@ async fn regression(live: bool) {
         let (events, _) = core.sessions.subscribe(CHAT, 0).unwrap();
         let native_sessions: Vec<_> = events
             .iter()
-            .filter_map(|e| match &e.event {
+            .filter_map(|e| match e.event.as_ref() {
                 zeron_proto::AgentEvent::SessionStarted { session_id, .. } => Some(session_id),
                 _ => None,
             })
@@ -453,9 +453,12 @@ async fn disconnected_cleanup_is_durable_before_snapshot_debounce() {
         handle.doc().doc().commit();
     }
     let expected = handle.doc().doc().oplog_vv();
-    assert!(store.pending_chat_updates(CHAT).unwrap().len() >= 136);
     drop(handle);
     host.shutdown_workers().await;
+    assert!(
+        store.pending_chat_updates(CHAT).unwrap().len() >= 136,
+        "shutdown returned before queued cleanup rows were durable"
+    );
     drop(host);
     // Crash shape: the durable update journal is newer than the last snapshot.
     store
@@ -673,4 +676,65 @@ async fn cold_outbox_is_published_after_restart_without_opening_the_chat() {
     assert_eq!(room.lock().unwrap().ids.len(), 1);
     host.shutdown_workers().await;
     server.abort();
+}
+
+/// Model a kill after a stream commit, before its outbox INSERT: only the
+/// previous snapshot and the newer raw journal events survive the process.
+#[tokio::test]
+async fn journal_tail_recovery_does_not_restore_a_lost_stream_update() {
+    use zeron_doc::{MessagePart, SegmentWriter};
+    use zeron_engine::RunJournal;
+    use zeron_proto::AgentEvent;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("device-id"), "crashed-writer").unwrap();
+    let profile = EngineProfile::local(dir.path()).unwrap();
+    let doc = SessionDoc::init(CHAT).unwrap();
+    let mut writer = SegmentWriter::begin(&doc, "interrupted-reply", "crashed-writer", 1).unwrap();
+    writer
+        .sync(&[MessagePart::Text {
+            id: "text".into(),
+            text: "saved prefix".into(),
+        }])
+        .unwrap();
+    let store = DocsStore::open(profile.store_root()).unwrap();
+    store
+        .save_snapshot_with_cursor(CHAT, &doc.export_snapshot().unwrap(), 0, 2)
+        .unwrap();
+    let journal = RunJournal::open(profile.store_root().join("journals")).unwrap();
+    for text in ["saved prefix", " LOST SUFFIX"] {
+        journal
+            .append(CHAT, &AgentEvent::TextDelta { text: text.into() })
+            .unwrap();
+    }
+    drop(writer);
+    drop(doc);
+    drop(store);
+    // Boot recovery consumes the real journal-tail path, but does not replay
+    // the deltas into the document or regenerate the missing CRDT update.
+    let core = EngineCore::assemble_with_profile(
+        profile.clone(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let handle = core.doc_host.open_local(CHAT).unwrap();
+    let entries = handle.doc().read_entries().unwrap();
+    let reply = entries
+        .iter()
+        .find(|e| e.id == "interrupted-reply")
+        .unwrap();
+    assert_eq!(reply.status, Some(MessageStatus::Aborted));
+    assert!(matches!(&reply.parts[0], MessagePart::Text { text, .. } if text == "saved prefix"));
+    assert!(
+        !serde_json::to_string(&entries)
+            .unwrap()
+            .contains("LOST SUFFIX")
+    );
+    assert!(journal.replay(CHAT, 0).unwrap().iter().any(|(_, event)| {
+        matches!(event, AgentEvent::TextDelta { text } if text == " LOST SUFFIX")
+    }));
+    drop(handle);
+    core.sessions.shutdown().await;
+    core.doc_host.shutdown_workers().await;
 }

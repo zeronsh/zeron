@@ -40,22 +40,16 @@ pub(crate) struct LocalDoc {
 /// Restore a chat doc from disk: the chat2 snapshot (epoch ≥ 2 only — a
 /// retired s2 lineage is never imported) plus any unacknowledged own writes.
 pub(crate) fn load_local(store: &DocsStore, chat_id: &str) -> LocalDoc {
-    let raw = loro::LoroDoc::new();
+    let mut raw = loro::LoroDoc::new();
     let mut cursor = 0;
     let mut had_content = false;
-    match store.load_snapshot_with_cursor(chat_id) {
-        Ok(Some((bytes, stored_cursor, epoch))) if epoch >= CHAT2_DOC_EPOCH => {
-            match raw.import(&bytes) {
-                Ok(_) => {
-                    had_content = true;
-                    if store.snapshot_cursor_verified(chat_id).unwrap_or(false) {
-                        cursor = stored_cursor;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(chat = %chat_id, error = %err, "chat snapshot unreadable; starting fresh")
-                }
+    match store.load_chat_state(chat_id) {
+        Ok(Some(state)) if state.epoch >= CHAT2_DOC_EPOCH => {
+            had_content = true;
+            if state.verified {
+                cursor = state.cursor;
             }
+            raw = state.doc;
         }
         Ok(_) => {}
         Err(err) => tracing::warn!(chat = %chat_id, error = %err, "chat snapshot load failed"),
@@ -720,5 +714,50 @@ impl Drop for Room {
             crate::runtime::shared().spawn(client.shutdown());
         }
         self.persister.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_local_replays_snapshot_deltas_then_publication_outbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let source = SessionDoc::init("chat").unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &source.export_snapshot().unwrap(), 7, 2)
+            .unwrap();
+        let vv = source.doc().oplog_vv();
+        source.doc().get_text("text").insert(0, "delta").unwrap();
+        source.doc().commit();
+        store
+            .append_snapshot_delta(
+                "chat",
+                &source.doc().export(loro::ExportMode::updates(&vv)).unwrap(),
+                8,
+                &zeron_sync::DocsStore::snapshot_roots(source.doc()).unwrap(),
+            )
+            .unwrap();
+        let vv = source.doc().oplog_vv();
+        source.doc().get_text("text").insert(0, "outbox").unwrap();
+        source.doc().commit();
+        store
+            .enqueue_chat_update(
+                "chat",
+                "unacked",
+                &source.doc().export(loro::ExportMode::updates(&vv)).unwrap(),
+            )
+            .unwrap();
+        let local = load_local(&store, "chat");
+        assert!(local.had_content);
+        assert_eq!(local.cursor, 8);
+        assert_eq!(local.doc.doc().oplog_vv(), source.doc().oplog_vv());
+        assert_eq!(
+            local.doc.doc().get_deep_value(),
+            source.doc().get_deep_value()
+        );
+        assert_eq!(store.pending_chat_updates("chat").unwrap().len(), 1);
     }
 }

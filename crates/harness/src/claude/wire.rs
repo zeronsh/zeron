@@ -332,13 +332,57 @@ pub(crate) struct ControlRequestBody {
 
 /// Parse one stdout JSONL line. `Err` = not JSON; unknown types = `Other`.
 ///
+/// A plain, unique top-level `type` is deserialized straight into that frame.
+/// Ambiguous or unreadable input falls through to [`parse_frame_full`].
+pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeLines, 1);
+    if let Some(frame) = parse_frame_direct(line) {
+        return Ok(frame);
+    }
+    parse_frame_full(line)
+}
+
+/// One `from_str` into the frame named by the line's top-level type.
+/// `None` when that would not match [`parse_frame_full`] (the value parse
+/// then runs instead).
+fn parse_frame_direct(line: &str) -> Option<Frame> {
+    let kind = unambiguous_top_level_type(line)?;
+    parse_frame_direct_kind(line, kind.as_ref())
+}
+
+fn parse_frame_direct_kind(line: &str, kind: &str) -> Option<Frame> {
+    zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+    let frame = match kind {
+        "system" => Frame::System(serde_json::from_str(line).ok()?),
+        "stream_event" => Frame::StreamEvent(serde_json::from_str(line).ok()?),
+        "assistant" => Frame::Assistant(serde_json::from_str(line).ok()?),
+        "user" => Frame::User(serde_json::from_str(line).ok()?),
+        "rate_limit_event" => Frame::RateLimit(serde_json::from_str(line).ok()?),
+        "result" => Frame::Result(serde_json::from_str(line).ok()?),
+        "control_request" => Frame::ControlRequest(serde_json::from_str(line).ok()?),
+        "control_response" => Frame::ControlResponse(serde_json::from_str(line).ok()?),
+        "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_str(line).ok()?),
+        _ => {
+            // Unknown types are `Other` only once the line is actually JSON.
+            // A torn unknown line stays an error, as the value parse was.
+            serde_json::from_str::<serde::de::IgnoredAny>(line).ok()?;
+            Frame::Other
+        }
+    };
+    Some(frame)
+}
+
+/// Value parse of one line: `str` → [`Value`] → typed frame, then
+/// null-stripping, then an unreadable `result` so a torn result still ends
+/// the turn.
+///
 /// Two repairs before giving up on a line. Node's `JSON.stringify` writes a
 /// string cut through a surrogate pair as a lone `\uD83D` escape, which
 /// serde_json rejects: those become U+FFFD. An explicit `null` where a field
 /// is normally present fails its typed parse: nulls read as absent. A
 /// `result` line that still won't parse becomes an unreadable result rather
 /// than an error, so the turn it ends still ends.
-pub(crate) fn parse_frame(line: &str) -> Result<Frame, serde_json::Error> {
+fn parse_frame_full(line: &str) -> Result<Frame, serde_json::Error> {
     let error = match parse_value(line).and_then(typed_frame) {
         Ok(frame) => return Ok(frame),
         Err(error) => error,
@@ -386,6 +430,104 @@ fn top_level_type(line: &str) -> Option<&str> {
     None
 }
 
+/// Find the top-level type while guarding differences from the value parser.
+/// Escaped keys may alias another key; surrogate escapes and deeply nested or
+/// out-of-range ignored values need the full value parser's validation.
+fn unambiguous_top_level_type(line: &str) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+
+    let bytes = line.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    let mut found = None;
+    let mut type_value_at = None;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => {
+                depth += 1;
+                if depth >= 128 {
+                    return None;
+                }
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                i += 1;
+            }
+            b'"' => {
+                let quote = i;
+                i += 1;
+                let start = i;
+                let mut escaped = false;
+                loop {
+                    match *bytes.get(i)? {
+                        b'"' => break,
+                        b'\\' => {
+                            escaped = true;
+                            if bytes.get(i + 1) == Some(&b'u')
+                                && matches!(bytes.get(i + 2), Some(b'd' | b'D'))
+                                && matches!(
+                                    bytes.get(i + 3),
+                                    Some(b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+                                )
+                                && bytes.get(i + 4).is_some_and(u8::is_ascii_hexdigit)
+                                && bytes.get(i + 5).is_some_and(u8::is_ascii_hexdigit)
+                            {
+                                return None;
+                            }
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                let end = i;
+                i += 1;
+                let mut after = i;
+                while matches!(bytes.get(after), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+                    after += 1;
+                }
+                let is_key = bytes.get(after) == Some(&b':');
+                if escaped && is_key {
+                    return None;
+                }
+                if type_value_at == Some(quote) {
+                    found = Some(if escaped {
+                        zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+                        Cow::Owned(serde_json::from_str(&line[quote..i]).ok()?)
+                    } else {
+                        Cow::Borrowed(&line[start..end])
+                    });
+                    type_value_at = None;
+                } else if depth == 1 && is_key && &line[start..end] == "type" {
+                    if found.is_some() || type_value_at.is_some() {
+                        return None;
+                    }
+                    after += 1;
+                    while matches!(bytes.get(after), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+                        after += 1;
+                    }
+                    if bytes.get(after) != Some(&b'"') {
+                        return None;
+                    }
+                    type_value_at = Some(after);
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+                serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
+            }
+            _ => i += 1,
+        }
+    }
+    found
+}
+
 /// Index of the quote closing a JSON string whose contents start at `start`.
 fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut i = start;
@@ -400,8 +542,12 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn parse_value(line: &str) -> Result<Value, serde_json::Error> {
+    zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
     serde_json::from_str(line).or_else(|error| match repair_lone_surrogates(line) {
-        Some(repaired) => serde_json::from_str(&repaired),
+        Some(repaired) => {
+            zeron_counters::add(zeron_counters::C::ClaudeJsonParses, 1);
+            serde_json::from_str(&repaired)
+        }
         None => Err(error),
     })
 }
@@ -709,6 +855,7 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn steer_priority_follows_tool_state() {
@@ -736,6 +883,43 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+    }
+
+    #[test]
+    fn streamed_text_deltas_take_the_direct_path() {
+        // The commonest line in a turn. `ClaudeJsonParses` also counts each
+        // validated number token, so this line counts 2 on either path; only
+        // this check tells the single-pass path is the one taken.
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}},"session_id":"s","parent_tool_use_id":null,"uuid":"u"}"#,
+        ] {
+            assert!(parse_frame_direct(line).is_some(), "{line}");
+        }
+    }
+
+    #[test]
+    fn direct_and_fallback_frames_count_lines_and_text_parses() {
+        use zeron_counters::{C, get};
+        for (line, parses) in [
+            (r#"{"type":"system"}"#, 1),
+            (r#"{"type":"system","tools":null}"#, 3),
+            (r#"{"type":"sys\u0074em","attempt":2}"#, 3),
+        ] {
+            let lines_before = get(C::ClaudeLines);
+            let parses_before = get(C::ClaudeJsonParses);
+            assert!(parse_frame(line).is_ok());
+            assert!(get(C::ClaudeLines) >= lines_before + 1);
+            assert!(get(C::ClaudeJsonParses) >= parses_before + parses);
+        }
+    }
+
+    #[test]
+    fn repaired_value_counts_each_json_parse() {
+        let before = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(parse_value(r#"{"text":"\ud83d"}"#).is_ok());
+        let after = zeron_counters::snapshot()[zeron_counters::C::ClaudeJsonParses as usize].1;
+        assert!(after >= before + 2);
     }
 
     #[test]
@@ -856,5 +1040,537 @@ mod tests {
             user_message_line_with_images("hi", &[]),
             user_message_line("hi")
         );
+    }
+
+    /// Corpus lines (every frame the wire module handles, plus the inline
+    /// cases above and every fixture line) parse the same through the
+    /// single-pass path and the value path.
+    #[test]
+    fn parse_frame_single_pass_matches_value_path() {
+        let images = [ImageBlock {
+            media_type: "image/png".into(),
+            data: "QUJD".into(),
+        }];
+        let mut lines: Vec<(String, String)> = Vec::new();
+        let owned = [
+            user_message_line("hi"),
+            user_message_line_with_images("what is this?", &images),
+            steer_message_line("hold on", "u1", true),
+            steer_message_line("later", "u2", false),
+            steer_message_line_with_images("look", "u3", false, &images),
+            prompt_line("open", "p1", &images),
+            prompt_line("plain", "p2", &[]),
+            initialize_request_line("r0"),
+            set_model_request_line("r1", Some("claude-haiku")),
+            set_model_request_line("r2", None),
+            apply_flag_settings_line("r3", json!({"effort": "low"})),
+            set_permission_mode_line("r4", "default"),
+            stop_turn_request_line("r5"),
+            stop_task_request_line("r6", "task-1"),
+            control_response_line("r7", json!({"behavior": "allow"})),
+            control_error_line("r8", "nope"),
+            interrupt_request_line("r9"),
+            json!({
+                "type": "system",
+                "subtype": "init",
+                "model": "m",
+                "tools": ["Bash", "Read"],
+                "cwd": "/tmp/proj",
+                "session_id": "s1",
+                "permissionMode": "default",
+                "extra": {"ignored": true}
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "task_started",
+                "tool_use_id": "toolu_1",
+                "task_id": "a1",
+                "subagent_type": "general-purpose",
+                "description": "/fanout",
+                "prompt": "do the thing"
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "toolUseId": "toolu_2",
+                "taskId": "a2",
+                "status": "completed",
+                "error": {"message": "boom"}
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [{"id": "1", "status": "running"}, null]
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "api_retry",
+                "attempt": 2,
+                "max_retries": 5,
+                "retry_delay_ms": 250.5,
+                "error_status": 529,
+                "error": "overloaded"
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": {"trigger": "auto", "pre_tokens": 1000, "post_tokens": 200}
+            })
+            .to_string(),
+            json!({
+                "type": "system",
+                "subtype": "status",
+                "status": "requesting",
+                "permissionMode": "plan"
+            })
+            .to_string(),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": "p",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "hello 😀"}
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "stream_event",
+                "parent_tool_use_id": null,
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "hmm", "estimated_tokens": null}
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "assistant",
+                "uuid": "u",
+                "parent_tool_use_id": null,
+                "error": "rate_limit",
+                "message": {
+                    "model": "m",
+                    "usage": {"input_tokens": 1, "output_tokens": 2},
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "thinking", "thinking": "hmm"},
+                        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "ls"}}
+                    ]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "user",
+                "uuid": "u",
+                "parent_tool_use_id": null,
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "t",
+                        "is_error": true,
+                        "content": "no"
+                    }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": "rejected",
+                    "rateLimitType": "five_hour",
+                    "overageStatus": "allowed_warning",
+                    "isUsingOverage": false,
+                    "overageInUse": false
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "result",
+                "subtype": "success",
+                "result": "ok",
+                "is_error": false,
+                "session_id": "s",
+                "terminal_reason": "completed",
+                "api_error_status": 429,
+                "modelUsage": {"a": {"inputTokens": 1}, "b": {"outputTokens": 2}},
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+                "errors": ["nope", {"message": "x"}]
+            })
+            .to_string(),
+            json!({
+                "type": "control_request",
+                "request_id": "r",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "Bash",
+                    "display_name": "bash",
+                    "description": "list",
+                    "input": {"command": "ls"}
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": "zeron_model_1",
+                    "error": {"message": "Unknown model", "code": 1}
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": "x", "response": {}}
+            })
+            .to_string(),
+            json!({"type": "command_lifecycle", "command_uuid": "c", "state": "started"})
+                .to_string(),
+            json!({"type": "control_cancel_request", "request_id": "r"}).to_string(),
+            json!({"type": "mystery_frame", "x": 1, "nested": {"type": "result"}}).to_string(),
+        ];
+        for line in owned {
+            lines.push(("corpus".to_owned(), line));
+        }
+        for line in [
+            r#"{"type":"system","subtype":"init","model":"m","tools":["Bash"],"cwd":"/x","session_id":"s1"}"#,
+            r#"{"type":"mystery_frame"}"#,
+            "not json",
+            "",
+            "   ",
+            "{",
+            "[]",
+            "null",
+            "0",
+            r#""type""#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"a\ud83d b \ude00 \\ud83d 😀"}}}"#,
+            r#"{"type":"result","subtype":"success","usage":null,"modelUsage":null,"errors":null,"result":"ok","session_id":"s"}"#,
+            r#"{"type":"system","subtype":"init","model":null,"cwd":null,"tools":null,"session_id":"s1"}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":"many"}}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"tor"#,
+            r#"{"type":"assistant","message":"#,
+            r#"{"type":"user","message":{"content":[{"type":"result","text":"tor"#,
+            r#"{"type":"system","subtype":"init","session_id":5,"x":{"type":"result"}}"#,
+            r#"{"type":"assistant","message":"say \"type\":\"result\" {","#,
+            r#"{"subtype":"success","note":"{\"type\":1}","type":"result","res"#,
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"zeron_model_1","error":"Unknown model"}}"#,
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{}}}"#,
+            r#"{"type":"mystery_frame","x":"#,
+            r#"{"type":"control_cancel_request","request_id":"#,
+            r#"{"type":"system","type":"assistant","subtype":"init","session_id":"s","message":{"content":"hi"}}"#,
+            r#"{"type":"sys\u0074em","subtype":"init","session_id":"s"}"#,
+            r#"{"subtype":"success","result":"done","session_id":"s","usage":{"input_tokens":1,"output_tokens":2},"type":"result"}"#,
+            r#"{"note":"{\"type\":\"assistant\"}","type":"system","subtype":"init","session_id":"s"}"#,
+            "  \n{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}",
+            r#"{"type" : "command_lifecycle", "command_uuid" : "c", "state" : "queued"}"#,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":-1}}"#,
+            r#"{"ty\u0070e":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"system","ty\u0070e":"assistant","message":{"content":"hello"}}"#,
+            r#"{"type":"system","ignored":1e400}"#,
+            r#"{"type":"unknown","ignored":1e400}"#,
+            r#"{"type":"system","ignored":"\ud800"}"#,
+            r#"{"type":"system","ty\u0070e":"assistant","message":{"content":"escaped key"}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"te\u0078t":"one","text":"two"}}}"#,
+            r#"{"type":"assistant","message":{"co\u006etent":"first","content":"last"}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"quote: \" slash: \\ solidus: \/ backspace: \b form: \f newline: \n carriage: \r tab: \t unicode: \u0041"}}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"\uD83D\uDE00"}}}"#,
+            r#"{"type":"stream_event","event":{"delta":{"text":"\ud800 and \uDeAd"}}}"#,
+            r#"{"type":"system","prompt":"literal \\ud800"}"#,
+            r#"{"type":"sys\u0074em","model":"escaped type value"}"#,
+            r#"{"type":"system","attempt":18446744073709551615,"retry_delay_ms":18446744073709551615}"#,
+            r#"{"type":"system","attempt":18446744073709551616,"retry_delay_ms":-0.0}"#,
+            r#"{"type":"system","retry_delay_ms":9007199254740993}"#,
+            r#"{"type":"system","task_id":null,"prompt":{"a":null}}"#,
+            r#"{"type":"system","task_id":"first","task_id":"last"}"#,
+            "\u{feff}{\"type\":\"system\",\"subtype\":\"init\"}",
+        ] {
+            lines.push(("inline".to_owned(), line.to_owned()));
+        }
+        lines.push((
+            "deep ignored value".to_owned(),
+            format!(
+                "{{\"type\":\"system\",\"ignored\":{}0{}}}",
+                "[".repeat(130),
+                "]".repeat(130)
+            ),
+        ));
+        lines.push((
+            "long frame".to_owned(),
+            format!(
+                "{{\"type\":\"system\",\"model\":\"{}\"}}",
+                "x".repeat(64 * 1024 + 17)
+            ),
+        ));
+
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        let mut dirs = vec![manifest.join("tests/fixtures")];
+        while let Some(dir) = dirs.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("fixture entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        for path in files {
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let text = String::from_utf8_lossy(&bytes);
+            let label = path
+                .strip_prefix(&manifest)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for (index, line) in text.split('\n').enumerate() {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                lines.push((format!("{label}:{}", index + 1), line.to_owned()));
+            }
+        }
+
+        let mut direct_hits = 0usize;
+        for (origin, line) in &lines {
+            let full = parse_frame_full(line);
+            let got = parse_frame(line);
+            let full_dbg = format!("{full:?}");
+            let got_dbg = format!("{got:?}");
+            assert!(
+                got_dbg == full_dbg,
+                "{origin}\nline: {}\nfast: {}\nfull: {}",
+                preview(line),
+                preview(&got_dbg),
+                preview(&full_dbg),
+            );
+            if let Some(std::borrow::Cow::Borrowed(kind)) = unambiguous_top_level_type(line) {
+                assert_eq!(
+                    top_level_type(line),
+                    Some(kind),
+                    "{origin} type scan disagreed: {}",
+                    preview(line)
+                );
+            }
+            if parse_frame_direct(line).is_some() {
+                direct_hits += 1;
+            }
+        }
+
+        assert!(
+            parse_frame_direct(
+                r#"{"type":"stream_event","event":{"delta":{"text":"\n\"\\\/\b\f\r\t\u0041"}}}"#
+            )
+            .is_some()
+        );
+        assert!(parse_frame_direct(r#"{"type":"system","prompt":"\\ud800"}"#).is_some());
+        assert!(parse_frame_direct(r#"{"type":"system","prompt":"\uD83D\uDE00"}"#).is_none());
+
+        let fast = r#"{"type":"system","subtype":"init","model":"m","tools":["Bash"],"cwd":"/x","session_id":"s1"}"#;
+        assert!(
+            parse_frame_direct(fast).is_some(),
+            "happy path fell through"
+        );
+        assert!(parse_frame_direct(r#"{"type":"mystery_frame"}"#).is_some());
+        assert!(parse_frame_direct("not json").is_none());
+        assert!(parse_frame_direct(r#"{"type":"assistant","message":"#).is_none());
+        assert!(parse_frame_direct(r#"{"type":"mystery_frame","x":"#).is_none());
+        assert!(parse_frame_direct(
+            r#"{"type":"system","subtype":"init","model":null,"cwd":null,"tools":null,"session_id":"s1"}"#
+        )
+        .is_none());
+        assert!(parse_frame_direct(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"a\ud83d"}}}"#
+        )
+        .is_none());
+        assert!(parse_frame_direct(
+            r#"{"type":"system","type":"assistant","subtype":"init","session_id":"s","message":{"content":"hi"}}"#
+        )
+        .is_none());
+        assert!(
+            parse_frame_direct(r#"{"type":"sys\u0074em","subtype":"init","session_id":"s"}"#)
+                .is_some()
+        );
+        assert!(
+            direct_hits > 50,
+            "single-pass path parsed only {direct_hits} corpus lines"
+        );
+    }
+
+    // Keep historical guards here solely to measure the actual fallback rate.
+    #[test]
+    #[ignore = "release-mode fixture benchmark"]
+    fn fixture_parse_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect();
+        paths.sort();
+        let mut lines = Vec::new();
+        for path in &paths {
+            let text = std::fs::read_to_string(path).unwrap();
+            lines.extend(text.lines().map(str::to_owned));
+        }
+        assert!(!lines.is_empty());
+        let mut fallbacks = [0usize; 3];
+        for line in &lines {
+            let original =
+                original_guard(line).and_then(|kind| parse_frame_direct_kind(line, kind));
+            let conservative =
+                conservative_guard(line).and_then(|kind| parse_frame_direct_kind(line, kind));
+            let refined = parse_frame_direct(line);
+            for (count, result) in fallbacks.iter_mut().zip([original, conservative, refined]) {
+                *count += usize::from(result.is_none());
+            }
+            assert_eq!(
+                format!("{:?}", parse_frame(line)),
+                format!("{:?}", parse_frame_full(line))
+            );
+        }
+        let iterations = 500;
+        let measure = |parse: fn(&str) -> Result<Frame, serde_json::Error>| {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                for line in &lines {
+                    let _ = black_box(parse(black_box(line)));
+                }
+            }
+            start.elapsed().as_nanos() as f64 / (iterations * lines.len()) as f64
+        };
+        // Warm both paths before timing.
+        for line in &lines {
+            let _ = black_box(parse_frame_full(line));
+            let _ = black_box(parse_frame(line));
+        }
+        let old_ns = measure(parse_frame_full);
+        let new_ns = measure(parse_frame);
+        println!(
+            "files={} lines={} fallbacks={:?} old_ns_per_line={old_ns:.1} new_ns_per_line={new_ns:.1}",
+            paths.len(),
+            lines.len(),
+            fallbacks
+        );
+    }
+
+    fn original_guard(line: &str) -> Option<&str> {
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        let mut i = 0;
+        let mut found: Option<&str> = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth = depth.checked_sub(1)?,
+                b'"' => {
+                    let start = i + 1;
+                    let end = string_end(bytes, start)?;
+                    i = end + 1;
+                    if depth == 1 && &line[start..end] == "type" {
+                        let value = json_string_after_colon(line, i)?;
+                        if found.is_some() || value.text.as_bytes().contains(&b'\\') {
+                            return None;
+                        }
+                        found = Some(value.text);
+                        i = value.next;
+                        continue;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    }
+
+    struct JsonString<'a> {
+        text: &'a str,
+        /// Index of the first byte after the closing quote.
+        next: usize,
+    }
+
+    /// The JSON string after a colon at `i` (the first byte after a key's
+    /// closing quote). `None` when what follows is not a string.
+    fn json_string_after_colon(line: &str, i: usize) -> Option<JsonString<'_>> {
+        let rest = line.get(i..)?;
+        let after_colon = rest.trim_start().strip_prefix(':')?;
+        let raw = after_colon.trim_start().strip_prefix('"')?;
+        let end = string_end(raw.as_bytes(), 0)?;
+        Some(JsonString {
+            text: &raw[..end],
+            // `raw` is a suffix of `line`, so this is the byte after its quote.
+            next: line.len() - raw.len() + end + 1,
+        })
+    }
+
+    fn conservative_guard(line: &str) -> Option<&str> {
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        let mut i = 0;
+        let mut found: Option<&str> = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth >= 128 {
+                        return None;
+                    }
+                }
+                b'}' | b']' => depth = depth.checked_sub(1)?,
+                b'"' => {
+                    let start = i + 1;
+                    let end = string_end(bytes, start)?;
+                    if bytes[start..end].contains(&b'\\') {
+                        return None;
+                    }
+                    i = end + 1;
+                    if depth == 1 && &line[start..end] == "type" {
+                        let value = json_string_after_colon(line, i)?;
+                        if found.is_some() || value.text.as_bytes().contains(&b'\\') {
+                            return None;
+                        }
+                        found = Some(value.text);
+                        i = value.next;
+                        continue;
+                    }
+                    continue;
+                }
+                b'-' | b'0'..=b'9' => {
+                    let start = i;
+                    while i < bytes.len()
+                        && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                    {
+                        i += 1;
+                    }
+                    serde_json::from_str::<serde_json::Number>(&line[start..i]).ok()?;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        found
+    }
+
+    fn preview(text: &str) -> String {
+        let mut chars = text.chars();
+        let short: String = chars.by_ref().take(180).collect();
+        if chars.next().is_some() {
+            format!("{short}…")
+        } else {
+            short
+        }
     }
 }

@@ -703,25 +703,48 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
         .unwrap()
         .as_millis() as i64;
     let expected: Vec<_> = (0..100).map(|i| format!("remote message {i}")).collect();
-    // No await: all entries are visible together, as with a remote document import.
+    let peer = zeron_doc::SessionDoc::from_doc(loro::LoroDoc::new());
+    peer.doc()
+        .import(&handle.doc().export_snapshot().unwrap())
+        .unwrap();
+    let base = peer.doc().oplog_vv();
     for (i, prompt) in expected.iter().enumerate() {
-        handle
-            .doc()
-            .queue_command(&zeron_doc::SessionCommandEntry {
-                id: format!("remote-command-{i}"),
-                payload: SessionCommandPayload::Steer {
-                    prompt: prompt.clone(),
-                    message_id: Some(format!("remote-message-{i}")),
-                },
-                issued_by: "remote-device".into(),
-                issued_at: now + i as i64,
-                based_on: None,
-                expires_at: None,
-                status: zeron_doc::SessionCommandStatus::Pending,
-                resolution: None,
-            })
-            .unwrap();
+        peer.queue_command(&zeron_doc::SessionCommandEntry {
+            id: format!("remote-command-{i}"),
+            payload: SessionCommandPayload::Steer {
+                prompt: prompt.clone(),
+                message_id: Some(format!("remote-message-{i}")),
+            },
+            issued_by: "remote-device".into(),
+            issued_at: now + i as i64,
+            based_on: None,
+            expires_at: None,
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
     }
+    let update = peer.doc().export(loro::ExportMode::updates(&base)).unwrap();
+    handle.doc().doc().import(&update).unwrap();
+    // No explicit drain until the worker has consumed the remote import.
+    wait_for(
+        || queue_texts(&core) == expected,
+        "imported commands to drain",
+    )
+    .await;
+    wait_for(
+        || {
+            handle
+                .doc()
+                .read_commands()
+                .unwrap()
+                .iter()
+                .all(|c| c.status == zeron_doc::SessionCommandStatus::Applied)
+        },
+        "imported outcomes",
+    )
+    .await;
+    handle.doc().doc().import(&update).unwrap(); // replay is idempotent
     core.doc_host.drain_commands(&handle).await;
     core.doc_host.drain_commands(&handle).await;
     // Mid-turn, the whole burst waits in order in the queue: nothing reached
@@ -762,6 +785,221 @@ async fn batched_remote_steers_preserve_every_message_in_order_exactly_once() {
     .await;
     assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A system entry: a transcript commit that touches no command and no queue row.
+fn noise(id: &str) -> SessionMessageEntry {
+    SessionMessageEntry {
+        id: id.into(),
+        role: MessageRole::System,
+        parts: vec![MessagePart::Text {
+            id: format!("{id}-t"),
+            text: "tick".into(),
+        }],
+        created_at: 1,
+        device_id: "noise".into(),
+        status: Some(zeron_doc::MessageStatus::Complete),
+        continuation_of: None,
+        duration_ms: None,
+    }
+}
+
+/// D3 (a): a stream of commits that never touches the command ledger must not
+/// re-read it. Before the change mask every doc change ran the control worker
+/// and the command drain, each a whole-ledger deep read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_commits_do_not_re_read_the_command_ledger() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", vec![])
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let fills = handle.commands_cache_fills();
+    for i in 0..50 {
+        handle.doc().push_message(&noise(&format!("tick-{i}"))).unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        handle.commands_cache_fills(),
+        fills,
+        "50 message commits read the ledger {} times",
+        handle.commands_cache_fills() - fills
+    );
+    assert_eq!(handle.commands_cache_mismatches(), 0);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// D3 (b): a command queued in the middle of a stream still executes, and the
+/// ones queued around the stream's commits keep their order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commands_queued_between_streaming_commits_run_in_order() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", vec![])
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let expected: Vec<_> = (0..30).map(|i| format!("between {i}")).collect();
+    for (i, prompt) in expected.iter().enumerate() {
+        core.doc_host
+            .queue_command(
+                CHAT,
+                SessionCommandPayload::Steer {
+                    prompt: prompt.clone(),
+                    message_id: Some(format!("between-{i}")),
+                },
+            )
+            .unwrap();
+        for j in 0..3 {
+            handle
+                .doc()
+                .push_message(&noise(&format!("tick-{i}-{j}")))
+                .unwrap();
+        }
+    }
+    wait_for(|| queue_texts(&core) == expected, "every steer, in order").await;
+    assert!(
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .all(|c| c.status == zeron_doc::SessionCommandStatus::Applied),
+        "each command resolved exactly once"
+    );
+    assert_eq!(prompts.lock().unwrap().len(), 1, "nothing ran twice");
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// D3 (c): a pass that could not run (this device did not host the chat yet)
+/// is retried by the next doc change of ANY kind, as it was when every change
+/// ran a drain. A transcript-only commit must be enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_that_becomes_host_drains_on_the_next_doc_change() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.workspace
+        .set_chat_host(CHAT, "device-remote")
+        .expect("move chat host away");
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    handle
+        .doc()
+        .queue_command(&zeron_doc::SessionCommandEntry {
+            id: "waiting-prompt".into(),
+            payload: SessionCommandPayload::Steer {
+                prompt: "host-flip prompt".into(),
+                message_id: Some("host-flip-message".into()),
+            },
+            issued_by: "remote-device".into(),
+            issued_at: now,
+            based_on: None,
+            expires_at: None,
+            status: zeron_doc::SessionCommandStatus::Pending,
+            resolution: None,
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status = |handle: &zeron_engine::doc_host::ChatDocHandle| {
+        handle
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .find(|c| c.id == "waiting-prompt")
+            .map(|c| c.status)
+    };
+    assert_eq!(
+        status(&handle),
+        Some(zeron_doc::SessionCommandStatus::Pending),
+        "an off-host device leaves the command alone"
+    );
+    core.workspace
+        .set_chat_host(CHAT, &core.device_id)
+        .expect("host moves here");
+    handle
+        .doc()
+        .push_message(&noise("after-host-move"))
+        .unwrap();
+    wait_for(
+        || status(&handle) != Some(zeron_doc::SessionCommandStatus::Pending),
+        "the pending command to drain after the host change",
+    )
+    .await;
+    assert_eq!(
+        status(&handle),
+        Some(zeron_doc::SessionCommandStatus::Applied)
+    );
+    wait_for(
+        || !prompts.lock().unwrap().is_empty(),
+        "host-flip prompt to execute",
+    )
+    .await;
+    assert_eq!(*prompts.lock().unwrap(), vec!["host-flip prompt"]);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// The wait loops behind a Stop read the cached ledger and wake on ledger
+/// writes: sitting out a blocked prompt for up to two seconds used to be a
+/// whole-ledger read every 20 ms.
+#[tokio::test]
+async fn a_stop_waiting_behind_blocked_prompts_does_not_poll_the_ledger() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    *harness.mailbox_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+    core.doc_host
+        .queue_message(CHAT, "opening", vec![])
+        .unwrap();
+    wait_for(|| prompts.lock().unwrap().len() == 1, "opening turn").await;
+    for i in 0..40 {
+        core.doc_host
+            .queue_command(
+                CHAT,
+                SessionCommandPayload::Steer {
+                    prompt: format!("blocked {i}"),
+                    message_id: Some(format!("blocked-{i}")),
+                },
+            )
+            .unwrap();
+    }
+    wait_for(
+        || user_messages(&core).len() >= 34,
+        "blocked command after full mailbox",
+    )
+    .await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let fills = handle.commands_cache_fills();
+    let started = tokio::time::Instant::now();
+    let interrupt = core
+        .doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .unwrap();
+    wait_for(
+        || {
+            handle
+                .doc()
+                .read_commands()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == interrupt && c.status == zeron_doc::SessionCommandStatus::Applied)
+        },
+        "interrupt to bypass blocked prompts",
+    )
+    .await;
+    let waited = started.elapsed();
+    let reads = handle.commands_cache_fills() - fills;
+    // The Stop sat out most of the 2 s bound; polling would be ~waited/20ms
+    // reads. One per ledger write (queue, resolve, the odd racing drain) is fine.
+    assert!(
+        reads <= 12,
+        "{reads} ledger reads while a Stop waited {waited:?}"
+    );
+    assert_eq!(handle.commands_cache_mismatches(), 0);
     core.shutdown().await;
 }
 

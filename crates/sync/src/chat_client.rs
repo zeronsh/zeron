@@ -667,6 +667,15 @@ impl ChatClient {
                 false
             }
         };
+        self.enqueue_batch_journaled(batch_id, bytes, durable);
+    }
+
+    /// Queue a batch whose outbox write the caller has already attempted
+    /// (`durable`: it succeeded) and skip the second INSERT `enqueue_batch`
+    /// would make. A non-durable batch is held back from the network until
+    /// `ensure_durable` manages to write it, exactly like a failed
+    /// `enqueue_batch`.
+    pub fn enqueue_batch_journaled(&self, batch_id: String, bytes: Vec<u8>, durable: bool) {
         if bytes.len() > MAX_PUSH_BYTES {
             use std::sync::atomic::Ordering::Relaxed;
             tracing::error!(

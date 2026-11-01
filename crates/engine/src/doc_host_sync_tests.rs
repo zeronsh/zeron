@@ -21,6 +21,9 @@ struct Relay {
     joins_by_chat: Arc<Mutex<HashMap<String, usize>>>,
     rows_requests: Arc<AtomicUsize>,
     received: Arc<Mutex<HashMap<String, loro::LoroDoc>>>,
+    /// Tail sidecar PUTs and checkpoint POSTs the edge accepted.
+    tail_puts: Arc<AtomicUsize>,
+    checkpoint_posts: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -31,6 +34,14 @@ impl Drop for Relay {
 }
 
 async fn relay(hold: Hold) -> Relay {
+    relay_with_rows(hold, 0).await
+}
+
+/// `relay`, whose room reports `room_rows` outstanding rows in its state.
+async fn relay_with_rows(hold: Hold, room_rows: u64) -> Relay {
+    let tail_puts = Arc::new(AtomicUsize::new(0));
+    let checkpoint_posts = Arc::new(AtomicUsize::new(0));
+    let (counted_tails, counted_checkpoints) = (tail_puts.clone(), checkpoint_posts.clone());
     let remote = loro::LoroDoc::new();
     remote
         .get_text("slow-checkpoint")
@@ -62,6 +73,7 @@ async fn relay(hold: Hold) -> Relay {
                     let joined_by_chat = joined_by_chat.clone();
                     let requested = requested.clone();
                     let received = received_by_peer.clone();
+                    let (counted_tails, counted_checkpoints) = (counted_tails.clone(), counted_checkpoints.clone());
                     let mut gate = gate.clone();
                     peers.spawn(async move {
                         // Inspect without consuming the websocket upgrade.
@@ -77,7 +89,20 @@ async fn relay(hold: Hold) -> Relay {
                         };
                         if !headers.contains("upgrade: websocket") {
                             stream.read_exact(&mut buffer[..length]).await.unwrap();
-                            if headers.lines().next().unwrap().contains("/checkpoint") {
+                            let request_line = headers.lines().next().unwrap();
+                            let body_len: usize = headers
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length: "))
+                                .map_or(0, |v| v.trim().parse().unwrap());
+                            let mut body = vec![0; body_len];
+                            stream.read_exact(&mut body).await.unwrap();
+                            if request_line.starts_with("put ") && request_line.contains("/tail ") {
+                                counted_tails.fetch_add(1, Ordering::SeqCst);
+                                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                            } else if request_line.contains("/checkpoint") {
+                                if request_line.starts_with("post ") {
+                                    counted_checkpoints.fetch_add(1, Ordering::SeqCst);
+                                }
                                 if matches!(hold, Hold::Checkpoint) {
                                     let _ = gate.wait_for(|released| *released).await;
                                 }
@@ -109,7 +134,7 @@ async fn relay(hold: Hold) -> Relay {
                                 frame_type::HELLO => encode(frame_type::STATE, &serde_json::json!({
                                     "headSeq": 0, "seqFloor": 0, "checkpointSeq": 0,
                                     "checkpointSize": if matches!(hold, Hold::Checkpoint) {checkpoint.len()} else {0},
-                                    "rowCount": 0, "rowBytes": 0,
+                                    "rowCount": room_rows, "rowBytes": 0,
                                 }), &frontier),
                                 frame_type::ROWS_REQ => {
                                     requested.fetch_add(1, Ordering::SeqCst);
@@ -143,6 +168,8 @@ async fn relay(hold: Hold) -> Relay {
         joins_by_chat,
         rows_requests,
         received,
+        tail_puts,
+        checkpoint_posts,
         task,
     }
 }
@@ -200,12 +227,11 @@ async fn slow_checkpoints_survive_idle_grace_with_all_slots_occupied() {
     relay.release.send_replace(true);
     until(|| store.sync_work_counts().unwrap() == (0, 0)).await;
     for i in 0..ACTIVE_SYNC_CAP {
-        let bytes = store
-            .load_snapshot(&format!("slow-{i:02}"))
+        let doc = store
+            .load_chat_state(&format!("slow-{i:02}"))
             .unwrap()
-            .unwrap();
-        let doc = loro::LoroDoc::new();
-        doc.import(&bytes).unwrap();
+            .unwrap()
+            .doc;
         assert_eq!(doc.get_text("slow-checkpoint").to_string(), "received");
     }
     host.shutdown_workers().await;
@@ -448,8 +474,10 @@ async fn rejoin_after_idle_retirement_resumes_from_its_cursor() {
     let handle = host.open("remote").unwrap();
     until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
     until(|| {
-        store.snapshot_cursor("remote").unwrap() == 5
-            && store.snapshot_cursor_verified("remote").unwrap()
+        store
+            .load_chat_state("remote")
+            .unwrap()
+            .is_some_and(|state| state.cursor == 5 && state.verified)
     })
     .await;
     assert_eq!(
@@ -470,7 +498,7 @@ async fn rejoin_after_idle_retirement_resumes_from_its_cursor() {
         "rejoin rewound to the checkpoint"
     );
     until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
-    assert_eq!(store.snapshot_cursor("remote").unwrap(), 5);
+    assert_eq!(store.load_chat_state("remote").unwrap().unwrap().cursor, 5);
     assert_eq!(handle.doc.doc().get_text("log").to_string(), "1;2;3;4;5;");
     host.shutdown_workers().await;
 }
@@ -608,9 +636,7 @@ async fn admissible_wakes_preserve_missing_rows_modern_readers_and_local_epoch()
     relay.release.send_replace(true);
     until(|| store.sync_work_counts().unwrap().1 == 0).await;
     for id in ids {
-        let snapshot = store.load_snapshot(id).unwrap().unwrap();
-        let doc = loro::LoroDoc::new();
-        doc.import(&snapshot).unwrap();
+        let doc = store.load_chat_state(id).unwrap().unwrap().doc;
         assert_eq!(doc.get_text("slow-checkpoint").to_string(), "received");
     }
     host.shutdown_workers().await;
@@ -1412,4 +1438,73 @@ async fn cold_jobs_get_a_real_timed_turn_without_any_writer_ending() {
     assert_eq!(lock(&relay.joins_by_chat).len(), ACTIVE_SYNC_CAP + 8);
     assert_eq!(writers.len(), ACTIVE_SYNC_CAP);
     host.shutdown_workers().await;
+}
+
+/// A tail changed inside the idle floor is sent by the chat's own maintenance
+/// task when the floor ends: no tick runs for an idle chat and no further doc
+/// change follows, so only the task's deadline can deliver the final state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn throttled_tail_is_sent_on_its_trailing_edge_by_the_chat_task() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay(Hold::Checkpoint).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()), &relay);
+    let handle = host.open("trailing").unwrap();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    handle.write_user_message("one", "first", 1).unwrap();
+    until(|| relay.tail_puts.load(Ordering::SeqCst) == 1).await;
+    handle.write_user_message("two", "second", 2).unwrap();
+    // Not before the floor ends, and then exactly once, with nothing else
+    // touching the chat.
+    until(|| relay.tail_puts.load(Ordering::SeqCst) == 2).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        relay.tail_puts.load(Ordering::SeqCst),
+        2,
+        "idle again: no more PUTs"
+    );
+    host.shutdown_workers().await;
+}
+
+/// Shutdown must not strand what cadence deferred: a checkpoint held back by
+/// the streaming thresholds and a tail inside its throttle window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_flushes_the_deferred_checkpoint_and_tail() {
+    let _budget_guard = SYNC_TEST_LOCK.lock().await;
+    let relay = relay_with_rows(Hold::Checkpoint, 300).await;
+    relay.release.send_replace(true);
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()), &relay);
+    // Install the streaming lease and tail gate before joining. Catch-up
+    // itself wakes maintenance: setting these after caught_up raced an
+    // initial idle tail PUT (and the lower idle checkpoint threshold).
+    let handle = host.open_local("flush").unwrap();
+    let writer = handle.writer();
+    lock(&handle.sync_cadence).tail_retry_at =
+        Some(tokio::time::Instant::now() + Duration::from_secs(60));
+    host.open("flush").unwrap();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    // Switch the bootstrap gate to the real streaming throttle window.
+    {
+        let mut cadence = lock(&handle.sync_cadence);
+        cadence.tail_attempt = Some(tokio::time::Instant::now());
+        cadence.tail_retry_at = None;
+    }
+    handle.write_user_message("one", "streamed", 1).unwrap();
+    until(|| lock(&handle.sync_cadence).tail_deferred).await;
+    assert_eq!(relay.checkpoint_posts.load(Ordering::SeqCst), 0);
+    assert_eq!(relay.tail_puts.load(Ordering::SeqCst), 0);
+    host.shutdown_workers().await;
+    assert_eq!(
+        relay.checkpoint_posts.load(Ordering::SeqCst),
+        1,
+        "turn-end threshold at shutdown"
+    );
+    assert_eq!(
+        relay.tail_puts.load(Ordering::SeqCst),
+        1,
+        "deferred tail at shutdown"
+    );
+    drop(writer);
 }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/counters",
     "crates/voice",
     "crates/voice-media",
     "crates/voice-session",
@@ -40,6 +41,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+zeron-counters = { path = "crates/counters" }
 zeron-voice-session = { path = "crates/voice-session" }
 zeron-orb = { path = "crates/orb" }
 zeron-veil = { path = "crates/veil" }

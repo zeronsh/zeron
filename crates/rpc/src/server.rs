@@ -72,7 +72,15 @@ async fn handle_request(
         let out = out.clone();
         async move {
             match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+                Ok(json) => {
+                    let bytes = json.len() as u64;
+                    out.send(json).await.map_err(|_| RpcError::Closed)?;
+                    if frame.item.is_some() {
+                        zeron_counters::add(zeron_counters::C::RpcItemsOut, 1);
+                        zeron_counters::add(zeron_counters::C::RpcBytesOut, bytes);
+                    }
+                    Ok(())
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "rpc: failed to serialize server frame");
                     Err(RpcError::Closed)
@@ -123,6 +131,36 @@ async fn handle_request(
             })
             .await;
         }
+        Ok(RpcReply::RawStream(mut stream)) => {
+            // The readiness handshake is a property of the method, regardless
+            // of whether the service supplies parsed or raw stream items.
+            if method == crate::methods::WATCH_CHECKOUT_CHANGE_REQUEST
+                && send(ServerFrame {
+                    id,
+                    ok: Some(serde_json::json!({ "stream": true })),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            while let Some(item) = stream.next().await {
+                let json = crate::item_frame(id, &item);
+                let bytes = json.len() as u64;
+                if out.send(json).await.is_err() {
+                    return; // connection gone
+                }
+                zeron_counters::add(zeron_counters::C::RpcItemsOut, 1);
+                zeron_counters::add(zeron_counters::C::RpcBytesOut, bytes);
+            }
+            let _ = send(ServerFrame {
+                id,
+                done: true,
+                ..Default::default()
+            })
+            .await;
+        }
         Err(err) => {
             let _ = send(ServerFrame {
                 id,
@@ -148,7 +186,13 @@ pub async fn serve_ws_listener(listener: TcpListener, service: Arc<dyn RpcServic
         match listener.accept().await {
             Ok((stream, peer)) => {
                 tracing::debug!(%peer, "rpc: connection accepted");
-                tokio::spawn(serve_ws_socket(stream, service.clone(), token.clone()));
+                let service = if peer.ip().is_loopback() {
+                    service.clone()
+                } else {
+                    Arc::new(crate::device_room::RelayService(service.clone()))
+                        as Arc<dyn RpcService>
+                };
+                tokio::spawn(serve_ws_socket(stream, service, token.clone()));
             }
             Err(err) => {
                 tracing::warn!(error = %err, "rpc: accept failed");
@@ -229,4 +273,61 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, token:
 
     serve_connection(service, out_tx, in_rx).await;
     pump.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_counters::{C, get};
+
+    struct ItemService(bool);
+
+    #[async_trait::async_trait]
+    impl RpcService for ItemService {
+        async fn handle(&self, _: &str, _: serde_json::Value) -> Result<RpcReply, RpcError> {
+            let value = serde_json::json!({"text": "x".repeat(4096)});
+            Ok(if self.0 {
+                RpcReply::RawStream(
+                    futures::stream::iter([serde_json::value::to_raw_value(&value).unwrap()])
+                        .boxed(),
+                )
+            } else {
+                RpcReply::Stream(futures::stream::iter([value]).boxed())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_counters_include_raw_and_typed_item_envelopes() {
+        for raw in [false, true] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let items = get(C::RpcItemsOut);
+            let bytes = get(C::RpcBytesOut);
+            handle_request(
+                Arc::new(ItemService(raw)),
+                tx,
+                7,
+                "watch".into(),
+                serde_json::Value::Null,
+            )
+            .await;
+            let item = rx.recv().await.unwrap();
+            assert!(
+                serde_json::from_str::<ServerFrame>(&item)
+                    .unwrap()
+                    .item
+                    .is_some()
+            );
+            assert!(get(C::RpcItemsOut) >= items + 1, "raw={raw}");
+            assert!(
+                get(C::RpcBytesOut) >= bytes + item.len() as u64,
+                "raw={raw}"
+            );
+            assert!(
+                serde_json::from_str::<ServerFrame>(&rx.recv().await.unwrap())
+                    .unwrap()
+                    .done
+            );
+        }
+    }
 }

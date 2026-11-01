@@ -3,8 +3,12 @@
 //! `SearchWorkspaceFiles` (file tree) and `SearchWorkspaceContent` (cmd+K).
 //!
 //! An index is created by the first warm or search of its root, scans in the
-//! background and keeps itself current with its own watcher. Memory stays
-//! bounded: an index idle for [`IDLE_EVICT`] is dropped, at most [`MAX_LIVE`]
+//! background and keeps itself current with its own watcher. fff 0.11 exposes
+//! watch subscriptions but no public event-injection API: its index updater
+//! (`handle_debounced_events`) and background watcher are crate-private. Keep
+//! that watcher until upstream exposes ingestion; disabling it would stale
+//! search results. The file tree and diff consumers share FsWatchHub instead.
+//! Memory stays bounded: an index idle for [`IDLE_EVICT`] is dropped, at most [`MAX_LIVE`]
 //! are alive at once (least recently used goes first), and the content cache
 //! of each one is capped at [`CACHE_BUDGET_BYTES`]. Indexes hold paths only:
 //! content search greps the indexed files without a bigram prefilter. The UI
