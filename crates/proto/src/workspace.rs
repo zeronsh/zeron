@@ -35,6 +35,9 @@ pub mod capabilities {
     /// rows and answers `StopBackgroundTask` / `ReadBackgroundTaskOutput`
     /// (forwarding them, for a chat another device hosts).
     pub const BACKGROUND_TASKS_V1: &str = "background-tasks-v1";
+    /// The engine takes the `setChatSnoozed` mutate op (inbox sidebar
+    /// snooze); older engines reject it, so the UI hides snooze.
+    pub const CHAT_SNOOZE_V1: &str = "chat-snooze-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -48,6 +51,7 @@ pub mod capabilities {
         SIDEBAR_SECTION_ORDER_V1,
         PROVIDER_SWITCH_V1,
         BACKGROUND_TASKS_V1,
+        CHAT_SNOOZE_V1,
         crate::voice::remote::CAPABILITY,
     ];
 
@@ -133,6 +137,7 @@ mod tests {
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
                     "background-tasks-v1",
+                    "chat-snooze-v1",
                     "voice-client-media-v1"
                 ],
             })

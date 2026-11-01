@@ -953,6 +953,94 @@ impl Render for ShortcutsPage {
                 )
                 .child(pull_request_destination_control)
                 .search_anchor(SettingId::PullRequestDestination);
+            let settings = crate::settings::current(cx);
+            let (sidebar_inbox, sidebar_inbox_working) =
+                (settings.sidebar_inbox, settings.sidebar_inbox_working);
+            let sidebar_inbox_row = widgets::card_row(&theme, true)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Inbox sidebar"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Settle what needs you; running, snoozed and settled sessions get their own sections.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, sidebar_inbox, "sidebar-inbox")
+                        .id("sidebar-inbox-toggle")
+                        .debug_selector(|| "sidebar-inbox-toggle".into())
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Inbox sidebar")
+                        .aria_toggled(if sidebar_inbox {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::update(SavePolicy::Immediate, cx, |settings| {
+                                settings.sidebar_inbox = !sidebar_inbox;
+                            });
+                            cx.refresh_windows();
+                            cx.notify();
+                        })),
+                )
+                .search_anchor(SettingId::SidebarInbox);
+            // Only meaningful in the inbox layout: dimmed and inert while it
+            // is off (the notifications page's sub-option treatment).
+            let sidebar_inbox_working_row = widgets::card_row(&theme, false)
+                .when(!sidebar_inbox, |el| el.opacity(0.55))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Working section"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child("Running sessions fold into Working instead of staying in the Inbox.")
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, sidebar_inbox_working, "sidebar-inbox-working")
+                        .id("sidebar-inbox-working-toggle")
+                        .debug_selector(|| "sidebar-inbox-working-toggle".into())
+                        .role(gpui::Role::Switch)
+                        .aria_label("Working section")
+                        .aria_toggled(if sidebar_inbox_working {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .when(sidebar_inbox, |el| {
+                            el.tab_index(0)
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    crate::settings::update(
+                                        SavePolicy::Immediate,
+                                        cx,
+                                        |settings| {
+                                            settings.sidebar_inbox_working = !sidebar_inbox_working;
+                                        },
+                                    );
+                                    cx.refresh_windows();
+                                    cx.notify();
+                                }))
+                        }),
+                )
+                .search_anchor(SettingId::SidebarInboxWorking);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -985,6 +1073,14 @@ impl Render for ShortcutsPage {
                                         widgets::section_card(&theme)
                                             .mt_0()
                                             .child(pull_request_destination_row),
+                                    ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Sidebar",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(sidebar_inbox_row)
+                                            .child(sidebar_inbox_working_row),
                                     ))
                                     .child(self.thread_naming.clone())
                                     .child(self.worktrees.clone()),

@@ -465,6 +465,8 @@ mod tests {
             space_id: Some("space".into()),
             last_seen_at: None,
             room_gen: None,
+            snoozed_until: None,
+            archived_at: None,
         }
     }
 

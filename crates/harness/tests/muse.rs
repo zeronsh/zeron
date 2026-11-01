@@ -523,6 +523,10 @@ async fn a_subagent_is_a_spawn_chip_with_its_result() {
     assert!(!events.iter().any(|e| matches!(e,
         AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. } if name == "subagent_spawn")));
     assert_eq!(done(&events).0, DoneStatus::Completed);
+    // The subagent item never settled in this recording: it outlives the
+    // turn, and is reported as a background agent.
+    assert_eq!(controls.turn.background_agents(), 1);
+    assert!(controls.turn.background_live());
     ends(stream, controls).await;
 }
 
