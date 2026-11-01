@@ -145,6 +145,7 @@ mod tests {
                     "background-tasks-v1",
                     "voice-client-media-v1",
                     "mcp-lazy-v1",
+                    "mcp-runtime-controls-v1",
                     "prewarm-v1"
                 ],
             })
