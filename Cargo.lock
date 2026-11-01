@@ -13763,7 +13763,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mcp-proxy"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "hex",
  "libc",
