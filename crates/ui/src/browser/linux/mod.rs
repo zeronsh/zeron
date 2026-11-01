@@ -364,6 +364,10 @@ impl NativePage {
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }
+    pub fn load_html(&self, html: &str) -> Result<(), String> {
+        self.worker
+            .send(self.id, json!({"cmd":"load-html","html":html}))
+    }
     pub fn reload(&self) {
         self.command(json!({"cmd":"reload"}));
     }
@@ -451,11 +455,14 @@ impl super::BrowserSurface {
                 this.native_startup = None;
                 let result = result.and_then(|mut native| {
                     native.present(this.presentation);
-                    let result = this
-                        .page
-                        .url
-                        .as_deref()
-                        .map_or(Ok(()), |url| native.load(url));
+                    let result = if let Some(document) = &this.document {
+                        native.load_html(&document.html)
+                    } else {
+                        this.page
+                            .url
+                            .as_deref()
+                            .map_or(Ok(()), |url| native.load(url))
+                    };
                     this.native = Some(native);
                     result
                 });
@@ -507,6 +514,12 @@ impl super::BrowserSurface {
             }
             NativeEvent::Frame | NativeEvent::Changed => {
                 let mut page = native.state();
+                if let Some(document) = &self.document {
+                    page.url = Some(document.path.clone());
+                    page.title = document.title.clone();
+                    page.can_back = false;
+                    page.can_forward = false;
+                }
                 if page.url.is_none() {
                     page.url = self.page.url.clone();
                 }

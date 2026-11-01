@@ -4,13 +4,19 @@ pub struct LinkTarget {
     pub label: String,
     pub original: String,
     pub navigation: Result<String, &'static str>,
+    pub preview: Option<zeron_markdown::content_reference::HtmlPreview>,
 }
 impl LinkTarget {
     pub fn new(label: &str, original: &str) -> Self {
+        let preview = zeron_markdown::content_reference::html_preview(original);
         Self {
             label: label.into(),
-            original: original.into(),
+            original: preview
+                .as_ref()
+                .map_or(original, |preview| &preview.path)
+                .into(),
             navigation: crate::browser::model::transcript_address(original),
+            preview,
         }
     }
 }
@@ -48,6 +54,22 @@ impl LinkActivation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn html_preview_retains_the_file_and_rejects_external_navigation() {
+        let target = LinkTarget::new(
+            "Preview",
+            "\u{e200}visualize\u{e202}{\"path\":\"/tmp/test.html\",\"mode\":\"wide\"}\u{e201}",
+        );
+        assert_eq!(target.original, "/tmp/test.html");
+        assert!(target.preview.as_ref().unwrap().wide);
+        let activation = LinkActivation {
+            target,
+            action: LinkAction::External,
+            source_session: Some("owner".into()),
+        };
+        assert_eq!(activation.web_outcome(true), LinkOutcome::Rejected);
+        assert_eq!(activation.web_outcome(false), LinkOutcome::Rejected);
+    }
     #[test]
     fn internal_external_and_unsupported_platform_routes() {
         let mut a = LinkActivation {

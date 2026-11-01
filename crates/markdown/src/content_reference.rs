@@ -8,6 +8,8 @@ use std::ops::Range;
 use pulldown_cmark::{Event, Parser, Tag};
 
 const CITATION: &str = ":codex-file-citation{";
+const VISUALIZE: &str = "\u{e200}visualize\u{e202}";
+const VISUALIZE_END: &str = "\u{e201}";
 const PLACEHOLDER: &str = "\u{e000}zeron-content-reference\u{e001}";
 const MAX_REFERENCE_BYTES: usize = 16 * 1024;
 
@@ -35,6 +37,63 @@ pub fn file_destination(path: &str) -> String {
         }
     }
     destination
+}
+
+/// A host-independent request. File IO and document execution belong to the
+/// receiving host; a Markdown parser only describes what may be previewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlPreview {
+    pub path: String,
+    pub wide: bool,
+    pub compatibility: HtmlCompatibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HtmlCompatibility {
+    None,
+    CodexVisualize,
+}
+
+pub fn html_preview(text: &str) -> Option<HtmlPreview> {
+    let payload = text.strip_prefix(VISUALIZE)?.strip_suffix(VISUALIZE_END)?;
+    if payload.len() > MAX_REFERENCE_BYTES {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let object = value.as_object()?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "path" | "mode"))
+    {
+        return None;
+    }
+    let path = object.get("path")?.as_str()?;
+    let mode = object.get("mode").map(|v| v.as_str()).unwrap_or(Some(""))?;
+    if !matches!(mode, "" | "wide")
+        || !absolute_path(path)
+        || path.chars().any(char::is_control)
+        || !path
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "html" | "htm"))
+    {
+        return None;
+    }
+    Some(HtmlPreview {
+        path: path.into(),
+        wide: mode == "wide",
+        compatibility: HtmlCompatibility::CodexVisualize,
+    })
+}
+
+fn absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && path.as_bytes().get(1) == Some(&b':')
+            && path
+                .as_bytes()
+                .get(2)
+                .is_some_and(|c| matches!(c, b'/' | b'\\')))
 }
 
 /// Decode one complete directive. Unknown attributes are preserved in the
@@ -89,14 +148,8 @@ pub fn file_reference(text: &str) -> Option<FileReference> {
         rest = rest.trim_start();
     }
     let path = path?;
-    let absolute = path.starts_with('/')
-        || (path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            && path.as_bytes().get(1) == Some(&b':')
-            && path
-                .as_bytes()
-                .get(2)
-                .is_some_and(|c| matches!(c, b'/' | b'\\')));
-    (absolute && !path.ends_with(['/', '\\']) && path.len() > 1).then_some(FileReference { path })
+    (absolute_path(&path) && !path.ends_with(['/', '\\']) && path.len() > 1)
+        .then_some(FileReference { path })
 }
 
 struct Replacement {
@@ -180,14 +233,20 @@ impl Rewritten<'_> {
 }
 
 pub(crate) fn rewrite(source: &str) -> Option<Rewritten<'_>> {
-    if !source.contains(CITATION) {
+    if !source.contains(CITATION) && !source.contains(VISUALIZE) {
         return None;
     }
     let mut candidates = Vec::new();
     let mut at = 0;
-    while let Some(relative) = source[at..].find(CITATION) {
+    while let Some(relative) = source[at..].find(['\u{e200}', ':']) {
         let start = at + relative;
-        at = start + CITATION.len();
+        let visualize = source[start..].starts_with(VISUALIZE);
+        let prefix = if visualize { VISUALIZE } else { CITATION };
+        at = start + source[start..].chars().next().unwrap().len_utf8();
+        if !source[start..].starts_with(prefix) {
+            continue;
+        }
+        at = start + prefix.len();
         if source[..start]
             .bytes()
             .rev()
@@ -200,33 +259,43 @@ pub(crate) fn rewrite(source: &str) -> Option<Rewritten<'_>> {
         }
         let mut quoted = None;
         let mut escaped = false;
-        let end = source[at..]
-            .char_indices()
-            .take_while(|(i, _)| *i < MAX_REFERENCE_BYTES)
-            .find_map(|(i, c)| {
-                if escaped {
-                    escaped = false;
-                    return None;
-                }
-                if c == '\\' && quoted.is_some() {
-                    escaped = true;
-                    return None;
-                }
-                if quoted == Some(c) {
-                    quoted = None;
-                } else if quoted.is_none() && matches!(c, '"' | '\'') {
-                    quoted = Some(c);
-                } else if quoted.is_none() && c == '}' {
-                    return Some(at + i + 1);
-                }
-                None
-            });
+        let end = if visualize {
+            let bytes = &source.as_bytes()[at..];
+            bytes[..bytes.len().min(MAX_REFERENCE_BYTES + VISUALIZE_END.len())]
+                .windows(VISUALIZE_END.len())
+                .position(|window| window == VISUALIZE_END.as_bytes())
+                .map(|n| at + n + VISUALIZE_END.len())
+        } else {
+            source[at..]
+                .char_indices()
+                .take_while(|(i, _)| *i < MAX_REFERENCE_BYTES)
+                .find_map(|(i, c)| {
+                    if escaped {
+                        escaped = false;
+                        return None;
+                    }
+                    if c == '\\' && quoted.is_some() {
+                        escaped = true;
+                        return None;
+                    }
+                    if quoted == Some(c) {
+                        quoted = None;
+                    } else if quoted.is_none() && matches!(c, '"' | '\'') {
+                        quoted = Some(c);
+                    } else if quoted.is_none() && c == '}' {
+                        return Some(at + i + 1);
+                    }
+                    None
+                })
+        };
         let Some(end) = end else { continue };
         // Inline references cannot cross a paragraph boundary during streaming.
         if source[start..end].contains(['\n', '\r']) {
             continue;
         }
-        if file_reference(&source[start..end]).is_none() {
+        if file_reference(&source[start..end]).is_none()
+            && html_preview(&source[start..end]).is_none()
+        {
             continue;
         }
         candidates.push(start..end);
@@ -293,6 +362,43 @@ pub(crate) fn rewrite(source: &str) -> Option<Rewritten<'_>> {
 mod tests {
     use super::*;
     use crate::parser::{Block, IncrementalParser, parse_full};
+
+    const VISUAL: &str =
+        "\u{e200}visualize\u{e202}{\"path\":\"/tmp/方案 [a].html\",\"mode\":\"wide\"}\u{e201}";
+
+    #[test]
+    fn visualize_is_typed_only_when_complete_and_outside_examples() {
+        let request = html_preview(VISUAL).unwrap();
+        assert_eq!(request.path, "/tmp/方案 [a].html");
+        assert!(request.wide);
+        assert_eq!(links(VISUAL), [VISUAL]);
+        assert_eq!(links(&format!("{VISUAL}{VISUAL}")), [VISUAL, VISUAL]);
+        assert!(rewrite(&VISUAL.replace(",", ",\n\n")).is_none());
+        for source in [
+            format!("`{VISUAL}`"),
+            format!("```html\n{VISUAL}\n```"),
+            format!("\\{VISUAL}"),
+            VISUAL.replace("wide", "unknown"),
+            VISUAL.replace(".html", ".pdf"),
+            VISUAL.replace("/tmp/", "../"),
+            VISUAL.replace(VISUALIZE_END, ""),
+        ] {
+            assert!(rewrite(&source).is_none(), "{source}");
+        }
+        let source =
+            format!("前文\n\n{VISUAL}\n\n- [x] 后续 :codex-file-citation{{path=\"/tmp/a.pdf\"}}\n");
+        let mut parser = IncrementalParser::new();
+        for (i, c) in source.char_indices() {
+            let end = i + c.len_utf8();
+            parser.set_text(&source[..end]);
+            assert_eq!(parser.tree(), &parse_full(&source[..end]), "{end}");
+        }
+        let tree = parse_full(&source);
+        assert_eq!(
+            &source[tree.blocks[2].range.clone()],
+            "- [x] 后续 :codex-file-citation{path=\"/tmp/a.pdf\"}\n"
+        );
+    }
 
     fn links(source: &str) -> Vec<String> {
         let tree = parse_full(source);

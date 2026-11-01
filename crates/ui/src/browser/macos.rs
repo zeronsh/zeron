@@ -209,6 +209,7 @@ struct ObserverState {
     pending: Cell<bool>,
     error: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
+    document: Cell<bool>,
 }
 
 define_class!(
@@ -231,7 +232,10 @@ define_class!(
             if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }
-            decision.call((if allowed_navigation(&url) { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
+            let allowed = if self.ivars().document.get() {
+                super::model::allowed_document_navigation(&url)
+            } else { allowed_navigation(&url) };
+            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
@@ -279,6 +283,7 @@ impl Observer {
             pending: Cell::new(false),
             error: RefCell::new(None),
             requested_url: RefCell::new(None),
+            document: Cell::new(false),
         });
         unsafe { msg_send![super(object), init] }
     }
@@ -498,10 +503,17 @@ impl NativePage {
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
         let host = self.0.borrow();
+        host.observer.ivars().document.set(false);
         host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())
+    }
+    pub fn load_html(&self, html: &str) -> Result<(), String> {
+        let host = self.0.borrow();
+        host.observer.ivars().document.set(true);
+        host.observer.ivars().error.borrow_mut().take();
+        host.web.load_html(html).map_err(|error| error.to_string())
     }
     pub fn reload(&self) {
         let host = self.0.borrow();
@@ -894,6 +906,41 @@ impl NativePage {
                 .borrow()
                 .view
                 .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
+        }
+    }
+
+    pub fn fixture_snapshot(&self, completion: impl FnOnce(Result<Vec<u8>, String>) + 'static) {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+        let completion = RefCell::new(Some(completion));
+        let block = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let result = (|| {
+                if let Some(error) = unsafe { error.as_ref() } {
+                    return Err(error.to_string());
+                }
+                let image = unsafe { image.as_ref() }.ok_or("WebKit snapshot returned no image")?;
+                let tiff = image
+                    .TIFFRepresentation()
+                    .ok_or("Snapshot TIFF conversion failed")?;
+                let bitmap = NSBitmapImageRep::imageRepWithData(&tiff)
+                    .ok_or("Snapshot bitmap conversion failed")?;
+                let data = unsafe {
+                    bitmap.representationUsingType_properties(
+                        NSBitmapImageFileType::PNG,
+                        &NSDictionary::new(),
+                    )
+                }
+                .ok_or("Snapshot PNG conversion failed")?;
+                Ok(unsafe { data.as_bytes_unchecked() }.to_vec())
+            })();
+            if let Some(completion) = completion.borrow_mut().take() {
+                completion(result);
+            }
+        });
+        unsafe {
+            self.0
+                .borrow()
+                .view
+                .takeSnapshotWithConfiguration_completionHandler(None, &block);
         }
     }
 }

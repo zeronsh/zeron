@@ -32,7 +32,7 @@ pub struct InlineStyle {
     pub link: Option<String>,
     /// The label to show instead of `text` for a file link whose text is the
     /// path itself (an inline-code span) rather than a label the author
-    /// wrote. Never set by the parser; `None` shows `text`. When set, copy
+    /// wrote, or a content reference. `None` shows `text`. When set, copy
     /// and selection still map back to `text`.
     pub file_label: Option<String>,
     pub image: Option<InlineImage>,
@@ -726,6 +726,16 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
                 let mut style = style.clone();
                 style.file_label = Some(reference.label().to_owned());
                 style.link = Some(crate::content_reference::file_destination(&reference.path));
+                push(runs, reference.path, style);
+            } else if let Some(reference) = crate::content_reference::html_preview(&t) {
+                let mut style = style.clone();
+                let name = reference
+                    .path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&reference.path);
+                style.file_label = Some(format!("Preview · {name}"));
+                style.link = Some(t.into_string());
                 push(runs, reference.path, style);
             } else {
                 push(runs, t.into_string(), style.clone());

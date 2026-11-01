@@ -3805,6 +3805,17 @@ impl Shell {
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
+        if let Some(preview) = &activation.target.preview {
+            return if matches!(
+                activation.action,
+                LinkAction::Primary | LinkAction::Internal
+            ) && self.add_html_preview(&source, preview.clone(), window, cx)
+            {
+                LinkOutcome::Internal
+            } else {
+                LinkOutcome::Rejected
+            };
+        }
         if activation.target.navigation.is_err() {
             return if matches!(
                 activation.action,
@@ -3846,7 +3857,8 @@ impl Shell {
                 LinkAction::External
             };
         }
-        let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
+        let outcome =
+            resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
         if outcome == LinkOutcome::Internal {
             self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
@@ -3890,6 +3902,43 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_browser_surface_kind(url, None, window, cx);
+    }
+
+    fn add_html_preview(
+        &mut self,
+        source: &str,
+        preview: zeron_markdown::content_reference::HtmlPreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((_, owner)) = self.link_owner(source, cx) else {
+            return false;
+        };
+        let state = owner.read(cx);
+        let Some(context) = crate::files::client::FilesRequestContext::for_chat(state, source)
+        else {
+            return false;
+        };
+        let Some(engine) = state.engine().cloned() else {
+            return false;
+        };
+        let client = crate::files::client::WorkspaceFilesClient::new(engine, context);
+        self.set_surfaces_open(true, cx);
+        self.add_browser_surface_kind(None, Some((client, preview)), window, cx);
+        true
+    }
+
+    fn add_browser_surface_kind(
+        &mut self,
+        url: Option<String>,
+        preview: Option<(
+            crate::files::client::WorkspaceFilesClient,
+            zeron_markdown::content_reference::HtmlPreview,
+        )>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_chat.is_empty() {
             return;
         }
@@ -3904,18 +3953,37 @@ impl Shell {
         self.browser_seq += 1;
         let id = self.browser_seq;
         let browser = cx.new(|cx| {
-            crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
+            let context = if preview.is_some() {
+                crate::browser::BrowserContext::default()
+            } else {
+                self.browser_context.clone()
+            };
+            crate::browser::BrowserSurface::new(context, remote, window, cx)
         });
-        if let Some(handle) = self.state.read(cx).engine().cloned() {
+        if preview.is_none()
+            && let Some(handle) = self.state.read(cx).engine().cloned()
+        {
             let chat_id = self.active_chat.clone();
             browser.update(cx, |browser, cx| {
                 browser.watch_previews(handle, chat_id, cx)
             });
         }
         let owner = key.clone();
+        let preview_source = preview
+            .as_ref()
+            .and_then(|(client, _)| client.target().chat_id.clone());
         let sub = cx.subscribe_in(&browser, window, move |this, _, event, window, cx| {
             match event {
                 crate::browser::BrowserEvent::Changed => cx.notify(),
+                crate::browser::BrowserEvent::OpenSource(path) => {
+                    if this.panel_key(cx) == owner
+                        && this.resolved_right_active(cx) == RightSurface::Browser(id)
+                        && let Some(source) = &preview_source
+                    {
+                        let target = zeron_markdown::content_reference::file_destination(path);
+                        this.open_workspace_file_link(source, &target, window, cx);
+                    }
+                }
                 crate::browser::BrowserEvent::NewTab(url) => {
                     // A background page cannot open a tab in the wrong session.
                     if this.panel_key(cx) == owner
@@ -3937,7 +4005,9 @@ impl Shell {
             .push(RightSurface::Browser(id));
         self.set_right_active(RightSurface::Browser(id), cx);
         browser.update(cx, |browser, cx| {
-            if let Some(url) = url {
+            if let Some((client, request)) = preview {
+                browser.read_preview(client, request, window, cx);
+            } else if let Some(url) = url {
                 browser.navigate(&url, window, cx);
             } else {
                 browser.focus_address(window, cx);

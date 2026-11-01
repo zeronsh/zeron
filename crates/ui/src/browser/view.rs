@@ -286,12 +286,16 @@ impl BrowserSurface {
         }
         let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_error = self.page.error.is_some();
+        let reading =
+            self.preview_request.is_some() && self.document.is_none() && self.page.loading;
         #[cfg(target_os = "linux")]
         let starting = self.native_startup.is_some();
         #[cfg(not(target_os = "linux"))]
         let starting = false;
         let title = if has_error {
             "Couldn’t load this page"
+        } else if reading {
+            "Loading preview…"
         } else if starting {
             "Starting browser…"
         } else if external && self.page.url.is_some() {
@@ -301,6 +305,8 @@ impl BrowserSurface {
         };
         let description = if let Some(error) = &self.page.error {
             error.clone()
+        } else if reading {
+            "The preview will appear here.".into()
         } else if starting {
             "You can keep working while your page opens.".into()
         } else if external {
@@ -358,6 +364,7 @@ impl BrowserSurface {
                         div()
                             .mt(px(6.0))
                             .id("browser-empty-action")
+                            .when(reading, |el| el.hidden())
                             .h(px(28.0))
                             .px(px(10.0))
                             .rounded(px(6.0))
@@ -379,7 +386,7 @@ impl BrowserSurface {
                             .text_color(theme.text)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if has_error {
-                                    this.reload(cx);
+                                    this.reload(window, cx);
                                 } else {
                                     this.focus_address(window, cx);
                                 }
@@ -546,6 +553,7 @@ impl Render for BrowserSurface {
         let focused = self.address.focus_handle(cx).is_focused(window);
         let external = !cfg!(any(target_os = "macos", target_os = "linux", windows));
         let has_page = self.page.url.is_some();
+        let is_document = self.document.is_some() || self.document_task.is_some();
         let back = button(
             "browser-back",
             "Back",
@@ -577,7 +585,7 @@ impl Render for BrowserSurface {
             cx,
         )
         .when(has_page, |el| {
-            el.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
+            el.on_click(cx.listener(|this, _, window, cx| this.reload(window, cx)))
         });
         let address = surface_chrome::input()
             .id("browser-address")
@@ -648,6 +656,47 @@ impl Render for BrowserSurface {
             .when(!external, |el| el.child(back).child(forward).child(reload))
             .child(address)
             .child(open);
+        let toolbar = if is_document {
+            surface_chrome::toolbar(&theme)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .child(self.page.title.clone()),
+                )
+                .child(
+                    button(
+                        "preview-reload",
+                        "Reload preview",
+                        icons::REFRESH,
+                        self.preview_request.is_some(),
+                        &theme,
+                        cx,
+                    )
+                    .when(self.preview_request.is_some(), |el| {
+                        el.on_click(cx.listener(|this, _, window, cx| this.reload(window, cx)))
+                    }),
+                )
+                .child(
+                    button(
+                        "preview-source",
+                        "Open source file",
+                        icons::DOCUMENT,
+                        true,
+                        &theme,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(path) = &this.page.url {
+                            cx.emit(BrowserEvent::OpenSource(path.clone()));
+                        }
+                    })),
+                )
+        } else {
+            toolbar
+        };
 
         let body = div()
             .id("browser-page")
@@ -790,7 +839,7 @@ impl Render for BrowserSurface {
                 #[cfg(not(target_os = "linux"))]
                 let _=(this,event,w,cx);
             }))
-            .on_action(cx.listener(|this, _: &super::Reload, _, cx| this.reload(cx)))
+            .on_action(cx.listener(|this, _: &super::Reload, window, cx| this.reload(window, cx)))
             .on_action(cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)))
             .on_action(cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))))
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
