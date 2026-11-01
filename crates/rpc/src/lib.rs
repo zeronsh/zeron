@@ -60,6 +60,10 @@ pub mod methods {
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
+    /// Whether the target device's Codex sessions identify as the Codex CLI
+    /// (`{ enabled }`); Set replies with the stored value.
+    pub const GET_CODEX_CLI_IDENTITY: &str = "GetCodexCliIdentity";
+    pub const SET_CODEX_CLI_IDENTITY: &str = "SetCodexCliIdentity";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

@@ -5,6 +5,11 @@
 # start/resume, then a scenario picked from the turn/start prompt text. Driven
 # by crates/harness/tests/codex.rs.
 
+if [ "${1:-}" = "--version" ]; then
+  echo 'codex-cli 0.166.0'
+  exit 0
+fi
+
 emit() { printf '%s\n' "$1"; }
 rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
 has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
@@ -18,7 +23,7 @@ fail_turn() { # $1 = request id, $2 = message
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"experimentalApi":true' || exit 1
-has "$line" '"name":"zeron-native"' || exit 1
+has "$line" '"name":"zeron-native"' || has "$line" '"name":"codex-tui"' || exit 1
 if [ -n "$FAKE_CODEX_REJECT_OPT_OUT" ] && has "$line" 'optOutNotificationMethods'; then
   # An app-server that predates notification opt-outs: refuse, then expect
   # the handshake again without them.
@@ -50,6 +55,12 @@ if has "$line" 'crash-on-thread-start'; then
   exit 3
 fi
 if has "$line" '"method":"skills/list"'; then
+  if has "$init_line" '"name":"codex-tui"'; then
+    # CLI identity probe: report which identity the handshake carried.
+    if has "$init_line" '"title"'; then title=titled; else title=untitled; fi
+    emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"identity\",\"path\":\"/skills/identity/SKILL.md\",\"description\":\"codex-tui $title\"}]}]}}"
+    exec sleep 30
+  fi
   # Skill discovery probe: answer with two cwd groups sharing one skill
   # (dedupe by identity) and settle; no thread ever starts.
   emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"

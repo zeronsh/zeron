@@ -111,6 +111,12 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCodexCliIdentityParams {
+    enabled: bool,
+}
+
 async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
@@ -2139,6 +2145,8 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
             | methods::SET_HARNESS_ENABLED
+            | methods::GET_CODEX_CLI_IDENTITY
+            | methods::SET_CODEX_CLI_IDENTITY
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
@@ -2665,6 +2673,19 @@ impl RpcService for EngineRpc {
                     .set_native_subagents(p.harness, p.enabled)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.native_subagent_settings())
+            }
+            methods::GET_CODEX_CLI_IDENTITY => RpcReply::value(&serde_json::json!({
+                "enabled": self.registry.codex_cli_identity(),
+            })),
+            methods::SET_CODEX_CLI_IDENTITY => {
+                let p: SetCodexCliIdentityParams = parse_params(params)?;
+                self.registry
+                    .set_codex_cli_identity(p.enabled)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "enabled": self.registry.codex_cli_identity(),
+                }))
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

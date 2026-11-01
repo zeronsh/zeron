@@ -1776,6 +1776,23 @@ async fn skills_are_not_advertised_as_commands() {
     );
 }
 
+/// The engine's "Identify as Codex CLI" switch is read at each spawn: flipping
+/// the shared flag changes the very next handshake without a new harness.
+#[tokio::test]
+async fn cli_identity_switch_applies_to_the_next_spawn() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let h = harness().with_cli_identity(flag.clone());
+    let cwd = tempfile::tempdir().unwrap();
+    let skills = h.skills(cwd.path()).await.unwrap().unwrap();
+    assert_eq!(skills[0].name, "imagegen", "default handshake is zeron-native");
+
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    let skills = h.skills(cwd.path()).await.unwrap().unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "identity");
+    assert_eq!(skills[0].description, "codex-tui untitled");
+}
+
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test
 /// codex -- --ignored live_skills`.
 #[tokio::test]
