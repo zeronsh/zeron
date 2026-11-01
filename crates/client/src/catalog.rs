@@ -162,6 +162,7 @@ pub fn harness_label(id: &str) -> String {
         "devin" => "Devin",
         "grok" => "Grok",
         "hermes" => "Hermes",
+        "droid" => "Droid",
         "pi" => "Pi",
         "cursor" => "Cursor",
         "opencode" => "OpenCode",

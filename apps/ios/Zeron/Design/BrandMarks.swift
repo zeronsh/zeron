@@ -8,7 +8,7 @@ import SwiftUI
 import UIKit
 
 enum BrandMark {
-    case claude, openai, cursor, devin, grok, hermes, pi, opencode, antigravity, muse
+    case claude, openai, cursor, devin, grok, hermes, droid, pi, opencode, antigravity, muse
 
     var viewBox: CGSize {
         switch self {
@@ -18,6 +18,7 @@ enum BrandMark {
         case .devin: return CGSize(width: 263, height: 300)
         case .grok: return CGSize(width: 16, height: 16)
         case .hermes: return CGSize(width: 24, height: 24)
+        case .droid: return CGSize(width: 329.62, height: 329.62)
         case .pi: return CGSize(width: 800, height: 800)
         case .opencode: return CGSize(width: 24, height: 30)
         case .antigravity: return CGSize(width: 24, height: 24)
@@ -48,6 +49,8 @@ enum BrandMark {
             return "M0.58392448,14.9254204 L0.8326,14.66295 C2.004465,13.42985 3.1678,12.2082 2.45814,10.48105 C1.50813,8.1701 2.061355,5.4619 3.820575,3.70057 C5.6495,1.8709 8.3431,1.40957 10.59295,2.336505 C11.0907,2.52161 11.5245,2.785025 11.86295,3.02993 L9.98425,3.89849 C8.235,3.163775 6.23115,3.66355 5.0081,4.88809 C3.354105,6.5426 3.019895,9.4117 4.95835,11.2656 L-0.335,15.99995 C-0.066496,15.62975 0.2538896,15.275934 0.58392448,14.9254204 Z M14.0391,2.288155 L16.33165,0 L16.20795,0.172288 C14.4658,2.574355 13.6153,3.749045 14.29795,6.6879 C14.76445,8.68415 14.261,10.90255 12.63545,12.53005 C10.5861,14.58325 7.3066,15.0403 4.6059,13.19215 L6.48885,12.3193 C8.2125,12.99705 10.0983,12.69945 11.4536,11.34255 C12.80895,9.9856 13.1133,8.00925 12.4321,6.3647 C12.30265,6.05285 11.9144,5.97455 11.64275,6.1753 L6.102,10.27035 L14.0391,2.288155 Z"
         case .hermes:
             return HermesMarkData.pathData
+        case .droid:
+            return DroidMarkData.pathData
         case .pi:
             return "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65ZM517.36 400H634.72V634.72H517.36Z"
         case .opencode:
@@ -70,6 +73,7 @@ enum BrandMark {
         case "devin": return .devin
         case "grok": return .grok
         case "hermes": return .hermes
+        case "droid": return .droid
         case "pi": return .pi
         case "opencode": return .opencode
         case "antigravity": return .antigravity
