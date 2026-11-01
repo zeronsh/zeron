@@ -174,8 +174,6 @@ const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Negative `cache_size` is kibibytes: 8 MiB on each connection.
 const CACHE_SIZE_KIB: i64 = -8192;
-/// 256 MiB. Large snapshot reads stay off the page cache.
-const MMAP_SIZE_BYTES: i64 = 268_435_456;
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
@@ -1204,12 +1202,14 @@ fn import_snapshot_delta(
     Ok(())
 }
 
-/// `temp_store`, page cache, and mmap. Per connection; not a schema change.
+/// `temp_store` and bounded page cache. Per connection; not a schema change.
 /// `synchronous` is left as the caller set it.
 fn tune_connection(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB)?;
-    conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)?;
+    // Mapped snapshot reads made the profile's entire database resident in
+    // addition to the heap cache, without a measured boot-time benefit.
+    conn.pragma_update(None, "mmap_size", 0)?;
     Ok(())
 }
 
@@ -2242,7 +2242,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_and_reader_apply_cache_pragmas_without_changing_synchronous() {
+    fn writer_and_reader_bound_cache_without_mmap_or_synchronous_changes() {
         let dir = tempfile::tempdir().unwrap();
         let store = DocsStore::open(dir.path()).unwrap();
         let writer = store.conn();
@@ -2250,7 +2250,7 @@ mod tests {
         for conn in [&*writer, &*reader] {
             assert_eq!(pragma_i64(conn, "temp_store"), 2, "MEMORY");
             assert_eq!(pragma_i64(conn, "cache_size"), CACHE_SIZE_KIB);
-            assert_eq!(pragma_i64(conn, "mmap_size"), MMAP_SIZE_BYTES);
+            assert_eq!(pragma_i64(conn, "mmap_size"), 0, "no mapped database pages");
         }
         assert_eq!(pragma_i64(&writer, "synchronous"), 1, "NORMAL stays");
         let journal: String = writer
