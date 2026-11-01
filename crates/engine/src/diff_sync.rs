@@ -2320,6 +2320,32 @@ struct GateInputs {
     replace_dir: Option<PathBuf>,
 }
 
+/// Whether a `config --null --list` entry (`key\nvalue`) names a textconv or
+/// clean filter, whose output may depend on arbitrary external state. Git
+/// LFS's stock filter is the exception: its pointer is a hash of the content
+/// alone, and `git lfs install` registers it system-wide on most machines, so
+/// treating it as external would disable the gate wherever LFS is installed.
+fn config_entry_is_external(entry: &[u8]) -> bool {
+    let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
+        Some(split) => (&entry[..split], &entry[split + 1..]),
+        None => (entry, &b""[..]),
+    };
+    if key.starts_with(b"diff.") && key.ends_with(b".textconv") {
+        return true;
+    }
+    if !(key.starts_with(b"filter.") && (key.ends_with(b".clean") || key.ends_with(b".process"))) {
+        return false;
+    }
+    let stock_lfs = match key {
+        b"filter.lfs.clean" => value == b"git-lfs clean -- %f",
+        b"filter.lfs.process" => {
+            value == b"git-lfs filter-process" || value == b"git-lfs filter-process --skip"
+        }
+        _ => false,
+    };
+    !stock_lfs
+}
+
 fn input_stamp(path: &Path) -> (Option<FileStamp>, Option<FileStamp>) {
     (
         FileStamp::of(path),
@@ -2419,10 +2445,7 @@ impl GateInputs {
                 || key == b"core.excludesfile"
                 || key == b"diff.orderfile"
                 || (key.starts_with(b"include") && key.ends_with(b".path"));
-            // A textconv or clean filter may depend on arbitrary external state.
-            inputs.external |= (key.starts_with(b"diff.") && key.ends_with(b".textconv"))
-                || (key.starts_with(b"filter.")
-                    && (key.ends_with(b".clean") || key.ends_with(b".process")));
+            inputs.external |= config_entry_is_external(entry);
         }
         if query_paths {
             let paths = capture_git(
@@ -3324,7 +3347,9 @@ mod watch_budget_tests {
     }
 }
 
-#[cfg(test)]
+// The gate only trusts a skip on unix (std exposes no change time elsewhere),
+// and the fixtures use symlinks and names Windows cannot create.
+#[cfg(all(test, unix))]
 mod git_gating_tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -3599,6 +3624,25 @@ mod git_gating_tests {
         );
         #[cfg(unix)]
         assert!(shot["non-utf8"].truncated);
+    }
+
+    #[test]
+    fn only_custom_filters_and_textconv_make_the_gate_external() {
+        use super::config_entry_is_external as external;
+        // `git lfs install` (with and without --skip-smudge), as on CI runners.
+        assert!(!external(b"filter.lfs.clean\ngit-lfs clean -- %f"));
+        assert!(!external(b"filter.lfs.process\ngit-lfs filter-process"));
+        assert!(!external(
+            b"filter.lfs.process\ngit-lfs filter-process --skip"
+        ));
+        assert!(!external(b"filter.lfs.smudge\ngit-lfs smudge -- %f"));
+        assert!(!external(b"filter.lfs.required\ntrue"));
+        assert!(!external(b"core.autocrlf\ninput"));
+        assert!(external(b"filter.lfs.clean\n./my-wrapper clean %f"));
+        assert!(external(b"filter.crypt.clean\ngit-crypt clean"));
+        assert!(external(b"filter.crypt.process\ngit-crypt process"));
+        assert!(external(b"diff.lfs.textconv\ncat"));
+        assert!(external(b"diff.pdf.textconv"));
     }
 
     #[test]

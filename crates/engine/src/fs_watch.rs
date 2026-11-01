@@ -1538,6 +1538,9 @@ mod tests {
         }
     }
 
+    // Per-directory watches are the inotify/kqueue model. Windows always uses
+    // the shared recursive watcher, and its directory handles block renames.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn pruned_tree_fans_out_native_create_modify_rename_delete_and_new_dirs() {
         use notify::EventKind;
@@ -1892,6 +1895,8 @@ mod tests {
         event_matching(&mut a, |e| e.paths.contains(&late)).await;
     }
 
+    // See pruned_tree_fans_out_native_create_modify_rename_delete_and_new_dirs.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn directory_renamed_out_and_back_in_stays_watched() {
         for settle_between in [false, true] {

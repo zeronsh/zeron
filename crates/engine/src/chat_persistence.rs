@@ -326,8 +326,13 @@ impl ChatPersistence {
                     let verify = cfg!(debug_assertions)
                         || (std::env::var("ZERON_PERF_VERIFY").as_deref() == Ok("1")
                             && write.verifications % 32 == 0);
+                    // Tests verify every delta in every profile (CI runs some
+                    // suites with --release) unless a test opts out.
                     #[cfg(test)]
-                    let verify = verify && self.verify_deltas.load(Ordering::Relaxed);
+                    let verify = {
+                        let _ = verify;
+                        self.verify_deltas.load(Ordering::Relaxed)
+                    };
                     if verify {
                         if let Err(error) = self.verify_full(&doc, &vv_now) {
                             tracing::error!(chat = %self.chat_id, %error, "snapshot delta mismatch; using full snapshot");
