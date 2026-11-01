@@ -455,7 +455,7 @@ async fn subscriptions_and_pending_calls_hold_idle_and_logging_replays() {
     let dir = temp();
     let d = dir.path();
     seed(d).await;
-    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_CALL_DELAY_MS", "350")]);
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_CALL_DELAY_MS", "2000")]);
     peer.init().await;
     peer.request(json!(2), "logging/setLevel", json!({"level":"debug"}))
         .await;
@@ -470,13 +470,23 @@ async fn subscriptions_and_pending_calls_hold_idle_and_logging_replays() {
     eventually(|| pids(&d.join("spawn")).len() == 2).await;
     tokio::time::sleep(Duration::from_millis(220)).await;
     assert!(alive(pids(&d.join("spawn"))[1]));
-    peer.response(json!(3)).await;
-    peer.request(
+    // Attach the subscription while the delayed call still holds the runtime.
+    // Waiting for the call and then scheduling a subscribe can cross the
+    // ordinary idle deadline on a heavily loaded host.
+    peer.send(zeron_mcp_proxy::rpc::request(
         json!(4),
         "resources/subscribe",
         json!({"uri":"fake://test"}),
-    )
+    ))
     .await;
+    let mut completed = std::collections::BTreeSet::new();
+    while completed.len() < 2 {
+        let response = peer.recv().await;
+        if response["id"] == 3 || response["id"] == 4 {
+            assert!(response.get("result").is_some(), "{response}");
+            completed.insert(response["id"].as_i64().unwrap());
+        }
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(alive(pids(&d.join("spawn"))[1]));
     let requests: Vec<Value> = fs::read_to_string(d.join("requests"))
@@ -1140,7 +1150,8 @@ async fn paged_list_with_a_cursor_reaches_the_live_server() {
 async fn first_call_during_discovery_does_not_force_a_restart_for_the_second() {
     let dir = temp();
     let d = dir.path();
-    let mut peer = Peer::spawn(d, "lazy", &[]);
+    // Only discovery may retire the server here; ordinary idle expiry is independent.
+    let mut peer = Peer::spawn(d, "lazy", &[("ZERON_MCP_PROXY_IDLE_MS", "0")]);
     peer.send(zeron_mcp_proxy::rpc::request(
         1,
         "initialize",
@@ -1270,18 +1281,24 @@ async fn idle_cycles_leave_no_zombies_or_adopted_children() {
 async fn startup_failures_do_not_echo_credentials_to_the_client_or_the_log() {
     let dir = temp();
     let d = dir.path();
+    seed(d).await;
     let secret = "hunter2-credential-value";
     let mut peer = Peer::spawn(
         d,
         "lazy",
         &[
-            ("FAKE_INIT_ERROR", "1"),
+            ("FAKE_CRASH_ON", "crash"),
             ("FAKE_INIT_DELAY_MS", "100"),
             ("API_TOKEN", secret),
             ("FAKE_STDERR_TEXT", &format!("auth failed for {secret}")),
         ],
     );
-    let message = peer.init().await["error"]["message"]
+    assert!(peer.init().await.get("result").is_some());
+    // A cache-hit start fails after initialization, so this exercises the
+    // proxy's diagnostic path rather than the transparent legacy fallback.
+    let failure = peer.call(2, "crash").await;
+    assert_eq!(failure["result"]["isError"], true);
+    let message = failure["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1299,12 +1316,12 @@ async fn startup_failures_do_not_echo_credentials_to_the_client_or_the_log() {
 async fn an_old_failed_discovery_marker_is_retried() {
     let dir = temp();
     let d = dir.path();
-    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
-    assert!(peer.init().await.get("error").is_some());
-    peer.close().await;
+    seed(d).await;
     let file = &cache_files(d, "json")[0];
     let mut entry: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
-    assert_eq!(entry["discovery_failed"], true);
+    // A catalog failure written by an older proxy must expire too. Current
+    // pre-initialize failures use class-v1, covered by the expiry e2e above.
+    entry["discovery_failed"] = json!(true);
     entry["cached_at"] = json!(1);
     fs::write(file, entry.to_string()).unwrap();
     let mut peer = Peer::spawn(d, "lazy", &[]);
