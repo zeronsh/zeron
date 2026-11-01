@@ -82,3 +82,99 @@ async fn failed_or_logged_out_initialize_falls_back_to_curated_catalog() {
         assert!(harness.model_catalog(false).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn default_uses_the_named_rows_live_model_name_in_either_order() {
+    for aliases in [["default", "sonnet"], ["sonnet", "default"]] {
+        let (_dir, harness) = fixture(json!({"subtype":"success", "response":{
+            "models": aliases.map(|alias| json!({
+                "value":alias, "resolvedModel":"claude-sonnet-5-5",
+                "displayName":if alias == "default" { "Default (recommended)" } else { "Sonnet" },
+                "description":if alias == "default" {
+                    "Use the default model (currently Sonnet 5.5) · $2/$10 per Mtok"
+                } else { "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok" },
+                "supportedEffortLevels":["low","medium","high","xhigh","max"]
+            }))
+        }}));
+        let catalog = harness.model_catalog(true).await.unwrap();
+        let sonnet = &catalog.models[0];
+        assert_eq!(sonnet.id, "claude-sonnet-5-5");
+        assert_eq!(sonnet.label, "Sonnet 5.5");
+        assert_eq!(
+            sonnet.description.as_deref(),
+            Some("Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok")
+        );
+        assert_eq!(
+            catalog.models.iter().filter(|m| m.id == sonnet.id).count(),
+            1
+        );
+        assert!(sonnet.reasoning_levels.contains(&ReasoningLevel::XHigh));
+        // Discovery supplies this name; the fallback must not know the new model.
+        assert!(
+            !zeron_harness::claude::catalog::static_models()
+                .iter()
+                .any(|m| m.id == sonnet.id)
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_names_do_not_depend_on_known_families_versions_or_id_formats() {
+    for (id, name, description, expected) in [
+        (
+            "provider/opaque-deployment",
+            "Nebula",
+            "Nebula 17.3 · Provider description",
+            "Nebula 17.3",
+        ),
+        (
+            "gateway/custom",
+            "Custom gateway model",
+            "Gateway description",
+            "Custom gateway model",
+        ),
+        (
+            "opaque-model-without-prose",
+            "Nebula",
+            "Nebula 18.1",
+            "Nebula 18.1",
+        ),
+        (
+            "next-generation",
+            "New Model Preview",
+            "Provider description",
+            "New Model Preview",
+        ),
+        (
+            "claude-sonnet-6-2[1m]",
+            "Sonnet (1M context)",
+            "Sonnet 6.2 · Provider description",
+            "Sonnet 6.2",
+        ),
+    ] {
+        let (_dir, harness) = fixture(json!({"subtype":"success", "response":{
+            "models":[
+                {"value":"default", "resolvedModel":id, "displayName":"Default (recommended)"},
+                {"value":"new-alias", "resolvedModel":id, "displayName":name, "description":description}
+            ]
+        }}));
+        let catalog = harness.model_catalog(true).await.unwrap();
+        assert_eq!(catalog.models[0].id, id);
+        assert_eq!(catalog.models[0].label, expected);
+        assert_eq!(catalog.models[0].description.as_deref(), Some(description));
+    }
+}
+
+#[tokio::test]
+async fn unnamed_default_uses_its_concrete_id_without_guessing_the_model_name() {
+    let (_dir, harness) = fixture(json!({"subtype":"success", "response":{
+        "models":[
+            {"value":"default", "resolvedModel":"gateway/custom", "displayName":"Default (recommended)"},
+            {"value":"gateway/other", "displayName":"Custom gateway model"}
+        ]
+    }}));
+    let catalog = harness.model_catalog(true).await.unwrap();
+    assert_eq!(catalog.models[0].id, "gateway/custom");
+    assert_eq!(catalog.models[0].label, "gateway/custom");
+    assert_eq!(catalog.models.last().unwrap().label, "Custom gateway model");
+}
