@@ -628,6 +628,38 @@ impl SessionsEngine {
         self.inner.runtime_states_tx.subscribe()
     }
 
+    /// Restore local resumable sessions before the runtime watch is exposed.
+    pub(crate) fn seed_runtime_states(
+        &self,
+        workspace: &crate::WorkspaceHost,
+    ) -> Result<(), EngineError> {
+        let chats = workspace.read_chats()?;
+        let mut sessions = lock(&self.inner.harness_sessions);
+        let mut states = std::collections::BTreeMap::new();
+        for chat in chats {
+            if chat.device_id != self.inner.device_id {
+                continue;
+            }
+            let Some(session_id) = chat.harness_session_id.filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            sessions.insert(
+                chat.id.clone(),
+                HarnessSessionRef {
+                    session_id,
+                    cwd: chat.harness_session_cwd.unwrap_or_default(),
+                    harness: chat
+                        .harness_session_harness
+                        .as_deref()
+                        .and_then(HarnessId::from_slug),
+                },
+            );
+            states.insert(chat.id, zeron_proto::RuntimeState::Hibernated);
+        }
+        self.inner.runtime_states_tx.send_replace(states);
+        Ok(())
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }
@@ -2957,6 +2989,19 @@ impl Inner {
                 harness: Some(harness),
             },
         );
+        // Recovery can discover a resumable session with no run to publish a
+        // status transition. Serialize this update with run insertion.
+        let runs = lock(&self.runs);
+        if !runs.contains_key(chat_id) {
+            self.runtime_states_tx.send_if_modified(|states| {
+                if states.get(chat_id) == Some(&zeron_proto::RuntimeState::Hibernated) {
+                    return false;
+                }
+                states.insert(chat_id.to_owned(), zeron_proto::RuntimeState::Hibernated);
+                true
+            });
+        }
+        drop(runs);
         if let Some(ws) = self.workspace() {
             ws.set_chat_harness_session(chat_id, session_id, cwd, Some(harness));
         }
@@ -6130,6 +6175,137 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             assert!(lock(&self.core.sessions.inner.runs).contains_key("sleep"));
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_states_restore_persisted_sessions_on_engine_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = crate::EngineProfile::local(dir.path()).unwrap();
+        let fixture = Arc::new(HibernationFixture {
+            launches: Default::default(),
+            conversation: Default::default(),
+            channel: false,
+            harness_id: HarnessId::Mock,
+            claude_exe: None,
+            plugin_discovery: None,
+            hold_turn: false,
+            finish: Default::default(),
+            think: Default::default(),
+            lose_session: Default::default(),
+        });
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(fixture.clone());
+        let core = crate::EngineCore::assemble_with_profile(
+            profile.clone(),
+            registry.clone(),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        for id in ["sleep", "second", "tombstone", "no-session"] {
+            core.workspace
+                .create_chat(id, None, Some(&core.device_id), None, Some(cwd.into()))
+                .unwrap();
+        }
+        core.workspace
+            .create_chat(
+                "remote",
+                None,
+                Some("remote-device"),
+                None,
+                Some(cwd.into()),
+            )
+            .unwrap();
+        for id in ["sleep", "second", "remote"] {
+            core.workspace.set_chat_harness_session(
+                id,
+                "hibernation-session",
+                cwd,
+                Some(HarnessId::Mock),
+            );
+        }
+        core.workspace
+            .set_chat_harness_session("tombstone", "", cwd, Some(HarnessId::Mock));
+        core.shutdown().await;
+        drop(core);
+
+        let core =
+            crate::EngineCore::assemble_with_profile(profile, registry, HarnessId::Mock, None)
+                .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let mut stream = client
+            .subscribe_checked(
+                zeron_rpc::methods::WATCH_RUNTIME_STATES,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let frame = stream.recv().await.unwrap();
+        assert_eq!(
+            frame,
+            serde_json::json!({"sleep": "hibernated", "second": "hibernated"})
+        );
+        let mut watch = core.sessions.watch_runtime_states();
+        let states = watch.borrow_and_update().clone();
+        assert_eq!(states.len(), 2);
+        for id in ["sleep", "second"] {
+            assert_eq!(states.get(id), Some(&zeron_proto::RuntimeState::Hibernated));
+            assert!(!core.sessions.has_run(id));
+            assert_eq!(
+                core.sessions
+                    .inner
+                    .resume_for(id, cwd, HarnessId::Mock)
+                    .as_deref(),
+                Some("hibernation-session")
+            );
+        }
+        assert!(!states.contains_key("remote"));
+        assert!(!states.contains_key("tombstone"));
+        assert!(!states.contains_key("no-session"));
+        // A session discovered from a crash journal after seeding is visible too.
+        core.sessions.inner.remember_harness_session(
+            "no-session", "recovered-session", cwd, HarnessId::Mock,
+        );
+        assert_eq!(
+            watch.borrow_and_update().get("no-session"),
+            Some(&zeron_proto::RuntimeState::Hibernated)
+        );
+
+        let reply = client
+            .call(
+                zeron_rpc::methods::PREWARM_CHAT,
+                serde_json::json!({"chatId": "sleep"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["prewarming"], true);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if watch.borrow_and_update().get("sleep")
+                    == Some(&zeron_proto::RuntimeState::Parked)
+                {
+                    break;
+                }
+                watch.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(core.sessions.hibernate("sleep"));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if watch.borrow_and_update().get("sleep")
+                    == Some(&zeron_proto::RuntimeState::Hibernated)
+                {
+                    break;
+                }
+                watch.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        core.shutdown().await;
     }
 
     #[tokio::test]
