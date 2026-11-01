@@ -29,6 +29,9 @@ struct SessionRowVM: Hashable {
     var unseen: Bool
     var pinned: Bool
     var sendFailed: Bool
+    /// Its usage limit stopped it and its host resumes it once the limit
+    /// resets.
+    var paused: Bool = false
 }
 
 /// Folder row ("Pinned 2 ›", "P0 3 ›").
@@ -94,6 +97,9 @@ final class SessionCell: UICollectionViewListCell {
     /// state; unseen-and-finished reads "Done"; otherwise the time.
     static func corner(_ vm: SessionRowVM) -> (word: String, color: UIColor, glyph: StatusGlyph.Kind)? {
         if vm.sendFailed { return ("Failed", Palette.danger, .dot(Palette.danger)) }
+        if vm.paused, vm.status != .working, vm.status != .awaiting {
+            return ("Paused", StatusTone.paused, .dot(StatusTone.paused))
+        }
         switch vm.status {
         case .working: return ("Working", StatusTone.working, .spinner)
         case .awaiting: return ("Input", StatusTone.input, .dot(StatusTone.input))

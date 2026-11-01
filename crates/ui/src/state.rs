@@ -3314,6 +3314,20 @@ impl AppState {
         running_subagents(self.session_for(chat_id), now)
     }
 
+    /// The usage limit stopped `chat_id` and its host resumes it by itself
+    /// once the limit resets (the session row's `auto_resume`). Not while
+    /// the host is offline: nothing resumes until it is back. (An idle row
+    /// gets no heartbeat, so the row's own age says nothing here.)
+    pub fn waiting_to_resume(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.session_for(chat_id).is_some_and(|session| {
+            session
+                .auto_resume
+                .as_ref()
+                .is_some_and(zeron_proto::AutoResume::pending)
+                && self.device_online(&session.device_id, now)
+        })
+    }
+
     /// Native run indicator for composer/Stop controls. Sidebar attention is
     /// derived separately by `display_status_for`, including terminal reports.
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
@@ -5596,6 +5610,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -5835,6 +5850,33 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_waits_to_resume_while_its_stop_is_pending_and_its_host_is_up() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut row = session("chat", SessionStatus::Errored, 600, now);
+        let mut stop = crate::auto_resume::stop(true, zeron_proto::AutoResumePhase::Waiting);
+        row.auto_resume = Some(stop.clone());
+        state.sessions = vec![row.clone()];
+        // An idle row is never refreshed: its age alone doesn't stop it.
+        assert!(state.waiting_to_resume("chat", now));
+        assert!(!state.waiting_to_resume("other", now));
+        let mut host = device("dev", "Studio");
+        host.last_seen_at = Some(now - TimeDelta::hours(1));
+        state.devices = vec![host];
+        assert!(!state.waiting_to_resume("chat", now), "its host is offline");
+        state.devices.clear();
+        stop.enabled = false;
+        row.auto_resume = Some(stop.clone());
+        state.sessions = vec![row.clone()];
+        assert!(!state.waiting_to_resume("chat", now), "turned off");
+        stop.enabled = true;
+        stop.phase = zeron_proto::AutoResumePhase::Resumed;
+        row.auto_resume = Some(stop);
+        state.sessions = vec![row];
+        assert!(!state.waiting_to_resume("chat", now), "already resumed");
+    }
+
+    #[test]
     fn a_ready_cloud_machine_that_stopped_answering_is_asleep() {
         use crate::cloud::Presence;
         let mut state = AppState::new();
@@ -5867,6 +5909,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -5902,6 +5945,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,

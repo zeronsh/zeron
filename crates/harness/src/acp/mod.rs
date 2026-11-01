@@ -3174,12 +3174,29 @@ fn stop_outcome(
                 DoneStatus::Errored,
                 Some("The agent refused to continue.".to_owned()),
             ),
+            // Grok: its provider's usage or rate limit stopped the turn.
+            Some("rate_limit") => (
+                DoneStatus::Errored,
+                Some(
+                    "The agent's usage limit was reached — the turn stopped. Try again after \
+                     it resets."
+                        .to_owned(),
+                ),
+            ),
             // end_turn / max_tokens / max_turn_requests: the turn ended;
             // partial output is already in the doc.
             _ => (DoneStatus::Completed, None),
         },
         Err(e) => (DoneStatus::Errored, Some(e.to_string())),
     }
+}
+
+/// The provider's limit stopped the turn (`stopReason: "rate_limit"`): told
+/// to the engine as [`AgentEvent::LimitReached`], with no reset time (the
+/// engine asks the account's usage).
+fn limit_stop(res: &Result<Value, HarnessError>, interrupted: bool) -> Option<AgentEvent> {
+    let reason = res.as_ref().ok()?.get("stopReason")?.as_str()?;
+    (!interrupted && reason == "rate_limit").then_some(AgentEvent::LimitReached { resets_at: None })
 }
 
 /// One turn: `session/prompt` whose response (the `stopReason`) ends it.
@@ -4842,6 +4859,11 @@ async fn run_session(session: Session) {
                 preempt_pending = false;
                 if !preempted {
                     let (status, mut error) = stop_outcome(&res, interrupted || stopped);
+                    if let Some(stop) = limit_stop(&res, interrupted || stopped)
+                        && !send(&event_tx, stop).await
+                    {
+                        break 'main;
+                    }
                     if !interrupted
                         && auth_method.is_some()
                         && res.as_ref().is_err_and(is_auth_required)
@@ -5055,6 +5077,9 @@ async fn run_session(session: Session) {
                             let _ = send(&event_tx, usage).await;
                         }
                         let (status, error) = stop_outcome(&res, interrupted);
+                        if let Some(stop) = limit_stop(&res, interrupted) {
+                            let _ = send(&event_tx, stop).await;
+                        }
                         done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
@@ -5738,6 +5763,21 @@ async fn run_session(session: Session) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rate_limit_stop_is_an_error_and_a_limit_stop() {
+        let res = Ok(serde_json::json!({ "stopReason": "rate_limit" }));
+        let (status, error) = super::stop_outcome(&res, false);
+        assert_eq!(status, zeron_proto::DoneStatus::Errored);
+        assert!(error.is_some_and(|e| e.contains("usage limit was reached")));
+        assert_eq!(
+            super::limit_stop(&res, false),
+            Some(zeron_proto::AgentEvent::LimitReached { resets_at: None })
+        );
+        assert_eq!(super::limit_stop(&res, true), None);
+        let ended = Ok(serde_json::json!({ "stopReason": "end_turn" }));
+        assert_eq!(super::limit_stop(&ended, false), None);
+    }
+
     use super::*;
 
     #[test]

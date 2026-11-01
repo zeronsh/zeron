@@ -138,6 +138,11 @@ fun StatusLabel(row: SessionRow) {
     // A send that never reached the host outranks the live state; a finished
     // run reads Done only until it's been seen.
     if (row.sendState == uniffi.zeron_core.SendState.FAILED) return label("Failed", MaterialTheme.colorScheme.error, dot = true)
+    // Its usage limit stopped it and its host resumes it once the limit
+    // resets: Paused, unless it runs or asks again.
+    if (row.paused && row.indicator != ChatIndicator.WORKING && row.indicator != ChatIndicator.AWAITING_INPUT) {
+        return label("Paused", sh.zeron.android.voice.warningColor(), dot = true)
+    }
     when (row.indicator) {
         ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(26.dp))
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)

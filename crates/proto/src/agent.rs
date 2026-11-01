@@ -871,6 +871,15 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_label: Option<String>,
     },
+    /// The provider's usage or rate limit stopped this turn, with when it
+    /// resets if the provider said. Accompanies the `Error`/`Done` text that
+    /// tells the user; the engine keeps it for auto-resume and never
+    /// journals it or writes it to docs.
+    #[serde(rename_all = "camelCase")]
+    LimitReached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

@@ -8,6 +8,7 @@
 //! ranges are a binary search, display lists are built on demand from the
 //! frame's prepared rows (pure arithmetic, no measurement).
 
+mod auto_resume;
 pub mod display;
 mod markdown;
 mod file_icons;
@@ -28,7 +29,7 @@ use zeron_text::WidthCache;
 
 use display::{DisplayBuilder, MathFace, RowDisplay};
 use markdown::{Ctx, MathFailures, MathSettings, Px};
-pub use rows::{PendingUser, RowKind, TranscriptInput};
+pub use rows::{PendingUser, ResumeInput, RowKind, TranscriptInput};
 use rows::{Gap, Placed, RowBuilder, RowCore, place_row};
 pub use style::{FaceRole, StyleDesc};
 use style::Typography;
@@ -389,6 +390,7 @@ impl zeron_client::SubagentSink for SubagentInput {
             working_since_ms: None,
             streaming: live,
             workspace: None,
+            ..Default::default()
         };
         let _ = self.0.lock().unwrap().send(Msg::Input(input));
     }
@@ -454,8 +456,12 @@ impl TranscriptView {
         // Agent messages' senders, by their live titles (read per snapshot).
         let workspace = client.clone();
         let guard = handle.watch(move |snap| {
+            let entries = snap.transcript_messages();
+            let workspace = workspace.client().workspace();
+            // A usage limit stop's auto-resume, on its error card.
+            let host_offline = workspace.session(&snap.chat_id).is_some_and(|row| !row.device_online);
             let input = TranscriptInput {
-                entries: snap.transcript_messages(),
+                entries,
                 pending: snap
                     .pending
                     .iter()
@@ -467,7 +473,10 @@ impl TranscriptView {
                 working: snap.working,
                 working_since_ms: snap.working_since_ms,
                 streaming: snap.streaming,
-                workspace: Some(workspace.client().workspace()),
+                auto_resume: snap.auto_resume.clone(),
+                host_offline,
+                resume: Vec::new(),
+                workspace: Some(workspace),
             };
             let _ = tx.lock().unwrap().send(Msg::Input(input));
         });
@@ -576,6 +585,7 @@ pub(crate) fn debug_input(entries: Vec<DebugEntry>, working: bool) -> Transcript
         working_since_ms: None,
         streaming: working,
         workspace: None,
+        ..Default::default()
     }
 }
 
@@ -626,7 +636,26 @@ impl Worker {
     }
 
     fn run(mut self, rx: Receiver<Msg>) {
-        while let Ok(first) = rx.recv() {
+        loop {
+            // A limit stop's card words itself by the clock ("Checking
+            // limit…" once its reset time passes): wake then to lay it out.
+            let deadline = self.input.auto_resume.as_ref().and_then(|stop| auto_resume::next_change(stop, chrono::Utc::now()));
+            let first = match deadline.and_then(|at| (at - chrono::Utc::now()).to_std().ok()) {
+                Some(wait) => match rx.recv_timeout(wait + std::time::Duration::from_millis(50)) {
+                    Ok(msg) => msg,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if self.width > 0.0 && self.typo.has_faces() {
+                            self.pass();
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                },
+                None => match rx.recv() {
+                    Ok(msg) => msg,
+                    Err(_) => return,
+                },
+            };
             // Coalesce everything queued: only the latest input matters.
             let mut dirty = false;
             for msg in std::iter::once(first).chain(rx.try_iter()) {
@@ -723,6 +752,9 @@ impl Worker {
 
     pub(crate) fn pass(&mut self) -> Arc<LayoutFrame> {
         let started = Instant::now();
+        if self.input.auto_resume.is_some() {
+            self.input.resume = auto_resume::resume_inputs(self.input.auto_resume.as_ref(), !self.input.host_offline, &self.input.entries, chrono::Utc::now());
+        }
         let placed: Vec<Placed> = {
             let mut ctx = Ctx {
                 typo: &mut self.typo,

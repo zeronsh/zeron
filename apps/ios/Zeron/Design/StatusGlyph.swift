@@ -6,6 +6,8 @@ enum StatusTone {
     static let input = Palette.dynamic(0x5B43E8, 0x8B7CF6, alpha: 0.6)
     static let failed = Palette.dynamic(0xDC2626, 0xF87171, alpha: 0.65)
     static let done = Palette.dynamic(0x15803D, 0x34D399, alpha: 0.9)
+    /// Waiting on a usage limit to reset (the desktop's warning amber).
+    static let paused = Palette.dynamic(0xA16207, 0xFACC15, alpha: 0.85)
     static let idle = Palette.dynamic(0x000000, 0xFFFFFF, alpha: 0.14)
     /// Time-ago text on idle rows (`text_muted` @ 0.5).
     static let time = Palette.dynamic(0x62626A, 0xA9A9AE, alpha: 0.5)

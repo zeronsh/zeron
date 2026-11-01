@@ -400,6 +400,12 @@ pub struct Session {
     /// through `view::background_tasks`. Missing on older peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// The chat's latest turn the provider's usage limit stopped, and whether
+    /// and when the host resumes it (the error card's "Auto-resumes at…" and
+    /// toggle). Kept through the continuation as `Resumed` until the next
+    /// turn starts; dropped when the chat moves on. Missing on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resume: Option<crate::AutoResume>,
 }
 
 /// One background process of a chat's agent, as its runtime reports it.

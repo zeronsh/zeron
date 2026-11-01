@@ -38,6 +38,9 @@ use crate::doc_host::{ChatDocHandle, DocHost};
 
 #[path = "session_activity.rs"]
 mod activity;
+#[path = "session_limits.rs"]
+mod limits;
+pub use limits::LimitResume;
 use crate::registry::{HarnessDescriptor, HarnessRegistry};
 use crate::run_journal::RunJournal;
 use crate::{EngineError, new_id, now_ms};
@@ -243,6 +246,9 @@ struct Revival {
     /// Sent instead of the original prompt when the resumed provider session
     /// already holds that prompt and part of the work on it.
     continuation: Option<String>,
+    /// The usage-limit stop (its entry) this revival continues, when it is
+    /// auto-resume's (see `limits`).
+    limit_entry: Option<String>,
 }
 
 struct Inner {
@@ -313,6 +319,10 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Whether a turn the usage limit stops resumes by itself by default
+    /// (the device setting, shared with [`crate::auto_resume::AutoResumer`]).
+    /// Unwired (bare tests), limit stops are not recorded at all.
+    auto_resume_default: OnceLock<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -362,6 +372,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                auto_resume_default: OnceLock::new(),
             }),
         }
     }
@@ -1079,6 +1090,15 @@ impl SessionsEngine {
                 .inner
                 .shutting_down
                 .load(std::sync::atomic::Ordering::Acquire);
+        // Auto-resume's continuation: a Stop since it began, or the engine
+        // going down, simply leaves it (the Stop dropped the stop; a saved
+        // stop resumes after the restart).
+        let limit_entry = revival.as_ref().and_then(|r| r.limit_entry.clone());
+        if limit_entry.is_some() && !moved_on && (stopped || shutting_down) {
+            drop(runs);
+            tracing::info!(chat = %chat_id, stopped, "limit auto-resume abandoned");
+            return Ok(String::new());
+        }
         if moved_on || stopped || shutting_down {
             drop(runs);
             if moved_on {
@@ -1119,7 +1139,7 @@ impl SessionsEngine {
             },
         );
         drop(runs);
-        self.set_status(
+        self.inner.update_status(
             chat_id,
             if idle {
                 SessionStatus::Idle
@@ -1127,6 +1147,10 @@ impl SessionsEngine {
                 SessionStatus::Working
             },
             true,
+            None,
+            None,
+            None,
+            limit_entry.as_deref(),
         );
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -1424,6 +1448,8 @@ impl SessionsEngine {
         *lock(&self.inner.user_stops)
             .entry(chat_id.to_string())
             .or_default() += 1;
+        // A Stop also ends a limit stop's wait: the user took over.
+        self.inner.cancel_auto_resume(chat_id, None);
         let live = if let Some(run) = lock(&self.inner.runs).get(chat_id) {
             run.shutdown_cut
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -1762,6 +1788,7 @@ impl SessionsEngine {
                 Revival {
                     message_id: user_id.clone(),
                     continuation,
+                    limit_entry: None,
                 },
             );
             request.resume = None; // dispatch re-injects the remembered session
@@ -2127,6 +2154,24 @@ impl Inner {
         completed_turn: Option<String>,
         outcome: Option<DoneStatus>,
     ) {
+        self.update_status(chat_id, status, fresh_start, completed_turn, outcome, None, None);
+    }
+
+    /// [`Self::set_status_with_completion`], also setting the row's
+    /// auto-resume state when `limit` brings one — in the same row write,
+    /// so no reader sees the limit's `Errored` without it. `resumed`: the
+    /// turn starting is auto-resume's continuation of that stop.
+    #[allow(clippy::too_many_arguments)]
+    fn update_status(
+        &self,
+        chat_id: &str,
+        status: SessionStatus,
+        fresh_start: bool,
+        completed_turn: Option<String>,
+        outcome: Option<DoneStatus>,
+        limit: Option<zeron_proto::AutoResume>,
+        resumed: Option<&str>,
+    ) {
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -2143,6 +2188,7 @@ impl Inner {
                     terminal_activity: None,
                     running_subagents: 0,
                     background_tasks: Vec::new(),
+                    auto_resume: None,
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -2170,6 +2216,12 @@ impl Inner {
                 });
             } else if status == SessionStatus::Working && (fresh_start || !was_active) {
                 entry.last_turn_outcome = None;
+            }
+            if status == SessionStatus::Working && (fresh_start || !was_active) {
+                limits::turn_started(&mut entry.auto_resume, now, resumed);
+            }
+            if limit.is_some() {
+                entry.auto_resume = limit;
             }
             entry.updated_at = now;
             match status {
@@ -4022,6 +4074,10 @@ async fn drive_run(
 
     let mut final_completed_turn = None;
     let mut final_outcome = None;
+    // This turn's `LimitReached`, with its reset time if the provider gave
+    // one; and the stop the run ended with (see `limits::limit_stop`).
+    let mut limit_signal: Option<Option<chrono::DateTime<Utc>>> = None;
+    let mut final_limit = None;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -4501,6 +4557,12 @@ async fn drive_run(
             }
             continue;
         }
+        // The provider's usage limit stopped the turn: kept for the turn's
+        // end (auto-resume), never journaled or written to the transcript.
+        if let AgentEvent::LimitReached { resets_at } = &event {
+            limit_signal = Some(resets_at.or(limit_signal.flatten()));
+            continue;
+        }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
@@ -4848,6 +4910,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            let turn_limit = limit_signal.take();
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -4979,6 +5042,10 @@ async fn drive_run(
             final_completed_turn = completed_turn;
             // Retiring an already parked process is not a new turn outcome.
             final_outcome = turn_was_active.then_some(*status);
+            if *status == DoneStatus::Errored && !interrupted {
+                final_limit = limits::limit_stop(harness_id, turn_limit, &folded, Utc::now())
+                    .map(|resets_at| (entry_id.clone(), resets_at));
+            }
             break match status {
                 DoneStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
@@ -5023,13 +5090,18 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status_with_completion(
-        &chat_id,
-        final_status,
-        false,
-        final_completed_turn,
-        final_outcome,
-    );
+    match final_limit {
+        Some((entry, resets_at)) if final_status == SessionStatus::Errored => {
+            inner.set_status_limited(&chat_id, final_outcome, &entry, resets_at);
+        }
+        _ => inner.set_status_with_completion(
+            &chat_id,
+            final_status,
+            false,
+            final_completed_turn,
+            final_outcome,
+        ),
+    }
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.
     let orphans: Vec<RoutedSteer> = if inner

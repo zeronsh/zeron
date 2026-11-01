@@ -25,6 +25,7 @@
 //! against an in-process simulated host, so it exercises the real pipeline.
 
 pub mod attachments;
+pub mod auto_resume;
 pub mod auth;
 pub mod catalog;
 mod client;

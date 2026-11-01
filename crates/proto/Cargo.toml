@@ -10,4 +10,6 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# This device's zone name, to read a limit's "resets 3pm (Europe/Berlin)".
+iana-time-zone = "0.1"
 pulldown-cmark.workspace = true

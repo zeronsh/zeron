@@ -121,6 +121,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onFollowChange: ((Bool) -> Void)?
     /// A row's button was tapped (`sign-in` on an error card).
     var onAction: ((String) -> Void)?
+    /// A row's switch was flipped (`auto-resume`, now on or off); the last
+    /// argument puts it back when the change fails.
+    var onSwitch: ((String, Bool, @escaping () -> Void) -> Void)?
     /// A subagent card was tapped (doc id, title, still running).
     var onSubagent: ((String, String, Bool) -> Void)?
     /// An agent message's sender caption was tapped (the sending chat's id).
@@ -688,6 +691,11 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
 
     func rowView(_ view: RowView, perform action: String) {
         onAction?(action)
+    }
+
+    func rowView(_ view: RowView, setSwitch action: String, on: Bool, revert: @escaping () -> Void) {
+        guard let onSwitch else { return revert() }
+        onSwitch(action, on, revert)
     }
 
     func rowView(_ view: RowView, openSubagent docId: String, title: String, running: Bool) {

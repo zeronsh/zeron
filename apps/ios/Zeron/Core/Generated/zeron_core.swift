@@ -1281,6 +1281,24 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func workspaceRevision()  -> UInt64
     
     /**
+     * Whether turns the usage limit stops on `device_id` resume by
+     * themselves (on unless the user turned it off).
+     */
+    func autoResumeEnabled(deviceId: String) async throws  -> Bool
+    
+    /**
+     * Turn auto-resume on `device_id` on or off, for its later stops and
+     * the ones waiting now; the device's setting after the change.
+     */
+    func setAutoResumeEnabled(deviceId: String, enabled: Bool) async throws  -> Bool
+    
+    /**
+     * The error card's switch: resume `chat_id`'s limit stop by itself, or
+     * not. Asks the chat's host; its session row brings the new state.
+     */
+    func setChatAutoResume(chatId: String, enabled: Bool) async throws 
+    
+    /**
      * A Stripe Checkout url: a plan (`kind = "subscription"`, `plan`) or
      * extra credits (`kind = "credits"`, `packs`).
      */
@@ -2312,6 +2330,66 @@ open func workspaceRevision() -> UInt64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Whether turns the usage limit stops on `device_id` resume by
+     * themselves (on unless the user turned it off).
+     */
+open func autoResumeEnabled(deviceId: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_auto_resume_enabled(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_i8,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_i8,
+            freeFunc: ffi_zeron_mobile_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Turn auto-resume on `device_id` on or off, for its later stops and
+     * the ones waiting now; the device's setting after the change.
+     */
+open func setAutoResumeEnabled(deviceId: String, enabled: Bool)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_set_auto_resume_enabled(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_i8,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_i8,
+            freeFunc: ffi_zeron_mobile_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * The error card's switch: resume `chat_id`'s limit stop by itself, or
+     * not. Asks the chat's host; its session row brings the new state.
+     */
+open func setChatAutoResume(chatId: String, enabled: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_set_chat_auto_resume(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_void,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_void,
+            freeFunc: ffi_zeron_mobile_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
 }
     
     /**
@@ -12179,6 +12257,11 @@ public struct SessionRow: Equatable, Hashable {
      * 2 = chat2; 1 = legacy (not dialable).
      */
     public var roomGen: UInt32
+    /**
+     * Its usage limit stopped it and its host (online) resumes it once the
+     * limit resets: the list reads "Paused" unless it runs or asks again.
+     */
+    public var paused: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -12218,7 +12301,11 @@ public struct SessionRow: Equatable, Hashable {
          */sendState: SendState?, parentChatId: String?, 
         /**
          * 2 = chat2; 1 = legacy (not dialable).
-         */roomGen: UInt32) {
+         */roomGen: UInt32, 
+        /**
+         * Its usage limit stopped it and its host (online) resumes it once the
+         * limit resets: the list reads "Paused" unless it runs or asks again.
+         */paused: Bool) {
         self.id = id
         self.revision = revision
         self.title = title
@@ -12250,6 +12337,7 @@ public struct SessionRow: Equatable, Hashable {
         self.sendState = sendState
         self.parentChatId = parentChatId
         self.roomGen = roomGen
+        self.paused = paused
     }
 
     
@@ -12298,7 +12386,8 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
                 pullRequest: FfiConverterOptionTypePullRequest.read(from: &buf), 
                 sendState: FfiConverterOptionTypeSendState.read(from: &buf), 
                 parentChatId: FfiConverterOptionString.read(from: &buf), 
-                roomGen: FfiConverterUInt32.read(from: &buf)
+                roomGen: FfiConverterUInt32.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -12334,6 +12423,7 @@ public struct FfiConverterTypeSessionRow: FfiConverterRustBuffer {
         FfiConverterOptionTypeSendState.write(value.sendState, into: &buf)
         FfiConverterOptionString.write(value.parentChatId, into: &buf)
         FfiConverterUInt32.write(value.roomGen, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
     }
 }
 
@@ -19102,6 +19192,13 @@ public enum WidgetKind: Equatable, Hashable {
     case action(action: String, label: String
     )
     /**
+     * An on/off switch the app acts on: `action` names it (`auto-resume`),
+     * and flipping it sends `{action}:on` or `{action}:off` for the state it
+     * now shows; a failure puts it back. `label` names it for accessibility.
+     */
+    case toggle(action: String, label: String, on: Bool
+    )
+    /**
      * A subagent spawn's card: opens the child's transcript (`doc_id`;
      * `None` while the host hasn't bound one yet).
      */
@@ -19167,7 +19264,10 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
         case 14: return .action(action: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf)
         )
         
-        case 15: return .subagent(docId: try FfiConverterOptionString.read(from: &buf), title: try FfiConverterString.read(from: &buf), running: try FfiConverterBool.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
+        case 15: return .toggle(action: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf), on: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 16: return .subagent(docId: try FfiConverterOptionString.read(from: &buf), title: try FfiConverterString.read(from: &buf), running: try FfiConverterBool.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -19255,8 +19355,15 @@ public struct FfiConverterTypeWidgetKind: FfiConverterRustBuffer {
             FfiConverterString.write(label, into: &buf)
             
         
-        case let .subagent(docId,title,running,failed):
+        case let .toggle(action,label,on):
             writeInt(&buf, Int32(15))
+            FfiConverterString.write(action, into: &buf)
+            FfiConverterString.write(label, into: &buf)
+            FfiConverterBool.write(on, into: &buf)
+            
+        
+        case let .subagent(docId,title,running,failed):
+            writeInt(&buf, Int32(16))
             FfiConverterOptionString.write(docId, into: &buf)
             FfiConverterString.write(title, into: &buf)
             FfiConverterBool.write(running, into: &buf)
@@ -22025,6 +22132,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_workspace_revision() != 48105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_auto_resume_enabled() != 43412) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_auto_resume_enabled() != 22108) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_set_chat_auto_resume() != 60735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_billing_checkout() != 44997) {

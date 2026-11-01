@@ -81,6 +81,9 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
     val accounts = remember { mutableStateMapOf<String, List<DeviceAccountInfo>>() }
     val failed = remember { mutableStateMapOf<String, String>() }
     val toggling = remember { mutableStateMapOf<String, Boolean>() }
+    // Each computer's "Auto-resume when limits reset" (absent until read).
+    val autoResume = remember { mutableStateMapOf<String, Boolean>() }
+    val autoResumeError = remember { mutableStateMapOf<String, String>() }
     var signingIn by remember { mutableStateOf<String?>(null) }
     var refreshing by remember { mutableStateOf(false) }
     var toggleError by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -106,6 +109,15 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
         }
         val c = client ?: return
         runCatching { c.listHarnesses(id) }.onSuccess { harnesses[id] = it }
+        try {
+            autoResume[id] = c.autoResumeEnabled(id)
+            autoResumeError.remove(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // An older Zeron there, or offline: the row says so.
+            autoResumeError[id] = CloudStore.message(e)
+        }
         loadAccounts(id)
     }
 
@@ -133,6 +145,23 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
                 toggleError = (if (on) "Couldn't turn it on" else "Couldn't turn it off") to CloudStore.message(e)
             } finally {
                 toggling.remove(h.id)
+            }
+        }
+    }
+
+    // Flips at once; a failure flips it back.
+    fun setAutoResume(on: Boolean) {
+        val c = client ?: return
+        val id = selected
+        autoResume[id] = on
+        scope.launch {
+            try {
+                autoResume[id] = c.setAutoResumeEnabled(id, on)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                autoResume[id] = !on
+                model.toast("Couldn't change auto-resume: ${CloudStore.message(e)}")
             }
         }
     }
@@ -229,6 +258,27 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
                         }
                         if (sorted.isEmpty()) CloudRow(0, 1, "No agents", if (online) "$name hasn't reported any agents." else "$name is offline.")
                     }
+                }
+            }
+            if (!onCloud) {
+                cloudSection("Usage limits", footer = "Each stopped chat's card can turn it off for that chat alone.", key = "limits-$selected") {
+                    val on = autoResume[selected]
+                    CloudRow(
+                        0, 1, "Auto-resume when limits reset",
+                        when {
+                            on != null -> "Chats on $name, and their subagents, continue once a usage limit resets, including chats already waiting."
+                            !online -> "$name is offline."
+                            else -> autoResumeError[selected] ?: "Loading…"
+                        },
+                        trailing = {
+                            Switch(
+                                // On until the computer says otherwise: the default.
+                                checked = on ?: true,
+                                onCheckedChange = { setAutoResume(it) },
+                                enabled = online && on != null,
+                            )
+                        },
+                    )
                 }
             }
         }

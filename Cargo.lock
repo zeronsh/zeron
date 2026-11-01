@@ -13762,6 +13762,7 @@ name = "zeron-mobile"
 version = "0.2.131"
 dependencies = [
  "async-trait",
+ "chrono",
  "serde",
  "serde_json",
  "similar",
@@ -13837,6 +13838,7 @@ name = "zeron-proto"
 version = "0.2.131"
 dependencies = [
  "chrono",
+ "iana-time-zone",
  "pulldown-cmark",
  "serde",
  "serde_json",

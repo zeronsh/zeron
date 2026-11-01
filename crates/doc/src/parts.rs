@@ -564,6 +564,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::PlanUsage { .. }
+        | AgentEvent::LimitReached { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::UserMessage { .. } => {}

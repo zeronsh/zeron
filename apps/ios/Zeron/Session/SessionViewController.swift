@@ -97,6 +97,18 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             }
             self.present(nav, animated: true)
         }
+        // A limit stop's "Auto-resume" switch: the chat's host flips it, and
+        // its session row brings the card's new state.
+        list.onSwitch = { [weak self] action, on, revert in
+            guard let self, action == "auto-resume" else { return revert() }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if await !self.source.setAutoResume(on) {
+                    revert()
+                    Toast.show("Couldn't change auto-resume. Try again.", in: self.view.window)
+                }
+            }
+        }
         list.onSubagent = { [weak self] doc, title, running in
             guard let self else { return }
             self.presentCompanion(SubagentViewController(app: self.app, parentId: self.chatId, docId: doc, title: title, running: running))

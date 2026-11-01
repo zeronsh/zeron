@@ -3065,6 +3065,57 @@ impl AgentAccounts {
         self.persist_usage(&usage);
     }
 
+    /// `harness`'s live account with its usage windows, re-probed first when
+    /// `probe` (honouring the probe backoff like a forced list, but probing
+    /// only that account): auto-resume's check that a usage limit has reset.
+    /// `None` when `harness` has no live account here.
+    pub async fn active_usage(
+        &self,
+        harness: HarnessId,
+        probe: bool,
+    ) -> Result<Option<AgentAccount>, EngineError> {
+        let _ops = self.inner.ops.lock().await;
+        let active = |snapshot: AgentAccountsSnapshot| {
+            snapshot
+                .accounts
+                .into_iter()
+                .find(|account| account.harness == harness && account.active)
+        };
+        let account = active(self.list_locked(false).await?);
+        if !probe || harness == HarnessId::Muse {
+            return Ok(account);
+        }
+        let Some(slot) = account.as_ref().and_then(|account| {
+            self.read_slots(harness)
+                .into_iter()
+                .find(|slot| slot.id == account.id)
+        }) else {
+            return Ok(account);
+        };
+        let key = usage_key(harness, &slot.account_key);
+        let credentials = credentials_fingerprint(&slot.credentials);
+        let due = lock(&self.inner.usage)
+            .get(&key)
+            .is_none_or(|entry| entry.probe_due(&credentials, now_ms()));
+        if !due || !lock(&self.inner.inflight_probes).insert(key.clone()) {
+            return Ok(account);
+        }
+        let _release = InflightGuard {
+            set: &self.inner.inflight_probes,
+            keys: vec![key.clone()],
+        };
+        let result = self.probe_usage(harness, &slot, true).await;
+        {
+            let mut usage = lock(&self.inner.usage);
+            usage
+                .entry(key)
+                .or_default()
+                .record(result, credentials, now_ms());
+            self.persist_usage(&usage);
+        }
+        Ok(active(self.list_locked(false).await?))
+    }
+
     /// Write the usage cache; the caller holds [`Inner::usage`].
     fn persist_usage(&self, usage: &HashMap<String, UsageEntry>) {
         let file = UsageCacheFile {

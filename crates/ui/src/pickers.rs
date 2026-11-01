@@ -7637,6 +7637,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
             last_turn_outcome: None,
             terminal_activity: None,
         }

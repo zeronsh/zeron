@@ -561,7 +561,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None };
+        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None, ..Default::default() };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();
@@ -1432,4 +1432,100 @@ fn errors_render_as_cards_with_a_log_in_button_when_signing_in_fixes_them() {
             assert!(button.x > text_right, "row {i}: button at {} beside text ending {text_right}", button.x);
         }
     }
+}
+
+#[test]
+fn a_limit_stop_card_says_when_it_resumes_beside_its_switch() {
+    use chrono::{FixedOffset, TimeZone, Utc};
+    use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+    use zeron_proto::{AutoResume, AutoResumePhase};
+    let limited = Arc::new(SessionMessageEntry {
+        id: "a1".into(),
+        role: MessageRole::Assistant,
+        parts: vec![
+            MessagePart::Text { id: "t".into(), text: "Working on it.".into() },
+            MessagePart::Error { id: "e".into(), message: "Claude usage limit reached — try again after the limit resets.".into() },
+        ],
+        created_at: 0,
+        device_id: String::new(),
+        status: Some(MessageStatus::Complete),
+        continuation_of: None,
+        duration_ms: None,
+    });
+    let now = Utc.with_ymd_and_hms(2026, 11, 2, 14, 0, 0).unwrap();
+    let mut stop = AutoResume {
+        entry_id: "a1".into(),
+        enabled: true,
+        phase: AutoResumePhase::Waiting,
+        resume_at: Some(Utc.with_ymd_and_hms(2026, 11, 2, 15, 40, 0).unwrap()),
+        stopped_at: now,
+        resumed_at: None,
+        attempt: 0,
+    };
+    let utc = FixedOffset::east_opt(0).unwrap();
+    let entries = vec![limited];
+    let resume = super::auto_resume::resume_inputs_in(Some(&stop), true, &entries, now, &utc);
+    assert_eq!(resume.len(), 1);
+    assert_eq!(resume[0].part, "a1#e");
+    assert_eq!(resume[0].status, "Auto-resumes at 3:40 PM");
+    assert_eq!(resume[0].switch, Some(true));
+
+    let card = |resume: Vec<super::ResumeInput>| {
+        let mut w = worker(390.0);
+        let mut input = debug_input(Vec::new(), false);
+        input.entries = entries.clone();
+        input.resume = resume;
+        w.input = input;
+        let frame = w.pass();
+        (0..frame.row_count()).filter_map(|i| frame.display(i)).find(|d| d.boxes.iter().any(|b| b.color == display::ColorRole::DangerWash)).expect("the error card")
+    };
+    let plain = card(Vec::new());
+    let d = card(resume);
+    assert!(d.text.contains("Auto-resumes at 3:40 PM"), "{}", d.text);
+    assert!(d.height > plain.height, "the status line adds a line to the card");
+    let switch = d
+        .widgets
+        .iter()
+        .find_map(|w| match &w.kind {
+            display::WidgetKind::Toggle { action, label, on } => Some((w, action.clone(), label.clone(), *on)),
+            _ => None,
+        })
+        .expect("an auto-resume switch");
+    // The switch names its action and reads on; it trails the status line.
+    assert_eq!((switch.1.as_str(), switch.2.as_str(), switch.3), ("auto-resume", "Auto-resume", true));
+    let button = d.widgets.iter().find(|w| matches!(w.kind, display::WidgetKind::Action { .. })).expect("Log in stays");
+    assert!(switch.0.y > button.y, "the switch sits under the Log in button");
+    assert!((switch.0.x + switch.0.w - (button.x + button.w)).abs() < 0.5, "both trail the card's edge");
+    assert!(d.widgets.iter().any(|w| matches!(&w.kind, display::WidgetKind::Icon { name, .. } if name == "clock")));
+
+    // Resumed: the line stays, the switch goes.
+    stop.phase = AutoResumePhase::Resumed;
+    stop.resumed_at = Some(Utc.with_ymd_and_hms(2026, 11, 2, 15, 41, 0).unwrap());
+    let resume = super::auto_resume::resume_inputs_in(Some(&stop), true, &entries, now, &utc);
+    assert_eq!((resume[0].status.as_str(), resume[0].switch), ("Resumed at 3:41 PM", None));
+    let d = card(resume);
+    assert!(!d.widgets.iter().any(|w| matches!(w.kind, display::WidgetKind::Toggle { .. })));
+
+    // Off for this stop, and a stop on another entry shows nothing here.
+    stop.phase = AutoResumePhase::Waiting;
+    stop.enabled = false;
+    let resume = super::auto_resume::resume_inputs_in(Some(&stop), true, &entries, now, &utc);
+    assert_eq!((resume[0].status.as_str(), resume[0].switch), ("Auto-resume off · limit resets at 3:40 PM", Some(false)));
+    stop.entry_id = "elsewhere".into();
+    assert!(super::auto_resume::resume_inputs_in(Some(&stop), true, &entries, now, &utc).is_empty());
+
+    // From the session row: the layout words the card itself at each pass,
+    // here for a host that went offline.
+    stop.entry_id = "a1".into();
+    stop.enabled = true;
+    stop.resume_at = Some(Utc::now() + chrono::Duration::hours(1));
+    let mut w = worker(390.0);
+    let mut input = debug_input(Vec::new(), false);
+    input.entries = entries.clone();
+    input.auto_resume = Some(stop);
+    input.host_offline = true;
+    w.input = input;
+    let frame = w.pass();
+    let d = (0..frame.row_count()).filter_map(|i| frame.display(i)).find(|d| d.boxes.iter().any(|b| b.color == display::ColorRole::DangerWash)).unwrap();
+    assert!(d.text.contains("Host offline"), "{}", d.text);
 }
