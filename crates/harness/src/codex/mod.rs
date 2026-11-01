@@ -35,6 +35,12 @@
 //!   declines); auto-accept edits accepts file changes outright. MCP
 //!   elicitations (sent whatever the policy) are asked when they are a flat
 //!   form and declined otherwise.
+//! - Lazy MCP, when the run carries an `McpPlan`: `config/read`, then dotted
+//!   `thread/start` overrides that point each lazy or lazy-keep-alive stdio
+//!   server at `proxy_command mcp-proxy`. Env, cwd, timeouts, tool filters
+//!   and the approval mode stay in Codex's own config. Channel, off, eager,
+//!   remote and native rows are left as configured. A failed read leaves
+//!   every server as configured. Title runs still turn every server off.
 //! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
 //!   (across a resume too), so once a thread has planned every turn names
 //!   its mode. The proposed plan arrives as its own `plan` item, rendered
@@ -161,6 +167,336 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         // asks about one under the others.
         (key("default_tools_approval_mode"), "approve".into()),
     ]
+}
+
+/// Dotted `thread/start` overrides that stand lazy stdio servers behind
+/// `zeron mcp-proxy`. Only `command` and `args` change, so Codex still
+/// applies the row's env, `env_vars`, cwd, startup and tool timeouts, tool
+/// filters and approval mode, and the proxy inherits that environment.
+///
+/// Only `Lazy` and `LazyKeepAlive` stdio rows are rewritten. Off, eager,
+/// channel, remote, native and already-disabled rows emit nothing: v1 does
+/// not turn servers off from this path and does not lease channels. Plugin
+/// servers are rewritten only when `config/read` has already merged them
+/// into `mcp_servers`.
+fn codex_proxy_overrides(
+    servers: &serde_json::Map<String, Value>,
+    plan: &zeron_proto::McpPlan,
+) -> Vec<(String, Value)> {
+    let Some(data_dir) = plan.data_dir().and_then(std::path::Path::to_str) else {
+        return Vec::new();
+    };
+    let mut names: Vec<&String> = servers.keys().collect();
+    names.sort();
+    let mut overrides = Vec::new();
+    for name in names {
+        // Codex splits override keys on dots; only bare TOML keys are safe.
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            continue;
+        }
+        let Some(row) = servers.get(name).and_then(Value::as_object) else {
+            continue;
+        };
+        // Do not reconstruct incomplete or unrepresentable launch data.
+        if !row
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().all(Value::is_string))
+            || row.get("env").is_some_and(|v| {
+                !v.is_null()
+                    && !v.as_object().is_some_and(|e| {
+                        e.iter()
+                            .all(|(k, v)| !k.is_empty() && !k.contains(',') && v.is_string())
+                    })
+            })
+            || row.get("env_vars").is_some_and(|v| {
+                !v.is_null()
+                    && !v.as_array().is_some_and(|a| {
+                        a.iter().all(|v| {
+                            v.as_str()
+                                .is_some_and(|k| !k.is_empty() && !k.contains(','))
+                        })
+                    })
+            })
+            || row
+                .get("cwd")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            continue;
+        }
+        // Codex is already not going to start it. Rewriting the command
+        // would not change that, and would clobber a row the user disabled.
+        if row.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        // The proxy discovers unknown channels and keeps them forwarding;
+        // known channel identities launch the real command directly.
+        let Some(mode) = codex_server_mode(name, row, plan) else {
+            continue;
+        };
+        let (zeron_proto::McpMode::Lazy | zeron_proto::McpMode::LazyKeepAlive) = mode else {
+            continue;
+        };
+        let Some(command) = row
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|command| !command.is_empty())
+        else {
+            continue;
+        };
+        let key = |field: &str| format!("mcp_servers.{name}.{field}");
+        overrides.push((key("command"), plan.proxy_command.clone().into()));
+        overrides.push((
+            key("args"),
+            json!(codex_proxy_args(name, mode, plan, row, command, data_dir)),
+        ));
+    }
+    overrides
+}
+
+/// `config` is a successful `config/read` result. `None` (the read failed)
+/// and a body without `mcp_servers` both mean no overrides: today's launch.
+fn codex_mcp_plan_overrides(
+    config: Option<&Value>,
+    plan: &zeron_proto::McpPlan,
+) -> Vec<(String, Value)> {
+    config
+        .and_then(|value| value.pointer("/config/mcp_servers"))
+        .and_then(Value::as_object)
+        .map(|servers| codex_proxy_overrides(servers, plan))
+        .unwrap_or_default()
+}
+
+/// Remember a successful `config/read` for Settings. The plan's data dir wins.
+/// Otherwise an explicit `ZERON_DATA_DIR` on the request, then on the process.
+/// There is no home default: a missing dir means Settings falls back to a
+/// cheap read of `config.toml` instead of writing under `~/.zeron`.
+fn cache_codex_config(request: &RunRequest, config: &Value) {
+    let process = std::env::var("ZERON_DATA_DIR").ok();
+    let Some(dir) = mcp_cache_data_dir(
+        request.mcp_plan.as_ref().and_then(|plan| plan.data_dir()),
+        request.env.get("ZERON_DATA_DIR").map(String::as_str),
+        process.as_deref(),
+    ) else {
+        return;
+    };
+    if let Err(error) = crate::mcp_observed::remember_codex_config_read(&dir, config) {
+        tracing::warn!(
+            target: "zeron_harness::codex",
+            %error,
+            "could not cache config/read for MCP settings"
+        );
+    }
+}
+
+fn mcp_cache_data_dir(
+    plan: Option<&Path>,
+    request_env: Option<&str>,
+    process_env: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(dir) = plan {
+        return Some(dir.to_path_buf());
+    }
+    [request_env, process_env]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Resolved launch mode for `name`. `None` means leave the row alone.
+///
+/// User choices in `plan.modes` go through `mcp_policy`, so a channel or
+/// remote server stays untouched even when the plan names a mode. A heavy
+/// server with no explicit mode takes `default_mode`. An explicit `Lazy`
+/// stays lazy when that default is keep-alive.
+fn codex_server_mode(
+    name: &str,
+    row: &serde_json::Map<String, Value>,
+    plan: &zeron_proto::McpPlan,
+) -> Option<zeron_proto::McpMode> {
+    let explicit = plan.modes.get(name).copied();
+    let fact = config_server_fact(name, row);
+    let ctx = crate::mcp_policy::PolicyContext {
+        worker: plan.worker,
+        channel_owner: !plan.drop_channels,
+        choice: explicit.map(codex_mode_choice),
+    };
+    match crate::mcp_policy::disposition(&fact, ctx) {
+        crate::mcp_policy::McpDisposition::Untouched => None,
+        // Heavy's class default is `Lazy`, which stands for `default_mode`.
+        crate::mcp_policy::McpDisposition::Mode(zeron_proto::McpMode::Lazy)
+            if explicit.is_none() =>
+        {
+            Some(plan.default_mode)
+        }
+        crate::mcp_policy::McpDisposition::Mode(mode) => Some(mode),
+    }
+}
+
+fn codex_mode_choice(mode: zeron_proto::McpMode) -> zeron_proto::McpServerChoice {
+    match mode {
+        zeron_proto::McpMode::Off => zeron_proto::McpServerChoice::Off,
+        zeron_proto::McpMode::Eager => zeron_proto::McpServerChoice::Eager,
+        zeron_proto::McpMode::Lazy => zeron_proto::McpServerChoice::Lazy,
+        zeron_proto::McpMode::LazyKeepAlive => zeron_proto::McpServerChoice::LazyKeepAlive,
+    }
+}
+
+pub(crate) fn config_server_fact(
+    name: &str,
+    row: &serde_json::Map<String, Value>,
+) -> crate::mcp_policy::McpServerFact {
+    crate::mcp_policy::McpServerFact {
+        name: name.to_owned(),
+        transport: if row
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| !command.is_empty())
+        {
+            "stdio".to_owned()
+        } else if row.get("url").is_some() {
+            "http".to_owned()
+        } else {
+            row.get("transport")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        },
+        command: row
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        // config/read shows the configured command, not an npx cache path.
+        npx_resolved: false,
+        channel: codex_row_declares_channel(row),
+        scope: String::new(),
+    }
+}
+
+/// Codex config rows do not carry a channel capability today. A row that
+/// does (an experimental map, the same signal the policy uses elsewhere)
+/// is still marked, so classification does not treat it as a heavy runtime.
+fn codex_row_declares_channel(row: &serde_json::Map<String, Value>) -> bool {
+    let declares = crate::mcp_policy::experimental_map_declares_channel;
+    for key in ["experimental", "channelCapabilities"] {
+        if row
+            .get(key)
+            .and_then(Value::as_object)
+            .is_some_and(declares)
+        {
+            return true;
+        }
+    }
+    row.get("capabilities")
+        .and_then(|value| value.get("experimental"))
+        .and_then(Value::as_object)
+        .is_some_and(declares)
+}
+
+/// `zeron mcp-proxy --server NAME --mode … -- <original command> <args…>`.
+/// `--identity-env` names the row's `env` and `env_vars` keys. Values stay
+/// in Codex's env and never ride argv.
+fn codex_proxy_args(
+    name: &str,
+    mode: zeron_proto::McpMode,
+    plan: &zeron_proto::McpPlan,
+    row: &serde_json::Map<String, Value>,
+    command: &str,
+    data_dir: &str,
+) -> Vec<String> {
+    let mode = match mode {
+        zeron_proto::McpMode::LazyKeepAlive => "lazy-keep-alive",
+        zeron_proto::McpMode::Lazy => "lazy",
+        zeron_proto::McpMode::Off | zeron_proto::McpMode::Eager => "lazy",
+    };
+    let mut args = vec![
+        "mcp-proxy".to_owned(),
+        "--server".to_owned(),
+        name.to_owned(),
+        "--mode".to_owned(),
+        mode.to_owned(),
+        "--idle-min".to_owned(),
+        plan.idle_minutes.to_string(),
+    ];
+    let keys = codex_identity_env_keys(row);
+    if !keys.is_empty() {
+        args.push("--identity-env".to_owned());
+        args.push(keys.join(","));
+    }
+    if let Some(cwd) = row.get("cwd").and_then(Value::as_str) {
+        args.push("--cwd".to_owned());
+        // Codex already applied a relative cwd when it launched the proxy.
+        args.push(if std::path::Path::new(cwd).is_absolute() {
+            cwd.to_owned()
+        } else {
+            ".".to_owned()
+        });
+    }
+    args.push("--run-dir".to_owned());
+    args.push(plan.run_dir.clone());
+    args.push("--data-dir".to_owned());
+    args.push(data_dir.to_owned());
+    args.push("--".to_owned());
+    args.push(command.to_owned());
+    if let Some(items) = row.get("args").and_then(Value::as_array) {
+        args.extend(
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned)),
+        );
+    }
+    args
+}
+
+fn codex_identity_env_keys(row: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(env) = row.get("env").and_then(Value::as_object) {
+        keys.extend(env.keys().cloned());
+    }
+    if let Some(vars) = row.get("env_vars").and_then(Value::as_array) {
+        for value in vars {
+            if let Some(name) = value.as_str() {
+                keys.push(name.to_owned());
+            }
+        }
+    }
+    keys.retain(|key| !key.is_empty() && !key.contains(','));
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Relaunch when lazy MCP is enabled, disabled, or its policy changes.
+/// `run_dir` is a fresh id every launch and is not compared.
+fn same_mcp_plan(live: &Option<zeron_proto::McpPlan>, next: &Option<zeron_proto::McpPlan>) -> bool {
+    let Some(next) = next else {
+        return live.is_none();
+    };
+    let Some(live) = live else {
+        return false;
+    };
+    let zeron_proto::McpPlan {
+        proxy_command,
+        run_dir: _,
+        idle_minutes,
+        default_mode,
+        modes,
+        drop_channels,
+        worker,
+    } = live;
+    *proxy_command == next.proxy_command
+        && live.data_dir() == next.data_dir()
+        && *idle_minutes == next.idle_minutes
+        && *default_mode == next.default_mode
+        && modes == &next.modes
+        && *drop_channels == next.drop_channels
+        && *worker == next.worker
 }
 
 /// A ready-to-spawn `codex login` command for the engine's account flow.
@@ -723,6 +1059,7 @@ impl Harness for CodexHarness {
             && service_tier(live) == service_tier(next)
             && run_access(live) == run_access(next)
             && live.plan == next.plan
+            && same_mcp_plan(&live.mcp_plan, &next.mcp_plan)
     }
     /// `turn/start` carries model, effort, service tier, approval policy,
     /// sandbox and collaboration mode, and each sticks for later turns — so
@@ -1548,6 +1885,7 @@ async fn run_session(session: Session) {
             let config = client
                 .request("config/read", json!({"includeLayers": false}))
                 .await?;
+            cache_codex_config(&request, &config);
             if let Some(servers) = config["config"]["mcp_servers"].as_object() {
                 let overrides = start_params
                     .get_mut("config")
@@ -1556,6 +1894,48 @@ async fn run_session(session: Session) {
                 for name in servers.keys() {
                     overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
                 }
+            }
+        } else if let Some(plan) = request.mcp_plan.as_ref() {
+            // Title runs are the branch above. Every other run that has a
+            // plan reads the resolved servers and rewrites only the lazy
+            // stdio ones. A failed read is today's launch: no overrides.
+            let read = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.request(
+                    "config/read",
+                    json!({"includeLayers": false, "cwd": request.cwd}),
+                ),
+            )
+            .await;
+            if let Ok(Ok(config)) = &read {
+                cache_codex_config(&request, config);
+            } else {
+                let error = format!("{read:?}");
+                tracing::warn!(
+                    target: "zeron_harness::codex",
+                    %error,
+                    "config/read failed; MCP servers stay as configured"
+                );
+            }
+            let extra =
+                codex_mcp_plan_overrides(read.as_ref().ok().and_then(|r| r.as_ref().ok()), plan)
+                    .into_iter()
+                    // The injected server's command and args must take precedence.
+                    .filter(|(key, _)| {
+                        !request.mcp.as_ref().is_some_and(|mcp| {
+                            key.starts_with(&format!("mcp_servers.{}.", mcp.name))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+            if !extra.is_empty() {
+                if !start_params.contains_key("config") {
+                    start_params.insert("config".into(), json!({}));
+                }
+                start_params
+                    .get_mut("config")
+                    .and_then(Value::as_object_mut)
+                    .expect("thread/start config overrides are an object")
+                    .extend(extra);
             }
         }
         let mut restore_notice = None;
@@ -1607,7 +1987,13 @@ async fn run_session(session: Session) {
             effort: thread["reasoningEffort"].as_str().map(str::to_owned),
             plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice, thread_mode))
+        Ok::<_, HarnessError>((
+            thread_id,
+            children,
+            voice_context,
+            restore_notice,
+            thread_mode,
+        ))
     };
     let (thread_id, mut children, voice_context, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
@@ -3026,6 +3412,19 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
 
 use crate::{Signal, send_signal, shutdown_child};
 
+/// A Unix-style absolute fixture path, absolute on Windows too (`C:\…`):
+/// MCP plans only derive a data dir, and the proxy only keeps a cwd, from
+/// absolute paths.
+#[cfg(test)]
+fn abs(path: &str) -> &'static str {
+    let path = if cfg!(windows) {
+        format!("C:{}", path.replace('/', "\\"))
+    } else {
+        path.to_owned()
+    };
+    Box::leak(path.into_boxed_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3084,6 +3483,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            mcp_plan: None,
         }
     }
 
@@ -3095,7 +3495,11 @@ mod tests {
         };
         assert_eq!(
             wire(AccessMode::FullAccess, false),
-            ("never", "danger-full-access", json!({"type": "dangerFullAccess"}))
+            (
+                "never",
+                "danger-full-access",
+                json!({"type": "dangerFullAccess"})
+            )
         );
         assert_eq!(
             wire(AccessMode::AutoAcceptEdits, false),
@@ -3130,9 +3534,8 @@ mod tests {
             "item/commandExecution/requestApproval",
             "item/permissions/requestApproval",
         ];
-        let allowed = |access| {
-            methods.map(|method| allowed_without_asking(access, approval_action(method)))
-        };
+        let allowed =
+            |access| methods.map(|method| allowed_without_asking(access, approval_action(method)));
         assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
         assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
         assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
@@ -3159,6 +3562,36 @@ mod tests {
         assert!(!harness.reconfigures_in_place(&live, &moved));
         assert_eq!(harness.access_modes(), &AccessMode::ALL);
         assert!(harness.supports_plan());
+    }
+
+    #[test]
+    fn mcp_plan_changes_relaunch_without_run_dir_storms() {
+        let harness = CodexHarness::new();
+        let live = run_request(AccessMode::FullAccess, false);
+        let mut stamped = live.clone();
+        stamped.mcp_plan = Some(zeron_proto::McpPlan {
+            proxy_command: "/opt/zeron/zeron".into(),
+            run_dir: abs("/data/run/mcp/run-1").into(),
+            ..zeron_proto::McpPlan::default()
+        });
+        // Disabling lazy MCP removes the plan and must replace the runtime.
+        assert!(!harness.same_runtime(&stamped, &live));
+        assert!(harness.same_runtime(&live, &live));
+        let mut next = stamped.clone();
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/data/run/mcp/run-2").into();
+        assert!(harness.same_runtime(&stamped, &next));
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/other-data/run/mcp/run-2").into();
+        assert!(!harness.same_runtime(&stamped, &next));
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/data/run/mcp/run-2").into();
+        next.mcp_plan
+            .as_mut()
+            .unwrap()
+            .modes
+            .insert("notes".into(), zeron_proto::McpMode::Off);
+        assert!(!harness.same_runtime(&stamped, &next));
+        let mut incoming = live.clone();
+        incoming.mcp_plan = Some(zeron_proto::McpPlan::default());
+        assert!(!harness.same_runtime(&live, &incoming));
     }
 
     #[test]
@@ -3391,6 +3824,372 @@ mod mcp_injection_tests {
             overrides["mcp_servers.zeron.default_tools_approval_mode"],
             "approve"
         );
+    }
+
+    fn sample_plan() -> zeron_proto::McpPlan {
+        zeron_proto::McpPlan {
+            proxy_command: "/opt/zeron/zeron".into(),
+            run_dir: abs("/data/run/mcp/run-1").into(),
+            idle_minutes: 10,
+            default_mode: zeron_proto::McpMode::Lazy,
+            modes: Default::default(),
+            drop_channels: false,
+            worker: false,
+        }
+    }
+
+    /// The resolved `config/read` body for a realistic `config.toml`:
+    /// stdio rows with env, an npx row, an http row, and a disabled row.
+    fn resolved_mcp_servers() -> serde_json::Map<String, Value> {
+        json!({
+            "notes": {
+                "capabilities": {},
+                "command": "npx",
+                "args": ["-y", "@scope/notes", "--title", "a b", "say \"hi\""],
+                "env": {"NOTES_TOKEN": "secret-token", "DISPLAY": ":1"},
+                "env_vars": ["PATH", "NOTES_TOKEN"],
+                "cwd": abs("/work/notes"),
+                "environment_id": "local",
+                "enabled": true,
+                "startup_timeout_sec": 20.0,
+                "tool_timeout_sec": 45.0,
+                "enabled_tools": ["read_note"],
+                "disabled_tools": ["delete_note"]
+            },
+            "playwright": {
+                "capabilities": {},
+                "cwd": abs("/work/playwright"),
+                "command": "npx",
+                "args": ["-y", "@playwright/mcp@0.0.1"],
+                "env_vars": ["PLAYWRIGHT_BROWSERS_PATH"],
+                "environment_id": "local",
+                "enabled": true,
+                "tool_timeout_sec": null
+            },
+            "spaced": {
+                "capabilities": {},
+                "cwd": abs("/work/spaced"),
+                "command": "/opt/My Servers/node",
+                "args": ["srv.js", "a b", "say \"hi\""],
+                "enabled": true
+            },
+            "reins": {
+                "command": "reins",
+                "args": ["serve"],
+                "env": {"REINS_URL": "http://127.0.0.1:9"},
+                "enabled": true
+            },
+            "docs": {
+                "url": "https://example.invalid/mcp",
+                "bearer_token_env_var": "DOCS_TOKEN",
+                "environment_id": "local",
+                "enabled": true,
+                "tool_timeout_sec": null
+            },
+            "parked": {
+                "command": "node",
+                "args": ["server.js"],
+                "env": {"PARKED": "1"},
+                "enabled": false,
+                "tool_timeout_sec": null
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn override_map(
+        servers: &serde_json::Map<String, Value>,
+        plan: &zeron_proto::McpPlan,
+    ) -> serde_json::Map<String, Value> {
+        codex_proxy_overrides(servers, plan).into_iter().collect()
+    }
+
+    fn arg_list(overrides: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+        overrides[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_capabilities_and_unset_cwd_are_proxied_but_channels_are_not() {
+        let servers = json!({
+            "unknown": {"command": "node", "args": []},
+            "channel": {"command": "node", "args": [], "capabilities": {"experimental": {"vendor/channel": {}}}},
+            "relative": {"command": "node", "args": [], "cwd": "relative"},
+            "invalid-cwd": {"command": "node", "args": [], "cwd": 4}
+        }).as_object().unwrap().clone();
+        let overrides = override_map(&servers, &sample_plan());
+        assert_eq!(overrides.len(), 4);
+        assert!(overrides.contains_key("mcp_servers.unknown.command"));
+        let unknown = arg_list(&overrides, "mcp_servers.unknown.args");
+        assert!(!unknown.iter().any(|arg| arg == "--cwd"));
+        let relative = arg_list(&overrides, "mcp_servers.relative.args");
+        let cwd = relative.iter().position(|arg| arg == "--cwd").unwrap();
+        assert_eq!(relative[cwd + 1], ".");
+    }
+
+    #[test]
+    fn unsafe_names_and_incomplete_launch_data_stay_eager() {
+        let servers = json!({
+            "dot.name": {"command": "node", "args": []},
+            "quote\"name": {"command": "node", "args": []},
+            "dash-name": {"capabilities": {}, "cwd": abs("/work"), "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
+            "bad-args": {"capabilities": {}, "command": "node", "args": [1]},
+            "bad-env": {"capabilities": {}, "command": "node", "env_vars": ["A,B"]},
+            "relative": {"capabilities": {}, "command": "node", "cwd": "relative"}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let overrides = override_map(&servers, &sample_plan());
+        assert_eq!(overrides.len(), 2);
+        let args = arg_list(&overrides, "mcp_servers.dash-name.args");
+        assert_eq!(&args[args.len() - 3..], &["a\\b", "x\ny", "\"z\""]);
+    }
+
+    #[test]
+    fn codex_proxy_overrides_rewrite_lazy_stdio_and_leave_the_rest() {
+        let overrides = override_map(&resolved_mcp_servers(), &sample_plan());
+        let keys: Vec<_> = overrides.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "mcp_servers.notes.args",
+                "mcp_servers.notes.command",
+                "mcp_servers.playwright.args",
+                "mcp_servers.playwright.command",
+                "mcp_servers.spaced.args",
+                "mcp_servers.spaced.command",
+            ]
+        );
+        assert_eq!(overrides["mcp_servers.notes.command"], "/opt/zeron/zeron");
+        assert_eq!(
+            overrides["mcp_servers.playwright.command"],
+            "/opt/zeron/zeron"
+        );
+        assert_eq!(overrides["mcp_servers.spaced.command"], "/opt/zeron/zeron");
+        // Args stay a JSON array. Spaces and quotes are one element each,
+        // not a shell-escaped string.
+        assert_eq!(
+            arg_list(&overrides, "mcp_servers.notes.args"),
+            vec![
+                "mcp-proxy",
+                "--server",
+                "notes",
+                "--mode",
+                "lazy",
+                "--idle-min",
+                "10",
+                "--identity-env",
+                "DISPLAY,NOTES_TOKEN,PATH",
+                "--cwd",
+                abs("/work/notes"),
+                "--run-dir",
+                abs("/data/run/mcp/run-1"),
+                "--data-dir",
+                abs("/data"),
+                "--",
+                "npx",
+                "-y",
+                "@scope/notes",
+                "--title",
+                "a b",
+                "say \"hi\"",
+            ]
+        );
+        assert!(
+            !overrides["mcp_servers.notes.args"]
+                .to_string()
+                .contains("secret-token")
+        );
+        assert_eq!(
+            arg_list(&overrides, "mcp_servers.playwright.args"),
+            vec![
+                "mcp-proxy",
+                "--server",
+                "playwright",
+                "--mode",
+                "lazy",
+                "--idle-min",
+                "10",
+                "--identity-env",
+                "PLAYWRIGHT_BROWSERS_PATH",
+                "--cwd",
+                abs("/work/playwright"),
+                "--run-dir",
+                abs("/data/run/mcp/run-1"),
+                "--data-dir",
+                abs("/data"),
+                "--",
+                "npx",
+                "-y",
+                "@playwright/mcp@0.0.1",
+            ]
+        );
+        assert_eq!(
+            arg_list(&overrides, "mcp_servers.spaced.args"),
+            vec![
+                "mcp-proxy",
+                "--server",
+                "spaced",
+                "--mode",
+                "lazy",
+                "--idle-min",
+                "10",
+                "--cwd",
+                abs("/work/spaced"),
+                "--run-dir",
+                abs("/data/run/mcp/run-1"),
+                "--data-dir",
+                abs("/data"),
+                "--",
+                "/opt/My Servers/node",
+                "srv.js",
+                "a b",
+                "say \"hi\"",
+            ]
+        );
+        for key in overrides.keys() {
+            assert!(
+                !key.ends_with(".env")
+                    && !key.ends_with(".env_vars")
+                    && !key.ends_with(".cwd")
+                    && !key.contains("timeout")
+                    && !key.contains("tools")
+                    && !key.contains("approval"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_proxy_leaves_incomplete_storage_plans_eager() {
+        let servers = resolved_mcp_servers();
+        let mut plan = sample_plan();
+        for run in ["", "run/mcp/relative", "/unrelated/run"] {
+            plan.run_dir = run.into();
+            assert!(codex_proxy_overrides(&servers, &plan).is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_proxy_overrides_follow_plan_modes_channels_and_a_failed_read() {
+        let mut servers = resolved_mcp_servers();
+        servers.insert(
+            "channel".into(),
+            json!({
+                "command": "node",
+                "args": ["channel.js"],
+                "enabled": true,
+                "experimental": {"claude/channel": {}}
+            }),
+        );
+        let mut plan = sample_plan();
+        plan.modes
+            .insert("notes".into(), zeron_proto::McpMode::Eager);
+        plan.modes
+            .insert("reins".into(), zeron_proto::McpMode::LazyKeepAlive);
+        plan.modes.insert("docs".into(), zeron_proto::McpMode::Off);
+        plan.modes
+            .insert("playwright".into(), zeron_proto::McpMode::LazyKeepAlive);
+        plan.drop_channels = true;
+
+        let overrides = override_map(&servers, &plan);
+        assert!(overrides.get("mcp_servers.notes.command").is_none());
+        assert!(overrides.get("mcp_servers.notes.enabled").is_none());
+        assert!(overrides.get("mcp_servers.docs.enabled").is_none());
+        assert!(overrides.get("mcp_servers.docs.command").is_none());
+        // Native-small stays as configured even when the plan names lazy-keep-alive.
+        assert!(overrides.get("mcp_servers.reins.command").is_none());
+        assert!(overrides.get("mcp_servers.reins.enabled").is_none());
+        assert!(overrides.keys().all(|key| !key.contains("channel")));
+        assert_eq!(
+            overrides["mcp_servers.playwright.command"],
+            "/opt/zeron/zeron"
+        );
+        let playwright = arg_list(&overrides, "mcp_servers.playwright.args");
+        assert_eq!(playwright[4], "lazy-keep-alive");
+        let after = playwright.iter().position(|arg| arg == "--").unwrap();
+        assert_eq!(playwright[after + 1], "npx");
+
+        // Owner, non-owner and worker all leave a channel row untouched.
+        plan.drop_channels = false;
+        assert!(
+            override_map(&servers, &plan)
+                .keys()
+                .all(|key| !key.contains("channel"))
+        );
+        plan.worker = true;
+        assert!(
+            override_map(&servers, &plan)
+                .keys()
+                .all(|key| !key.contains("channel"))
+        );
+        plan.modes
+            .insert("channel".into(), zeron_proto::McpMode::Lazy);
+        plan.modes.insert("docs".into(), zeron_proto::McpMode::Lazy);
+        let forced = override_map(&servers, &plan);
+        assert!(
+            forced
+                .keys()
+                .all(|key| { !key.contains("channel") && !key.starts_with("mcp_servers.docs.") })
+        );
+
+        plan = sample_plan();
+        plan.default_mode = zeron_proto::McpMode::LazyKeepAlive;
+        assert_eq!(
+            arg_list(&override_map(&servers, &plan), "mcp_servers.notes.args")[4],
+            "lazy-keep-alive"
+        );
+        plan.modes
+            .insert("notes".into(), zeron_proto::McpMode::Lazy);
+        assert_eq!(
+            arg_list(&override_map(&servers, &plan), "mcp_servers.notes.args")[4],
+            "lazy"
+        );
+        plan = sample_plan();
+        plan.default_mode = zeron_proto::McpMode::Off;
+        let off = override_map(&servers, &plan);
+        assert!(off.get("mcp_servers.notes.enabled").is_none());
+        assert!(off.get("mcp_servers.notes.command").is_none());
+        assert!(off.get("mcp_servers.docs.enabled").is_none());
+        assert!(off.get("mcp_servers.reins.enabled").is_none());
+        assert!(off.get("mcp_servers.playwright.command").is_none());
+        assert!(off.keys().all(|key| !key.contains("channel")));
+
+        let body = json!({"config": {"mcp_servers": servers}});
+        assert!(codex_mcp_plan_overrides(None, &sample_plan()).is_empty());
+        assert!(codex_mcp_plan_overrides(Some(&json!({})), &sample_plan()).is_empty());
+        assert_eq!(
+            codex_mcp_plan_overrides(Some(&body), &sample_plan())
+                .iter()
+                .any(|(key, _)| key == "mcp_servers.notes.command"),
+            true
+        );
+    }
+
+    #[test]
+    fn mcp_config_cache_dir_comes_from_the_plan_or_an_explicit_data_dir() {
+        let plan = Path::new("/var/lib/zeron");
+        assert_eq!(
+            mcp_cache_data_dir(Some(plan), Some("/from/env"), Some("/from/process")).as_deref(),
+            Some(plan)
+        );
+        assert_eq!(
+            mcp_cache_data_dir(None, Some(""), Some("/from/process")).as_deref(),
+            Some(Path::new("/from/process"))
+        );
+        assert_eq!(
+            mcp_cache_data_dir(None, Some("/from/env"), None).as_deref(),
+            Some(Path::new("/from/env"))
+        );
+        assert!(mcp_cache_data_dir(None, None, None).is_none());
+        assert!(mcp_cache_data_dir(None, Some(""), Some("")).is_none());
     }
 }
 

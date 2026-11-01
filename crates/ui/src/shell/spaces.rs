@@ -1322,6 +1322,120 @@ mod pinned_session_tests {
         exercise_session_section_drops(cx, false, false);
     }
 
+    /// A hibernated chat's Idle mark wears a ring, in both row layouts; a
+    /// chat the engine says nothing about (an older engine) shows none.
+    #[gpui::test]
+    fn hibernated_sessions_show_a_sleeping_mark(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        struct SidebarHost(Entity<Shell>);
+        impl Render for SidebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div()
+                        .w(px(280.0))
+                        .h(px(800.0))
+                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            SidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = ["napping", "awake", "unknown"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, id)| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "title": id, "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("chat-sleeping-napping").is_none(),
+            "an engine that sends no runtime states shows no mark"
+        );
+        for compact in [false, true] {
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_compact = compact;
+                shell.state.update(cx, |state, _| {
+                    state.apply_runtime_states(
+                        [
+                            ("napping".to_owned(), zeron_proto::RuntimeState::Hibernated),
+                            ("awake".to_owned(), zeron_proto::RuntimeState::Parked),
+                        ]
+                        .into(),
+                    );
+                });
+                cx.notify();
+            });
+            redraw(cx);
+            assert!(cx.debug_bounds("chat-sleeping-napping").is_some(), "{compact}");
+            assert!(cx.debug_bounds("chat-sleeping-awake").is_none(), "{compact}");
+            assert!(cx.debug_bounds("chat-sleeping-unknown").is_none(), "{compact}");
+            // The row keeps its geometry: the ring takes the idle dot's place
+            // (compact) or sits before the time (regular).
+            assert_eq!(
+                cx.debug_bounds("chat-napping").unwrap().size,
+                cx.debug_bounds("chat-awake").unwrap().size
+            );
+            // Waking it takes the mark away.
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_runtime_states(
+                        [("napping".to_owned(), zeron_proto::RuntimeState::Live)].into(),
+                    );
+                });
+                cx.notify();
+            });
+            redraw(cx);
+            assert!(cx.debug_bounds("chat-sleeping-napping").is_none(), "{compact}");
+        }
+    }
+
     fn exercise_session_section_drops(
         cx: &mut gpui::TestAppContext,
         compact: bool,
@@ -3061,6 +3175,26 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         }
         ChatIndicator::Idle => crate::theme::ink(0.14),
     }
+}
+
+/// A sleeping (hibernated) session's mark: the idle dot as a ring, so it
+/// reads as "nothing running here" without a word of its own.
+pub(crate) fn sleeping_mark(chat_id: &str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(format!("chat-sleeping-{chat_id}")))
+        .debug_selector({
+            let id = chat_id.to_owned();
+            move || format!("chat-sleeping-{id}")
+        })
+        .size(px(6.0))
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(crate::theme::ink(0.28))
+        .aria_label("Sleeping")
+        .tooltip(crate::settings::widgets::text_tooltip_above(
+            "Sleeping: resumes when you send a message",
+        ))
 }
 
 // Handle-based rail host for the spaces dropdown: its list is a plain

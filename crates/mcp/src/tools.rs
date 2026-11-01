@@ -264,6 +264,18 @@ fn catalog() -> Vec<ToolDef> {
     tools
 }
 
+/// Definitions `tools/list` serves.
+///
+/// `in_chat` follows `ZERON_CHAT_ID`: [`SHOW_VISUAL`] and [`SHOW_IMAGE`] are
+/// offered only to an agent Zeron launched. Pi embeds the `in_chat == true`
+/// list and skips the rest when that id is absent.
+pub fn listed_tools(in_chat: bool) -> Vec<ToolDef> {
+    catalog()
+        .into_iter()
+        .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
+        .collect()
+}
+
 /// Shows a page in the CALLING chat, so it is offered only to an agent that
 /// Zeron launched (`ZERON_CHAT_ID` set).
 const SHOW_VISUAL: &str = "show_visual";
@@ -743,11 +755,7 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
-        let in_chat = self.zeron.origin().chat_id.is_some();
-        catalog()
-            .into_iter()
-            .filter(|tool| in_chat || ![SHOW_VISUAL, SHOW_IMAGE].contains(&tool.name))
-            .collect()
+        listed_tools(self.zeron.origin().chat_id.is_some())
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -1564,6 +1572,7 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 };
                 self.zeron
                     .queue_command(
@@ -1912,6 +1921,98 @@ mod tests {
         }
     }
 
+    /// Pi registers this snapshot instead of calling `tools/list` at startup.
+    /// The file is what `zeron mcp` serves inside a chat, plus the names
+    /// dropped when `ZERON_CHAT_ID` is absent. Set `ZERON_WRITE_PI_TOOLS=1`
+    /// to regenerate it after a catalog change.
+    #[tokio::test]
+    async fn pi_static_tool_list_matches_served_tools() {
+        let world = Arc::new(World::default());
+        let inside = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                ..Default::default()
+            },
+        );
+        let outside = tools(world, Origin::default());
+        let in_chat = crate::jsonrpc::handle_request(&inside, json!(1), "tools/list", Value::Null)
+            .await["result"]["tools"]
+            .clone();
+        let no_chat = crate::jsonrpc::handle_request(&outside, json!(1), "tools/list", Value::Null)
+            .await["result"]["tools"]
+            .clone();
+        let in_names: std::collections::BTreeSet<&str> = in_chat
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let out_names: std::collections::BTreeSet<&str> = no_chat
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            out_names.is_subset(&in_names),
+            "a tool served outside a chat must also be served inside one"
+        );
+        let omit: Vec<&str> = in_names.difference(&out_names).copied().collect();
+        let served = json!({ "omitWithoutChat": omit, "tools": in_chat });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../harness/src/pi/mcp-tools.json");
+        if std::env::var_os("ZERON_WRITE_PI_TOOLS").is_some() {
+            std::fs::write(&path, serde_json::to_string_pretty(&served).unwrap() + "\n").unwrap();
+        }
+        let embedded: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!(
+                    "read {}: {error}. Regenerate with ZERON_WRITE_PI_TOOLS=1",
+                    path.display()
+                )
+            }))
+            .unwrap();
+        assert_eq!(
+            embedded, served,
+            "crates/harness/src/pi/mcp-tools.json drifted from zeron mcp tools/list. \
+             Regenerate with ZERON_WRITE_PI_TOOLS=1"
+        );
+        let omitted: std::collections::BTreeSet<&str> = embedded["omitWithoutChat"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        let filtered: Vec<Value> = embedded["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| !omitted.contains(tool["name"].as_str().unwrap()))
+            .cloned()
+            .collect();
+        assert_eq!(Value::Array(filtered), no_chat);
+        // Side-chat mode changes initialize instructions, but must not change
+        // the catalog Pi registers, both inside and outside a chat.
+        for (chat_id, expected) in [
+            (Some("chat-alpha-1".to_owned()), &embedded["tools"]),
+            (None, &no_chat),
+        ] {
+            let side = tools(
+                Arc::new(World::default()),
+                Origin {
+                    chat_id,
+                    side_chats_only: true,
+                    ..Default::default()
+                },
+            );
+            let listed = crate::jsonrpc::handle_request(&side, json!(1), "tools/list", Value::Null)
+                .await["result"]["tools"]
+                .clone();
+            assert_eq!(&listed, expected);
+        }
+    }
+
     #[test]
     fn the_show_visual_example_passes_its_own_check() {
         let start = SHOW_VISUAL_DESCRIPTION.find("local s = ui.state").unwrap();
@@ -2193,6 +2294,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            runtime: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools

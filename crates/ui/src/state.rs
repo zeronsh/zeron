@@ -542,6 +542,13 @@ impl EngineHandle {
         }
     }
 
+    /// The same engine advertising only `capabilities`: an older build.
+    #[cfg(test)]
+    pub(crate) fn with_test_capabilities(mut self, capabilities: &[&str]) -> Self {
+        self.engine_info.capabilities = capabilities.iter().map(|c| c.to_string()).collect();
+        self
+    }
+
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }
@@ -959,6 +966,10 @@ pub struct AppState {
     /// no registry row, no doc, until its first send.
     unsaved_side_chat: bool,
     pub sessions: Vec<Session>,
+    /// Where each chat's agent runtime is on the connected engine, from
+    /// `WatchRuntimeStates`. Session rows do not carry it, and an engine
+    /// without the watch leaves it empty, so nothing reads as sleeping.
+    runtime_states: HashMap<String, zeron_proto::RuntimeState>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
     pub sidebar_preferences: SidebarPreferencesState,
@@ -1165,6 +1176,7 @@ impl AppState {
             pending_side_chat: None,
             unsaved_side_chat: false,
             sessions: Vec::new(),
+            runtime_states: HashMap::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
             selected_space: None,
@@ -3307,6 +3319,28 @@ impl AppState {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
 
+    /// Where `chat_id`'s runtime is, when the connected engine says.
+    pub fn runtime_state_for(&self, chat_id: &str) -> Option<zeron_proto::RuntimeState> {
+        self.runtime_states
+            .get(chat_id)
+            .copied()
+            .or_else(|| self.session_for(chat_id).and_then(|s| s.runtime))
+    }
+
+    /// Whether `chat_id`'s agent is hibernated: nothing running, resumable.
+    pub fn is_sleeping(&self, chat_id: &str) -> bool {
+        self.runtime_state_for(chat_id) == Some(zeron_proto::RuntimeState::Hibernated)
+    }
+
+    pub fn apply_runtime_states(
+        &mut self,
+        states: HashMap<String, zeron_proto::RuntimeState>,
+    ) -> bool {
+        let changed = self.runtime_states != states;
+        self.runtime_states = states;
+        changed
+    }
+
     /// Subagents running under `chat_id` right now (the engine's count on its
     /// session row; 0 once that row goes stale). Every device can ask, opened
     /// chat or not.
@@ -3932,6 +3966,18 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
+        // The runtime-state watch has its own capability; an older
+        // one has no such method and would only be asked again every 2 s.
+        if engine_info.supports(zeron_proto::capabilities::MCP_RUNTIME_CONTROLS_V1) {
+            watch_tasks.push(spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_RUNTIME_STATES,
+                AppState::apply_runtime_states,
+            ));
+        } else {
+            self.runtime_states.clear();
+        }
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(
                 cx,
@@ -5601,7 +5647,34 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
+            runtime: None,
         }
+    }
+
+    #[test]
+    fn runtime_states_mark_only_hibernated_chats_as_sleeping() {
+        use zeron_proto::RuntimeState::{Hibernated, Live, Parked};
+        let mut state = AppState::new();
+        assert!(!state.is_sleeping("a"), "an engine that says nothing");
+        let states = || {
+            HashMap::from([
+                ("a".to_owned(), Hibernated),
+                ("b".to_owned(), Parked),
+                ("c".to_owned(), Live),
+            ])
+        };
+        assert!(state.apply_runtime_states(states()));
+        assert!(!state.apply_runtime_states(states()), "no change, no repaint");
+        assert!(state.is_sleeping("a"));
+        assert!(!state.is_sleeping("b") && !state.is_sleeping("c") && !state.is_sleeping("d"));
+        assert_eq!(state.runtime_state_for("b"), Some(Parked));
+        // A session row that carries the state counts when the watch is silent.
+        let mut row = session("d", SessionStatus::Idle, 0, Utc::now());
+        row.runtime = Some(Hibernated);
+        state.sessions = vec![row];
+        assert!(state.is_sleeping("d"));
+        assert!(state.apply_runtime_states(HashMap::new()));
+        assert!(!state.is_sleeping("a"));
     }
 
     fn user_entry(id: &str) -> SessionMessageEntry {
@@ -5872,6 +5945,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            runtime: None,
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -5907,6 +5981,7 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
+            runtime: None,
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);

@@ -81,7 +81,20 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Unix ms until which scheduled work (a wakeup, a cron job) is expected
+    /// to wake the runtime; 0 = none. Not a task in the roster, but retiring
+    /// the runtime before it fires loses it all the same.
+    scheduled_until: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// When the background task count last changed (tokio's clock, so a
+    /// paused test clock moves it).
+    background_changed: std::sync::Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
     processes: std::sync::Arc<background::BackgroundWork>,
+}
+
+pub(crate) fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl TurnControl {
@@ -97,14 +110,44 @@ impl TurnControl {
 
     /// Driver: how many background tasks the runtime currently holds.
     pub fn set_background(&self, tasks: usize) {
-        self.background
-            .store(tasks, std::sync::atomic::Ordering::Release);
+        if self
+            .background
+            .swap(tasks, std::sync::atomic::Ordering::AcqRel)
+            != tasks
+        {
+            *self
+                .background_changed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Driver: the runtime holds scheduled work that will wake it until this
+    /// unix-ms time (0 clears it).
+    pub fn set_scheduled_until(&self, until_ms: u64) {
+        self.scheduled_until
+            .store(until_ms, std::sync::atomic::Ordering::Release);
     }
 
     /// Host: the runtime reports live background work, so retiring it now
-    /// would kill work nobody asked to stop.
+    /// would kill work nobody asked to stop. Scheduled work that has yet to
+    /// fire counts: its timer lives in the runtime.
     pub fn background_live(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+            || self
+                .scheduled_until
+                .load(std::sync::atomic::Ordering::Acquire)
+                > unix_ms()
+    }
+
+    /// Host: no background task started or ended within `quiet`. A task that
+    /// just finished is about to wake the agent with its result; a runtime
+    /// retired in that gap loses the wake.
+    pub fn background_settled(&self, quiet: std::time::Duration) -> bool {
+        self.background_changed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none_or(|changed| changed.elapsed() >= quiet)
     }
 
     /// Driver: the background processes the runtime runs now, oldest first —
@@ -232,6 +275,12 @@ pub trait Harness: Send + Sync {
     fn executable_path(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Only Claude Code supports channel delivery. Its driver must establish
+    /// that marketplace-plugin servers cannot hold a live channel.
+    fn hibernation_safe(&self, _request: &RunRequest, _data_dir: &std::path::Path) -> bool {
+        self.id() != HarnessId::ClaudeCode
+    }
+
     /// Whether every turn shape — user-prompted AND agent-initiated
     /// (background-subagent wakes) — ends with a deterministic `Done` from
     /// the agent's own wire. Native drivers reading the CLI's terminal frame
@@ -370,6 +419,8 @@ pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
+pub mod mcp_observed;
+pub mod mcp_policy;
 pub mod muse;
 mod model_context;
 pub mod opencode;

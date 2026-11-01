@@ -34,6 +34,7 @@ async fn live_run(cancel: bool) {
         access: Default::default(), plan: false,
         attachments: Vec::new(), worktree: None, resume: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     let mut stream = zeron_harness::PiHarness::new()
         .run(request, controls)

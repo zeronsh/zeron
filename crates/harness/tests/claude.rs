@@ -53,6 +53,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     }
 }
 
@@ -2115,6 +2116,54 @@ async fn background_shells_are_listed_read_and_stopped() {
     .await
     .expect("the stopped shell leaves the list");
     assert!(turn.background_output("bgsh").is_none());
+}
+
+/// ScheduleWakeup and CronCreate timers live in the CLI process and are not
+/// roster tasks: the host must still see them as work that retiring the
+/// runtime would lose, until the model cancels them.
+#[tokio::test]
+async fn scheduled_wakeups_and_cron_jobs_hold_the_runtime() {
+    use zeron_harness::TurnControl;
+    let (mut controls, steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut stream = harness()
+        .run(request("scenario:scheduled-work"), controls)
+        .await
+        .expect("run starts");
+    async fn next_done(
+        stream: &mut futures::stream::BoxStream<'static, Result<AgentEvent, HarnessError>>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                    return;
+                }
+            }
+            panic!("stream ended without Done");
+        })
+        .await
+        .expect("turn ends");
+    }
+    next_done(&mut stream).await;
+    assert!(
+        turn.background_live(),
+        "the roster is empty, yet a wakeup and a cron job are pending"
+    );
+    steer
+        .send(SteerMessage {
+            prompt: "cancel them".into(),
+            message_id: None,
+            attachments: Vec::new(),
+            config: None,
+        })
+        .await
+        .unwrap();
+    next_done(&mut stream).await;
+    assert!(
+        !turn.background_live(),
+        "CronDelete and ScheduleWakeup stop released the hold"
+    );
 }
 
 #[tokio::test]

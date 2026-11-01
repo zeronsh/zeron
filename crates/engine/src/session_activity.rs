@@ -178,6 +178,7 @@ fn project(
             last_completed_turn: None,
             last_turn_outcome: None,
             terminal_activity: None,
+            runtime: None,
         });
         row.terminal_activity = Some(activity.clone());
         // OSC 7501 has no heartbeat requirement. The PTY owner supplies the
@@ -253,6 +254,7 @@ mod tests {
             last_completed_turn: Some("previous-turn".into()),
             last_turn_outcome: None,
             terminal_activity: None,
+            runtime: None,
         };
         let activity = TerminalActivity {
             terminal_id: "pty".into(),

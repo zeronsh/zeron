@@ -908,7 +908,7 @@ async fn target_device_id_routes_over_the_relay() {
     .expect("quiet remote transcript released its view");
 
     // Unary forward with side effects: QueueCommand lands (and executes) on B.
-    let command = serde_json::to_value(SessionCommandPayload::Run {
+    let mut command = serde_json::to_value(SessionCommandPayload::Run {
         request: RunRequest {
             mcp: None,
             prompt: "run remotely".into(),
@@ -925,10 +925,13 @@ async fn target_device_id_routes_over_the_relay() {
             worktree: None,
             resume: None,
             env: Default::default(),
+            mcp_plan: None,
         },
         message_id: "m-a-1".into(),
     })
     .expect("serialize command");
+    command["request"]["mcpPlan"] = serde_json::json!({"proxyCommand": "attacker", "runDir": "/attacker"});
+    command["request"]["env"] = serde_json::json!({"ATTACKER": "injected"});
     let queued = client
         .call(
             methods::QUEUE_COMMAND,
@@ -949,6 +952,11 @@ async fn target_device_id_routes_over_the_relay() {
         commands.iter().any(|c| c.id == command_id),
         "command must live in B's doc"
     );
+
+    let stored = commands.iter().find(|c| c.id == command_id).unwrap();
+    let SessionCommandPayload::Run { request, .. } = &stored.payload else { panic!("expected run") };
+    assert!(request.mcp_plan.is_none());
+    assert!(request.env.is_empty());
 
     // Project Actions are also device-routed and persist only in B's private
     // profile store. A versioned project file only contributes import offers.

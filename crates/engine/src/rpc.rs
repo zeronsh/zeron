@@ -2134,6 +2134,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_MCP_SETTINGS
+            | methods::SET_MCP_SETTINGS
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
@@ -2195,6 +2197,11 @@ fn forwardable(method: &str) -> bool {
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
             | methods::RUN_PROJECT_ACTION
+            // Sessions and their runtimes live on the chat's host.
+            | methods::PREWARM_CHAT
+            | methods::HIBERNATE_CHAT
+            | methods::HIBERNATE_IDLE
+            | methods::RESTART_CHAT_WITH_ALL_MCP
             // Background processes run in the chat host's runtime.
             | methods::STOP_BACKGROUND_TASK
             | methods::READ_BACKGROUND_TASK_OUTPUT
@@ -2524,6 +2531,21 @@ impl crate::remote_terminals::Relay for EngineRpc {
     }
 }
 
+/// Restrict the runtime-state feed to local IPC at the host relay boundary.
+pub(crate) fn relay_service(inner: std::sync::Arc<dyn RpcService>) -> std::sync::Arc<dyn RpcService> {
+    struct RelayService(std::sync::Arc<dyn RpcService>);
+    #[async_trait]
+    impl RpcService for RelayService {
+        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            if method == methods::WATCH_RUNTIME_STATES {
+                return Err(RpcError::UnknownMethod(method.to_owned()));
+            }
+            self.0.handle(method, params).await
+        }
+    }
+    std::sync::Arc::new(RelayService(inner))
+}
+
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -2629,6 +2651,12 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_MCP_SETTINGS => RpcReply::value(&self.registry.mcp_settings()),
+            methods::SET_MCP_SETTINGS => {
+                let prefs: crate::registry::McpPrefs = parse_params(params)?;
+                self.registry.set_mcp_prefs(prefs);
+                RpcReply::value(&self.registry.mcp_settings())
+            }
             methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {
                 Some(credit) => RpcReply::value(&credit.status()),
                 None => Err(RpcError::Failed(
@@ -3092,6 +3120,40 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "removed": removed }))
             }
+            methods::PREWARM_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                let request = self
+                    .sessions
+                    .last_request(&p.chat_id)
+                    .or_else(|| self.doc_host.request_from_chat_row(&p.chat_id, ""));
+                let prewarming = if let Some(request) = request {
+                    let harness = self.doc_host.harness_for_request(&p.chat_id, &request);
+                    self.sessions
+                        .prewarm(&p.chat_id, harness, request)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                } else {
+                    false
+                };
+                RpcReply::value(&serde_json::json!({ "prewarming": prewarming }))
+            }
+            methods::HIBERNATE_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                RpcReply::value(
+                    &serde_json::json!({ "hibernating": self.sessions.hibernate(&p.chat_id) }),
+                )
+            }
+            methods::RESTART_CHAT_WITH_ALL_MCP => {
+                let p: ChatParams = parse_params(params)?;
+                self.sessions.restart_with_all_mcp(&p.chat_id);
+                RpcReply::value(&serde_json::json!({ "restarting": true }))
+            }
+            methods::WATCH_RUNTIME_STATES => Ok(RpcReply::Stream(watch_stream(
+                self.sessions.watch_runtime_states(),
+            ))),
+            methods::HIBERNATE_IDLE => RpcReply::value(
+                &serde_json::json!({ "hibernating": self.sessions.hibernate_idle() }),
+            ),
             methods::STOP_BACKGROUND_TASK => {
                 let p: BackgroundTaskParams = parse_params(params)?;
                 let stopping = self.sessions.stop_background_task(&p.chat_id, &p.task_id);
@@ -4826,6 +4888,103 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn runtime_states_are_not_available_through_the_host_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()), HarnessId::Codex, None,
+        ).unwrap();
+        let client = zeron_rpc::memory_client(relay_service(core.rpc_service()));
+        assert!(client.subscribe_checked(methods::WATCH_RUNTIME_STATES, serde_json::json!({})).await.is_err());
+        assert!(client.call(methods::LOCAL_DEVICE, serde_json::json!({})).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn restart_with_all_mcp_answers_over_the_memory_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let reply = client
+            .call(
+                methods::RESTART_CHAT_WITH_ALL_MCP,
+                serde_json::json!({ "chatId": "chat" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["restarting"], true);
+    }
+
+    #[tokio::test]
+    async fn mcp_policy_settings_round_trip_over_the_memory_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        let settings: crate::registry::McpSettings = client
+            .call_as(methods::GET_MCP_SETTINGS, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(settings.prefs.lazy);
+        assert_eq!(settings.prefs.idle_minutes, 10);
+        assert_eq!(settings.prefs.session_idle_minutes, 10);
+        assert!(settings.prefs.prewarm);
+        assert!(settings.servers.is_empty());
+        assert_eq!(
+            settings.prefs.channel_owner,
+            crate::registry::ChannelOwnerSetting::Automatic
+        );
+
+        let saved: crate::registry::McpSettings = client
+            .call_as(methods::SET_MCP_SETTINGS, serde_json::json!({ "lazy": false }))
+            .await
+            .unwrap();
+        assert!(!saved.prefs.lazy);
+        assert_eq!(saved.prefs.idle_minutes, 10);
+        assert_eq!(saved.prefs.session_idle_minutes, 10);
+        assert!(saved.prefs.prewarm);
+        assert_eq!(saved.prefs.channel_owner, crate::registry::ChannelOwnerSetting::Automatic);
+
+        let mut next = saved.prefs.clone();
+        next.lazy = true;
+        next.idle_minutes = 4;
+        next.session_idle_minutes = 0;
+        next.prewarm = false;
+        next.channel_owner = crate::registry::ChannelOwnerSetting::Off;
+        next.servers.insert(
+            "codex:playwright".into(),
+            zeron_proto::McpServerChoice::Lazy,
+        );
+        let saved: crate::registry::McpSettings = client
+            .call_as(methods::SET_MCP_SETTINGS, serde_json::to_value(&next).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(saved.prefs, next);
+        let again: crate::registry::McpSettings = client
+            .call_as(methods::GET_MCP_SETTINGS, serde_json::json!(null))
+            .await
+            .unwrap();
+        assert_eq!(again.prefs, next);
+
+        let info: EngineInfo = client
+            .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(info.capabilities.iter().any(|cap| cap == "mcp-lazy-v1"));
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
         let temp = tempfile::tempdir().unwrap();
         let core = crate::EngineCore::assemble_with_profile(
@@ -5327,6 +5486,7 @@ mod tests {
     #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
+        assert!(!forwardable(methods::WATCH_RUNTIME_STATES));
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));

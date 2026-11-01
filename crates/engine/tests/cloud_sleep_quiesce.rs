@@ -148,6 +148,7 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
                     worktree: None,
                     resume: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 },
                 message_id: id.into(),
             },

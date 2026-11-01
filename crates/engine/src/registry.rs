@@ -7,14 +7,19 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
 use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AccessMode, AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use zeron_proto::{
+    AccessMode, AgentEvent, DoneStatus, HarnessId, McpMode, McpServerChoice, ReasoningLevel,
+    SteeringMode,
+};
+
+pub use crate::channel_leases::ChannelOwnerSetting;
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +115,99 @@ struct HarnessPrefsFile {
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
     enabled: Option<Vec<HarnessId>>,
+    mcp: McpPrefs,
+}
+
+// Preserve fields written by newer versions while replacing known preferences.
+fn preserve_unknown_prefs(current: &mut serde_json::Value, old: serde_json::Value) {
+    if let (Some(current), serde_json::Value::Object(old)) = (current.as_object_mut(), old) {
+        for (key, value) in old {
+            if let Some(existing) = current.get_mut(&key) {
+                // Server choices are a replaceable map, not a fixed schema.
+                if key != "servers" {
+                    preserve_unknown_prefs(existing, value);
+                }
+            } else {
+                current.insert(key, value);
+            }
+        }
+    }
+}
+
+fn default_mcp_idle_minutes() -> u32 {
+    10
+}
+
+fn default_mcp_flag_on() -> bool {
+    true
+}
+
+/// Lazy MCP and session-idle preferences (`harness-prefs.json`).
+///
+/// Every field later units read is defined here. Jobserver and sccache
+/// preferences are not: nothing throttles agent builds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpPrefs {
+    /// When false, the host stamps no plan and harnesses launch as they do today.
+    #[serde(default = "default_mcp_flag_on")]
+    pub lazy: bool,
+    /// Idle minutes passed to `zeron mcp-proxy`.
+    #[serde(default = "default_mcp_idle_minutes")]
+    pub idle_minutes: u32,
+    /// `"<harness>:<name>"` → off, eager, lazy, lazy-keep-alive, or main-only.
+    #[serde(default)]
+    pub servers: BTreeMap<String, McpServerChoice>,
+    /// Reserved for future channel ownership; has no effect in v1.
+    #[serde(default)]
+    pub channel_owner: ChannelOwnerSetting,
+    /// Parked-session idle window, in minutes. `0` means never. The reaper
+    /// still uses its built-in window until the hibernation unit reads this.
+    #[serde(default = "default_mcp_idle_minutes")]
+    pub session_idle_minutes: u32,
+    /// Composer-focus prewarm. Stored now; the prewarm unit reads it.
+    #[serde(default = "default_mcp_flag_on")]
+    pub prewarm: bool,
+}
+
+impl Default for McpPrefs {
+    fn default() -> Self {
+        Self {
+            lazy: true,
+            idle_minutes: default_mcp_idle_minutes(),
+            servers: BTreeMap::new(),
+            channel_owner: ChannelOwnerSetting::Automatic,
+            session_idle_minutes: default_mcp_idle_minutes(),
+            prewarm: true,
+        }
+    }
+}
+
+/// One server a fresh harness snapshot or Codex config has named.
+/// `GetMcpSettings` fills [`McpSettings::servers`] from this device's data dir.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredMcpServer {
+    pub harness: HarnessId,
+    pub name: String,
+    pub class: zeron_harness::mcp_policy::McpClass,
+    /// Scope or source (`user`, `plugin`, `claude.ai`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Last seen proportional set size, in kibibytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_pss_kib: Option<u64>,
+    #[serde(default)]
+    pub running: u32,
+}
+
+/// `GetMcpSettings` / `SetMcpSettings` body. Set replaces [`McpPrefs`] only;
+/// the discovered list is host-owned and ignored on the way in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSettings {
+    pub prefs: McpPrefs,
+    pub servers: Vec<DiscoveredMcpServer>,
 }
 
 /// Per-device automatic session title preferences.
@@ -579,7 +677,23 @@ impl HarnessRegistry {
         else {
             return;
         };
-        let json = match serde_json::to_string_pretty(&*self.prefs()) {
+        let mut value = match serde_json::to_value(&*self.prefs()) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(error = %err, "harness-prefs serialize failed");
+                return;
+            }
+        };
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(mut old) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            // The legacy allow-list is deliberately consumed during migration.
+            if let Some(object) = old.as_object_mut() {
+                object.remove("enabled");
+            }
+            preserve_unknown_prefs(&mut value, old);
+        }
+        let json = match serde_json::to_string_pretty(&value) {
             Ok(json) => json,
             Err(err) => {
                 tracing::warn!(error = %err, "harness-prefs serialize failed");
@@ -590,6 +704,92 @@ impl HarnessRegistry {
         if let Err(err) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
             tracing::warn!(error = %err, "harness-prefs save failed");
         }
+    }
+
+    pub fn mcp_prefs(&self) -> McpPrefs {
+        self.prefs().mcp.clone()
+    }
+
+    /// Replace the MCP block and persist it. Omitted fields are the caller's
+    /// problem: deserializing a partial object already filled them from
+    /// [`McpPrefs`]'s defaults. Channel ownership is inert in v1.
+    pub fn set_mcp_prefs(&self, prefs: McpPrefs) {
+        self.prefs().mcp = prefs;
+        self.persist_prefs();
+    }
+
+    /// `ZERON_MCP_LAZY=0` forces the legacy launch. Any other value, including
+    /// unset, leaves the preference in charge.
+    pub fn env_forces_mcp_legacy(value: Option<&str>) -> bool {
+        value == Some("0")
+    }
+
+    /// The preference is on and the environment did not force legacy.
+    pub fn mcp_lazy_enabled(&self) -> bool {
+        self.prefs().mcp.lazy
+            && !Self::env_forces_mcp_legacy(std::env::var("ZERON_MCP_LAZY").ok().as_deref())
+    }
+
+    /// Parent of `harness-prefs.json`, once [`Self::load_prefs`] has run.
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.prefs_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    /// User choices for `harness` that name a concrete mode. Keys in the file
+    /// are `<harness>:<server>`. Main-only on a main chat is absent: the class
+    /// default still applies. Main-only on a worker is Off.
+    pub fn server_modes(&self, harness: HarnessId, worker: bool) -> BTreeMap<String, McpMode> {
+        let prefix = format!("{}:", harness.as_str());
+        self.prefs()
+            .mcp
+            .servers
+            .iter()
+            .filter_map(|(key, choice)| {
+                let name = key.strip_prefix(&prefix).filter(|name| !name.is_empty())?;
+                choice
+                    .explicit_mode(worker)
+                    .map(|mode| (name.to_owned(), mode))
+            })
+            .collect()
+    }
+
+    pub fn mcp_settings(&self) -> McpSettings {
+        let prefs = self.mcp_prefs();
+        let Some(data_dir) = self.data_dir() else {
+            return McpSettings {
+                prefs,
+                servers: Vec::new(),
+            };
+        };
+        let runtime = crate::mcp_servers::by_server(&data_dir);
+        let mut servers = zeron_harness::mcp_observed::discovered_servers(
+            &data_dir,
+            crate::mcp_servers::codex_config().as_deref(),
+        )
+        .into_iter()
+        .map(|server| {
+            let seen = runtime.get(&server.name);
+            DiscoveredMcpServer {
+                harness: server.harness,
+                name: server.name,
+                class: server.class,
+                scope: server.scope,
+                last_seen_pss_kib: seen.and_then(|seen| seen.pss_kib),
+                running: seen.map(|seen| seen.running).unwrap_or(0),
+            }
+        })
+        .collect::<Vec<_>>();
+        servers.sort_by(|left, right| {
+            left.harness
+                .as_str()
+                .cmp(right.harness.as_str())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        McpSettings { prefs, servers }
     }
 
     pub fn title_settings(&self) -> TitleSettings {
@@ -1629,6 +1829,84 @@ mod title_tests {
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
         assert!(prefs.native_subagents_off.is_empty());
+        assert_eq!(prefs.mcp, McpPrefs::default());
+    }
+
+    #[test]
+    fn mcp_policy_prefs_round_trip_keeps_defaults_for_missing_fields() {
+        let old: HarnessPrefsFile = serde_json::from_str(
+            r#"{"disabled":["codex"],"buildJobs":4,"sharedJobserver":true,"jobserverMake":false,"sccache":true}"#,
+        )
+        .unwrap();
+        assert_eq!(old.disabled, vec![HarnessId::Codex]);
+        assert!(old.mcp.lazy);
+        assert_eq!(old.mcp.idle_minutes, 10);
+        assert_eq!(old.mcp.session_idle_minutes, 10);
+        assert!(old.mcp.prewarm);
+        assert_eq!(old.mcp.channel_owner, ChannelOwnerSetting::Automatic);
+        assert!(old.mcp.servers.is_empty());
+
+        let partial: HarnessPrefsFile = serde_json::from_str(
+            r#"{"mcp":{"lazy":false,"servers":{"codex:playwright":"lazy-keep-alive","claude-code:fake-channel":"main-only"},"channelOwner":"chat-9"}}"#,
+        )
+        .unwrap();
+        assert!(!partial.mcp.lazy);
+        assert_eq!(partial.mcp.idle_minutes, 10);
+        assert_eq!(partial.mcp.session_idle_minutes, 10);
+        assert!(partial.mcp.prewarm);
+        assert_eq!(
+            partial.mcp.channel_owner,
+            ChannelOwnerSetting::Chat("chat-9".into())
+        );
+        assert_eq!(
+            partial.mcp.servers.get("codex:playwright"),
+            Some(&McpServerChoice::LazyKeepAlive)
+        );
+        assert_eq!(
+            partial.mcp.servers.get("claude-code:fake-channel"),
+            Some(&McpServerChoice::MainOnly)
+        );
+        let blank: ChannelOwnerSetting = serde_json::from_str("\"\"").unwrap();
+        assert_eq!(blank, ChannelOwnerSetting::Automatic);
+        let off: ChannelOwnerSetting = serde_json::from_str("\"off\"").unwrap();
+        assert_eq!(off, ChannelOwnerSetting::Off);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harness-prefs.json"),
+            r#"{"disabled":["codex"],"buildJobs":2,"sharedJobserver":true,"mcp":{"futureOption":{"x":1}},"titles":{"futureTitle":42}}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(registry.mcp_lazy_enabled());
+        assert_eq!(registry.server_modes(HarnessId::Codex, true).len(), 0);
+        registry.set_mcp_prefs(partial.mcp.clone());
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        assert!(text.contains("buildJobs"), "{text}");
+        assert!(text.contains("sharedJobserver"), "{text}");
+        assert!(text.contains("futureOption"), "{text}");
+        assert!(text.contains("futureTitle"), "{text}");
+        assert!(!text.contains("jobserverMake"), "{text}");
+        assert!(!text.contains("sccache"), "{text}");
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.mcp_prefs(), partial.mcp);
+        assert_eq!(reloaded.prefs().disabled, vec![HarnessId::Codex]);
+        let worker = reloaded.server_modes(HarnessId::Codex, true);
+        assert_eq!(worker.get("playwright"), Some(&McpMode::LazyKeepAlive));
+        assert!(worker.get("fake-channel").is_none());
+        let main = reloaded.server_modes(HarnessId::ClaudeCode, false);
+        assert!(main.get("fake-channel").is_none());
+        let worker_claude = reloaded.server_modes(HarnessId::ClaudeCode, true);
+        assert_eq!(worker_claude.get("fake-channel"), Some(&McpMode::Off));
+        assert!(
+            !HarnessRegistry::env_forces_mcp_legacy(None)
+                && !HarnessRegistry::env_forces_mcp_legacy(Some("1"))
+                && !HarnessRegistry::env_forces_mcp_legacy(Some(""))
+                && !HarnessRegistry::env_forces_mcp_legacy(Some("false"))
+                && HarnessRegistry::env_forces_mcp_legacy(Some("0"))
+        );
     }
 }
 

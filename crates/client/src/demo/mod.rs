@@ -485,6 +485,7 @@ impl DemoHost {
                     _ => None,
                 },
                 updated_at: now,
+                runtime: None,
             })
         });
     }

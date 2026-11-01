@@ -56,6 +56,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     }
 }
 

@@ -192,6 +192,28 @@ pub fn run_mcp() -> anyhow::Result<()> {
     runtime.block_on(zeron_mcp::run(config))
 }
 
+/// Standalone proxy keeps the GUI/engine image out of every MCP session.
+/// Source builds without a packaged sibling use the same current-thread core.
+pub fn run_mcp_proxy(args: Vec<String>) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let sibling = std::env::current_exe()?.with_file_name("zeron-mcp-proxy");
+        if sibling.is_file() {
+            // exec only returns on failure (noexec mount, damaged file). The server
+            // must still start, so fall through to the in-process core.
+            let error = std::process::Command::new(&sibling).args(&args).exec();
+            eprintln!(
+                "zeron mcp-proxy: cannot run {}: {error}; continuing in-process",
+                sibling.display()
+            );
+        }
+    }
+    // Parsing --data-dir must not migrate the default application profile.
+    zeron_mcp_proxy::run_cli(args, zeron_mcp_proxy::data_dir())?;
+    Ok(())
+}
+
 /// `{data_dir}/logs/zeron-{mode}.log`, previous launch preserved as `.old`.
 /// Headed and headless are separate files so an embedded-engine app and a
 /// daemon on the same machine never interleave writes.

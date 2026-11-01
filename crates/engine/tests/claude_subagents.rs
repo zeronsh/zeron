@@ -38,6 +38,7 @@ fn request(dir: &Path, scenario: &str) -> RunRequest {
             dir.join("claude").display().to_string(),
         )]
         .into(),
+        mcp_plan: None,
     }
 }
 

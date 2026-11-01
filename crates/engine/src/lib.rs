@@ -17,6 +17,7 @@ use zeron_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
+mod channel_leases;
 mod change_request_store;
 pub mod change_requests;
 pub mod chat2_host;
@@ -37,6 +38,8 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+mod mcp_servers;
+mod memory_pressure;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -271,6 +274,7 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.set_doc_host(doc_host.clone());
+        sessions.seed_runtime_states(&workspace)?;
         match sessions.recover_stale() {
             Ok(0) => {}
             Ok(recovered) => tracing::info!(recovered, "stale sessions recovered on boot"),
@@ -493,7 +497,7 @@ impl EngineCore {
                 }
             }
         });
-        let mut service: Arc<dyn RpcService> = self.rpc_service();
+        let mut service: Arc<dyn RpcService> = rpc::relay_service(self.rpc_service());
         // Cloud runner: requests served to remote devices are the heartbeat's
         // `clients` activity (idle sleep), counted at the relay boundary.
         if let Some(activity) = self.relay_activity() {

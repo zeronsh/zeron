@@ -461,6 +461,19 @@ impl Normalizer {
         self.saw_init
     }
 
+    pub(super) fn idle_started(&mut self, request: &zeron_proto::RunRequest) -> AgentEvent {
+        self.saw_init = true;
+        self.session_id = request.resume.clone();
+        AgentEvent::SessionStarted {
+            harness: HarnessId::ClaudeCode,
+            model: request.model.clone().unwrap_or_default(),
+            tools: vec![],
+            cwd: request.cwd.clone(),
+            session_id: request.resume.clone().unwrap_or_default(),
+            assistant_message_id: self.assistant_message_id.clone(),
+        }
+    }
+
     /// Restore only spawn identity from Claude's native history. The CLI
     /// does not replay task_started when --resume starts a new process.
     /// Session ids are global; search project directories rather than

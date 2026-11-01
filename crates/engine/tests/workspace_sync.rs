@@ -160,6 +160,7 @@ fn run_request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     }
 }
 
@@ -741,6 +742,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 status: SessionStatus::Idle,
                 started_at: Some(now),
                 updated_at: now,
+                runtime: None,
             })
             .unwrap();
         store

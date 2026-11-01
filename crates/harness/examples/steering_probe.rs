@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     let controls = RunControls {
         realtime: None,

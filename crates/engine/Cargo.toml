@@ -13,6 +13,7 @@ zeron-proto.workspace = true
 zeron-doc.workspace = true
 zeron-sync.workspace = true
 zeron-harness.workspace = true
+zeron-mcp-proxy.workspace = true
 semver = "1"
 zeron-rpc.workspace = true
 zeron-update.workspace = true
@@ -53,13 +54,13 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
 zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
-# Paused-clock tests (the 30-minute idle reaper).
+# Paused-clock tests for the configured idle reaper.
 tokio = { workspace = true, features = ["test-util"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true

@@ -22,6 +22,7 @@ fn run_request_attachments_survive_command_round_trip() {
         worktree: None,
         resume: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     doc.queue_command(&SessionCommandEntry {
         id: "c1".into(),

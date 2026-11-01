@@ -162,6 +162,7 @@ fn request(prompt: &str) -> RunRequest {
         attachments: vec![],
         worktree: None,
         env: Default::default(),
+        mcp_plan: None,
     }
 }
 fn rich_text(label: &str) -> (String, String) {

@@ -57,6 +57,7 @@ async fn main() {
         resume: None,
         worktree: None,
         env: Default::default(),
+        mcp_plan: None,
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {

@@ -356,6 +356,18 @@ pub enum SessionStatus {
     Errored,
 }
 
+/// Where a chat's agent runtime is. The engine sets it; older peers ignore
+/// the field. `None` on a [`Session`] means this build has not classified
+/// the runtime yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeState {
+    Live,
+    Parked,
+    Hibernated,
+    Starting,
+}
+
 /// Native outcome evidence survives coalesced watches, including consecutive
 /// turns with the same outcome. Terminal leases never rewrite `finished_at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,6 +412,9 @@ pub struct Session {
     /// through `view::background_tasks`. Missing on older peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// Live, parked, hibernated, or starting. Absent on older peers.
+    #[serde(skip)]
+    pub runtime: Option<RuntimeState>,
 }
 
 /// One background process of a chat's agent, as its runtime reports it.
@@ -1657,6 +1672,32 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn session_runtime_is_absent_on_old_rows() {
+        let session: Session = serde_json::from_value(serde_json::json!({
+            "chatId": "chat",
+            "deviceId": "device",
+            "status": "idle",
+            "updatedAt": "2026-08-19T12:00:00Z"
+        }))
+        .unwrap();
+        assert!(session.runtime.is_none());
+        assert!(session.background_tasks.is_empty());
+        let value = serde_json::to_value(&session).unwrap();
+        assert!(value.get("runtime").is_none());
+        let mut live = session.clone();
+        live.runtime = Some(RuntimeState::Parked);
+        let value = serde_json::to_value(&live).unwrap();
+        assert!(value.get("runtime").is_none());
+        assert_eq!(
+            serde_json::from_value::<Session>(value.clone()).unwrap().runtime,
+            None
+        );
+        let mut injected = value;
+        injected["runtime"] = serde_json::json!("live");
+        assert_eq!(serde_json::from_value::<Session>(injected).unwrap().runtime, None);
+    }
 
     #[test]
     fn outside_workspace_reads_round_trip_without_breaking_older_reasons() {

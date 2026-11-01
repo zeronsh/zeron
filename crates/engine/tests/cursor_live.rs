@@ -88,6 +88,7 @@ fn start(core: &EngineCore, cwd: &std::path::Path, prompt: String) {
                     worktree: None,
                     resume: None,
                     env: Default::default(),
+                    mcp_plan: None,
                 },
             },
         )

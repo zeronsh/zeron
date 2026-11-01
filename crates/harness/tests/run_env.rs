@@ -50,6 +50,7 @@ fn request(cwd: &Path) -> RunRequest {
         ]
         .into_iter()
         .collect(),
+        mcp_plan: None,
     }
 }
 

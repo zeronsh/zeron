@@ -832,6 +832,7 @@ impl From<RawSession> for Session {
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
+            runtime: None,
         }
     }
 }
@@ -947,6 +948,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            runtime: None,
         }
     }
 

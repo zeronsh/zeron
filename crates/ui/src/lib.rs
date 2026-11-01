@@ -56,6 +56,7 @@ pub mod orb;
 pub mod overscroll;
 pub mod pickers;
 pub mod popover;
+mod prewarm;
 pub mod project_actions;
 pub mod pull_request_detail;
 mod pull_request_media;

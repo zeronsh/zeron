@@ -13585,6 +13585,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-mcp",
+ "zeron-mcp-proxy",
  "zeron-notify",
  "zeron-rpc",
  "zeron-ui",
@@ -13688,6 +13689,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
+ "zeron-mcp-proxy",
  "zeron-notify",
  "zeron-preview",
  "zeron-proto",
@@ -13708,6 +13710,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "deser-hjson",
+ "dunce",
  "filetime",
  "futures",
  "libc",
@@ -13721,9 +13724,11 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-mcp-proxy",
  "zeron-proto",
  "zeron-voice-media",
  "zip",
@@ -13755,6 +13760,20 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-visual",
+]
+
+[[package]]
+name = "zeron-mcp-proxy"
+version = "0.2.131"
+dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

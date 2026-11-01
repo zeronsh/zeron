@@ -347,6 +347,104 @@ pub struct ModelOptionChoice {
     pub label: String,
 }
 
+/// How a harness should launch one MCP server once lazy MCP is on.
+/// `Eager` is the real server, started as the harness starts it today.
+/// `Lazy` and `LazyKeepAlive` are the `zeron mcp-proxy` stand-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpMode {
+    Off,
+    Eager,
+    #[default]
+    Lazy,
+    LazyKeepAlive,
+}
+
+/// A user's per-server choice in Settings. `MainOnly` is not itself a launch
+/// mode: workers drop that server, and a main chat keeps the class default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpServerChoice {
+    Off,
+    Eager,
+    Lazy,
+    LazyKeepAlive,
+    MainOnly,
+}
+
+impl McpServerChoice {
+    /// A concrete launch mode for the plan's `modes` map.
+    /// Main-only on a main chat is `None`: the class default still applies.
+    pub fn explicit_mode(self, worker: bool) -> Option<McpMode> {
+        match self {
+            Self::Off => Some(McpMode::Off),
+            Self::Eager => Some(McpMode::Eager),
+            Self::Lazy => Some(McpMode::Lazy),
+            Self::LazyKeepAlive => Some(McpMode::LazyKeepAlive),
+            Self::MainOnly if worker => Some(McpMode::Off),
+            Self::MainOnly => None,
+        }
+    }
+}
+
+fn default_mcp_idle_minutes() -> u32 {
+    10
+}
+
+/// Host-stamped lazy-MCP plan. Drivers read it; they do not invent it.
+/// Missing fields default so a partial plan from an older writer still loads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpPlan {
+    /// This binary (`current_exe`): the `mcp-proxy` subcommand.
+    #[serde(default)]
+    pub proxy_command: String,
+    /// `<data_dir>/run/mcp/<run_id>`.
+    #[serde(default)]
+    pub run_dir: String,
+    #[serde(default = "default_mcp_idle_minutes")]
+    pub idle_minutes: u32,
+    #[serde(default)]
+    pub default_mode: McpMode,
+    /// Harness-visible server name → mode, where it differs from the class
+    /// default the driver computes. User choices that name a concrete mode
+    /// live here; main-only on a main chat does not.
+    #[serde(default)]
+    pub modes: std::collections::BTreeMap<String, McpMode>,
+    /// Reserved for future channel ownership. The engine sets this false in v1.
+    #[serde(default)]
+    pub drop_channels: bool,
+    /// Side chat, or a chat an agent spawned (its parent chat id is set).
+    #[serde(default)]
+    pub worker: bool,
+}
+
+impl Default for McpPlan {
+    fn default() -> Self {
+        Self {
+            proxy_command: String::new(),
+            run_dir: String::new(),
+            idle_minutes: default_mcp_idle_minutes(),
+            default_mode: McpMode::Lazy,
+            modes: std::collections::BTreeMap::new(),
+            drop_channels: false,
+            worker: false,
+        }
+    }
+}
+
+impl McpPlan {
+    /// Storage is encoded in the host-stamped `<data_dir>/run/mcp/<run_id>`.
+    /// Partial/older plans without that layout must leave MCP launches eager.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        let run = std::path::Path::new(&self.run_dir);
+        let mcp = run.parent()?;
+        let runs = mcp.parent()?;
+        (run.is_absolute() && mcp.file_name()? == "mcp" && runs.file_name()? == "run")
+            .then_some(runs.parent()?)
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
@@ -399,6 +497,13 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Lazy-MCP plan, stamped by the host before dispatch routes a turn or
+    /// saves its runtime configuration. `serde(skip)` in both directions, exactly as `env`:
+    /// a remote sender cannot inject a plan, and the plan never rides the
+    /// command plane, the session doc, or the run journal. The host
+    /// recomputes it for the process it is about to start.
+    #[serde(skip)]
+    pub mcp_plan: Option<McpPlan>,
     /// Host-resolved environment for the spawned agent process (credential
     /// broker secrets on a Cloud device: `CODEX_HOME`, `GH_TOKEN`,
     /// `ANTHROPIC_API_KEY`, …). Filled by the HOST right before the request
@@ -430,6 +535,7 @@ impl std::fmt::Debug for RunRequest {
             attachments,
             worktree,
             mcp,
+            mcp_plan,
             env,
         } = self;
         f.debug_struct("RunRequest")
@@ -447,6 +553,7 @@ impl std::fmt::Debug for RunRequest {
             .field("attachments", attachments)
             .field("worktree", worktree)
             .field("mcp", mcp)
+            .field("mcp_plan", mcp_plan)
             .field("env", &env.keys().collect::<Vec<_>>())
             .finish()
     }
@@ -1089,6 +1196,84 @@ mod tests {
         let printed = format!("{req:?}");
         assert!(printed.contains("GH_TOKEN"), "{printed}");
         assert!(!printed.contains("ghu_secret_token_value"), "{printed}");
+    }
+
+    /// The lazy-MCP plan is host-stamped in memory. A remote sender cannot
+    /// inject one, and it never rides the command plane or the session doc.
+    #[test]
+    fn run_request_mcp_plan_never_serializes_or_deserializes() {
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let mut req: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(req.mcp_plan.is_none());
+        req.mcp_plan = Some(McpPlan {
+            proxy_command: "zeron".into(),
+            run_dir: "/data/run/mcp/run-1".into(),
+            idle_minutes: 10,
+            default_mode: McpMode::Lazy,
+            modes: std::collections::BTreeMap::from([("playwright".into(), McpMode::Eager)]),
+            drop_channels: true,
+            worker: false,
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("mcpPlan"), "{json}");
+        assert!(!json.contains("proxyCommand"), "{json}");
+        assert!(!json.contains("playwright"), "{json}");
+        assert!(!json.contains("/data/run/mcp/run-1"), "{json}");
+        let round: RunRequest = serde_json::from_str(&json).unwrap();
+        assert!(round.mcp_plan.is_none());
+        let injected = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null,"mcpPlan":{"proxyCommand":"evil","idleMinutes":1,"defaultMode":"eager","worker":true}}"#;
+        let req: RunRequest = serde_json::from_str(injected).unwrap();
+        assert!(req.mcp_plan.is_none());
+        let mut req = req;
+        req.mcp_plan = Some(McpPlan {
+            proxy_command: "zeron".into(),
+            ..McpPlan::default()
+        });
+        let printed = format!("{req:?}");
+        assert!(printed.contains("mcp_plan"), "{printed}");
+        assert!(printed.contains("zeron"), "{printed}");
+    }
+
+    #[test]
+    fn mcp_plan_data_dir_comes_from_the_host_run_layout() {
+        let root = std::env::current_dir().unwrap().join("custom-data");
+        let mut plan = McpPlan {
+            run_dir: root.join("run/mcp/run-1").to_string_lossy().into_owned(),
+            ..McpPlan::default()
+        };
+        assert_eq!(plan.data_dir(), Some(root.as_path()));
+        for invalid in ["", "run/mcp/run-1", "/data/unrelated/run-1"] {
+            plan.run_dir = invalid.into();
+            assert_eq!(plan.data_dir(), None);
+        }
+    }
+
+    #[test]
+    fn mcp_plan_defaults_missing_fields_and_modes_use_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&McpMode::LazyKeepAlive).unwrap(),
+            "\"lazy-keep-alive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&McpServerChoice::MainOnly).unwrap(),
+            "\"main-only\""
+        );
+        assert_eq!(McpServerChoice::MainOnly.explicit_mode(true), Some(McpMode::Off));
+        assert_eq!(McpServerChoice::MainOnly.explicit_mode(false), None);
+        assert_eq!(McpServerChoice::Eager.explicit_mode(true), Some(McpMode::Eager));
+        let plan: McpPlan = serde_json::from_str(r#"{"proxyCommand":"zeron"}"#).unwrap();
+        assert_eq!(plan.proxy_command, "zeron");
+        assert!(plan.run_dir.is_empty());
+        assert_eq!(plan.idle_minutes, 10);
+        assert_eq!(plan.default_mode, McpMode::Lazy);
+        assert!(plan.modes.is_empty());
+        assert!(!plan.drop_channels);
+        assert!(!plan.worker);
+        let whole = McpPlan::default();
+        assert_eq!(
+            serde_json::from_value::<McpPlan>(serde_json::to_value(&whole).unwrap()).unwrap(),
+            whole
+        );
     }
 
     #[test]
