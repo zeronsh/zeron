@@ -535,6 +535,73 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn pull_request_commits_open_as_diff_tabs_beside_the_pull_request(cx: &mut TestAppContext) {
+    use crate::pull_request_detail::PullRequestDetailEvent;
+    let (shell, cx) = setup(cx);
+    let url = "https://github.com/a/b/pull/1";
+    let page = cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_chat_pull_request(url.into(), Some("remote".into()), window, cx);
+            let RightSurface::PullRequest(id) = shell.resolved_right_active(cx) else {
+                panic!("the pull request tab is active");
+            };
+            shell.chat_pull_requests[&id].page.clone()
+        })
+    });
+    let open = |cx: &mut VisualTestContext, sha: &str| {
+        let commit = zeron_proto::GitHistoryCommit {
+            sha: sha.into(),
+            parent_shas: Vec::new(),
+            subject: format!("Commit {sha}"),
+            author_name: "Ada".into(),
+            author_email: "ada@example.com".into(),
+            authored_at: "2026-09-01T10:00:00Z".into(),
+            refs: Vec::new(),
+        };
+        page.update(cx, |_, cx| {
+            cx.emit(PullRequestDetailEvent::OpenCommit {
+                url: url.into(),
+                device: Some("remote".into()),
+                commit,
+            })
+        });
+        cx.run_until_parked();
+    };
+    let commit_tabs = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |shell, cx| {
+            shell.right_tabs["parent"]
+                .iter()
+                .filter_map(|surface| match surface {
+                    RightSurface::Diff(id) => shell.diffs[id]
+                        .read(cx)
+                        .change_request_commit()
+                        .map(|(_, sha)| sha.to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let active_commit = |cx: &mut VisualTestContext| {
+        shell.update(cx, |shell, cx| match shell.resolved_right_active(cx) {
+            RightSurface::Diff(id) => shell.diffs[&id]
+                .read(cx)
+                .change_request_commit()
+                .map(|(url, sha)| (url.to_owned(), sha.to_owned())),
+            _ => None,
+        })
+    };
+    let first = "a".repeat(40);
+    let second = "b".repeat(40);
+    open(cx, &first);
+    assert_eq!(active_commit(cx), Some((url.to_owned(), first.clone())));
+    open(cx, &second);
+    // The same commit returns to its tab instead of opening another.
+    open(cx, &first);
+    assert_eq!(commit_tabs(cx), [first.clone(), second]);
+    assert_eq!(active_commit(cx), Some((url.to_owned(), first)));
+}
+
+#[gpui::test]
 fn pull_requests_from_a_chat_open_as_tabs_beside_the_focused_session(cx: &mut TestAppContext) {
     use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
     let (shell, cx) = setup(cx);

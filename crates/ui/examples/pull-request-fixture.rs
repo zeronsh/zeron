@@ -298,6 +298,14 @@ fn main() -> anyhow::Result<()> {
                     detail.update(cx, |d, cx| d.fixture_select_tab(0, cx));
                     pause(cx, 800).await;
                     shot(cx, "13-summary-600-light")?;
+                    cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Dark, cx));
+                    window.update(cx, |_, w, _| w.resize(size(px(1320.), px(848.))))?;
+                    detail.update(cx, |d, cx| d.fixture_select_tab(2, cx));
+                    pause(cx, 6000).await;
+                    shot(cx, "14-activity-commits")?;
+                    detail.update(cx, |d, cx| d.fixture_open_commit(cx));
+                    pause(cx, 6000).await;
+                    shot(cx, "15-commit-diff")?;
                     Ok(())
                 }
                 .await;
