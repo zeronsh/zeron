@@ -567,12 +567,11 @@ fn common_project_root(project: &Path) -> io::Result<PathBuf> {
         .trim()
         .strip_prefix("gitdir: ")
         .ok_or_else(|| invalid("invalid git worktree marker"))?;
-    let git_dir = project.join(git_dir).canonicalize()?;
+    // Claude keys projects by plain paths; Windows canonicalizes to `\\?\`.
+    let git_dir = dunce::canonicalize(project.join(git_dir))?;
     let common = git_dir.join("commondir");
     match std::fs::read_to_string(common) {
-        Ok(common) => git_dir
-            .join(common.trim())
-            .canonicalize()?
+        Ok(common) => dunce::canonicalize(git_dir.join(common.trim()))?
             .parent()
             .map(Path::to_path_buf)
             .ok_or_else(|| invalid("git common dir has no parent")),
@@ -1054,6 +1053,8 @@ mod tests {
         let nested = linked.join("nested");
         std::fs::create_dir(&nested).unwrap();
         inputs.project_dir = nested;
+        // Canonical form: Windows temp dirs use 8.3 short names (RUNNER~1).
+        let main = dunce::canonicalize(&main).unwrap();
         assert_eq!(common_project_root(&linked).unwrap(), main);
         let before = fingerprint(&inputs).unwrap();
         write(

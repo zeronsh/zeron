@@ -26,6 +26,7 @@ zeron-voice-media.workspace = true
 zeron-proto.workspace = true
 zeron-mcp-proxy.workspace = true
 base64 = "0.22"
+dunce = "1"
 reqwest.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io-util", "codec"] }

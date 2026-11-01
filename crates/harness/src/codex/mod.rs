@@ -3412,6 +3412,19 @@ fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
 
 use crate::{Signal, send_signal, shutdown_child};
 
+/// A Unix-style absolute fixture path, absolute on Windows too (`C:\…`):
+/// MCP plans only derive a data dir, and the proxy only keeps a cwd, from
+/// absolute paths.
+#[cfg(test)]
+fn abs(path: &str) -> &'static str {
+    let path = if cfg!(windows) {
+        format!("C:{}", path.replace('/', "\\"))
+    } else {
+        path.to_owned()
+    };
+    Box::leak(path.into_boxed_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3558,18 +3571,18 @@ mod tests {
         let mut stamped = live.clone();
         stamped.mcp_plan = Some(zeron_proto::McpPlan {
             proxy_command: "/opt/zeron/zeron".into(),
-            run_dir: "/data/run/mcp/run-1".into(),
+            run_dir: abs("/data/run/mcp/run-1").into(),
             ..zeron_proto::McpPlan::default()
         });
         // Disabling lazy MCP removes the plan and must replace the runtime.
         assert!(!harness.same_runtime(&stamped, &live));
         assert!(harness.same_runtime(&live, &live));
         let mut next = stamped.clone();
-        next.mcp_plan.as_mut().unwrap().run_dir = "/data/run/mcp/run-2".into();
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/data/run/mcp/run-2").into();
         assert!(harness.same_runtime(&stamped, &next));
-        next.mcp_plan.as_mut().unwrap().run_dir = "/other-data/run/mcp/run-2".into();
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/other-data/run/mcp/run-2").into();
         assert!(!harness.same_runtime(&stamped, &next));
-        next.mcp_plan.as_mut().unwrap().run_dir = "/data/run/mcp/run-2".into();
+        next.mcp_plan.as_mut().unwrap().run_dir = abs("/data/run/mcp/run-2").into();
         next.mcp_plan
             .as_mut()
             .unwrap()
@@ -3816,7 +3829,7 @@ mod mcp_injection_tests {
     fn sample_plan() -> zeron_proto::McpPlan {
         zeron_proto::McpPlan {
             proxy_command: "/opt/zeron/zeron".into(),
-            run_dir: "/data/run/mcp/run-1".into(),
+            run_dir: abs("/data/run/mcp/run-1").into(),
             idle_minutes: 10,
             default_mode: zeron_proto::McpMode::Lazy,
             modes: Default::default(),
@@ -3835,7 +3848,7 @@ mod mcp_injection_tests {
                 "args": ["-y", "@scope/notes", "--title", "a b", "say \"hi\""],
                 "env": {"NOTES_TOKEN": "secret-token", "DISPLAY": ":1"},
                 "env_vars": ["PATH", "NOTES_TOKEN"],
-                "cwd": "/work/notes",
+                "cwd": abs("/work/notes"),
                 "environment_id": "local",
                 "enabled": true,
                 "startup_timeout_sec": 20.0,
@@ -3845,7 +3858,7 @@ mod mcp_injection_tests {
             },
             "playwright": {
                 "capabilities": {},
-                "cwd": "/work/playwright",
+                "cwd": abs("/work/playwright"),
                 "command": "npx",
                 "args": ["-y", "@playwright/mcp@0.0.1"],
                 "env_vars": ["PLAYWRIGHT_BROWSERS_PATH"],
@@ -3855,7 +3868,7 @@ mod mcp_injection_tests {
             },
             "spaced": {
                 "capabilities": {},
-                "cwd": "/work/spaced",
+                "cwd": abs("/work/spaced"),
                 "command": "/opt/My Servers/node",
                 "args": ["srv.js", "a b", "say \"hi\""],
                 "enabled": true
@@ -3925,7 +3938,7 @@ mod mcp_injection_tests {
         let servers = json!({
             "dot.name": {"command": "node", "args": []},
             "quote\"name": {"command": "node", "args": []},
-            "dash-name": {"capabilities": {}, "cwd": "/work", "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
+            "dash-name": {"capabilities": {}, "cwd": abs("/work"), "command": "node", "args": ["a\\b", "x\ny", "\"z\""]},
             "bad-args": {"capabilities": {}, "command": "node", "args": [1]},
             "bad-env": {"capabilities": {}, "command": "node", "env_vars": ["A,B"]},
             "relative": {"capabilities": {}, "command": "node", "cwd": "relative"}
@@ -3975,11 +3988,11 @@ mod mcp_injection_tests {
                 "--identity-env",
                 "DISPLAY,NOTES_TOKEN,PATH",
                 "--cwd",
-                "/work/notes",
+                abs("/work/notes"),
                 "--run-dir",
-                "/data/run/mcp/run-1",
+                abs("/data/run/mcp/run-1"),
                 "--data-dir",
-                "/data",
+                abs("/data"),
                 "--",
                 "npx",
                 "-y",
@@ -4007,11 +4020,11 @@ mod mcp_injection_tests {
                 "--identity-env",
                 "PLAYWRIGHT_BROWSERS_PATH",
                 "--cwd",
-                "/work/playwright",
+                abs("/work/playwright"),
                 "--run-dir",
-                "/data/run/mcp/run-1",
+                abs("/data/run/mcp/run-1"),
                 "--data-dir",
-                "/data",
+                abs("/data"),
                 "--",
                 "npx",
                 "-y",
@@ -4029,11 +4042,11 @@ mod mcp_injection_tests {
                 "--idle-min",
                 "10",
                 "--cwd",
-                "/work/spaced",
+                abs("/work/spaced"),
                 "--run-dir",
-                "/data/run/mcp/run-1",
+                abs("/data/run/mcp/run-1"),
                 "--data-dir",
-                "/data",
+                abs("/data"),
                 "--",
                 "/opt/My Servers/node",
                 "srv.js",
