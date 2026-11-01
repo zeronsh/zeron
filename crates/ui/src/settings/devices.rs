@@ -534,26 +534,10 @@ impl Render for DevicesPage {
             }
             block
         });
-        let others_block = if others.is_empty() {
-            widgets::section_card(&theme).mt(px(8.0)).child(
-                widgets::card_row(&theme, true).child(
-                    div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "Sign in on another device to see it here.",
-                        )),
-                ),
-            )
-        } else {
-            let mut block = widgets::section_card(&theme).mt(px(8.0));
-            for (n, (ix, device)) in others.into_iter().enumerate() {
-                block = block.child(device_row(ix, device, n == 0));
-            }
-            block
-        };
-        let others_block = others_block.child(
-            widgets::card_row(&theme, false)
+        // Add devbox leads Other devices: a workspace with many sandboxes
+        // would otherwise bury it below every row (user request).
+        let others_block = widgets::section_card(&theme).mt(px(8.0)).child(
+            widgets::card_row(&theme, true)
                 .child(
                     div()
                         .flex_1()
@@ -576,6 +560,24 @@ impl Render for DevicesPage {
                         .on_click(cx.listener(|this, _, _, cx| this.add_devbox(cx))),
                 ),
         );
+        let others_block = if others.is_empty() {
+            others_block.child(
+                widgets::card_row(&theme, false).child(
+                    div()
+                        .text_size(crate::typography::ui_rems(13.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(
+                            "Sign in on another device to see it here.",
+                        )),
+                ),
+            )
+        } else {
+            others
+                .into_iter()
+                .fold(others_block, |block, (ix, device)| {
+                    block.child(device_row(ix, device, false))
+                })
+        };
         let card = div()
             .flex()
             .flex_col()
