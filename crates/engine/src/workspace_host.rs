@@ -1400,6 +1400,58 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    pub fn forget_device(&self, device_id: &str) -> Result<bool, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other(
+                "This device can not be forgotten.".into(),
+            ));
+        }
+        if self.device_seen_online(device_id) {
+            return Err(EngineError::Other(
+                "Device is still online. Forget it once it goes offline.".into(),
+            ));
+        }
+        self.mutate(|doc| -> Result<bool, EngineError> {
+            let spaces = doc.read_spaces()?;
+            let chats = doc.read_chats()?;
+            let owned_spaces = spaces.iter().filter(|s| s.device_id == device_id).count();
+            let owned_chats = chats.iter().filter(|c| c.device_id == device_id).count();
+            if owned_spaces > 0 || owned_chats > 0 {
+                let message = if owned_spaces > 0 && owned_chats > 0 {
+                    "This device still owns projects and chats. Move or remove them first."
+                } else if owned_spaces > 0 {
+                    "This device still owns projects. Move or remove its projects first."
+                } else {
+                    "This device still owns chats. Move or remove its chats first."
+                };
+                return Err(EngineError::Other(message.into()));
+            }
+            Ok(doc.delete_device(device_id)?.existed)
+        })
+    }
+
+    fn device_seen_online(&self, device_id: &str) -> bool {
+        zeron_proto::device_online(self.device_seen_at(device_id), Utc::now())
+    }
+
+    fn device_seen_at(&self, device_id: &str) -> Option<chrono::DateTime<Utc>> {
+        let live = lock(&self.inner.room)
+            .as_ref()
+            .and_then(|room| room.presence().get(device_id).copied());
+        let cached = lock(&self.inner.presence_seen).get(device_id).copied();
+        let row = self
+            .read(|doc| doc.device(device_id))
+            .ok()
+            .flatten()
+            .and_then(|d| d.last_seen_at)
+            .map(|at| at.timestamp_millis());
+        live.into_iter()
+            .chain(cached)
+            .chain(row)
+            .max()
+            .and_then(chrono::DateTime::<Utc>::from_timestamp_millis)
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.

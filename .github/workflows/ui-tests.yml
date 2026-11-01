@@ -8,6 +8,7 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/actions/linux-ci/**'
+      - '.github/actions/ort-bin-cache/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
@@ -22,6 +23,7 @@ on:
       - 'rust-toolchain.toml'
       - 'crates/**'
       - '.github/actions/linux-ci/**'
+      - '.github/actions/ort-bin-cache/**'
       - 'scripts/ci/**'
       - 'scripts/*cursor-sdk*'
       - '.github/workflows/cursor-*.yml'
@@ -70,6 +72,12 @@ jobs:
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
       - name: UI and headless layout regressions
         run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib --test voice_orb_geometry
+      - name: Save ONNX Runtime binaries
+        # One job per cache key saves on main; pull requests only restore.
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: ./.github/actions/ort-bin-cache
+        with:
+          mode: save
 
   linux-browser:
     runs-on: ubuntu-24.04
