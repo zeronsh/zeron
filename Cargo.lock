@@ -5505,9 +5505,9 @@ dependencies = [
 
 [[package]]
 name = "loro"
-version = "1.13.9"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ea00f70c1acad4b7a05aaf72c1d9a671426021a1999ee821c77b56f0a15900"
+checksum = "410c939fe3bee34b8ed61f7aea93201fb136629f685ffa557039c4d9952f9988"
 dependencies = [
  "enum-as-inner 0.6.1",
  "generic-btree",
@@ -5521,9 +5521,9 @@ dependencies = [
 
 [[package]]
 name = "loro-common"
-version = "1.13.1"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b51042936156a1d537df8a38938ec8ed24b45de14530af933c1d02de39c9e056"
+checksum = "bd3f7afbafc4db85aefe9620e7e99fa49c974477563904f226ae96fc9674eade"
 dependencies = [
  "arbitrary",
  "enum-as-inner 0.6.1",
@@ -5551,9 +5551,9 @@ dependencies = [
 
 [[package]]
 name = "loro-internal"
-version = "1.13.9"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fec47acf8db115b7146da5e1d5b18d0cf58032e6012c0c1ee3ec3442d1e936f"
+checksum = "7e533c1688430aa4fcdd933f00861e331c169a4158ee6d27d054e0558892d447"
 dependencies = [
  "append-only-bytes",
  "arref",
@@ -5598,9 +5598,9 @@ dependencies = [
 
 [[package]]
 name = "loro-kv-store"
-version = "1.13.9"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "937f88e4a3d80d5853f5119753f5e5f68d4375726db7e9b3d6dac9db8167e8bf"
+checksum = "c7331ebe6902effeb0c3d52aba9e30fb0118bc926faed6f3848487aab40c1a4e"
 dependencies = [
  "bytes",
  "ensure-cov",
@@ -13319,7 +13319,7 @@ dependencies = [
 
 [[package]]
 name = "zatex"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "tiny-skia",
  "ttf-parser",
@@ -13570,7 +13570,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "clap",
@@ -13593,7 +13593,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-audio"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "base64 0.22.1",
  "cpal 0.18.2",
@@ -13605,7 +13605,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-client"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13640,7 +13640,7 @@ version = "0.2.130"
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "chrono",
  "loro",
@@ -13655,7 +13655,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -13708,7 +13708,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13739,14 +13739,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-markdown"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "zeron-mcp"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13767,7 +13767,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "async-trait",
  "serde",
@@ -13794,14 +13794,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-mobile-bindgen"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "zeron-notify"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "objc",
  "tracing",
@@ -13809,11 +13809,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-orb"
-version = "0.2.130"
+version = "0.2.131"
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13843,7 +13843,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -13854,7 +13854,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13876,7 +13876,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -13900,7 +13900,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -13935,14 +13935,14 @@ dependencies = [
 
 [[package]]
 name = "zeron-term"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "zeron-term-link"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13959,7 +13959,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-text"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
@@ -13976,7 +13976,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "clap",
@@ -13991,7 +13991,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -14074,7 +14074,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "futures",
@@ -14090,11 +14090,11 @@ dependencies = [
 
 [[package]]
 name = "zeron-veil"
-version = "0.2.130"
+version = "0.2.131"
 
 [[package]]
 name = "zeron-visual"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "base64 0.22.1",
  "gltf",
@@ -14106,7 +14106,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual-gpu"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "image",
  "pollster 0.4.0",
@@ -14117,7 +14117,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "cpal 0.17.3",
@@ -14134,7 +14134,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-media"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "async-trait",
  "semver",
@@ -14149,7 +14149,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-voice-session"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "async-trait",
  "futures",

@@ -164,7 +164,7 @@ describe("user directory", () => {
       await SELF.fetch("https://edge.test/admin/users?format=csv", { headers: { authorization: "Bearer test-admin-token" } })
     ).text();
     expect(csv.split("\n")[0]).toBe(
-      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges"
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username,created_org_id"
     );
     const number = (await find("user_csv"))?.userNumber;
     expect(csv).toContain(`\n${number},user_csv,user_csv@example.com,"Grace, Jr.","Grace, Jr.",,`);
@@ -383,7 +383,7 @@ describe("user directory", () => {
     const res = await SELF.fetch("https://edge.test/admin/organizations?format=csv", { headers: { authorization: "Bearer test-admin-token" } });
     expect(res.headers.get("content-disposition")).toContain("zeron-organizations.csv");
     const csv = await res.text();
-    expect(csv.split("\n")[0]).toBe("org_id,name,external_id,domains,member_count,members,created_at,updated_at,deleted_at");
+    expect(csv.split("\n")[0]).toBe("org_id,name,external_id,domains,member_count,members,created_at,updated_at,deleted_at,created_by");
     expect(csv).toContain(
       '\norg_csv,"Foo, ""Corp""",,foo-corp.com,2,user_csv_member@example.com;user_csv_no_profile,2026-10-01T10:00:00.000Z,'
     );

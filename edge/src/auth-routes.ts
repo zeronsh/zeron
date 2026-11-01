@@ -4,7 +4,8 @@
  *  - POST /auth/exchange     — WorkOS code → tokens (see `workos.ts`).
  *  - POST /auth/refresh      — WorkOS refresh → fresh tokens (org-scopable).
  *  - GET  /auth/orgs         — the caller's active org memberships.
- *  - POST /auth/orgs         — create an org + first (admin) membership.
+ *  - POST /auth/orgs         — create an org + first (admin) membership; one
+ *                              per user (409 `org_exists` after that).
  *  - GET  /auth/cli/callback — headless sign-in: shows a paste-able code.
  *
  * Exchange/refresh/callback run BEFORE the bearer gate (the caller has no
@@ -15,6 +16,7 @@
  */
 import { bearerFromRequest, verifyToken } from "./auth";
 import type { Env } from "./env";
+import { userDirectoryStub } from "./user-directory";
 import { WorkOsAuthFailed, createOrg, exchange, listOrgs, refresh } from "./workos";
 
 const json = (value: unknown, status = 200): Response =>
@@ -24,6 +26,10 @@ const json = (value: unknown, status = 200): Response =>
   });
 
 const notConfigured = (): Response => json({ error: "workos not configured" }, 501);
+
+/** The caller already created `organizationId` (null: it's being created by
+ * another request right now). */
+const orgExists = (organizationId: string | null): Response => json({ error: "org_exists", organizationId }, 409);
 
 const authFailed = (e: unknown): Response =>
   json({ error: e instanceof WorkOsAuthFailed ? e.message : "authentication failed" }, 401);
@@ -103,11 +109,36 @@ export const handleAuthRoute = async (
       if (trimmed.length === 0 || trimmed.length > 80) {
         return json({ error: "name must be 1-80 characters" }, 400);
       }
+      // Each user creates one org; invitations to others are unaffected. The
+      // claim is taken before WorkOS is called, so concurrent requests (a
+      // double-submit, a retry) can't both create.
+      const directory = userDirectoryStub(env);
+      const claim = directory ? await directory.claimOrgCreation(caller.userId) : undefined;
+      if (claim && "organizationId" in claim) return orgExists(claim.organizationId);
+      const release = async () => {
+        if (claim) await directory!.releaseOrgCreation(caller.userId, claim.claimId);
+      };
+      let created: { organizationId: string };
       try {
-        return json(await createOrg(apiKey, caller.userId, trimmed));
+        // An admin membership counts as having created one: creators from
+        // before the claims, and a create that died after WorkOS made the org.
+        const admin = (await listOrgs(apiKey, caller.userId)).find((m) => m.role === "admin");
+        if (admin) {
+          await release();
+          return orgExists(admin.organizationId);
+        }
+        created = await createOrg(apiKey, caller.userId, trimmed);
       } catch (e) {
+        await release();
         return authFailed(e);
       }
+      if (claim) {
+        // Unrecorded, the claim goes stale and the admin membership still counts.
+        await directory!
+          .finishOrgCreation(caller.userId, claim.claimId, created.organizationId)
+          .catch((e: unknown) => console.error("auth/orgs: recording a creation failed", String(e)));
+      }
+      return json(created);
     }
   }
 
@@ -124,7 +155,7 @@ export const handleAuthRoute = async (
 
 /** Query params land verbatim in the page — escape them. (WorkOS codes/states
  * are URL-safe tokens, but this URL accepts anything.) */
-const escapeHtml = (s: string): string =>
+export const escapeHtml = (s: string): string =>
   s
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
