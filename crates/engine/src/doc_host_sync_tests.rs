@@ -1476,11 +1476,21 @@ async fn shutdown_flushes_the_deferred_checkpoint_and_tail() {
     relay.release.send_replace(true);
     let dir = tempfile::tempdir().unwrap();
     let host = host(Arc::new(DocsStore::open(dir.path()).unwrap()), &relay);
-    let handle = host.open("flush").unwrap();
-    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
-    // A turn is streaming: 300 rows is below the streaming checkpoint line.
+    // Install the streaming lease and tail gate before joining. Catch-up
+    // itself wakes maintenance: setting these after caught_up raced an
+    // initial idle tail PUT (and the lower idle checkpoint threshold).
+    let handle = host.open_local("flush").unwrap();
     let writer = handle.writer();
-    lock(&handle.sync_cadence).tail_attempt = Some(tokio::time::Instant::now());
+    lock(&handle.sync_cadence).tail_retry_at =
+        Some(tokio::time::Instant::now() + Duration::from_secs(60));
+    host.open("flush").unwrap();
+    until(|| lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up())).await;
+    // Switch the bootstrap gate to the real streaming throttle window.
+    {
+        let mut cadence = lock(&handle.sync_cadence);
+        cadence.tail_attempt = Some(tokio::time::Instant::now());
+        cadence.tail_retry_at = None;
+    }
     handle.write_user_message("one", "streamed", 1).unwrap();
     until(|| lock(&handle.sync_cadence).tail_deferred).await;
     assert_eq!(relay.checkpoint_posts.load(Ordering::SeqCst), 0);
