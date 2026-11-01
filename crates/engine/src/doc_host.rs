@@ -50,14 +50,53 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 const TAIL_INTERVAL: Duration = Duration::from_secs(5);
+/// Minimum spacing between tail PUTs outside a streaming turn, except at a
+/// local turn end. A remote turn arrives as several assistant segments with a
+/// gap between them; each gap looks quiesced, so this bounds the PUTs a remote
+/// turn can cause to one per second.
+const TAIL_IDLE_FLOOR: Duration = Duration::from_secs(1);
 const STREAM_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(600);
+/// Failure backoff for the tail PUT and the threshold checkpoint: doubling
+/// from the minimum to the cap, so an outage costs a handful of attempts per
+/// chat per hour instead of one per wake.
+const TAIL_RETRY_MIN: Duration = Duration::from_secs(5);
+const TAIL_RETRY_MAX: Duration = Duration::from_secs(120);
+const CHECKPOINT_RETRY_MIN: Duration = Duration::from_secs(15);
+const CHECKPOINT_RETRY_MAX: Duration = Duration::from_secs(300);
+/// Shutdown spends at most this long pushing deferred tails and checkpoints.
+const SHUTDOWN_SYNC_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct SyncCadence {
     tail_attempt: Option<tokio::time::Instant>,
     tail_hash: Option<[u8; 32]>,
+    /// The doc version the last successful PUT covered: an unchanged version
+    /// means an unchanged tail, so a pass can stop before materializing it.
+    tail_version: Option<loro::VersionVector>,
+    tail_failures: u32,
+    tail_retry_at: Option<tokio::time::Instant>,
+    /// A pass found a changed tail it could not send yet (throttled or
+    /// failed). Shutdown flushes these; a clean chat costs shutdown nothing.
+    tail_deferred: bool,
+    checkpoint_failures: u32,
+    checkpoint_retry_at: Option<tokio::time::Instant>,
     stream_since_checkpoint: Option<tokio::time::Instant>,
     session_streaming: Option<bool>,
+}
+
+fn backoff(failures: u32, min: Duration, max: Duration) -> Duration {
+    min.saturating_mul(1u32 << failures.saturating_sub(1).min(16))
+        .min(max)
+}
+
+fn earliest(
+    a: Option<tokio::time::Instant>,
+    b: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 fn checkpoint_due(streaming: bool, rows: u64, bytes: u64, stale: bool) -> bool {
@@ -74,6 +113,14 @@ fn checkpoint_stale(since: Option<tokio::time::Instant>, now: tokio::time::Insta
 
 fn cadence_streaming(writers: usize, session_streaming: Option<bool>) -> bool {
     writers > 0 && session_streaming.unwrap_or(true)
+}
+
+/// Only `Working` streams. A turn parked on a question (`AwaitingInput`)
+/// writes nothing: it must flush like a finished turn (the asker is waiting on
+/// a reader's view of the question) and must not keep a 1 Hz tick alive for as
+/// long as the question stays open.
+fn session_streams(status: zeron_proto::SessionStatus) -> bool {
+    matches!(status, zeron_proto::SessionStatus::Working)
 }
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
@@ -1547,6 +1594,26 @@ impl DocHost {
         });
     }
 
+    /// The cached streaming state of this chat's local session, seeded from the
+    /// engine's current status on first use. The status watcher only sees
+    /// changes: a handle opened while its session was already idle (a resumed
+    /// or parked run) would otherwise read as "writer without status" and tick
+    /// at 1 Hz on streaming thresholds until some unrelated status change.
+    fn session_active(&self, handle: &ChatDocHandle) -> Option<bool> {
+        if let Some(known) = lock(&handle.sync_cadence).session_streaming {
+            return Some(known);
+        }
+        let seeded = self
+            .sessions()
+            .and_then(|sessions| sessions.session_status(&handle.chat_id))
+            .map(|session| session_streams(session.status))?;
+        Some(
+            *lock(&handle.sync_cadence)
+                .session_streaming
+                .get_or_insert(seeded),
+        )
+    }
+
     fn spawn_sync_status_watcher(&self, mut statuses: watch::Receiver<Vec<zeron_proto::Session>>) {
         let host = self.clone();
         self.spawn_worker(async move {
@@ -1558,11 +1625,7 @@ impl DocHost {
                         .iter()
                         .find(|s| s.chat_id == handle.chat_id && s.device_id == handle.device_id)
                     {
-                        let active = matches!(
-                            session.status,
-                            zeron_proto::SessionStatus::Working
-                                | zeron_proto::SessionStatus::AwaitingInput
-                        );
+                        let active = session_streams(session.status);
                         let mut cadence = lock(&handle.sync_cadence);
                         let previous = cadence.session_streaming.replace(active);
                         if previous != Some(active) {
@@ -1584,6 +1647,9 @@ impl DocHost {
     /// weak-keyed room/join loops and watcher streams), and sever the sessions
     /// back-edge so the replaced engine graph can actually drop. Idempotent.
     pub async fn shutdown_workers(&self) {
+        // Cadence defers sync work to a later pass: that pass must not be the
+        // one the cancel below cuts off.
+        self.flush_deferred_sync().await;
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
@@ -1606,6 +1672,49 @@ impl DocHost {
         lock(&self.inner.seeding).clear();
         lock(&self.inner.seed_waiting).clear();
         lock(&self.inner.sessions).take();
+    }
+
+    /// One last pass of the deferred sync duties for every open chat, before
+    /// the workers are cancelled: a checkpoint that streaming thresholds held
+    /// back (down to the turn-end thresholds, since nothing streams any more)
+    /// and a tail that was throttled, failed or flagged by a turn end that no
+    /// pass has consumed. Chats owing nothing cost a few atomic reads. Bounded
+    /// by [`SHUTDOWN_SYNC_BUDGET`] so an unreachable edge cannot hold shutdown.
+    async fn flush_deferred_sync(&self) {
+        if self.inner.config.edge.is_none() {
+            return;
+        }
+        let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
+        let work = handles.into_iter().map(|handle| async move {
+            if handle.retired.load(Ordering::Relaxed) {
+                return;
+            }
+            // Cancelling would drop an in-flight checkpoint: let it land, then
+            // judge the thresholds on the numbers it left behind.
+            while handle.checkpointing.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            let Some(stats) = lock(&handle.chat2).as_ref().map(|client| client.stats()) else {
+                return;
+            };
+            if checkpoint_due(false, stats.row_count, stats.row_bytes, false)
+                && let Some(reset) = self.begin_chat2_checkpoint(&handle)
+            {
+                self.run_chat2_checkpoint(handle.clone(), "shutdown", reset)
+                    .await;
+            }
+            let owed = handle.turn_end_pending.swap(false, Ordering::AcqRel)
+                || lock(&handle.sync_cadence).tail_deferred;
+            if owed {
+                self.chat2_tail_maintenance(&handle, false, true).await;
+            }
+        });
+        if tokio::time::timeout(SHUTDOWN_SYNC_BUDGET, futures::future::join_all(work))
+            .await
+            .is_err()
+        {
+            tracing::warn!("shutdown: deferred chat2 sync did not finish within its budget");
+        }
     }
 
     /// Freeze every open queue before settling live runs during shutdown.
@@ -2071,7 +2180,7 @@ impl DocHost {
         let turn_end_pending = Arc::new(AtomicBool::new(false));
         let writers = Arc::new(AtomicUsize::new(0));
         let status_writers = writers.clone();
-        let (status_wake, status_end) = (writer_wake.clone(), turn_end_pending.clone());
+        let status_wake = writer_wake.clone();
         let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
             // This callback runs before the change worker can publish. The
             // import origin belongs to the event, so concurrent local commits
@@ -2088,15 +2197,19 @@ impl DocHost {
             // Bits and cache first, wakes last: a consumer that wakes must
             // find its bit set and the ledger cache already stale.
             let mask = zeron_doc::ChangeMask::of_event(&diff);
-            // A remote writer has no local DocWriter to drop. A status change
-            // on a message map provides the same immediate turn-end wake.
+            // A remote writer has no local DocWriter to drop, and its session
+            // status is not visible here. A finished segment is the earliest
+            // signal that a remote turn may have ended: wake maintenance now
+            // instead of after the debounce. This is a hint only. A remote
+            // turn is split into several assistant segments, so it must not
+            // be taken for a turn end; the pass decides from the transcript
+            // (a streaming entry in the tail), and the idle floor bounds PUTs.
             if status_writers.load(Ordering::Acquire) == 0 && diff.events.iter().any(|change| {
                 matches!(change.path.first(), Some((_, loro::Index::Key(key))) if key.as_str() == "messages")
                     && matches!(&change.diff, loro::event::Diff::Map(delta)
                         if !delta.updated.contains_key("role") && delta.updated.get("status").is_some_and(|value|
                             value.as_ref().is_some_and(|v| v.get_deep_value().to_json_value().as_str().is_some_and(|status| status != "streaming"))))
             }) {
-                status_end.store(true, Ordering::Release);
                 status_wake.notify_one();
             }
             callback_publish.set(mask);
@@ -3379,23 +3492,50 @@ impl DocHost {
     ///   instead of replaying the log (the alert-shaped growth bound);
     /// - tail sidecar: publish the last-64 transcript JSON for thin/instant
     ///   readers (the iOS fallback path).
-    async fn chat2_maintenance(&self, handle: &Arc<ChatDocHandle>, turn_end: bool) {
+    ///
+    /// Returns when the pass wants to run again without a wake: the trailing
+    /// edge of a throttled tail, or a retry after a failed PUT or checkpoint.
+    /// `None` is the idle answer: nothing owed, no timer, zero wakeups.
+    async fn chat2_maintenance(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        turn_end: bool,
+    ) -> Option<tokio::time::Instant> {
         if handle.retired.load(Ordering::Relaxed) {
-            return;
+            return None;
         }
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
-            None => return,
+            None => return None,
         };
         let streaming = cadence_streaming(
             handle.writers.load(Ordering::Acquire),
-            lock(&handle.sync_cadence).session_streaming,
+            self.session_active(handle),
         );
         let now = tokio::time::Instant::now();
-        let stale =
-            streaming && checkpoint_stale(lock(&handle.sync_cadence).stream_since_checkpoint, now);
+        let (stale, checkpoint_retry_at) = {
+            let cadence = lock(&handle.sync_cadence);
+            (
+                streaming && checkpoint_stale(cadence.stream_since_checkpoint, now),
+                cadence.checkpoint_retry_at,
+            )
+        };
+        let mut next = None;
         if checkpoint_due(streaming, stats.row_count, stats.row_bytes, stale) {
-            self.spawn_chat2_checkpoint(handle, "threshold");
+            match checkpoint_retry_at.filter(|at| now < *at) {
+                Some(at) => next = Some(at),
+                None => {
+                    if !self.spawn_chat2_checkpoint(handle, "threshold")
+                        && self.inner.edge_disconnected.load(Ordering::Acquire)
+                    {
+                        // Nothing was attempted, so nothing will wake us when
+                        // the link returns: come back on the retry cadence.
+                        next = Some(now + CHECKPOINT_RETRY_MIN);
+                    }
+                    // Otherwise a checkpoint is in flight (its completion
+                    // wakes this task to re-evaluate) or there is no edge.
+                }
+            }
         }
         let tail_streaming = if streaming {
             true
@@ -3405,44 +3545,102 @@ impl DocHost {
                 .await
                 .unwrap_or(false)
         };
-        self.chat2_tail_maintenance(handle, tail_streaming && !turn_end)
+        let tail_next = self
+            .chat2_tail_maintenance(handle, tail_streaming && !turn_end, turn_end)
             .await;
+        earliest(next, tail_next)
     }
 
-    async fn chat2_tail_maintenance(&self, handle: &Arc<ChatDocHandle>, streaming: bool) {
-        let Some(edge) = self.inner.config.edge.clone() else {
-            return;
-        };
+    /// One tail sidecar pass. `streaming` throttles to [`TAIL_INTERVAL`];
+    /// `turn_end` (a local writer dropped or the session left `Working`) sends
+    /// at once. Whatever it cannot send now it reports back as a deadline:
+    /// the trailing edge of a throttled tail, or the next retry of a failed
+    /// PUT. Without that, a tail changed during the last throttle window of a
+    /// turn, or a turn that ended during an outage, would stay stale until
+    /// some later unrelated edit woke the chat.
+    async fn chat2_tail_maintenance(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        streaming: bool,
+        turn_end: bool,
+    ) -> Option<tokio::time::Instant> {
+        let edge = self.inner.config.edge.clone()?;
         let now = tokio::time::Instant::now();
-        if streaming
-            && lock(&handle.sync_cadence)
-                .tail_attempt
-                .is_some_and(|last| now.duration_since(last) < TAIL_INTERVAL)
-        {
-            return;
+        if !turn_end {
+            let cadence = lock(&handle.sync_cadence);
+            let floor = if streaming {
+                TAIL_INTERVAL
+            } else {
+                TAIL_IDLE_FLOOR
+            };
+            let until = [
+                cadence.tail_attempt.map(|last| last + floor),
+                cadence.tail_retry_at,
+            ]
+            .into_iter()
+            .flatten()
+            .max();
+            if let Some(until) = until.filter(|until| now < *until) {
+                drop(cadence);
+                lock(&handle.sync_cadence).tail_deferred = true;
+                // Gated. Whether anything is owed is settled when the
+                // deadline passes: an unchanged version ends it there.
+                return Some(until);
+            }
         }
         let doc = handle.doc.clone();
+        let (last_hash, last_version) = {
+            let cadence = lock(&handle.sync_cadence);
+            (cadence.tail_hash, cadence.tail_version.clone())
+        };
         let encoded = tokio::task::spawn_blocking(move || {
+            let version = (doc.doc().get_pending_txn_len() == 0).then(|| doc.doc().state_vv());
+            if version.is_some() && version == last_version {
+                return Some(None);
+            }
             let mut tail =
                 zeron_doc::materialize_tail_fast(&doc, 0, zeron_doc::TAIL_MESSAGE_COUNT).ok()?;
             // updatedAt is transport metadata, not a transcript change.
             let canonical = serde_json::to_vec(&tail).ok()?;
             let hash: [u8; 32] = Sha256::digest(&canonical).into();
+            if Some(hash) == last_hash {
+                return Some(Some((hash, None, version)));
+            }
             tail.updated_at = now_ms();
-            Some((hash, serde_json::to_vec(&tail).ok()?))
+            Some(Some((hash, Some(serde_json::to_vec(&tail).ok()?), version)))
         })
         .await
         .ok()
         .flatten();
-        let Some((hash, body)) = encoded else { return };
-        {
-            let cadence = lock(&handle.sync_cadence);
-            if cadence.tail_hash == Some(hash) {
-                return;
+        let fail = || {
+            let mut cadence = lock(&handle.sync_cadence);
+            cadence.tail_failures = cadence.tail_failures.saturating_add(1);
+            let at = tokio::time::Instant::now()
+                + backoff(cadence.tail_failures, TAIL_RETRY_MIN, TAIL_RETRY_MAX);
+            cadence.tail_retry_at = Some(at);
+            cadence.tail_deferred = true;
+            Some(at)
+        };
+        let (hash, body, version) = match encoded {
+            // Materialization failed: retry later rather than never.
+            None => return fail(),
+            // The version is the one already pushed: nothing is owed.
+            Some(None) => {
+                lock(&handle.sync_cadence).tail_deferred = false;
+                return None;
             }
-        }
+            Some(Some(sent)) => sent,
+        };
+        let Some(body) = body else {
+            // Same content as the last PUT (a version moved without moving
+            // the tail): remember the version so the next pass is free.
+            let mut cadence = lock(&handle.sync_cadence);
+            cadence.tail_version = version;
+            cadence.tail_deferred = false;
+            return None;
+        };
         let Ok(bearer) = edge.bearer().await else {
-            return;
+            return fail();
         };
         let url = format!(
             "{}/chat2/{}/tail",
@@ -3453,10 +3651,10 @@ impl DocHost {
             .http(zeron_sync::budget::Priority::Background)
             .await
         else {
-            return;
+            return fail();
         };
         lock(&handle.sync_cadence).tail_attempt = Some(tokio::time::Instant::now());
-        if self
+        let sent = self
             .inner
             .http
             .put(&url)
@@ -3466,10 +3664,17 @@ impl DocHost {
             .body(body)
             .send()
             .await
-            .is_ok_and(|response| response.status().is_success())
-        {
-            lock(&handle.sync_cadence).tail_hash = Some(hash);
+            .is_ok_and(|response| response.status().is_success());
+        if !sent {
+            return fail();
         }
+        let mut cadence = lock(&handle.sync_cadence);
+        cadence.tail_hash = Some(hash);
+        cadence.tail_version = version;
+        cadence.tail_failures = 0;
+        cadence.tail_retry_at = None;
+        cadence.tail_deferred = false;
+        None
     }
 
     /// POST a full checkpoint for a chat2 room (one in flight per handle).
@@ -3477,104 +3682,169 @@ impl DocHost {
     /// events (`ServerReset` — a wiped room needs a seed checkpoint or every
     /// fresh reader sees only post-reset rows; `PushRejected` — the rejected
     /// ops reach peers only through a checkpoint).
-    fn spawn_chat2_checkpoint(&self, handle: &Arc<ChatDocHandle>, reason: &'static str) {
+    ///
+    /// Returns whether a checkpoint was started. Either way of finishing
+    /// wakes the chat's maintenance task, so a pass that found one in flight
+    /// re-evaluates the thresholds when it lands; a failure records a backoff
+    /// that the threshold path honours.
+    fn spawn_chat2_checkpoint(&self, handle: &Arc<ChatDocHandle>, reason: &'static str) -> bool {
+        let Some(reset) = self.begin_chat2_checkpoint(handle) else {
+            return false;
+        };
+        let host = self.clone();
+        let handle = handle.clone();
+        self.spawn_worker(async move { host.run_chat2_checkpoint(handle, reason, reset).await });
+        true
+    }
+
+    /// Claim the one in-flight checkpoint slot, or `None` when the link is
+    /// down, the chat has no room client or edge, or one is already running.
+    fn begin_chat2_checkpoint(&self, handle: &Arc<ChatDocHandle>) -> Option<ResetFlag> {
         if self.inner.edge_disconnected.load(Ordering::Acquire) {
-            return;
+            return None;
         }
+        self.inner.config.edge.as_ref()?;
+        lock(&handle.chat2).as_ref()?;
+        handle
+            .checkpointing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(ResetFlag(handle.checkpointing.clone()))
+    }
+
+    async fn run_chat2_checkpoint(
+        &self,
+        handle: Arc<ChatDocHandle>,
+        reason: &'static str,
+        reset: ResetFlag,
+    ) {
+        let succeeded = self.post_chat2_checkpoint(&handle, reason).await;
+        // Release the slot before waking: the woken pass must not find it busy.
+        drop(reset);
+        {
+            let mut cadence = lock(&handle.sync_cadence);
+            if succeeded {
+                cadence.checkpoint_failures = 0;
+                cadence.checkpoint_retry_at = None;
+            } else {
+                cadence.checkpoint_failures = cadence.checkpoint_failures.saturating_add(1);
+                cadence.checkpoint_retry_at = Some(
+                    tokio::time::Instant::now()
+                        + backoff(
+                            cadence.checkpoint_failures,
+                            CHECKPOINT_RETRY_MIN,
+                            CHECKPOINT_RETRY_MAX,
+                        ),
+                );
+            }
+        }
+        handle.writer_wake.notify_one();
+    }
+
+    async fn post_chat2_checkpoint(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        reason: &'static str,
+    ) -> bool {
         use base64::Engine as _;
         let Some(edge) = self.inner.config.edge.clone() else {
-            return;
+            return false;
         };
         let stats = match &*lock(&handle.chat2) {
             Some(client) => client.stats(),
-            None => return,
+            None => return false,
         };
         let chat_id = handle.chat_id.clone();
-        if handle
-            .checkpointing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        let in_flight = handle.checkpointing.clone();
         let publication_store = self.inner.store.clone();
         let snapshot_doc = handle.doc.clone();
         let seq_covered = stats.cursor;
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
-        let reset = ResetFlag(in_flight);
-        self.spawn_worker(async move {
-            let _reset = reset;
-            let store = publication_store.clone();
-            let chat = chat_id.clone();
-            let prepared = tokio::task::spawn_blocking(move || {
-                let rejected = store.rejected_chat_updates(&chat).unwrap_or_default();
-                let snapshot = snapshot_doc.export_snapshot().ok()?;
-                let frontier = loro::LoroDoc::decode_import_blob_meta(&snapshot, true).ok()?.partial_end_vv.encode();
-                let vv = loro::VersionVector::decode(&frontier).ok()?;
-                let covered_rejections: Vec<String> = rejected.into_iter().filter_map(|(id, bytes)| {
-                    loro::LoroDoc::decode_import_blob_meta(&bytes, true).ok()
-                        .filter(|m| vv.includes_vv(&m.partial_end_vv)).map(|_| id)
-                }).collect();
-                Some((snapshot, frontier, covered_rejections))
-            }).await;
-            let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
-                return;
-            };
+        let store = publication_store.clone();
+        let chat = chat_id.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            let rejected = store.rejected_chat_updates(&chat).unwrap_or_default();
+            let snapshot = snapshot_doc.export_snapshot().ok()?;
+            let frontier = loro::LoroDoc::decode_import_blob_meta(&snapshot, true)
+                .ok()?
+                .partial_end_vv
+                .encode();
+            let vv = loro::VersionVector::decode(&frontier).ok()?;
+            let covered_rejections: Vec<String> = rejected
+                .into_iter()
+                .filter_map(|(id, bytes)| {
+                    loro::LoroDoc::decode_import_blob_meta(&bytes, true)
+                        .ok()
+                        .filter(|m| vv.includes_vv(&m.partial_end_vv))
+                        .map(|_| id)
+                })
+                .collect();
+            Some((snapshot, frontier, covered_rejections))
+        })
+        .await;
+        let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
+            return false;
+        };
 
-            let Ok(bearer) = edge.bearer().await else {
-                return;
-            };
-            let url = format!(
-                "{}/chat2/{}/checkpoint?seqCovered={}",
-                edge.url.trim_end_matches('/'),
-                chat_id,
-                seq_covered
-            );
-            let Ok(_permit) = zeron_sync::budget::shared().http(zeron_sync::budget::Priority::Background).await else {
-                return;
-            };
-            let size = snapshot.len() as u64;
-            match http
-                .post(&url)
-                .timeout(std::time::Duration::from_secs(300))
-                .bearer_auth(&bearer)
-                .header(
-                    "x-chat2-frontier",
-                    base64::engine::general_purpose::STANDARD.encode(&frontier),
-                )
-                .body(snapshot)
-                .send()
-                .await
-            {
-                Ok(res) if res.status().is_success() => {
-                    tracing::info!(chat = %chat_id, seq_covered, reason, "chat2 checkpoint posted");
-                    for batch_id in &covered_rejections {
-                        if let Err(err) = publication_store.acknowledge_chat_update(&chat_id,batch_id) {
-                            tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
-                        }
+        let Ok(bearer) = edge.bearer().await else {
+            return false;
+        };
+        let url = format!(
+            "{}/chat2/{}/checkpoint?seqCovered={}",
+            edge.url.trim_end_matches('/'),
+            chat_id,
+            seq_covered
+        );
+        let Ok(_permit) = zeron_sync::budget::shared()
+            .http(zeron_sync::budget::Priority::Background)
+            .await
+        else {
+            return false;
+        };
+        let size = snapshot.len() as u64;
+        match http
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(300))
+            .bearer_auth(&bearer)
+            .header(
+                "x-chat2-frontier",
+                base64::engine::general_purpose::STANDARD.encode(&frontier),
+            )
+            .body(snapshot)
+            .send()
+            .await
+        {
+            Ok(res) if res.status().is_success() => {
+                tracing::info!(chat = %chat_id, seq_covered, reason, "chat2 checkpoint posted");
+                for batch_id in &covered_rejections {
+                    if let Err(err) = publication_store.acknowledge_chat_update(&chat_id, batch_id)
+                    {
+                        tracing::warn!(%err, "chat2: checkpoint obligation retirement failed; will retry");
                     }
+                }
 
-                    if let Some(handle) = weak_note.upgrade() {
-                        if handle.writers.load(Ordering::Acquire) > 0 {
-                            lock(&handle.sync_cadence).stream_since_checkpoint = Some(tokio::time::Instant::now());
-                        }
-                        if let Some(client) = &*lock(&handle.chat2) {
-                            client.note_checkpoint(seq_covered, size);
-                        }
+                if let Some(handle) = weak_note.upgrade() {
+                    if handle.writers.load(Ordering::Acquire) > 0 {
+                        lock(&handle.sync_cadence).stream_since_checkpoint =
+                            Some(tokio::time::Instant::now());
+                    }
+                    if let Some(client) = &*lock(&handle.chat2) {
+                        client.note_checkpoint(seq_covered, size);
                     }
                 }
-                Ok(res) => {
-                    tracing::warn!(chat = %chat_id, status = res.status().as_u16(),
-                        "chat2 checkpoint rejected");
-                }
-                Err(err) => {
-                    let err = describe_http_error(err);
-                    tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
-                }
+                true
             }
-        });
+            Ok(res) => {
+                tracing::warn!(chat = %chat_id, status = res.status().as_u16(),
+                    "chat2 checkpoint rejected");
+                false
+            }
+            Err(err) => {
+                let err = describe_http_error(err);
+                tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
+                false
+            }
+        }
     }
 
     /// LRU eviction: while the warm set exceeds [`WARM_DOC_CAP`] or the
@@ -7299,20 +7569,25 @@ async fn sync_maintenance_task(host: DocHost, weak: Weak<ChatDocHandle>) {
     };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The pass's own request to run again (throttle trailing edge, failure
+    // retry). Idle chats have none, so they hold no timer and never wake.
+    let mut deadline: Option<tokio::time::Instant> = None;
     loop {
         let streaming = weak.upgrade().is_some_and(|handle| {
             cadence_streaming(
                 handle.writers.load(Ordering::Acquire),
-                lock(&handle.sync_cadence).session_streaming,
+                host.session_active(&handle),
             )
         });
         tokio::select! {
             _ = wake.notified() => {},
             _ = tick.tick(), if streaming => {},
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if deadline.is_some() => {},
         }
         let Some(handle) = weak.upgrade() else { break };
         let turn_end = handle.turn_end_pending.swap(false, Ordering::AcqRel);
-        host.chat2_maintenance(&handle, turn_end).await;
+        deadline = host.chat2_maintenance(&handle, turn_end).await;
     }
 }
 
@@ -7390,21 +7665,64 @@ mod publication_eviction_tests {
     }
 
     #[tokio::test]
-    async fn chat2_remote_status_completion_wakes_maintenance() {
+    async fn chat2_remote_segment_completion_wakes_but_is_not_a_turn_end() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(DocsStore::open(dir.path()).unwrap());
         let host = outbox_host(&store);
         let handle = host.open_local("status-wake").unwrap();
         host.shutdown_workers().await;
+        let drained = |handle: &Arc<ChatDocHandle>| {
+            let wake = handle.writer_wake.clone();
+            async move {
+                tokio::time::timeout(Duration::from_millis(100), wake.notified())
+                    .await
+                    .is_ok()
+            }
+        };
+        let _ = drained(&handle).await;
         let writer = zeron_doc::SegmentWriter::begin(handle.doc(), "a", "remote", 1).unwrap();
-        assert!(!handle.turn_end_pending.load(Ordering::Acquire));
         writer.finish(&[], MessageStatus::Complete).unwrap();
-        assert!(handle.turn_end_pending.load(Ordering::Acquire));
-        handle.turn_end_pending.store(false, Ordering::Release);
+        assert!(
+            drained(&handle).await,
+            "a finished remote segment wakes the pass"
+        );
+        assert!(
+            !handle.turn_end_pending.load(Ordering::Acquire),
+            "one segment of a multi-segment remote turn is not a turn end"
+        );
         let _active = handle.writer();
+        let _ = drained(&handle).await;
         let segment = zeron_doc::SegmentWriter::begin(handle.doc(), "b", "host", 2).unwrap();
         segment.finish(&[], MessageStatus::Complete).unwrap();
-        assert!(!handle.turn_end_pending.load(Ordering::Acquire));
+        assert!(!drained(&handle).await, "a local writer owns its own wakes");
+    }
+
+    #[test]
+    fn chat2_only_working_streams() {
+        use zeron_proto::SessionStatus as S;
+        assert!(session_streams(S::Working));
+        assert!(
+            !session_streams(S::AwaitingInput),
+            "a pending question writes nothing"
+        );
+        assert!(!session_streams(S::Idle));
+        assert!(!session_streams(S::Errored));
+    }
+
+    #[test]
+    fn chat2_retry_backoff_doubles_to_its_cap() {
+        let steps: Vec<u64> = (1..=8)
+            .map(|n| backoff(n, TAIL_RETRY_MIN, TAIL_RETRY_MAX).as_secs())
+            .collect();
+        assert_eq!(steps, [5, 10, 20, 40, 80, 120, 120, 120]);
+        assert_eq!(
+            backoff(u32::MAX, TAIL_RETRY_MIN, TAIL_RETRY_MAX),
+            TAIL_RETRY_MAX
+        );
+        assert_eq!(
+            backoff(0, CHECKPOINT_RETRY_MIN, CHECKPOINT_RETRY_MAX),
+            CHECKPOINT_RETRY_MIN
+        );
     }
 
     #[tokio::test]
@@ -7492,14 +7810,21 @@ mod publication_eviction_tests {
         assert_eq!((new_puts, old_checkpoints, new_checkpoints), (121, 24, 3));
     }
 
-    #[tokio::test]
-    async fn chat2_tail_cadence_uses_fake_edge() {
+    /// A loopback edge that counts tail PUTs. While `healthy` is false it
+    /// answers 503, so a turn can end "during an outage".
+    async fn tail_edge() -> (
+        String,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _guard = SYNC_TEST_LOCK.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let puts = Arc::new(AtomicUsize::new(0));
-        let received = puts.clone();
+        let (accepted, attempts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let (received, tried, up) = (accepted.clone(), attempts.clone(), healthy.clone());
         let server = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -7520,12 +7845,12 @@ mod publication_eviction_tests {
                             .parse()
                             .unwrap();
                         if request.len() >= end + 4 + len {
-                            if headers.starts_with("put /chat2/")
-                                && headers
-                                    .lines()
-                                    .next()
-                                    .is_some_and(|line| line.contains("/tail "))
-                            {
+                            let is_tail = headers.starts_with("put /chat2/")
+                                && headers.lines().next().is_some_and(|l| l.contains("/tail "));
+                            if is_tail {
+                                tried.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if is_tail && up.load(Ordering::SeqCst) {
                                 received.fetch_add(1, Ordering::SeqCst);
                                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
                             } else {
@@ -7537,33 +7862,194 @@ mod publication_eviction_tests {
                 }
             }
         });
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
-        let host = DocHost::new(
-            store,
+        (url, accepted, attempts, healthy, server)
+    }
+
+    fn edge_host(url: &str, dir: &Path) -> DocHost {
+        DocHost::new(
+            Arc::new(DocsStore::open(dir).unwrap()),
             DocHostConfig {
                 device_id: "host".into(),
                 default_harness: HarnessId::Mock,
-                edge: Some(EdgeConfig::with_static_token(&url, "test")),
+                edge: Some(EdgeConfig::with_static_token(url, "test")),
             },
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn chat2_tail_cadence_uses_fake_edge() {
+        let _guard = SYNC_TEST_LOCK.lock().await;
+        let (url, puts, _, _, server) = tail_edge().await;
+        let dir = tempfile::tempdir().unwrap();
+        let host = edge_host(&url, dir.path());
         let handle = host.open_local("tail-cadence").unwrap();
         host.shutdown_workers().await;
         handle.write_user_message("one", "first", 1).unwrap();
-        host.chat2_tail_maintenance(&handle, true).await;
+        assert!(
+            host.chat2_tail_maintenance(&handle, true, false)
+                .await
+                .is_none()
+        );
         assert_eq!(puts.load(Ordering::SeqCst), 1);
         handle.write_user_message("two", "second", 2).unwrap();
-        host.chat2_tail_maintenance(&handle, true).await;
-        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        let trailing = host.chat2_tail_maintenance(&handle, true, false).await;
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            1,
+            "throttled inside the 5 s window"
+        );
+        assert!(
+            trailing.is_some(),
+            "a throttled change must report its trailing edge"
+        );
         lock(&handle.sync_cadence).tail_attempt = Some(tokio::time::Instant::now() - TAIL_INTERVAL);
-        host.chat2_tail_maintenance(&handle, true).await;
-        host.chat2_tail_maintenance(&handle, false).await;
-        assert_eq!(puts.load(Ordering::SeqCst), 2, "unchanged turn end");
+        assert!(
+            host.chat2_tail_maintenance(&handle, true, false)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            2,
+            "the trailing pass sends the change"
+        );
+        assert!(
+            host.chat2_tail_maintenance(&handle, false, true)
+                .await
+                .is_none(),
+            "an unchanged turn end sends nothing"
+        );
+        assert_eq!(puts.load(Ordering::SeqCst), 2);
         handle.write_user_message("three", "final", 3).unwrap();
-        host.chat2_tail_maintenance(&handle, false).await;
-        host.chat2_tail_maintenance(&handle, false).await;
-        assert_eq!(puts.load(Ordering::SeqCst), 3, "one changed turn-end PUT");
+        host.chat2_tail_maintenance(&handle, false, true).await;
+        host.chat2_tail_maintenance(&handle, false, true).await;
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            3,
+            "one changed turn-end PUT, immediately"
+        );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat2_turn_end_during_an_outage_is_pushed_once_the_edge_returns() {
+        let _guard = SYNC_TEST_LOCK.lock().await;
+        let (url, puts, attempts, healthy, server) = tail_edge().await;
+        let dir = tempfile::tempdir().unwrap();
+        let host = edge_host(&url, dir.path());
+        let handle = host.open_local("tail-outage").unwrap();
+        host.shutdown_workers().await;
+        handle.write_user_message("one", "final answer", 1).unwrap();
+        healthy.store(false, Ordering::SeqCst);
+        let retry = host.chat2_tail_maintenance(&handle, false, true).await;
+        let retry = retry.expect("a failed turn-end PUT must schedule a retry");
+        assert_eq!(
+            (attempts.load(Ordering::SeqCst), puts.load(Ordering::SeqCst)),
+            (1, 0)
+        );
+        assert!(lock(&handle.sync_cadence).tail_deferred);
+        // Wakes inside the backoff window reach the edge zero more times.
+        for _ in 0..5 {
+            assert_eq!(
+                host.chat2_tail_maintenance(&handle, false, false).await,
+                Some(retry)
+            );
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "no storm while backing off"
+        );
+        // The retry fires with the edge still down: the backoff grows.
+        lock(&handle.sync_cadence).tail_retry_at = Some(tokio::time::Instant::now());
+        lock(&handle.sync_cadence).tail_attempt = None;
+        let again = host
+            .chat2_tail_maintenance(&handle, false, false)
+            .await
+            .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(again > retry, "the second backoff is longer than the first");
+        // Connectivity returns; the retry deadline passes.
+        healthy.store(true, Ordering::SeqCst);
+        lock(&handle.sync_cadence).tail_retry_at = Some(tokio::time::Instant::now());
+        lock(&handle.sync_cadence).tail_attempt = None;
+        assert!(
+            host.chat2_tail_maintenance(&handle, false, false)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            1,
+            "the final tail lands after the outage"
+        );
+        assert!(!lock(&handle.sync_cadence).tail_deferred);
+        assert_eq!(lock(&handle.sync_cadence).tail_failures, 0);
+        // Nothing more is owed, and nothing wakes for it.
+        assert!(
+            host.chat2_tail_maintenance(&handle, false, true)
+                .await
+                .is_none()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat2_idle_floor_reports_its_deadline() {
+        // The idle floor reports its deadline (the task test below proves the task
+        // honours it); nothing else would wake an idle chat for the trailing edge.
+        let _guard = SYNC_TEST_LOCK.lock().await;
+        let (url, puts, _, _, server) = tail_edge().await;
+        let dir = tempfile::tempdir().unwrap();
+        let host = edge_host(&url, dir.path());
+        let handle = host.open_local("tail-task").unwrap();
+        host.shutdown_workers().await;
+        let mut cadence = lock(&handle.sync_cadence);
+        cadence.tail_attempt = Some(tokio::time::Instant::now());
+        drop(cadence);
+        handle.write_user_message("one", "x", 1).unwrap();
+        let deadline = host.chat2_tail_maintenance(&handle, false, false).await;
+        assert_eq!(puts.load(Ordering::SeqCst), 0);
+        let deadline = deadline.expect("idle-floor throttle reports its deadline");
+        assert!(deadline <= tokio::time::Instant::now() + TAIL_IDLE_FLOOR);
+        tokio::time::sleep_until(deadline).await;
+        assert!(
+            host.chat2_tail_maintenance(&handle, false, false)
+                .await
+                .is_none()
+        );
+        assert_eq!(puts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn chat2_checkpoint_completion_frees_the_slot_then_wakes_and_failure_backs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("ckpt-slot").unwrap();
+        host.shutdown_workers().await;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(20), handle.writer_wake.notified()).await;
+        // A pass that finds the slot busy defers to the completion wake.
+        handle.checkpointing.store(true, Ordering::Release);
+        let reset = ResetFlag(handle.checkpointing.clone());
+        // No room client: the checkpoint cannot be posted, i.e. it fails.
+        host.run_chat2_checkpoint(handle.clone(), "test", reset)
+            .await;
+        assert!(!handle.checkpointing.load(Ordering::Acquire), "slot freed");
+        tokio::time::timeout(Duration::from_millis(100), handle.writer_wake.notified())
+            .await
+            .expect("completion wakes the maintenance task");
+        let cadence = lock(&handle.sync_cadence);
+        assert_eq!(cadence.checkpoint_failures, 1);
+        assert!(
+            cadence
+                .checkpoint_retry_at
+                .is_some_and(|at| at > tokio::time::Instant::now()),
+            "a failed checkpoint backs off rather than retrying on the next wake"
+        );
     }
 
     #[tokio::test]
