@@ -349,15 +349,6 @@ struct FileSearchParams {
     path: Option<String>,
 }
 
-/// `requested`'s canonical form when it names the same folder as `folder`.
-fn same_folder(
-    folder: &std::path::Path,
-    requested: &std::path::Path,
-) -> Option<std::path::PathBuf> {
-    let requested = std::fs::canonicalize(requested).ok()?;
-    (std::fs::canonicalize(folder).ok()? == requested).then_some(requested)
-}
-
 fn tool_file_path(call: &ToolCall) -> Option<&str> {
     match call {
         ToolCall::ReadFile { path }
@@ -1396,11 +1387,10 @@ impl EngineRpc {
                 .filter(|space| space.device_id == local_device)
             {
                 let space_path = std::path::Path::new(&space.path);
-                // A plain folder has no linked worktrees: only the folder
-                // itself can match, and `git worktree list` there walks every
-                // parent directory looking for a repository first.
+                // `git worktree list` in a plain folder walks every parent
+                // directory looking for a repository first.
                 if !space.git_detected {
-                    if let Some(folder) = same_folder(space_path, &requested) {
+                    if let Some(folder) = self.repos.same_folder(space_path, &requested).await {
                         return Ok(folder);
                     }
                     continue;

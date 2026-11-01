@@ -1334,6 +1334,20 @@ impl Repos {
         .flatten()
     }
 
+    /// [`Self::workspace_checkout`] for a folder that is not a repository: it
+    /// has no linked worktrees, so only the folder itself matches, and no git
+    /// runs. Resolved on a disposable thread for the same dead-mount reason.
+    pub(crate) async fn same_folder(&self, folder: &Path, candidate: &Path) -> Option<PathBuf> {
+        let folder = folder.to_path_buf();
+        let candidate = candidate.to_path_buf();
+        disposable_worker("folder-auth", move || {
+            let candidate = std::fs::canonicalize(candidate).ok()?;
+            (std::fs::canonicalize(folder).ok()? == candidate).then_some(candidate)
+        })
+        .await
+        .flatten()
+    }
+
     /// Switch the checkout at `cwd` (a main folder OR a linked worktree) to
     /// `ref_name` — the t3code `switchRef` port: an existing local branch is
     /// checked out directly; a remote-only branch gets a local tracking
