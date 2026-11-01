@@ -597,18 +597,26 @@ impl SessionDoc {
             .collect())
     }
 
-    /// Read only message metadata to detect a remote streaming turn.
+    /// Whether an assistant entry among the last [`TAIL_MESSAGE_COUNT`] raw
+    /// entries is still `streaming`. Reads only each entry's scalar fields, and
+    /// only a bounded suffix: a live turn is always at the tail, and a stale
+    /// `streaming` row deep in a whale's history must neither cost a full scan
+    /// on every wake nor throttle the sidecar forever.
     pub fn has_streaming_assistant(&self) -> bool {
         use loro::{Container, ValueOrContainer};
         let messages = self.doc.get_list("messages");
-        (0..messages.len()).any(|index| {
-            let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index) else {
-                return false;
-            };
-            let entry = map.get_value().to_json_value();
-            entry.get("role").and_then(|v| v.as_str()) == Some("assistant")
-                && entry.get("status").and_then(|v| v.as_str()) == Some("streaming")
-        })
+        let len = messages.len();
+        (len.saturating_sub(TAIL_MESSAGE_COUNT)..len)
+            .rev()
+            .any(|index| {
+                let Some(ValueOrContainer::Container(Container::Map(map))) = messages.get(index)
+                else {
+                    return false;
+                };
+                let entry = map.get_value().to_json_value();
+                entry.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                    && entry.get("status").and_then(|v| v.as_str()) == Some("streaming")
+            })
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -2836,6 +2844,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fast_tail_matches_oracle_on_irregular_continuations() {
+        // Orphans, duplicate roots, continuations of continuations, a
+        // continuation before its root, and entries the strict decoder rejects.
+        let build = |shape: &[(&str, Option<&str>)], raw: &[usize]| {
+            let doc = SessionDoc::init("irregular").unwrap();
+            for (i, (id, cont)) in shape.iter().enumerate() {
+                let mut entry = user_entry(id, &format!("t{i}"));
+                entry.continuation_of = cont.map(str::to_owned);
+                entry.duration_ms = Some(i as i64);
+                doc.push_message(&entry).unwrap();
+            }
+            for &at in raw {
+                let map = doc.doc.get_list("messages").get(at).unwrap();
+                let loro::ValueOrContainer::Container(loro::Container::Map(map)) = map else {
+                    panic!("not a map")
+                };
+                map.delete("deviceId").unwrap();
+                map.delete("continuationOf").ok();
+            }
+            doc.doc.commit();
+            doc
+        };
+        let shapes: &[&[(&str, Option<&str>)]] = &[
+            &[
+                ("a", None),
+                ("b", Some("a")),
+                ("c", Some("b")),
+                ("d", Some("a")),
+            ],
+            &[
+                ("x", Some("r")),
+                ("r", None),
+                ("y", Some("r")),
+                ("z", Some("nope")),
+            ],
+            &[
+                ("a", None),
+                ("a", None),
+                ("b", Some("a")),
+                ("c", None),
+                ("d", Some("a")),
+            ],
+            &[
+                ("a", None),
+                ("b", None),
+                ("c", Some("a")),
+                ("d", Some("b")),
+                ("e", Some("a")),
+            ],
+        ];
+        for (n, shape) in shapes.iter().enumerate() {
+            for raw in [&[][..], &[1][..], &[0, 2][..]] {
+                if raw.iter().any(|&at| at >= shape.len()) {
+                    continue;
+                }
+                let doc = build(shape, raw);
+                for count in [0, 1, 2, 3, 64] {
+                    assert_eq!(
+                        materialize_tail_fast(&doc, 7, count).unwrap(),
+                        materialize_tail(&doc, 7, count).unwrap(),
+                        "shape {n}, salvaged {raw:?}, count {count}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_scan_is_bounded_to_the_tail() {
+        let doc = SessionDoc::init("scan").unwrap();
+        let mut stale = user_entry("old", "x");
+        stale.role = MessageRole::Assistant;
+        stale.status = Some(MessageStatus::Streaming);
+        doc.push_message(&stale).unwrap();
+        assert!(doc.has_streaming_assistant());
+        for i in 0..TAIL_MESSAGE_COUNT {
+            doc.push_message(&user_entry(&format!("m{i}"), "y"))
+                .unwrap();
+        }
+        assert!(
+            !doc.has_streaming_assistant(),
+            "a stale streaming row beyond the tail must not throttle the sidecar"
+        );
+        let mut live = user_entry("live", "z");
+        live.role = MessageRole::Assistant;
+        live.status = Some(MessageStatus::Streaming);
+        doc.push_message(&live).unwrap();
+        assert!(doc.has_streaming_assistant());
     }
 
     /// 2026-08-10 incident: entries/parts missing strict fields must salvage
