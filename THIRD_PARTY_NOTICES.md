@@ -439,3 +439,40 @@ as `Voice/WebRTC-LICENSE.txt`. The binary also contains WebRTC's own bundled
 third-party components (such as BoringSSL, libsrtp, Opus, libyuv and Abseil)
 under their respective licenses; see the WebRTC source tree's `third_party/`
 for each license.
+
+## CLIProxyAPI
+
+The quota and credential classification rules in
+`crates/account-proxy/src/provider.rs` (Claude unified-window rejections with
+the overage-only exclusion, Codex `usage_limit_reached` with `resets_at` /
+`resets_in_seconds`, Codex lifecycle events) and the bounded pre-content hold
+of event streams in `crates/account-proxy/src/forward.rs` (48 events / 1 MiB)
+follow the logic of
+[CLIProxyAPI at `250d598`](https://github.com/router-for-me/CLIProxyAPI/tree/250d598175db61a4e99ac38b9164ed04745754e5),
+`internal/runtime/executor/helps/claude_ratelimit.go`,
+`internal/runtime/executor/codex_executor_terminal.go` and
+`internal/runtime/executor/codex_executor_stream.go`. The proxy itself is
+independently written Zeron code.
+
+MIT License
+
+Copyright (c) 2025-2005.9 Luis Pater
+Copyright (c) 2025.9-present Router-For.ME
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

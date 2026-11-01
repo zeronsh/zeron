@@ -478,6 +478,27 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
+    /// The chats with a turn in flight ([`Self::turn_in_flight`]), read
+    /// through a weak handle: the account service holding it never keeps a
+    /// retired engine alive (an empty set once it is gone).
+    pub fn running_chats_probe(
+        &self,
+    ) -> impl Fn() -> std::collections::HashSet<String> + Send + Sync + 'static {
+        let inner = Arc::downgrade(&self.inner);
+        move || {
+            inner
+                .upgrade()
+                .map(|inner| {
+                    lock(&inner.statuses)
+                        .iter()
+                        .filter(|(_, session)| is_active(session))
+                        .map(|(chat_id, _)| chat_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
     /// Whether the chat's live runtime reports background work (subagents,
     /// background shells) still running — parked or not.
     pub fn holds_background_work(&self, chat_id: &str) -> bool {
@@ -961,7 +982,11 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let credential = self
+            .inner
+            .registry
+            .run_credential(harness_id, Some(chat_id))
+            .await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1186,7 +1211,12 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        match self
+            .inner
+            .registry
+            .run_credential(harness_id, Some(chat_id))
+            .await
+        {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -3686,7 +3716,7 @@ async fn drive_run(
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
+                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
                     .await
                 {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
@@ -5187,6 +5217,30 @@ mod tests {
     }
 
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[tokio::test]
+    async fn the_running_chats_probe_sees_turns_in_flight_and_never_holds_the_engine() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let probe = sessions.running_chats_probe();
+        sessions
+            .inner
+            .set_status("working", SessionStatus::Working, true);
+        sessions
+            .inner
+            .set_status("asking", SessionStatus::AwaitingInput, true);
+        sessions.inner.set_status("idle", SessionStatus::Idle, true);
+        let mut running: Vec<String> = probe().into_iter().collect();
+        running.sort();
+        assert_eq!(running, ["asking", "working"]);
+        drop(sessions);
+        assert!(probe().is_empty());
+    }
 
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {

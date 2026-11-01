@@ -76,7 +76,10 @@ impl AgentAccounts {
 
     /// Single-flight per slot, like Claude's: a second concurrent refresh of
     /// a single-use refresh token would revoke it. `Ok(None)` = in flight.
-    async fn refresh_grok_slot(&self, slot: &Slot) -> Result<Option<String>, ProbeError> {
+    pub(super) async fn refresh_grok_slot(
+        &self,
+        slot: &Slot,
+    ) -> Result<Option<String>, ProbeError> {
         if !lock(&self.inner.inflight_refreshes).insert(slot.id.clone()) {
             return Ok(None);
         }

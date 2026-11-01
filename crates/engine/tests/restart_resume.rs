@@ -586,10 +586,15 @@ struct SwitchableCredential(Arc<Mutex<String>>);
 
 #[async_trait]
 impl zeron_engine::registry::RunEnvironment for SwitchableCredential {
-    async fn prepare(&self, _harness: HarnessId, _request: &mut RunRequest) -> Result<(), String> {
+    async fn prepare(
+        &self,
+        _harness: HarnessId,
+        _chat_id: Option<&str>,
+        _request: &mut RunRequest,
+    ) -> Result<(), String> {
         Ok(())
     }
-    async fn credential(&self, _harness: HarnessId) -> Option<String> {
+    async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         Some(self.0.lock().unwrap().clone())
     }
 }

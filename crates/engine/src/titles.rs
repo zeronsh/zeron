@@ -220,7 +220,7 @@ impl TitleGenerator {
             // without one there is no title to generate.
             self.inner
                 .registry
-                .prepare_run(harness_id, &mut request)
+                .prepare_run(harness_id, None, &mut request)
                 .await
                 .ok()?;
             match tokio::time::timeout(

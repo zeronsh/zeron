@@ -30,6 +30,7 @@ members = [
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
+    "crates/account-proxy",
     "apps/zeron",
 ]
 
@@ -67,6 +68,7 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-account-proxy = { path = "crates/account-proxy" }
 
 # CRDT
 loro = "1.17"

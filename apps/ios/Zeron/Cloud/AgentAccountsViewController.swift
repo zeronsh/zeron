@@ -26,6 +26,8 @@ final class AgentAccountsViewController: UITableViewController {
         let isKey: Bool
         /// Cloud's vault provider (`claude`, `anthropic-key`, …).
         let cloudProvider: String?
+        /// While its agent's chats take turns: "Next", "2 chats", …
+        var marks: String? = nil
     }
 
     /// The card's rows, in order: the accounts (or why there are none),
@@ -43,6 +45,8 @@ final class AgentAccountsViewController: UITableViewController {
     private var deviceAccounts: [DeviceAccountInfo]?
     private var loadError: String?
     private var busy: String?
+    /// The rotation switch is being flipped.
+    private var rotating = false
     private var signIn: SignInState?
     private let cloudSignIn = ProviderSignIn()
     private let deviceSignIn = DeviceSignIn()
@@ -172,12 +176,98 @@ final class AgentAccountsViewController: UITableViewController {
             return logins + keys
         case .device:
             return (deviceAccounts ?? []).filter { $0.harness == harness }.map { a in
+                // A rotation skip says why the account sits out; it beats the usage reason.
                 Account(id: a.id, title: a.email ?? a.displayName ?? (a.apiKey ? "API key" : "Account"),
                         detail: [a.planLabel, a.organization, a.provider.flatMap(optionLabel)].compactMap { $0 }.joined(separator: " · ").nonEmpty,
-                        usage: rules.reportsUsage ? a.usage : [], usageNote: a.usageError,
-                        active: a.active, switchable: a.switchable && rules.switches, isKey: a.apiKey, cloudProvider: nil)
+                        usage: rules.reportsUsage ? a.usage : [],
+                        usageNote: Self.rotationSkipNote(a) ?? a.usageError,
+                        active: a.active, switchable: a.switchable && rules.switches, isKey: a.apiKey, cloudProvider: nil,
+                        marks: Self.rotationMarks(a))
             }
         }
+    }
+
+    /// A rotating agent's marks for one account ("Next · 2 chats running");
+    /// a skip shows as the row's note instead.
+    private static func rotationMarks(_ a: DeviceAccountInfo) -> String? {
+        guard a.rotationActive else { return nil }
+        // A skip shows as the row's note instead — unless every account is
+        // at its limit and the computer still starts the next chat here.
+        let state: String? = switch (a.rotationNext, a.rotationSkipped != nil) {
+        case (true, true): "Next — all at limit"
+        case (false, true): nil
+        case (true, false): "Next"
+        case (false, false): a.inRotation ? nil : "Not in rotation"
+        }
+        let chats: String? = switch a.liveChats {
+        case 0: nil
+        case 1: "1 chat running"
+        default: "\(a.liveChats) chats running"
+        }
+        return [state, chats].compactMap { $0 }.joined(separator: " · ").nonEmpty
+    }
+
+    /// "Skipped — usage limit until 3:40 PM", "Skipped — signed out"; none
+    /// while rotation isn't in effect or the account is still next.
+    private static func rotationSkipNote(_ a: DeviceAccountInfo) -> String? {
+        guard let reason = a.rotationSkipped, a.rotationActive, !a.rotationNext else { return nil }
+        let what = reason.prefix(1).lowercased() + reason.dropFirst()
+        guard let ms = a.rotationSkippedUntilMs else { return "Skipped — \(what)" }
+        return "Skipped — \(what) until \(formatUntil(Date(timeIntervalSince1970: TimeInterval(ms) / 1000)))"
+    }
+
+    /// When a skipped account is back: its time today ("3:40 PM"),
+    /// "tomorrow at 3:40 PM", or the date ("Nov 3").
+    private static func formatUntil(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let time = date.formatted(date: .omitted, time: .shortened)
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: .now), to: calendar.startOfDay(for: date)).day ?? 0
+        switch days {
+        case ...0: return time
+        case 1: return "tomorrow at \(time)"
+        default: return date.formatted(.dateTime.month(.abbreviated).day())
+        }
+    }
+
+    /// This agent's logins on the computer (rotation rides on every row).
+    private var ownDeviceAccounts: [DeviceAccountInfo] {
+        guard case .device = target else { return [] }
+        return (deviceAccounts ?? []).filter { $0.harness == harness }
+    }
+
+    private var rotationOn: Bool { ownDeviceAccounts.contains { $0.rotationEnabled } }
+    private var rotationActive: Bool { ownDeviceAccounts.contains { $0.rotationActive } }
+
+    /// Already on, it can always go off; otherwise it needs support and two
+    /// accounts.
+    private var rotationFlippable: Bool {
+        let mine = ownDeviceAccounts
+        return rotationOn || (mine.contains { $0.rotationSupported } && usableCount >= 2)
+    }
+
+    /// Why it can't be turned on, or why an enabled rotation isn't in effect
+    /// yet — the computer's reason first — else the description.
+    private var rotationCaption: String {
+        guard !rotationFlippable || (rotationOn && !rotationActive) else {
+            return "New chats take turns across your saved accounts, and a chat that hits a limit moves to the next account."
+        }
+        if let note = ownDeviceAccounts.lazy.compactMap(\.rotationNote).first { return note }
+        return ownDeviceAccounts.contains { $0.rotationSupported }
+            ? "Add a second account to take turns."
+            : "This agent can't run chats on separate accounts yet."
+    }
+
+    /// Logins that could take a turn: API keys never do.
+    private var usableCount: Int { ownDeviceAccounts.filter { $0.switchable && !$0.apiKey }.count }
+
+    /// Driven by what the computer reports (an older engine, or an agent it
+    /// doesn't list, shows nothing): a supported (or already on) agent with
+    /// an account, or any agent with two (disabled, saying why).
+    private var showsRotation: Bool {
+        let mine = ownDeviceAccounts
+        guard mine.contains(where: { $0.rotationReported }) else { return false }
+        if mine.contains(where: { $0.rotationSupported }) || rotationOn { return !mine.isEmpty }
+        return usableCount >= 2
     }
 
     private func optionLabel(_ provider: String) -> String? {
@@ -222,16 +312,19 @@ final class AgentAccountsViewController: UITableViewController {
         return items
     }
 
-    override func numberOfSections(in tableView: UITableView) -> Int { 1 }
+    /// The accounts card, then (where it applies) the rotation switch.
+    private static let rotationSection = 1
+
+    override func numberOfSections(in tableView: UITableView) -> Int { showsRotation ? 2 : 1 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        items.count
+        section == Self.rotationSection ? 1 : items.count
     }
 
     override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         let header = UITableViewHeaderFooterView()
         var c = UIListContentConfiguration.groupedHeader()
-        c.text = "Accounts on \(deviceName)"
+        c.text = section == Self.rotationSection ? "Rotation" : "Accounts on \(deviceName)"
         header.contentConfiguration = c
         return header
     }
@@ -239,6 +332,11 @@ final class AgentAccountsViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? {
         let footer = UITableViewHeaderFooterView()
         var c = UIListContentConfiguration.groupedFooter()
+        if section == Self.rotationSection {
+            c.text = "Accounts at their usage limit or signed out are skipped."
+            footer.contentConfiguration = c
+            return footer
+        }
         let where_: String = switch target {
         case .cloud:
             "Cloud sessions use the account in use. Sign-ins and keys are kept in Cloud, never on this phone."
@@ -251,6 +349,7 @@ final class AgentAccountsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        if indexPath.section == Self.rotationSection { return rotationCell() }
         switch items[indexPath.row] {
         case let .placeholder(text, detail):
             return plainCell(text: text, detail: detail, symbol: detail == nil ? nil : "exclamationmark.triangle", tint: Palette.secondary)
@@ -259,10 +358,11 @@ final class AgentAccountsViewController: UITableViewController {
             cell.configure(
                 icon: account.isKey ? CloudUI.symbol("key.fill", 15) : BrandMarks.image(for: harness, side: 20),
                 title: account.title,
-                detail: account.detail,
+                detail: [account.detail, account.marks].compactMap { $0 }.joined(separator: " · ").nonEmpty,
                 usage: account.usage,
                 note: account.usageNote,
-                state: busy == account.id ? .busy : account.active ? .inUse : account.switchable ? .switchable : .fixed
+                state: busy == account.id ? .busy : account.active ? .inUse : account.switchable ? .switchable : .fixed,
+                activeLabel: rotationActive ? "Default" : "In use"
             ) { [weak self] in self?.activate(account) }
             cell.accessibilityIdentifier = "account-\(account.id)"
             return cell
@@ -301,6 +401,40 @@ final class AgentAccountsViewController: UITableViewController {
         }
     }
 
+    /// "Rotate accounts across chats" with its switch (a spinner while it flips).
+    private func rotationCell() -> UITableViewCell {
+        let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+        var c = UIListContentConfiguration.subtitleCell()
+        c.text = "Rotate accounts across chats"
+        c.textProperties.font = Fonts.ui(.sansMedium, 16)
+        c.textProperties.color = Palette.text
+        c.secondaryText = rotationCaption
+        c.secondaryTextProperties.font = Fonts.ui(.sans, 13)
+        c.secondaryTextProperties.color = Palette.secondary
+        c.secondaryTextProperties.numberOfLines = 0
+        cell.contentConfiguration = c
+        cell.backgroundColor = Palette.elevated
+        cell.selectionStyle = .none
+        if rotating {
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            cell.accessoryView = spinner
+        } else {
+            let toggle = UISwitch()
+            toggle.isOn = rotationOn
+            toggle.isEnabled = rotationFlippable
+            toggle.onTintColor = Palette.accent
+            toggle.accessibilityIdentifier = "toggle-account-rotation"
+            toggle.addAction(UIAction { [weak self, weak toggle] _ in
+                guard let self, let toggle else { return }
+                self.setRotation(toggle.isOn)
+            }, for: .valueChanged)
+            cell.accessoryView = toggle
+        }
+        cell.accessibilityIdentifier = "account-rotation"
+        return cell
+    }
+
     private func plainCell(text: String, detail: String?, symbol: String?, tint: UIColor) -> UITableViewCell {
         let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
         var c = UIListContentConfiguration.subtitleCell()
@@ -323,6 +457,7 @@ final class AgentAccountsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        guard indexPath.section != Self.rotationSection else { return }
         if case .waiting = items[indexPath.row] {
             // Cancels on the computer too (the poll loop notices).
             cancelSignIn()
@@ -337,6 +472,7 @@ final class AgentAccountsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
+        guard indexPath.section != Self.rotationSection else { return false }
         if case .add = items[indexPath.row] { return signIn == nil && busy == nil }
         if case .waiting = items[indexPath.row], case .device = target { return true }
         return false
@@ -354,7 +490,7 @@ final class AgentAccountsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
+        guard indexPath.section != Self.rotationSection, case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
         let remove = UIContextualAction(style: .destructive, title: "Remove") { [weak self] _, _, done in
             self?.remove(account)
             done(true)
@@ -363,7 +499,7 @@ final class AgentAccountsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        guard case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
+        guard indexPath.section != Self.rotationSection, case let .account(account) = items[indexPath.row], busy == nil, account.switchable else { return nil }
         return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
             var actions: [UIMenuElement] = []
             if !account.active {
@@ -386,6 +522,22 @@ final class AgentAccountsViewController: UITableViewController {
             case let .device(id, _, harness, _):
                 apply(try await client.deviceActivateAccount(deviceId: id, harness: harness, accountId: account.id))
             }
+        }
+    }
+
+    private func setRotation(_ on: Bool) {
+        guard case let .device(id, _, harness, _) = target, !rotating, let client = app.client else { return }
+        rotating = true
+        tableView.reloadData()
+        Task { @MainActor in
+            do {
+                self.apply(try await client.deviceSetAccountRotation(deviceId: id, harness: harness, enabled: on))
+                UISelectionFeedbackGenerator().selectionChanged()
+            } catch {
+                self.alert(on ? "Couldn't turn rotation on" : "Couldn't turn rotation off", CloudStore.message(error))
+            }
+            self.rotating = false
+            self.tableView.reloadData()
         }
     }
 
@@ -648,7 +800,7 @@ final class AccountCell: UITableViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(icon image: UIImage?, title: String, detail: String?, usage: [UsageWindowInfo], note: String?, state: State, onSwitch: @escaping () -> Void) {
+    func configure(icon image: UIImage?, title: String, detail: String?, usage: [UsageWindowInfo], note: String?, state: State, activeLabel: String = "In use", onSwitch: @escaping () -> Void) {
         icon.image = image
         titleLabel.text = title
         titleLabel.textColor = state == .fixed ? Palette.tertiary : Palette.text
@@ -673,7 +825,7 @@ final class AccountCell: UITableViewCell {
         switch state {
         case .inUse:
             let badge = PaddedLabel(insets: UIEdgeInsets(top: 3, left: 8, bottom: 3, right: 8))
-            badge.text = "In use"
+            badge.text = activeLabel
             badge.font = Fonts.ui(.sansMedium, 12)
             badge.textColor = Palette.success
             badge.backgroundColor = Palette.success.withAlphaComponent(0.12)
