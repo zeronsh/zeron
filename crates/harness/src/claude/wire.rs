@@ -886,6 +886,19 @@ mod tests {
     }
 
     #[test]
+    fn streamed_text_deltas_take_the_direct_path() {
+        // The commonest line in a turn. `ClaudeJsonParses` also counts each
+        // validated number token, so this line counts 2 on either path; only
+        // this check tells the single-pass path is the one taken.
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}},"session_id":"s","parent_tool_use_id":null,"uuid":"u"}"#,
+        ] {
+            assert!(parse_frame_direct(line).is_some(), "{line}");
+        }
+    }
+
+    #[test]
     fn direct_and_fallback_frames_count_lines_and_text_parses() {
         use zeron_counters::{C, get};
         for (line, parses) in [
