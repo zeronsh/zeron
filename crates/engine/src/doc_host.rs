@@ -351,6 +351,8 @@ struct DocHostInner {
     /// Tracks every spawned worker so `shutdown_workers` can await them.
     tasks: TaskTracker,
     handles: Mutex<HashMap<String, Arc<ChatDocHandle>>>,
+    /// Includes handles removed from the LRU but still owned by a worker/caller.
+    live_handles: Arc<AtomicUsize>,
     document_loads: AtomicU64,
     /// Snapshot blobs the salvage sweep imported. A salvage-checked chat
     /// must not move this on a later boot.
@@ -643,6 +645,7 @@ pub struct TranscriptSnapshot {
 
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
 pub struct ChatDocHandle {
+    live_handles: Arc<AtomicUsize>,
     chat_id: String,
     device_id: String,
     doc: Arc<SessionDoc>,
@@ -849,6 +852,7 @@ impl Drop for DocWriter {
 }
 impl Drop for ChatDocHandle {
     fn drop(&mut self) {
+        self.live_handles.fetch_sub(1, Ordering::Relaxed);
         lock(&self.sync_cancel).cancel();
         self.writer_wake.notify_one();
     }
@@ -1264,15 +1268,28 @@ impl ChatDocHandle {
     }
 }
 
-/// Preserve the decoder's treatment of malformed and scalar list entries.
+/// The decoder salvages every JSON object, including torn entry maps, and
+/// rejects every non-object. Inspect that shape without materializing message
+/// bodies: decoding a whole transcript just to test emptiness left hundreds
+/// of MiB of freed allocations resident in blocking-pool malloc arenas at boot.
 fn messages_list_empty(doc: &loro::LoroDoc) -> Result<bool, String> {
-    if doc.get_list("messages").is_empty() {
-        return Ok(true);
+    use loro::{Container, LoroValue, ValueOrContainer};
+    let messages = doc.get_list("messages");
+    for i in 0..messages.len() {
+        let Some(value) = messages.get(i) else {
+            continue;
+        };
+        let object = match value {
+            ValueOrContainer::Container(Container::Map(_))
+            | ValueOrContainer::Value(LoroValue::Map(_)) => true,
+            // Preserve the deep-value shape of unusual container kinds too.
+            other => matches!(other.get_deep_value(), LoroValue::Map(_)),
+        };
+        if object {
+            return Ok(false);
+        }
     }
-    SessionDoc::from_doc(doc.clone())
-        .read_entries()
-        .map(|entries| entries.is_empty())
-        .map_err(|err| err.to_string())
+    Ok(true)
 }
 
 struct SalvageScan {
@@ -1406,6 +1423,7 @@ impl DocHost {
                 edge_disconnected: AtomicBool::new(false),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
+                live_handles: Arc::new(AtomicUsize::new(0)),
                 document_loads: AtomicU64::new(0),
                 #[cfg(test)]
                 salvage_imports: AtomicU64::new(0),
@@ -2245,7 +2263,9 @@ impl DocHost {
         let recovered_queue_pending = !initial_queue.is_empty();
         let (queue_tx, _) = watch::channel(initial_queue);
 
+        self.inner.live_handles.fetch_add(1, Ordering::Relaxed);
         let handle = Arc::new(ChatDocHandle {
+            live_handles: self.inner.live_handles.clone(),
             chat_id: chat_id.to_string(),
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
@@ -3461,6 +3481,7 @@ impl DocHost {
     async fn salvage_hosted_chats(&self, journals_dir: &std::path::Path) {
         let Some(ws) = self.workspace() else { return };
         let chats: Vec<zeron_proto::Chat> = ws.watch_chats().borrow().clone();
+        let mut eligible = Vec::new();
         for chat in chats {
             if chat.device_id != self.inner.config.device_id {
                 continue; // only the host owns its chats' history
@@ -3475,9 +3496,63 @@ impl DocHost {
             if !journaled {
                 continue; // never ran here — an empty doc is just new
             }
-            if let Err(err) = self.salvage_chat_transcript(&chat.id).await {
-                let _ = self.inner.store.schedule_sync_job(&chat.id, "recovery");
-                tracing::warn!(chat = %chat.id, error = %err, "transcript salvage failed");
+            eligible.push(chat.id);
+        }
+        if eligible.is_empty() {
+            return;
+        }
+        let mut outstanding: HashSet<_> = eligible.iter().cloned().collect();
+        let store = self.inner.store.clone();
+        let edge_configured = self.inner.config.edge.is_some();
+        let shutdown = self.inner.shutdown.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        // One short-lived thread reuses its allocator arena for the sweep.
+        // A job per chat spread large, short-lived imports across pool threads,
+        // leaving free heap pages resident long after all documents dropped.
+        // Keep this separate from workers with long-lived allocations, and
+        // release its thread cache when the sweep ends.
+        // Bound the handoff: only recovery payloads cross it, never live docs.
+        let scans = std::thread::Builder::new()
+            .name("salvage-scan".into())
+            .spawn(move || {
+                for chat in eligible {
+                    if shutdown.is_cancelled() {
+                        break;
+                    }
+                    zeron_counters::add(zeron_counters::C::SalvageChats, 1);
+                    let timer = zeron_counters::timer(zeron_counters::C::SalvageNanos);
+                    let scan = scan_salvage(&store, &chat, edge_configured);
+                    if tx.blocking_send((chat, scan, timer)).is_err() {
+                        break;
+                    }
+                }
+            });
+        let scans = match scans {
+            Ok(scans) => scans,
+            Err(err) => {
+                tracing::warn!(error = %err, "transcript salvage scan worker failed to start");
+                for chat in outstanding {
+                    let _ = self.inner.store.schedule_sync_job(&chat, "recovery");
+                }
+                return;
+            }
+        };
+        while let Some((chat, scan, _timer)) = rx.recv().await {
+            outstanding.remove(&chat);
+            let result = match scan {
+                Ok(scan) => self.apply_salvage_scan(&chat, scan).await,
+                Err(err) => Err(err),
+            };
+            if let Err(err) = result {
+                let _ = self.inner.store.schedule_sync_job(&chat, "recovery");
+                tracing::warn!(%chat, error = %err, "transcript salvage failed");
+            }
+        }
+        let joined = tokio::task::spawn_blocking(move || scans.join()).await;
+        if !matches!(joined, Ok(Ok(()))) {
+            tracing::warn!(?joined, "transcript salvage scan worker failed");
+            for chat in outstanding {
+                let _ = self.inner.store.schedule_sync_job(&chat, "recovery");
             }
         }
     }
@@ -3502,6 +3577,10 @@ impl DocHost {
             tokio::task::spawn_blocking(move || scan_salvage(&store, &chat, edge_configured))
                 .await
                 .map_err(|err| err.to_string())??;
+        self.apply_salvage_scan(chat_id, scan).await
+    }
+
+    async fn apply_salvage_scan(&self, chat_id: &str, scan: SalvageScan) -> Result<(), String> {
         self.note_salvage_imports(scan.imports);
         match scan.kind {
             SalvageScanKind::Skip => Ok(()),
@@ -4318,6 +4397,7 @@ impl DocHost {
             "budget": zeron_sync::budget::shared().stats(),
             "activeClientLimit": ACTIVE_SYNC_CAP,
             "openDocuments": handles.len(), "waitingDocuments": waiting,
+            "liveDocumentHandles": self.inner.live_handles.load(Ordering::Relaxed),
             "documentLoads": self.inner.document_loads.load(Ordering::Relaxed),
             "oldestWaitingAccessAgeMs": oldest, "retainedBy": reasons,
             "openFileDescriptors": open_fds, "fileDescriptorLimit": fd_limit,
@@ -8988,6 +9068,22 @@ mod salvage_tests {
         assert!(values_only.read_entries().unwrap().is_empty());
         emptiness_agrees(&values_only);
 
+        let containers = SessionDoc::init("containers").unwrap();
+        let messages = containers.doc().get_list("messages");
+        messages.push_container(loro::LoroList::new()).unwrap();
+        messages.push_container(loro::LoroText::new()).unwrap();
+        messages
+            .push_container(loro::LoroMovableList::new())
+            .unwrap();
+        messages.push_container(loro::LoroTree::new()).unwrap();
+        containers.doc().commit();
+        emptiness_agrees(&containers);
+        // Skipping malformed prefix rows must still find a later torn map.
+        messages.push_container(loro::LoroMap::new()).unwrap();
+        containers.doc().commit();
+        assert!(!messages_list_empty(containers.doc()).unwrap());
+        emptiness_agrees(&containers);
+
         // Loro values can themselves be objects, without a map container.
         // The decoder salvages these as entries too.
         let object_value = SessionDoc::init("object-value").unwrap();
@@ -9004,6 +9100,80 @@ mod salvage_tests {
         continuation.push_message(&entry).unwrap();
         assert!(!continuation.read_entries().unwrap().is_empty());
         emptiness_agrees(&continuation);
+    }
+
+    #[tokio::test]
+    async fn salvage_boot_many_chats_keeps_only_warm_docs_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let journals = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let workspace = workspace(&store);
+        let host = host_for(store.clone());
+        host.set_workspace(workspace.clone());
+        let mut handles = Vec::new();
+        let mut docs = Vec::new();
+        // Boot's interrupted-run cleanup opens documents before the salvage
+        // sweep. Count actual lifetimes, not just membership of the LRU map.
+        for n in 0..40 {
+            let handle = host.open_local(&format!("warm-{n}")).unwrap();
+            handles.push(Arc::downgrade(&handle));
+            docs.push(Arc::downgrade(&handle.doc));
+            tokio::task::yield_now().await;
+        }
+        for n in 0..200 {
+            let id = format!("boot-{n:03}");
+            workspace
+                .create_chat(&id, None, Some("host"), None, None)
+                .unwrap();
+            let doc = SessionDoc::init(&id).unwrap();
+            // Include real recovery opens as well as healthy inspections.
+            if n < 40 {
+                let fat = SessionDoc::init(&id).unwrap();
+                fat.push_message(&user_message("m", "recover me")).unwrap();
+                store
+                    .save_snapshot(&format!("{id}.pre-chat2"), &fat.export_snapshot().unwrap())
+                    .unwrap();
+            } else {
+                doc.push_message(&user_message("m", "healthy")).unwrap();
+            }
+            store
+                .save_snapshot_with_cursor(
+                    &id,
+                    &doc.export_snapshot().unwrap(),
+                    0,
+                    crate::chat2_host::CHAT2_DOC_EPOCH,
+                )
+                .unwrap();
+            std::fs::write(journals.path().join(format!("{id}.jsonl")), b"{}\n").unwrap();
+        }
+        wait_for_chats(&workspace, 200).await;
+        host.salvage_hosted_chats(journals.path()).await;
+        assert_eq!(host.inner.document_loads.load(Ordering::Relaxed), 80);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            host.evict_over_budget();
+            let live = host.inner.live_handles.load(Ordering::Relaxed);
+            if live <= WARM_DOC_CAP {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{live} live handles after boot"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(handles.iter().filter(|h| h.strong_count() > 0).count() <= WARM_DOC_CAP);
+        assert!(docs.iter().filter(|d| d.strong_count() > 0).count() <= WARM_DOC_CAP);
+        assert!(
+            lock(&host.inner.handles)
+                .values()
+                .map(|h| h.resident_estimate())
+                .sum::<usize>()
+                <= zeron_doc::DOC_LRU_BYTE_BUDGET
+        );
+        host.shutdown_workers().await;
+        assert_eq!(host.inner.live_handles.load(Ordering::Relaxed), 0);
+        assert!(docs.iter().all(|d| d.strong_count() == 0));
     }
 
     #[test]

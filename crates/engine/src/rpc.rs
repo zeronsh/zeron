@@ -2653,6 +2653,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({
                     "counters": zeron_counters::snapshot().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
                     "malloc": tokio::task::spawn_blocking(crate::counter_metrics::malloc).await.ok().flatten(),
+                    "docHost": self.doc_host.sync_resources(),
                     "tokio": { "workers": metrics.num_workers(), "alive_tasks": metrics.num_alive_tasks() },
                 }))
             }
