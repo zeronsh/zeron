@@ -49,7 +49,7 @@ mod tests {
             include_str!("mcp-tools.json")
         );
         let args: Vec<String> = cmd
-            .as_std()
+            .as_std_mut()
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
@@ -61,7 +61,7 @@ mod tests {
             ]
         );
         let mcp = cmd
-            .as_std()
+            .as_std_mut()
             .get_envs()
             .find(|(key, _)| *key == "ZERON_PI_MCP")
             .and_then(|(_, value)| value)

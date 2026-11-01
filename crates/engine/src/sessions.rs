@@ -7827,7 +7827,7 @@ mod tests {
         assert!(plan.modes.get("notes").is_none());
         assert!(!plan.proxy_command.is_empty());
         assert!(
-            plan.run_dir.ends_with("run/mcp/run-1"),
+            std::path::Path::new(&plan.run_dir).ends_with(std::path::Path::new("run").join("mcp").join("run-1")),
             "{}",
             plan.run_dir
         );
