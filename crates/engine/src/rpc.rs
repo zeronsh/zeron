@@ -1360,11 +1360,6 @@ impl EngineRpc {
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
         let requested = std::path::PathBuf::from(cwd);
         let unknown = || RpcError::BadParams("cwd is not a known checkout on this device".into());
-        // A removed worktree is still named by its chats; it has no checkout
-        // to resolve and no PR to watch.
-        if !crate::repos::Repos::path_exists(&requested).await {
-            return Err(unknown());
-        }
         let local_device = self.doc_host.device_id();
         let mut chats_rx = self.workspace.watch_chats();
         let mut spaces_rx = self.workspace.watch_spaces();
@@ -1378,7 +1373,15 @@ impl EngineRpc {
                             std::path::Path::new(&source.repo_root) == requested.as_path()
                         }))
             }) {
-                return Ok(requested);
+                // A removed worktree is still named by its chats; it has no
+                // checkout to resolve and no PR to watch. Checked only once a
+                // chat names the path, so an unknown path's answer never
+                // depends on whether it exists.
+                return if crate::repos::Repos::path_exists(&requested).await {
+                    Ok(requested)
+                } else {
+                    Err(unknown())
+                };
             }
 
             let spaces = spaces_rx.borrow_and_update().clone();
