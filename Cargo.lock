@@ -13605,7 +13605,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-bench"
-version = "0.2.130"
+version = "0.2.131"
 dependencies = [
  "anyhow",
  "clap",
