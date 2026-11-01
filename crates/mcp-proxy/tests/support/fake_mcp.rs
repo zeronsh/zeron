@@ -87,14 +87,20 @@ async fn main() {
         }
     }
     eprintln!(
-        "fake MCP stderr {}",
-        "x".repeat(number("FAKE_STDERR_BYTES") as usize)
+        "fake MCP stderr {}{}",
+        "x".repeat(number("FAKE_STDERR_BYTES") as usize),
+        env("FAKE_STDERR_TEXT")
     );
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(64);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(v) = rx.recv().await {
-            if stdout.write_all(format!("{v}\n").as_bytes()).await.is_err() {
+            // A bare JSON string stands for a raw (possibly non-JSON) stdout line.
+            let line = match &v {
+                Value::String(raw) => format!("{raw}\n"),
+                _ => format!("{v}\n"),
+            };
+            if stdout.write_all(line.as_bytes()).await.is_err() {
                 break;
             }
             if stdout.flush().await.is_err() {
@@ -102,6 +108,16 @@ async fn main() {
             }
         }
     });
+    if env("FAKE_NOISE") == "1" {
+        // Servers often leak banners and stray arrays onto stdout; clients skip them.
+        for raw in [
+            "Server listening on stdio",
+            "[1,2,3]",
+            "{\"not\":\"jsonrpc\"",
+        ] {
+            tx.send(Value::String(raw.into())).await.unwrap();
+        }
+    }
     let mut sampling = HashMap::new();
     let mut tools: Value = serde_json::from_str(&env("FAKE_TOOLS"))
         .unwrap_or_else(|_| serde_json::from_str(include_str!("../fixtures/tools.json")).unwrap());
@@ -123,12 +139,16 @@ async fn main() {
                     tx.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"fake init failure"}})).await.unwrap();
                     continue;
                 }
+                let protocol = match env("FAKE_PROTOCOL") {
+                    forced if !forced.is_empty() => json!(forced),
+                    _ => params["protocolVersion"].clone(),
+                };
                 {
                     let mut caps = json!({"tools":{"listChanged":true},"prompts":{},"resources":{"subscribe":true}});
                     if env("FAKE_CHANNEL") == "1" {
                         caps["experimental"] = json!({"claude/channel":{}});
                     }
-                    json!({"protocolVersion":params["protocolVersion"],"serverInfo":{"name":"fake","version":"1"},"instructions":env("FAKE_INSTRUCTIONS"),"capabilities":caps})
+                    json!({"protocolVersion":protocol,"serverInfo":{"name":"fake","version":"1"},"instructions":env("FAKE_INSTRUCTIONS"),"capabilities":caps})
                 }
             }
             "tools/list" => {
@@ -151,11 +171,20 @@ async fn main() {
             }
             "prompts/list" => json!({"prompts":[{"name":"hello"}]}),
             "resources/list" => json!({"resources":[{"name":"test","uri":"fake://test"}]}),
+            "resources/templates/list" if env("FAKE_NO_TEMPLATES") == "1" => {
+                tx.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}})).await.unwrap();
+                continue;
+            }
             "resources/templates/list" => json!({"resourceTemplates":[]}),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
                 if name == env("FAKE_CRASH_ON") {
                     std::process::exit(42);
+                }
+                if name == env("FAKE_FLOOD_ON") {
+                    for n in 0..number("FAKE_FLOOD") {
+                        tx.send(json!({"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":format!("flood {n} {}", "x".repeat(100))}})).await.unwrap();
+                    }
                 }
                 for progress in 0..number("FAKE_PROGRESS") {
                     tx.send(json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":params["_meta"]["progressToken"],"progress":progress}})).await.unwrap();

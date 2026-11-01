@@ -108,3 +108,44 @@ Files changed:
 - `crates/mcp-proxy/tests/e2e.rs`, `tests/measure_pss.py`,
   `tests/support/fake_mcp.rs`, `tests/fixtures/{README.md,tools.json}`.
 - `scripts/package-linux.sh`, `scripts/package-macos.sh`.
+
+## Review pass, 2026-10-30
+
+Adversarial review of the proxy, cache, lifecycle, cleanup and npx resolver
+against the fake server, the installed libnpmexec source and a real npm 12
+`_npx` cache. Each fix is its own commit with a test that failed before it.
+
+Fixed:
+
+- A stray non-JSON line on the server's stdout killed the server (clients skip
+  it); invalid UTF-8 ended the stream.
+- Bounded relay queues and `try_send` ended the proxy when a peer was slow
+  (notification floods).
+- A server that negotiates an older protocol never hit the cache.
+- A declared-but-unimplemented `resources/templates/list` (-32601) failed
+  discovery and pinned the key to passthrough.
+- A cursor-bearing list request was answered from the merged cache, duplicating
+  entries for a client resuming a live server's page.
+- After a miss, a first call queued behind discovery caused a stop and a second
+  start; the first call also waited behind the refresh's listing requests.
+- npx resolution: install selection did not match npm (see the commit); a
+  second `--package` or a dependency's bin ran a different executable; project
+  and global installs that npm prefers were ignored; floating specs were never
+  refreshed.
+- Failure text returned to the model and logged could echo credentials.
+- The discovery-failed marker never expired; script servers' cache keys ignored
+  the script; log growth; 0755 directories; SIGKILL of a group number that may
+  have been reused (and unverified group numbers in macOS sweeps).
+- `zeron mcp-proxy` failed outright when the packaged helper could not be
+  executed instead of running in-process.
+
+Overhead measured (release build, fake server, sequential `tools/call`, warm
+proxy, 2,000 calls): +36 µs median per small call. It grows with payload because
+messages are parsed and re-serialized: +0.3 ms at 100 KB, +5 ms at 2 MB.
+
+Not changed, by design or out of scope here: server-to-client requests during
+a cache-miss discovery are forwarded before the client's `initialize` reply
+(holding them could deadlock servers that need the answer to list tools);
+floating npx specs are up to 24 h behind npx; chrome's own process group (not
+the telemetry watchdog) is not tracked; Windows and macOS runtime behavior and
+Windows compilation (no windows std in this toolchain) were not exercised.

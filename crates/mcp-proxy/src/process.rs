@@ -130,8 +130,12 @@ impl Process {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // Only still-populated groups: a finished group's number may already belong to
+        // an unrelated process group.
         for group in &self.groups {
-            signal_group(*group, true);
+            if group_alive(*group) {
+                signal_group(*group, true);
+            }
         }
         let _ = self.child.wait().await;
         #[cfg(target_os = "linux")]
@@ -291,13 +295,7 @@ fn start_id(pid: u32) -> String {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        return std::process::Command::new("ps")
-            .args(["-o", "lstart=", "-p", &pid.to_string()])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_default();
+        ps_start(pid)
     }
     #[cfg(not(unix))]
     {
@@ -317,6 +315,19 @@ fn boot_id() -> String {
     }
     #[cfg(not(target_os = "linux"))]
     String::new()
+}
+/// Without /proc a recorded group is only trusted if the leader's start time still matches;
+/// a bare pgid in a marker left over from before a reboot could name any process group.
+#[cfg(unix)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn ps_start(pid: u32) -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 fn signal_group(group: u32, force: bool) {
     #[cfg(unix)]
@@ -341,7 +352,7 @@ pub struct LiveGroup {
 /// Write the marker `cleanup_run_dir` and `live_groups` both understand.
 /// `server` is the MCP name. Older markers omit it.
 pub fn record_group_marker(dir: &Path, pgid: u32, server: &str) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
+    cache::private_dir_all(dir)?;
     let value = serde_json::json!({
         "pgid": pgid,
         "start": start_id(pgid),
@@ -423,6 +434,31 @@ fn leader_is_zombie(_pgid: u32) -> bool {
     false
 }
 
+fn sweep_identity_matches(recorded: &str, current: &str, verified_orphan: bool) -> bool {
+    !recorded.is_empty()
+        && if current.is_empty() {
+            verified_orphan
+        } else {
+            recorded == current
+        }
+}
+
+fn verified_orphan(group: u32, recorded_boot: &str, boot: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        !boot.is_empty()
+            && recorded_boot == boot
+            && fs::metadata("/proc/self/stat").is_ok()
+            && fs::metadata(format!("/proc/{group}"))
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (group, recorded_boot, boot);
+        false
+    }
+}
+
 /// Sweep only numeric proxy-owned marker files. Non-marker run files are untouched.
 /// The engine calls this after harness teardown and at boot (WU9a).
 pub async fn cleanup_run_dir(dir: &Path) -> io::Result<()> {
@@ -466,7 +502,10 @@ pub async fn cleanup_run_dir(dir: &Path) -> io::Result<()> {
         }
         let current = start_id(group);
         let recorded = value["start"].as_str().unwrap_or_default();
-        if !current.is_empty() && recorded != current {
+        // A missing start id can mean an unreadable leader, not a gone one.
+        // Only Linux /proc plus this boot's marker can prove an orphan group.
+        let orphan = verified_orphan(group, value["boot"].as_str().unwrap_or_default(), &boot);
+        if !group_alive(group) || !sweep_identity_matches(recorded, &current, orphan) {
             fs::remove_file(entry.path())?;
             continue;
         }
@@ -481,7 +520,9 @@ pub async fn cleanup_run_dir(dir: &Path) -> io::Result<()> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     for group in groups {
-        signal_group(group, true);
+        if group_alive(group) {
+            signal_group(group, true);
+        }
         let _ = fs::remove_file(dir.join(group.to_string()));
     }
     Ok(())
@@ -701,5 +742,26 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert!(live.iter().all(|group| group.server != "other"));
         drop(child);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ps_tests {
+    #[test]
+    fn sweep_never_trusts_an_unidentifiable_marker_without_proc_proof() {
+        assert!(super::sweep_identity_matches("123", "123", false));
+        assert!(!super::sweep_identity_matches("123", "456", true));
+        assert!(!super::sweep_identity_matches("", "123", false));
+        assert!(!super::sweep_identity_matches("123", "", false));
+        assert!(!super::sweep_identity_matches("", "", true));
+        assert!(super::sweep_identity_matches("123", "", true));
+    }
+
+    #[test]
+    fn ps_start_identifies_a_process_by_its_start_time() {
+        let own = super::ps_start(std::process::id());
+        assert!(!own.is_empty());
+        assert_eq!(own, super::ps_start(std::process::id()));
+        assert!(super::ps_start(u32::MAX - 1).is_empty());
     }
 }

@@ -72,6 +72,23 @@ pub fn binary_id(path: &Path) -> String {
         meta.map(|m| m.len()).unwrap_or(0)
     )
 }
+/// Interpreter servers (`node server.js`, `python app.py`) change when their script does,
+/// not when the interpreter does: fold in the identity of every argument that is a file.
+fn arg_files(c: &Config) -> Value {
+    let base = c.cwd.clone().or_else(|| std::env::current_dir().ok());
+    json!(
+        c.args
+            .iter()
+            .take(32)
+            .filter_map(|arg| {
+                let path = base
+                    .as_ref()
+                    .map_or_else(|| PathBuf::from(arg), |b| b.join(arg));
+                path.is_file().then(|| (arg, binary_id(&path)))
+            })
+            .collect::<Vec<_>>()
+    )
+}
 pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Value) -> String {
     let env = identity_env(c);
     key_fields(
@@ -83,6 +100,7 @@ pub fn key(c: &Config, initialize: &Value, command: &Path, bin: &Path, npx: Valu
         &c.runtime_cwd,
         bin,
         npx,
+        arg_files(c),
         initialize,
     )
 }
@@ -111,7 +129,7 @@ pub fn launch_key(c: &Config) -> io::Result<String> {
             .ok_or_else(|| io::Error::other("non-UTF8 launch identity path"))
     };
     Ok(hash(
-        &json!({"v":1,"command":utf8(&command)?,"binary":binary_id(&command),
+        &json!({"v":2,"command":utf8(&command)?,"binary":binary_id(&command),"arg_files":arg_files(c),
         "args":c.args,"identity_env":identity_env(c),"runtime_cwd":utf8(&c.runtime_cwd)?,
         "configured_cwd":c.cwd.as_deref().map(utf8).transpose()?,
         "plugin_root":c.plugin_root.as_deref().map(utf8).transpose()?}),
@@ -128,11 +146,12 @@ fn key_fields(
     runtime_cwd: &Path,
     bin: &Path,
     npx: Value,
+    arg_files: Value,
     init: &Value,
 ) -> String {
     hash(
-        &json!({"v":2,"command":command,"args":args,"identity_env":env,"plugin_root":plugin_root,"cwd_if_configured":cwd,"runtime_cwd":runtime_cwd,
-        "npx":npx,"bin_id":binary_id(bin),"client":{"name":init["clientInfo"]["name"],
+        &json!({"v":3,"command":command,"args":args,"identity_env":env,"plugin_root":plugin_root,"cwd_if_configured":cwd,"runtime_cwd":runtime_cwd,
+        "npx":npx,"bin_id":binary_id(bin),"arg_files":arg_files,"client":{"name":init["clientInfo"]["name"],
         "version_major":init["clientInfo"]["version"].as_str().unwrap_or("").split('.').next().unwrap_or(""),
         "protocolVersion":init["protocolVersion"],"capabilities_hash":hash(&init["capabilities"])}}),
     )
@@ -169,17 +188,23 @@ impl Entry {
             discovery_failed: false,
         }
     }
-    pub fn valid(&self, key: &str, protocol: &Value) -> bool {
+    /// The key already covers the protocol version the client asked for. The version
+    /// stored in `initialize` is what the server negotiated, which may legitimately
+    /// differ (an older server answers with its own), so it is not compared here.
+    pub fn valid(&self, key: &str) -> bool {
         let age = now_ms().saturating_sub(self.cached_at);
         self.key == key
             && !self.discovery_failed
             && self.cache_scope.as_deref() != Some("private")
-            && self.initialize["protocolVersion"] == *protocol
             && age
                 < self
                     .ttl_ms
                     .unwrap_or(u64::MAX)
                     .min(30 * 24 * 60 * 60 * 1000)
+    }
+    /// A recent failed discovery: serve this key transparently instead of retrying yet.
+    pub fn failed_recently(&self) -> bool {
+        self.discovery_failed && discovery_failure_active(self.cached_at, now_ms())
     }
     pub fn listing(&self, method: &str) -> Option<Value> {
         match method {
@@ -223,7 +248,7 @@ fn read_at(data_dir: &Path, key: &str, now: u64) -> Option<Entry> {
 /// Per-key advisory lock closes the re-read/rename race between simultaneous proxies.
 pub fn save(data_dir: &Path, entry: &Entry) -> io::Result<()> {
     let path = path(data_dir, &entry.key);
-    fs::create_dir_all(path.parent().unwrap())?;
+    private_dir_all(path.parent().unwrap())?;
     let _guard = FileLock::new(&path.with_extension("lock"))?;
     if let Some(disk) = read(data_dir, &entry.key) {
         if disk.cached_at > entry.cached_at
@@ -295,6 +320,17 @@ impl Drop for FileLock {
         }
     }
 }
+/// Cached metadata, logs and ownership markers are per-user; so are their directories.
+pub fn private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
 pub fn private_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     #[cfg(unix)]
@@ -348,6 +384,7 @@ mod tests {
                 Path::new("/cwd"),
                 path,
                 npx,
+                json!([]),
                 init,
             )
         };
@@ -518,22 +555,68 @@ mod tests {
         assert!(read_at(dir.path(), "key", now + DISCOVERY_RETRY_MS).is_some());
     }
     #[test]
+    fn script_arguments_are_part_of_the_identity() {
+        let root = dir();
+        let script = root.path().join("server.js");
+        fs::write(&script, "one").unwrap();
+        let config = Config::parse(
+            [
+                "--server".into(),
+                "demo".into(),
+                "--".into(),
+                "/fake".into(),
+                script.to_string_lossy().into_owned(),
+                "--flag".into(),
+            ],
+            root.path().into(),
+        )
+        .unwrap();
+        let init = json!({"clientInfo":{"name":"c","version":"1"},"protocolVersion":"v","capabilities":{}});
+        let compute = || {
+            key(
+                &config,
+                &init,
+                Path::new("/fake"),
+                Path::new("/fake"),
+                Value::Null,
+            )
+        };
+        let before = compute();
+        let launch = launch_key(&config).unwrap();
+        assert_eq!(before, compute());
+        assert_eq!(launch, launch_key(&config).unwrap());
+        fs::write(&script, "longer script").unwrap();
+        assert_ne!(before, compute());
+        assert_ne!(launch, launch_key(&config).unwrap());
+    }
+    #[test]
+    fn failed_discovery_is_retried_after_a_while() {
+        let mut entry = Entry::new("key".into(), "demo".into(), Value::Null);
+        entry.discovery_failed = true;
+        assert!(entry.failed_recently());
+        entry.cached_at = now_ms() - DISCOVERY_RETRY_MS - 1;
+        assert!(!entry.failed_recently());
+        entry.discovery_failed = false;
+        entry.cached_at = now_ms();
+        assert!(!entry.failed_recently());
+    }
+    #[test]
     fn validity_ttl_protocol_and_discovery_marker() {
         let dir = dir();
         let mut entry = Entry::new("key".into(), "demo".into(), json!({"protocolVersion":"v"}));
-        assert!(entry.valid("key", &json!("v")));
-        assert!(!entry.valid("key", &json!("other")));
+        assert!(entry.valid("key"));
+        assert!(!entry.valid("other"));
         entry.ttl_ms = Some(0);
-        assert!(!entry.valid("key", &json!("v")));
+        assert!(!entry.valid("key"));
         entry.ttl_ms = None;
         entry.cached_at = now_ms() - 31 * 24 * 60 * 60 * 1000;
-        assert!(!entry.valid("key", &json!("v")));
+        assert!(!entry.valid("key"));
         entry.cached_at = now_ms();
         entry.discovery_failed = true;
         save(dir.path(), &entry).unwrap();
         let disk = read(dir.path(), "key").unwrap();
         assert!(disk.discovery_failed);
-        assert!(!disk.valid("key", &json!("v")));
+        assert!(!disk.valid("key"));
     }
 }
 

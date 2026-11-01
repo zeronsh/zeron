@@ -122,7 +122,7 @@ pub(super) fn hibernation_safe(exe: &Path, request: &RunRequest, data_dir: &Path
             // A later capture after a config edit cannot classify an older
             // runtime. Without fresh launch-bound evidence, use upstream parity.
             let dir = data_dir.join("run/mcp").join(run);
-            std::fs::create_dir_all(&dir).ok()?;
+            zeron_mcp_proxy::cache::private_dir_all(&dir).ok()?;
             let path = dir.join("hibernate-capture");
             let digest = key.digest();
             let mut options = std::fs::OpenOptions::new();

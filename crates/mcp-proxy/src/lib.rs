@@ -58,7 +58,7 @@ pub fn run_config(mut config: Config) -> io::Result<()> {
         // This exec bypasses the proxy loop. Preserve a run-local hold for
         // channels and uncertain legacy fallbacks before handing off stdio.
         if let Some(dir) = &config.run_dir {
-            let _ = std::fs::create_dir_all(dir).and_then(|()| {
+            let _ = cache::private_dir_all(dir).and_then(|()| {
                 cache::atomic_write(&dir.join("channel-live"), b"channel-or-unknown")
             });
         }

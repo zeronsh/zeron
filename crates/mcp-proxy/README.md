@@ -27,16 +27,27 @@ filter the inherited environment:
 - `mcp-cache/v1/<sha256>.json`: original initialization and merged catalogs;
   private 0600 files replaced atomically. `<sha256>.lock` serializes each key's
   freshness check and replacement. Identity env values are hashed, never saved.
+  Both catalog and launch-classification keys include script-file identity and
+  runtime cwd. The shim filters volatile session/login env and removes its PATH
+  entry before identity calculation and real-command hand-off.
 - `mcp-cache/npx.json`: version-2 resolution records keyed by package spec and
   bin, with a 24-hour TTL, plus `npx.lock`. Runtime arguments are never stored.
-  Floating specs re-scan the npm cache so an engine refresh takes effect on the
-  next session even within that TTL.
+  A floating spec (`@latest`, a range, no version) is served from the npm cache
+  for at most 24 hours per version; then the original `npx` runs once, which
+  revalidates it against the registry, and the clock restarts.
 - `run/mcp/<run>/<pgid>` when `--run-dir` is supplied: private ownership markers.
-  Linux markers include the leader's start ticks to reject PID reuse.
-  `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups.
-- `logs/mcp-proxy.jsonl` when `--run-dir` is supplied: append-only bounded JSON
-  lifecycle records, also emitted to stderr. Child stderr is copied verbatim;
-  failure reporting retains at most 8 KiB and exposes at most 300 characters.
+  Markers carry the boot id, leader start time (`/proc` ticks on Linux, `ps`
+  lstart elsewhere), and server name. Reused, empty or unidentifiable groups
+  are dropped without a signal. A leaderless group requires proof from this
+  boot and readable Linux `/proc`; no bare recorded pgid is trusted.
+  `cleanup_run_dir()` ignores nonnumeric run files and kills recorded groups
+  that still have members. Directories are created 0700.
+- `logs/mcp-proxy.jsonl` when `--run-dir` is supplied: append-only JSON lifecycle
+  records (one line under 4 KiB each), rotated to `.1` at 4 MiB, also emitted to
+  stderr. Child stderr is copied verbatim; failure reporting retains at most
+  8 KiB, exposes at most 300 characters, and masks the values of
+  credential-named environment variables and `--token`/`--api-key` style
+  arguments.
 
 Lazy cache misses start a discovery child and stop it after capture unless a
 call/subscription/progress/request holds it. Cache hits initialize without a
@@ -49,6 +60,8 @@ passthrough for 24 hours, then the next launch retries bounded discovery. The
 shared `class-v1` launch evidence uses the same retry window; old failure
 records without a timestamp retry on the next launch. Positive channel evidence
 remains sticky.
+List requests carrying a cursor (issued by a live server) are never answered
+from the merged catalog. Server stdout lines that are not JSON objects are skipped.
 
 Lazy idle timeout is ten minutes, checked every thirty seconds; a zero timeout
 disables idle stopping. Lazy-keep-alive never idle-stops. Keep-alive starts the
@@ -85,10 +98,16 @@ cache refresh.
 
 The npx resolver prefers `ZERON_NPM_CACHE`, then `NPM_CONFIG_CACHE` (also the
 npm lowercase spelling), then one bounded `npm config get cache` invocation.
-It chooses exact top-level specs before newer transitive copies, checks exact
-version pins, resolves `.bin` symlinks, and prepends the install's `.bin` to the
-child PATH. JS entries use the first executable `node` on that PATH. Unsupported
-invocations, local/git specs, Windows, and failures keep the original command;
+It runs exactly the install npm itself would: `_npx/<first 16 hex of SHA-512 of the
+spec as typed>`, whose top-level request is that package (any other install that
+merely contains a copy, such as another version or a hoisted dependency, is never
+used), with npm's bin choice (`.bin/<command>` for `-p`, else the single or
+package-named bin). A project-local or global install that npm would prefer
+(`node_modules` in the working directory or an ancestor, a local bin of that
+name, a global `lib/node_modules` next to a PATH `bin`) leaves the decision to
+npx. The install's `.bin` is prepended to the child PATH and JS entries use the
+first executable `node` on it. Several `--package` values, unsupported flags,
+local/git specs, Windows, and failures keep the original command;
 `--no-npx-resolve` explicitly selects that behavior. Unlike pi's optional slow
 population path, the proxy does not run a preliminary npm installation: the
 original invocation handles a cold npm cache. Daily refresh is engine work.

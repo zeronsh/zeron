@@ -679,14 +679,16 @@ async fn npx_resolves_without_wrapper_composes_path_and_has_an_escape_hatch() {
     let dir = temp();
     let d = dir.path();
     let npm = d.join("npm");
-    let install = npm.join("_npx/direct");
+    let install = npm
+        .join("_npx")
+        .join(zeron_mcp_proxy::npx::install_hash("demo@1.2.3"));
     let pkg = install.join("node_modules/demo");
     let bins = install.join("node_modules/.bin");
     fs::create_dir_all(&pkg).unwrap();
     fs::create_dir_all(&bins).unwrap();
     fs::write(
         install.join("package.json"),
-        r#"{"dependencies":{"demo":"1.2.3"}}"#,
+        r#"{"dependencies":{"demo":"^1.2.3"},"_npx":{"packages":["demo@1.2.3"]}}"#,
     )
     .unwrap();
     fs::write(
@@ -940,6 +942,46 @@ async fn inherited_runtime_cwd_partitions_catalogs_without_explicit_cwd() {
     }
 }
 
+fn cache_files(d: &Path, extension: &str) -> Vec<PathBuf> {
+    fs::read_dir(d.join("mcp-cache/v1"))
+        .map(|dir| {
+            dir.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == extension))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn children_of(parent: u32) -> Vec<(u32, char)> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| {
+            let pid: u32 = e.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            (fields.get(1)?.parse::<u32>().ok()? == parent)
+                .then(|| (pid, fields[0].chars().next().unwrap()))
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stray_server_stdout_lines_are_skipped_like_a_direct_client_would() {
+    for mode in ["lazy", "lazy-keep-alive", "keep-alive"] {
+        let dir = temp();
+        let mut peer = Peer::spawn(dir.path(), mode, &[("FAKE_NOISE", "1")]);
+        assert!(peer.init().await.get("result").is_some(), "{mode}");
+        assert_eq!(
+            peer.call(2, "echo").await["result"]["content"][0]["text"],
+            "echo",
+            "{mode}"
+        );
+        peer.close().await;
+    }
+}
+
 #[tokio::test]
 async fn inherited_runtime_cwd_also_partitions_channel_classification() {
     let dir = temp();
@@ -975,4 +1017,379 @@ async fn inherited_runtime_cwd_also_partitions_channel_classification() {
     eventually(|| pids(&dir.path().join("spawn")).len() == 3).await;
     known.init().await;
     known.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_client_survives_a_notification_flood() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[("FAKE_FLOOD_ON", "flood"), ("FAKE_FLOOD", "6000")],
+    );
+    peer.init().await;
+    peer.send(zeron_mcp_proxy::rpc::request(
+        2,
+        "tools/call",
+        json!({"name":"flood"}),
+    ))
+    .await;
+    // The pipe fills while nobody reads; the proxy must buffer, not give up.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let response = peer.response(json!(2)).await;
+    assert_eq!(response["result"]["isError"], false);
+    assert!(
+        peer.seen
+            .iter()
+            .filter(|v| v["method"] == "notifications/message")
+            .count()
+            >= 6000
+    );
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn channel_forwarding_skips_noise_and_survives_a_slow_client() {
+    let dir = temp();
+    let mut peer = Peer::spawn(
+        dir.path(),
+        "lazy",
+        &[
+            ("FAKE_CHANNEL", "1"),
+            ("FAKE_NOISE", "1"),
+            ("FAKE_FLOOD_ON", "flood"),
+            ("FAKE_FLOOD", "6000"),
+        ],
+    );
+    assert!(peer.init().await.get("result").is_some());
+    peer.send(zeron_mcp_proxy::rpc::request(
+        2,
+        "tools/call",
+        json!({"name":"flood"}),
+    ))
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(pids(&dir.path().join("spawn")).into_iter().all(alive));
+    assert_eq!(peer.response(json!(2)).await["result"]["isError"], false);
+    assert!(
+        peer.seen
+            .iter()
+            .filter(|v| v["method"] == "notifications/message")
+            .count()
+            >= 6000
+    );
+    assert!(
+        peer.seen
+            .iter()
+            .any(|v| v["method"] == "notifications/claude/channel")
+    );
+    assert_eq!(pids(&dir.path().join("spawn")).len(), 1);
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_negotiating_an_older_protocol_still_hits_the_cache() {
+    let dir = temp();
+    let d = dir.path();
+    for session in 0..2 {
+        let mut peer = Peer::spawn(d, "lazy", &[("FAKE_PROTOCOL", "2024-11-05")]);
+        let init = peer.init().await;
+        assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+        peer.close().await;
+        eventually(|| {
+            let spawned = pids(&d.join("spawn"));
+            spawned.len() == 1 && !alive(spawned[0])
+        })
+        .await;
+        assert_eq!(pids(&d.join("spawn")).len(), 1, "session {session}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resources_without_template_listing_still_cache() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_NO_TEMPLATES", "1")]);
+    assert!(peer.init().await.get("result").is_some());
+    peer.close().await;
+    eventually(|| cache_files(d, "json").len() == 1).await;
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_NO_TEMPLATES", "1")]);
+    peer.init().await;
+    peer.close().await;
+    assert_eq!(pids(&d.join("spawn")).len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn paged_list_with_a_cursor_reaches_the_live_server() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_PAGED", "1")]);
+    peer.init().await;
+    let page = peer
+        .request(json!(2), "tools/list", json!({"cursor":"page2"}))
+        .await;
+    assert_eq!(page["result"]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(pids(&d.join("spawn")).len(), 2);
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_call_during_discovery_does_not_force_a_restart_for_the_second() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    peer.send(zeron_mcp_proxy::rpc::request(
+        1,
+        "initialize",
+        json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1"},"capabilities":{}}),
+    ))
+    .await;
+    peer.send(zeron_mcp_proxy::rpc::request(
+        2,
+        "tools/call",
+        json!({"name":"echo"}),
+    ))
+    .await;
+    peer.response(json!(2)).await;
+    peer.call(3, "echo").await;
+    assert_eq!(pids(&d.join("spawn")).len(), 1);
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_sessions_leave_one_private_cache_without_secrets() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let d = dir.path();
+    let secret = "super-secret-token-value";
+    let mut peers = Vec::new();
+    for _ in 0..6 {
+        peers.push(Peer::spawn_command(
+            d,
+            "lazy",
+            &[("TOKEN", secret)],
+            env!("CARGO_BIN_EXE_fake-mcp"),
+            &[],
+            &["--identity-env", "TOKEN"],
+        ));
+    }
+    for peer in &mut peers {
+        peer.send(zeron_mcp_proxy::rpc::request(
+            "init",
+            "initialize",
+            json!({"protocolVersion":"2025-03-26","clientInfo":{"name":"e2e","version":"1"},"capabilities":{}}),
+        ))
+        .await;
+    }
+    for peer in &mut peers {
+        assert!(peer.response(json!("init")).await.get("result").is_some());
+    }
+    for peer in peers {
+        peer.close().await;
+    }
+    let files = cache_files(d, "json");
+    assert_eq!(files.len(), 1);
+    assert!(cache_files(d, "tmp").is_empty());
+    serde_json::from_slice::<Value>(&fs::read(&files[0]).unwrap()).unwrap();
+    for entry in ["mcp-cache/v1", "logs"] {
+        for file in fs::read_dir(d.join(entry)).unwrap().flatten() {
+            let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{:?}", file.path());
+            assert!(
+                !fs::read_to_string(file.path()).unwrap().contains(secret),
+                "{:?}",
+                file.path()
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn calls_straddling_the_idle_deadline_are_never_lost() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[
+            ("ZERON_MCP_PROXY_IDLE_MS", "40"),
+            ("ZERON_MCP_PROXY_CHECK_MS", "5"),
+        ],
+    );
+    peer.init().await;
+    let mut seed = 12345u64;
+    for id in 1..=80 {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        tokio::time::sleep(Duration::from_millis(25 + (seed >> 33) % 40)).await;
+        let response = peer.call(id, "echo").await;
+        assert_eq!(
+            response["result"]["content"][0]["text"], "echo",
+            "call {id}"
+        );
+    }
+    assert!(
+        pids(&d.join("spawn")).len() > 5,
+        "the stop path was exercised"
+    );
+    peer.close().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn idle_cycles_leave_no_zombies_or_adopted_children() {
+    let dir = temp();
+    let d = dir.path();
+    let env = [("FAKE_GRANDCHILD", "1"), ("FAKE_WATCHDOG", "1")];
+    let mut peer = Peer::spawn(d, "lazy", &env);
+    peer.init().await;
+    let proxy = peer.child.id().unwrap();
+    for id in 1..=3 {
+        peer.call(id, "echo").await;
+        eventually(|| {
+            let spawned = pids(&d.join("spawn"));
+            spawned.len() == id as usize + 1 && !alive(*spawned.last().unwrap())
+        })
+        .await;
+        // Reaping trails the server's exit by a few milliseconds; a persistent zombie fails.
+        eventually(|| children_of(proxy).is_empty()).await;
+    }
+    assert!(
+        pids(&d.join("children")).iter().all(|p| !alive(*p)),
+        "grandchildren and watchdogs are gone"
+    );
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_failures_do_not_echo_credentials_to_the_client_or_the_log() {
+    let dir = temp();
+    let d = dir.path();
+    let secret = "hunter2-credential-value";
+    let mut peer = Peer::spawn(
+        d,
+        "lazy",
+        &[
+            ("FAKE_INIT_ERROR", "1"),
+            ("FAKE_INIT_DELAY_MS", "100"),
+            ("API_TOKEN", secret),
+            ("FAKE_STDERR_TEXT", &format!("auth failed for {secret}")),
+        ],
+    );
+    let message = peer.init().await["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("auth failed for ***"), "{message}");
+    assert!(!message.contains(secret));
+    peer.close().await;
+    assert!(
+        !fs::read_to_string(d.join("logs/mcp-proxy.jsonl"))
+            .unwrap()
+            .contains(secret)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_old_failed_discovery_marker_is_retried() {
+    let dir = temp();
+    let d = dir.path();
+    let mut peer = Peer::spawn(d, "lazy", &[("FAKE_INIT_ERROR", "1")]);
+    assert!(peer.init().await.get("error").is_some());
+    peer.close().await;
+    let file = &cache_files(d, "json")[0];
+    let mut entry: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(entry["discovery_failed"], true);
+    entry["cached_at"] = json!(1);
+    fs::write(file, entry.to_string()).unwrap();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    assert!(peer.init().await.get("result").is_some());
+    eventually(|| {
+        serde_json::from_slice::<Value>(&fs::read(file).unwrap())
+            .is_ok_and(|e| e["discovery_failed"] == false && e["tools"][0]["name"] == "echo")
+    })
+    .await;
+    peer.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn directories_are_private_and_the_lifecycle_log_is_bounded() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp();
+    let d = dir.path();
+    fs::create_dir_all(d.join("logs")).unwrap();
+    let log = d.join("logs/mcp-proxy.jsonl");
+    fs::File::create(&log).unwrap().set_len(5 << 20).unwrap();
+    let mut peer = Peer::spawn(d, "lazy-keep-alive", &[]);
+    peer.init().await;
+    peer.call(2, "echo").await;
+    for private in [
+        "mcp-cache",
+        "mcp-cache/v1",
+        "mcp-cache/class-v1",
+        "run",
+        "run/capabilities",
+    ] {
+        let mode = fs::metadata(d.join(private)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{private}");
+    }
+    peer.close().await;
+    assert!(d.join("logs/mcp-proxy.jsonl.1").exists());
+    assert!(fs::metadata(&log).unwrap().len() < 1 << 20);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn sweep_never_kills_a_group_whose_pid_was_reused() {
+    use std::os::unix::process::CommandExt;
+    let dir = temp();
+    let run = dir.path().join("run");
+    fs::create_dir_all(&run).unwrap();
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pgid = bystander.id();
+    let marker = run.join(pgid.to_string());
+    // A marker from an earlier life of this pid: same number, different start time.
+    fs::write(&marker, json!({"pgid":pgid,"start":"1"}).to_string()).unwrap();
+    zeron_mcp_proxy::cleanup_run_dir(&run).await.unwrap();
+    assert!(alive(pgid), "an unrelated process group was killed");
+    assert!(!marker.exists(), "the stale marker is dropped");
+    // The same marker with the true start time is ours and is swept.
+    let stat = fs::read_to_string(format!("/proc/{pgid}/stat")).unwrap();
+    let start = stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19);
+    fs::write(&marker, json!({"pgid":pgid,"start":start}).to_string()).unwrap();
+    zeron_mcp_proxy::cleanup_run_dir(&run).await.unwrap();
+    assert!(!bystander.wait().unwrap().success());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_call_reaches_the_server_before_the_metadata_refresh() {
+    let dir = temp();
+    let d = dir.path();
+    seed(d).await;
+    fs::remove_file(d.join("requests")).unwrap();
+    let mut peer = Peer::spawn(d, "lazy", &[]);
+    peer.init().await;
+    peer.call(2, "echo").await;
+    eventually(|| {
+        fs::read_to_string(d.join("requests")).is_ok_and(|log| log.contains("\"tools/list\""))
+    })
+    .await;
+    let methods: Vec<_> = fs::read_to_string(d.join("requests"))
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["method"].as_str().map(str::to_owned))
+        .collect();
+    let at = |name: &str| methods.iter().position(|m| m == name).unwrap();
+    assert!(at("tools/call") < at("tools/list"), "{methods:?}");
+    peer.close().await;
 }

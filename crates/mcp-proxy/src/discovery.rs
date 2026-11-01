@@ -70,7 +70,7 @@ pub fn record_run_discovery(config: &crate::Config, outcome: Discovery) -> io::R
         "{}.json",
         crate::cache::hash(&serde_json::json!(config.server))
     ));
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::cache::private_dir_all(path.parent().unwrap())?;
     let _lock = crate::cache::FileLock::new(&path.with_extension("lock"))?;
     let outcome = if run_discovery(dir, &config.server)? == Some(Discovery::Channel) {
         Discovery::Channel
@@ -97,7 +97,7 @@ fn record_discovery_at(config: &crate::Config, outcome: Discovery, now: u64) -> 
         return run_result;
     };
     let path = evidence_path(&config.data_dir, identity);
-    std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::cache::private_dir_all(path.parent().unwrap())?;
     let _lock = crate::cache::FileLock::new(&path.with_extension("lock"))?;
     // Positive channel evidence is never overwritten by a concurrent failed or
     // non-channel capture. Only a changed launch identity permits re-discovery.

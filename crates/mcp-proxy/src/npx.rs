@@ -26,14 +26,15 @@ SOFTWARE.
 use crate::cache;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha512};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 const CACHE_VERSION: u64 = 2;
@@ -76,16 +77,19 @@ fn parse_npx(args: &[String]) -> Option<Invocation> {
                 let value = before
                     .get(i + 1)
                     .filter(|s| !s.is_empty() && !s.starts_with('-'))?;
-                spec.get_or_insert_with(|| value.clone());
+                // npm keys several packages' install directory by an ICU-collated sort
+                // of all specs; only the single-package layout is reproduced here.
+                if spec.replace(value.clone()).is_some() {
+                    return None;
+                }
                 package_flag = true;
                 i += 1;
             }
             s if s.starts_with("--package=") => {
                 let value = s.strip_prefix("--package=")?.to_owned();
-                if value.is_empty() {
+                if value.is_empty() || spec.replace(value).is_some() {
                     return None;
                 }
-                spec.get_or_insert(value);
                 package_flag = true;
             }
             s if s.starts_with('-') => return None,
@@ -118,15 +122,16 @@ fn parse_npm_exec(args: &[String]) -> Option<Invocation> {
                 let value = before
                     .get(i + 1)
                     .filter(|s| !s.is_empty() && !s.starts_with('-'))?;
-                spec.get_or_insert_with(|| value.clone());
+                if spec.replace(value.clone()).is_some() {
+                    return None;
+                }
                 i += 1;
             }
             s if s.starts_with("--package=") => {
                 let value = s.strip_prefix("--package=")?.to_owned();
-                if value.is_empty() {
+                if value.is_empty() || spec.replace(value).is_some() {
                     return None;
                 }
-                spec.get_or_insert(value);
             }
             s if s.starts_with('-') => return None,
             _ => (),
@@ -143,7 +148,6 @@ fn parse_npm_exec(args: &[String]) -> Option<Invocation> {
 #[derive(Debug)]
 struct Spec {
     name: String,
-    requested: Option<String>,
     exact: Option<String>,
 }
 fn exact_version(s: &str) -> bool {
@@ -199,25 +203,34 @@ fn package_spec(spec: &str) -> Option<Spec> {
         .map(|v| v.strip_prefix(['v', 'V']).unwrap_or(v));
     Some(Spec {
         name: name.into(),
-        requested: version.map(str::to_owned),
         exact: normalized.filter(|s| exact_version(s)).map(str::to_owned),
     })
 }
-fn bin_candidates(name: &str, explicit: Option<&str>) -> Vec<String> {
-    let mut bins = Vec::new();
-    if let Some(explicit) = explicit {
-        bins.push(explicit.to_owned());
-    }
-    if let Some(scoped) = name.strip_prefix('@') {
-        if let Some((scope, name)) = scoped.split_once('/') {
-            bins.push(name.into());
-            bins.push(format!("{scope}-{name}"));
+/// npm exec installs a request into `<cache>/_npx/<hash>`, where the hash is the first
+/// 16 hex digits of the SHA-512 of the requested specs. For one spec that is the raw
+/// spec text exactly as given on the command line (`pkg`, `pkg@latest`, `pkg@1.2.3`).
+pub fn install_hash(spec: &str) -> String {
+    hex::encode(Sha512::digest(spec.as_bytes()))[..16].to_owned()
+}
+/// libnpmexec's `getBinFromManifest`: the only bin, or all bins aliasing one file,
+/// else the bin named like the unscoped package; anything else is ambiguous (npx
+/// fails there, so the proxy must not guess).
+fn default_bin(pkg: &Value, name: &str) -> Option<String> {
+    let unscoped = name.rsplit('/').next()?;
+    match &pkg["bin"] {
+        Value::String(_) => Some(unscoped.to_owned()),
+        Value::Object(bins) => {
+            let targets: BTreeSet<_> = bins.values().filter_map(Value::as_str).collect();
+            if !bins.is_empty() && targets.len() == 1 {
+                bins.keys().next().cloned()
+            } else if bins.contains_key(unscoped) {
+                Some(unscoped.to_owned())
+            } else {
+                None
+            }
         }
-    } else {
-        bins.push(name.into());
+        _ => None,
     }
-    bins.dedup();
-    bins
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -266,100 +279,100 @@ fn detect_js(path: &Path) -> bool {
                 .is_some_and(|s| s.starts_with("#!") && s.contains("node"))
         })
 }
+/// The install `npx <spec>` itself would run, and nothing else: the directory named by
+/// the hash of the spec, whose top-level request is this package. Another install that
+/// merely contains a copy (a different version or tag of the same package, or a
+/// dependency hoisted by an unrelated command) is never a substitute.
 fn from_npm_cache(npm_cache: &Path, invocation: &Invocation) -> Option<CacheEntry> {
     let spec = package_spec(&invocation.package_spec)?;
-    let entries = fs::read_dir(npm_cache.join("_npx")).ok()?;
-    let mut installs = Vec::new();
-    for entry in entries.flatten() {
-        let root = entry.path();
-        if !root.is_dir() {
-            continue;
+    let root = npm_cache
+        .join("_npx")
+        .join(install_hash(&invocation.package_spec));
+    let root_json = json_file(&root.join("package.json"))?;
+    if let Some(recorded) = root_json["_npx"]["packages"].as_array() {
+        if recorded.len() != 1 || recorded[0] != invocation.package_spec.as_str() {
+            return None;
         }
-        let modules = root.join("node_modules");
-        let package = modules.join(&spec.name);
-        let manifest = package.join("package.json");
-        let Some(pkg) = json_file(&manifest) else {
-            continue;
-        };
-        let Some(version) = pkg["version"].as_str() else {
-            continue;
-        };
-        if spec.exact.as_ref().is_some_and(|v| v != version) {
-            continue;
-        }
-        let direct = json_file(&root.join("package.json")).is_some_and(|p| {
-            p["dependencies"][&spec.name]
-                .as_str()
-                .is_some_and(|requested| {
-                    requested == spec.requested.as_deref().unwrap_or("*")
-                        || requested == invocation.package_spec
-                })
-        });
-        let mtime = root
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        installs.push((direct, mtime, root, pkg, package, manifest));
     }
-    // Exact top-level request first, newest installation second, stable tie break.
-    installs.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| a.2.cmp(&b.2))
-    });
-    for (_, _, root, pkg, package, manifest) in installs {
-        let bins = &pkg["bin"];
-        let selected = if let Some(relative) = bins.as_str() {
-            Some((
-                spec.name.rsplit('/').next().unwrap().to_owned(),
-                relative.to_owned(),
-            ))
-        } else if let Some(bins) = bins.as_object() {
-            bin_candidates(&spec.name, invocation.bin_name.as_deref())
-                .into_iter()
-                .find_map(|name| {
-                    bins.get(&name)
-                        .and_then(Value::as_str)
-                        .map(|p| (name, p.to_owned()))
-                })
-                .or_else(|| {
-                    bins.iter().find_map(|(name, path)| {
-                        path.as_str().map(|p| (name.clone(), p.to_owned()))
-                    })
-                })
-        } else {
-            None
-        };
-        let Some((name, relative)) = selected else {
-            continue;
-        };
-        // Explicit bin names are resolved inside .bin, never as filesystem paths.
-        if name.contains(['/', '\\']) || name == "." || name == ".." {
-            continue;
-        }
-        let bin_dir = root.join("node_modules/.bin");
-        let bin = fs::canonicalize(bin_dir.join(name))
-            .or_else(|_| fs::canonicalize(package.join(relative)));
-        let Ok(bin) = bin else { continue };
-        if !bin.is_file() {
-            continue;
-        }
-        return Some(CacheEntry {
-            is_js: detect_js(&bin),
-            bin,
-            version: pkg["version"].as_str()?.into(),
-            resolved_at: cache::now_ms(),
-            bin_dir,
-            package_json: manifest,
-        });
+    root_json["dependencies"].get(&spec.name)?;
+    let manifest = root
+        .join("node_modules")
+        .join(&spec.name)
+        .join("package.json");
+    let pkg = json_file(&manifest)?;
+    let version = pkg["version"].as_str()?;
+    if spec.exact.as_ref().is_some_and(|v| v != version) {
+        return None;
     }
-    None
+    let name = match &invocation.bin_name {
+        Some(name) => name.clone(),
+        None => default_bin(&pkg, &spec.name)?,
+    };
+    // Bins are names inside .bin, never filesystem paths.
+    if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+        return None;
+    }
+    let bin_dir = root.join("node_modules/.bin");
+    let bin = fs::canonicalize(bin_dir.join(&name)).ok()?;
+    if !bin.is_file() {
+        return None;
+    }
+    Some(CacheEntry {
+        is_js: detect_js(&bin),
+        bin,
+        version: version.into(),
+        resolved_at: cache::now_ms(),
+        bin_dir,
+        package_json: manifest,
+    })
+}
+
+/// npm exec prefers an installation it finds before it looks at its cache: the project
+/// tree (the current directory and its ancestors) and, for a bare command, a global
+/// install. If any exists npx would run that one, so the proxy leaves the decision to npx.
+fn preempted(invocation: &Invocation, name: &str, cwd: &Path, path: Option<&OsStr>) -> bool {
+    let bare = invocation.bin_name.is_none();
+    let raw = &invocation.package_spec;
+    for dir in cwd.ancestors() {
+        let modules = dir.join("node_modules");
+        if modules.join(name).join("package.json").exists()
+            || (bare && modules.join(".bin").join(raw).symlink_metadata().is_ok())
+        {
+            return true;
+        }
+        if bare {
+            // The project's own bins count as local packages (`hasPkgBin`).
+            if let Some(own) = json_file(&dir.join("package.json")) {
+                if own["bin"].get(raw.as_str()).is_some()
+                    || (own["bin"].is_string()
+                        && own["name"].as_str().and_then(|n| n.rsplit('/').next())
+                            == Some(raw.as_str()))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    bare && std::env::split_paths(path.unwrap_or_default()).any(|bin| {
+        bin.parent().is_some_and(|prefix| {
+            prefix
+                .join("lib/node_modules")
+                .join(name)
+                .join("package.json")
+                .exists()
+        })
+    })
 }
 
 /// Resolution runs once per proxy. A missing cache falls back to the original
 /// invocation, which performs npm's ordinary installation itself. Daily cache
 /// population/refresh belongs to the engine, never to a foreground tool call.
-pub async fn resolve(command: &str, args: &[String], data_dir: &Path) -> Option<Resolution> {
+pub async fn resolve(
+    command: &str,
+    args: &[String],
+    data_dir: &Path,
+    cwd: &Path,
+) -> Option<Resolution> {
     if cfg!(windows) {
         return None;
     }
@@ -409,41 +422,77 @@ pub async fn resolve(command: &str, args: &[String], data_dir: &Path) -> Option<
         &invocation,
         data_dir,
         std::env::var_os("PATH").as_deref(),
+        cwd,
     )
+}
+fn store(file: &Path, key: &str, entry: &CacheEntry) {
+    // Cache failures must not prevent the equivalent direct executable path.
+    let _ = (|| -> std::io::Result<()> {
+        cache::private_dir_all(file.parent().unwrap())?;
+        let _lock = cache::FileLock::new(&file.with_extension("lock"))?;
+        let mut entries: BTreeMap<String, Value> = json_file(file)
+            .filter(|d| d["version"] == CACHE_VERSION)
+            .and_then(|d| serde_json::from_value(d["entries"].clone()).ok())
+            .unwrap_or_default();
+        entries.insert(key.to_owned(), serde_json::to_value(entry)?);
+        cache::atomic_write(
+            file,
+            &serde_json::to_vec(&json!({"version":CACHE_VERSION,"entries":entries}))?,
+        )
+    })();
 }
 fn resolve_in(
     npm_cache: &Path,
     invocation: &Invocation,
     data_dir: &Path,
     inherited_path: Option<&OsStr>,
+    cwd: &Path,
 ) -> Option<Resolution> {
     let spec = package_spec(&invocation.package_spec)?;
+    if preempted(invocation, &spec.name, cwd, inherited_path) {
+        return None;
+    }
     let key = json!([
         invocation.package_spec,
         invocation.bin_name.as_deref().unwrap_or("")
     ])
     .to_string();
     let file = data_dir.join("mcp-cache/npx.json");
-    let disk = json_file(&file);
-    let cached = disk
-        .as_ref()
+    let stored = json_file(&file)
         .filter(|d| d["version"] == CACHE_VERSION)
         .and_then(|d| serde_json::from_value::<CacheEntry>(d["entries"][&key].clone()).ok());
-    let cached = cached.filter(|c| {
-        cache::now_ms().saturating_sub(c.resolved_at) < CACHE_TTL_MS
-            && c.package_json.starts_with(npm_cache.join("_npx"))
-            && c.bin.is_file()
-            && c.bin_dir.is_dir()
-            && spec.exact.as_ref().is_none_or(|v| v == &c.version)
-            && json_file(&c.package_json).is_some_and(|p| p["version"] == c.version)
-    });
-    // Floating specs must see a newly refreshed npm install on the next session,
-    // even when the persisted resolution is less than 24 hours old.
-    let entry = if spec.exact.is_none() {
-        from_npm_cache(npm_cache, invocation)
-    } else {
-        cached.or_else(|| from_npm_cache(npm_cache, invocation))
-    }?;
+    let expired = |c: &CacheEntry| cache::now_ms().saturating_sub(c.resolved_at) >= CACHE_TTL_MS;
+    let mut entry = match &stored {
+        // A pinned version cannot go stale; reuse it while the files are still as recorded.
+        Some(c)
+            if spec.exact.is_some()
+                && !expired(c)
+                && c.package_json.starts_with(npm_cache.join("_npx"))
+                && c.bin.is_file()
+                && c.bin_dir.is_dir()
+                && spec.exact.as_ref().is_some_and(|v| v == &c.version)
+                && json_file(&c.package_json).is_some_and(|p| p["version"] == c.version) =>
+        {
+            c.clone()
+        }
+        _ => from_npm_cache(npm_cache, invocation)?,
+    };
+    if spec.exact.is_none() {
+        // npx revalidates a tag or range against the registry on every run; the proxy
+        // never talks to it. So a floating resolution is served for at most one TTL per
+        // version. Once it expires the original invocation runs (npx refreshes its own
+        // cache), and the clock restarts, so servers still follow `@latest` daily.
+        if let Some(previous) = stored
+            .as_ref()
+            .filter(|c| c.version == entry.version && c.bin == entry.bin)
+        {
+            if expired(previous) {
+                store(&file, &key, &entry);
+                return None;
+            }
+            entry.resolved_at = previous.resolved_at;
+        }
+    }
     let path = std::env::join_paths(
         std::iter::once(entry.bin_dir.clone())
             .chain(std::env::split_paths(inherited_path.unwrap_or_default())),
@@ -470,20 +519,7 @@ fn resolve_in(
         package: invocation.package_spec.clone(),
         version: entry.version.clone(),
     };
-    // Cache failures must not prevent the equivalent direct executable path.
-    let _ = (|| -> std::io::Result<()> {
-        fs::create_dir_all(file.parent().unwrap())?;
-        let _lock = cache::FileLock::new(&file.with_extension("lock"))?;
-        let mut entries: BTreeMap<String, Value> = json_file(&file)
-            .filter(|d| d["version"] == CACHE_VERSION)
-            .and_then(|d| serde_json::from_value(d["entries"].clone()).ok())
-            .unwrap_or_default();
-        entries.insert(key, serde_json::to_value(entry)?);
-        cache::atomic_write(
-            &file,
-            &serde_json::to_vec(&json!({"version":CACHE_VERSION,"entries":entries}))?,
-        )
-    })();
+    store(&file, &key, &entry);
     Some(result)
 }
 
@@ -506,42 +542,6 @@ mod tests {
                 .join("mcp-proxy-tests");
         fs::create_dir_all(&root).unwrap();
         tempfile::tempdir_in(root).unwrap()
-    }
-    fn package(
-        cache: &Path,
-        install: &str,
-        name: &str,
-        version: &str,
-        requested: Option<&str>,
-        bin: &str,
-        contents: &str,
-    ) -> PathBuf {
-        let root = cache.join("_npx").join(install);
-        let pkg = root.join("node_modules").join(name);
-        fs::create_dir_all(&pkg).unwrap();
-        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
-        fs::write(
-            pkg.join("package.json"),
-            json!({"name":name,"version":version,"bin":bin}).to_string(),
-        )
-        .unwrap();
-        fs::write(pkg.join(bin), contents).unwrap();
-        if let Some(requested) = requested {
-            fs::write(
-                root.join("package.json"),
-                json!({"dependencies":{name:requested}}).to_string(),
-            )
-            .unwrap();
-        }
-        pkg.join(bin)
-    }
-    fn mtime(dir: &Path, offset: u64) {
-        let file = fs::File::open(dir).unwrap();
-        file.set_times(
-            fs::FileTimes::new()
-                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000 + offset)),
-        )
-        .unwrap();
     }
     #[test]
     fn parse_table_preserves_pi_npx_and_npm_exec_semantics() {
@@ -577,10 +577,17 @@ mod tests {
                 &["-p", "@scope/pkg@1.2.3", "pkg-bin", "--x"],
                 Some(("@scope/pkg@1.2.3", Some("pkg-bin"), &["--x"])),
             ),
+            // Several packages share an install directory keyed by a collated sort.
             (
                 "npx",
                 &["--package=demo", "--package", "other", "demo"],
-                Some(("demo", Some("demo"), &[])),
+                None,
+            ),
+            ("npx", &["-p", "demo", "-p", "demo", "demo"], None),
+            (
+                "npm",
+                &["exec", "--package", "a", "--package=b", "--", "a"],
+                None,
             ),
             ("npx", &["demo", "--"], Some(("demo", None, &[]))),
             ("npx", &["--package", "demo", "--", "demo"], None),
@@ -664,101 +671,280 @@ mod tests {
         );
         assert!(package_spec("plain@latest").unwrap().exact.is_none());
     }
+    /// What `npx <spec>` leaves behind: `_npx/<hash of spec>` with the package requested at
+    /// the top level and one `.bin` link per bin, as npm creates them.
+    fn install(cache: &Path, spec: &str, name: &str, version: &str, bin: Value) -> PathBuf {
+        let root = cache.join("_npx").join(install_hash(spec));
+        let pkg = root.join("node_modules").join(name);
+        let bins = root.join("node_modules/.bin");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::create_dir_all(&bins).unwrap();
+        fs::write(
+            root.join("package.json"),
+            json!({"dependencies":{name:format!("^{version}")},"_npx":{"packages":[spec]}})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            json!({"name":name,"version":version,"bin":bin}).to_string(),
+        )
+        .unwrap();
+        let links: Vec<(String, String)> = match &bin {
+            Value::String(path) => vec![(name.rsplit('/').next().unwrap().into(), path.clone())],
+            Value::Object(m) => m
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().into()))
+                .collect(),
+            _ => vec![],
+        };
+        for (link, path) in links {
+            fs::write(pkg.join(&path), "// js").unwrap();
+            #[cfg(unix)]
+            let _ =
+                std::os::unix::fs::symlink(Path::new("..").join(name).join(&path), bins.join(link));
+        }
+        root
+    }
+    /// A PATH directory whose `node` is an executable stand-in, so JS bins resolve anywhere.
+    #[cfg(unix)]
+    fn node_dir(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("fake-node-bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("node"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(bin.join("node"), fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+    #[cfg(unix)]
+    fn resolve_here(cache: &Path, i: &Invocation, data: &Path) -> Option<Resolution> {
+        let path = std::env::join_paths([node_dir(cache)]).unwrap();
+        resolve_in(cache, i, data, Some(&path), cache)
+    }
+
     #[test]
-    fn exact_pin_wins_over_newer_wrong_scoped_or_unscoped_versions() {
-        let dir = temp();
-        for name in ["plain", "@scope/pkg"] {
-            let right = package(
-                dir.path(),
-                "correct",
-                name,
-                "2.0.0",
-                None,
-                "cli.js",
-                "// js",
-            );
-            package(dir.path(), "newer", name, "1.0.0", None, "cli.js", "// js");
-            mtime(&dir.path().join("_npx/correct"), 1);
-            mtime(&dir.path().join("_npx/newer"), 10);
-            for suffix in ["2.0.0", "v2.0.0", "=2.0.0"] {
-                assert_eq!(
-                    from_npm_cache(dir.path(), &invocation(&format!("{name}@{suffix}")))
-                        .unwrap()
-                        .bin,
-                    right
-                );
-            }
+    fn install_hash_matches_what_npm_writes_to_the_cache() {
+        // Directory names observed in a real npm 12 `_npx` cache.
+        for (spec, dir) in [
+            ("chrome-devtools-mcp@1.11.0", "053a863a8198098a"),
+            ("@playwright/mcp@latest", "9833c18b2d85bc59"),
+            ("prettier", "b388654678d519d9"),
+        ] {
+            assert_eq!(install_hash(spec), dir);
         }
     }
+    #[cfg(unix)]
     #[test]
-    fn latest_prefers_exact_top_level_request_over_transitive_copy() {
+    fn exact_pin_uses_its_own_install_never_a_newer_copy_or_another_spelling() {
         let dir = temp();
-        let right = package(
+        for name in ["plain", "@scope/pkg"] {
+            let pinned = format!("{name}@2.0.0");
+            let right = install(dir.path(), &pinned, name, "2.0.0", json!("cli.js"));
+            install(
+                dir.path(),
+                &format!("{name}@3.0.0"),
+                name,
+                "3.0.0",
+                json!("cli.js"),
+            );
+            let found = from_npm_cache(dir.path(), &invocation(&pinned)).unwrap();
+            assert_eq!(found.version, "2.0.0");
+            assert!(found.bin.starts_with(fs::canonicalize(right).unwrap()));
+            // npm keys the directory by the raw spelling; a different spelling is a
+            // different install that npx would create.
+            assert!(from_npm_cache(dir.path(), &invocation(&format!("{name}@v2.0.0"))).is_none());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn floating_specs_never_borrow_another_requests_install() {
+        let dir = temp();
+        install(dir.path(), "plain@1.0.0", "plain", "1.0.0", json!("cli.js"));
+        // Same package present at the top level of a *different* request's install.
+        for spec in ["plain", "plain@latest", "plain@^1", "plain@next"] {
+            assert!(
+                from_npm_cache(dir.path(), &invocation(spec)).is_none(),
+                "{spec}"
+            );
+        }
+        install(
             dir.path(),
-            "direct",
-            "plain",
-            "1.0.0",
-            Some("latest"),
-            "cli.js",
-            "// js",
-        );
-        package(
-            dir.path(),
-            "transitive",
+            "plain@latest",
             "plain",
             "9.0.0",
-            None,
-            "cli.js",
-            "// js",
+            json!("cli.js"),
         );
-        mtime(&dir.path().join("_npx/direct"), 1);
-        mtime(&dir.path().join("_npx/transitive"), 10);
-        assert_eq!(
-            from_npm_cache(dir.path(), &invocation("plain@latest"))
-                .unwrap()
-                .bin,
-            right
-        );
-        fs::remove_file(dir.path().join("_npx/direct/package.json")).unwrap();
-        mtime(&dir.path().join("_npx/direct"), 1);
         assert_eq!(
             from_npm_cache(dir.path(), &invocation("plain@latest"))
                 .unwrap()
                 .version,
             "9.0.0"
         );
+        assert_eq!(
+            from_npm_cache(dir.path(), &invocation("plain@1.0.0"))
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+        assert!(from_npm_cache(dir.path(), &invocation("plain@^1")).is_none());
     }
     #[cfg(unix)]
     #[test]
-    fn bin_candidates_symlink_realpath_js_and_native() {
+    fn hoisted_dependencies_and_foreign_directories_are_not_requests() {
         let dir = temp();
-        let source = package(
-            dir.path(),
-            "one",
-            "@scope/pkg",
-            "1.0.0",
-            None,
-            "cli",
-            "#!/usr/bin/env node\n",
-        );
-        let pkg = source.parent().unwrap();
+        // `other` installed `plain` as a hoisted dependency.
+        let root = install(dir.path(), "other", "other", "1.0.0", json!("cli.js"));
+        let hoisted = root.join("node_modules/plain");
+        fs::create_dir_all(&hoisted).unwrap();
         fs::write(
-            pkg.join("package.json"),
-            json!({"version":"1.0.0","bin":{"scope-pkg":"wrong","explicit":"cli"}}).to_string(),
+            hoisted.join("package.json"),
+            r#"{"name":"plain","version":"7.0.0","bin":"cli.js"}"#,
         )
         .unwrap();
+        assert!(from_npm_cache(dir.path(), &invocation("plain")).is_none());
+        // A directory with the right name that does not request the package at the top.
+        let wrong = dir.path().join("_npx").join(install_hash("plain"));
+        fs::create_dir_all(wrong.join("node_modules")).unwrap();
+        fs::rename(&hoisted, wrong.join("node_modules/plain")).unwrap();
+        fs::write(
+            wrong.join("package.json"),
+            r#"{"dependencies":{"other":"*"}}"#,
+        )
+        .unwrap();
+        assert!(from_npm_cache(dir.path(), &invocation("plain")).is_none());
+        // npm's own record of the request disagrees with the directory name.
+        install(dir.path(), "plain@4.0.0", "plain", "4.0.0", json!("cli.js"));
+        let recorded = dir.path().join("_npx").join(install_hash("plain@4.0.0"));
+        fs::write(
+            recorded.join("package.json"),
+            r#"{"dependencies":{"plain":"^4.0.0"},"_npx":{"packages":["plain@5.0.0"]}}"#,
+        )
+        .unwrap();
+        assert!(from_npm_cache(dir.path(), &invocation("plain@4.0.0")).is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bin_choice_follows_libnpmexec_and_never_guesses() {
+        let dir = temp();
+        let bin = |spec: &str, bin: Value, explicit: Option<&str>| {
+            install(dir.path(), spec, spec, "1.0.0", bin);
+            let mut i = invocation(spec);
+            i.bin_name = explicit.map(str::to_owned);
+            from_npm_cache(dir.path(), &i).map(|e| e.bin.file_name().unwrap().to_owned())
+        };
+        let file = |name: &str| Some(std::ffi::OsString::from(name));
+        assert_eq!(bin("one", json!({"tool":"t.js"}), None), file("t.js"));
+        assert_eq!(
+            bin("alias", json!({"a":"x.js","b":"x.js"}), None),
+            file("x.js")
+        );
+        assert_eq!(
+            bin("many", json!({"many":"m.js","other":"o.js"}), None),
+            file("m.js")
+        );
+        // Several bins, none named like the package: npx fails, the proxy must not pick.
+        assert_eq!(bin("ambiguous", json!({"a":"a.js","b":"b.js"}), None), None);
+        assert_eq!(bin("string", json!("s.js"), None), file("s.js"));
+        // `npx -p pkg cmd` runs `.bin/cmd`, including bins that belong to a dependency.
+        assert_eq!(bin("pkg", json!({"pkg":"p.js"}), Some("pkg")), file("p.js"));
+        let root = dir.path().join("_npx").join(install_hash("pkg"));
+        fs::write(root.join("node_modules/dep.js"), "// js").unwrap();
+        std::os::unix::fs::symlink("../dep.js", root.join("node_modules/.bin/dep-cli")).unwrap();
+        let mut i = invocation("pkg");
+        i.bin_name = Some("dep-cli".into());
+        assert_eq!(
+            from_npm_cache(dir.path(), &i)
+                .unwrap()
+                .bin
+                .file_name()
+                .unwrap(),
+            "dep.js"
+        );
+        for bad in ["missing", "../escape", "a/b", ".."] {
+            i.bin_name = Some(bad.into());
+            assert!(from_npm_cache(dir.path(), &i).is_none(), "{bad}");
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bin_symlink_realpath_js_and_native() {
+        let dir = temp();
+        let root = install(
+            dir.path(),
+            "@scope/pkg",
+            "@scope/pkg",
+            "1.0.0",
+            json!({"pkg":"cli"}),
+        );
         let target = dir.path().join("linked-native");
         fs::write(&target, b"\x7fELF").unwrap();
-        let link = dir.path().join("_npx/one/node_modules/.bin/explicit");
+        let link = root.join("node_modules/.bin/pkg");
+        fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let mut i = invocation("@scope/pkg");
-        i.bin_name = Some("explicit".into());
-        let result = from_npm_cache(dir.path(), &i).unwrap();
+        let result = from_npm_cache(dir.path(), &invocation("@scope/pkg")).unwrap();
         assert_eq!(result.bin, target);
         assert!(!result.is_js);
-        fs::remove_file(link).unwrap();
-        assert!(from_npm_cache(dir.path(), &i).unwrap().is_js);
-        assert_eq!(bin_candidates("@scope/pkg", None), vec!["pkg", "scope-pkg"]);
+        fs::write(&target, "#!/usr/bin/env node\n").unwrap();
+        assert!(
+            from_npm_cache(dir.path(), &invocation("@scope/pkg"))
+                .unwrap()
+                .is_js
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn project_and_global_installs_are_left_to_npx() {
+        let dir = temp();
+        let npm = dir.path().join("npm");
+        let data = dir.path().join("data");
+        install(&npm, "plain", "plain", "1.0.0", json!("cli.js"));
+        install(&npm, "plain@1.0.0", "plain", "1.0.0", json!({"x":"cli.js"}));
+        let project = dir.path().join("project");
+        let sub = project.join("packages/app");
+        fs::create_dir_all(&sub).unwrap();
+        let bare = invocation("plain");
+        let mut with_bin = invocation("plain@1.0.0");
+        with_bin.bin_name = Some("x".into());
+        let node = node_dir(dir.path());
+        let run = |i: &Invocation, cwd: &Path, extra: Option<&OsStr>| {
+            let path = std::env::join_paths(
+                extra
+                    .iter()
+                    .flat_map(|p| std::env::split_paths(p))
+                    .chain([node.clone()]),
+            )
+            .unwrap();
+            resolve_in(&npm, i, &data, Some(&path), cwd).is_some()
+        };
+        assert!(run(&bare, &sub, None));
+        // A project dependency anywhere above the working directory wins in npx.
+        fs::create_dir_all(project.join("node_modules/plain")).unwrap();
+        fs::write(project.join("node_modules/plain/package.json"), "{}").unwrap();
+        assert!(!run(&bare, &sub, None));
+        assert!(!run(&with_bin, &sub, None));
+        fs::remove_dir_all(project.join("node_modules")).unwrap();
+        // So does a local bin of the command's name, but only for a bare command.
+        fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+        fs::write(project.join("node_modules/.bin/plain"), "").unwrap();
+        assert!(!run(&bare, &sub, None));
+        fs::remove_dir_all(project.join("node_modules")).unwrap();
+        // The project's own bin counts as a local package.
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"me","bin":{"plain":"x.js"}}"#,
+        )
+        .unwrap();
+        assert!(!run(&bare, &sub, None));
+        fs::remove_file(project.join("package.json")).unwrap();
+        // A global install on PATH (<prefix>/bin next to <prefix>/lib/node_modules).
+        let prefix = dir.path().join("global");
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        fs::create_dir_all(prefix.join("lib/node_modules/plain")).unwrap();
+        fs::write(prefix.join("lib/node_modules/plain/package.json"), "{}").unwrap();
+        let path = std::env::join_paths([prefix.join("bin")]).unwrap();
+        assert!(!run(&bare, &sub, Some(&path)));
+        assert!(run(&with_bin, &sub, Some(&path)));
+        assert!(run(&bare, &sub, None));
     }
     #[cfg(unix)]
     #[test]
@@ -767,8 +953,8 @@ mod tests {
         let dir = temp();
         let npm = dir.path().join("npm");
         let data = dir.path().join("data");
-        let bin = package(&npm, "one", "plain", "1.0.0", Some("*"), "cli.js", "// js");
-        let bin_dir = npm.join("_npx/one/node_modules/.bin");
+        let root = install(&npm, "plain", "plain", "1.0.0", json!("cli.js"));
+        let bin_dir = root.join("node_modules/.bin");
         let node = bin_dir.join("node");
         fs::write(&node, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
@@ -777,10 +963,11 @@ mod tests {
             &invocation("plain"),
             &data,
             Some(OsStr::new("/other")),
+            dir.path(),
         )
         .unwrap();
         assert_eq!(resolved.command, node);
-        assert_eq!(resolved.args[0], bin.to_str().unwrap());
+        assert!(resolved.args[0].ends_with("plain/cli.js"));
         assert_eq!(resolved.args[1], "--token=secret-value");
         assert_eq!(std::env::split_paths(&resolved.path).next(), Some(bin_dir));
         assert!(
@@ -791,16 +978,17 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn persisted_cache_ttl_missing_binary_wrong_pin_and_malformed_entries() {
+    fn persisted_cache_missing_binary_wrong_pin_and_malformed_entries() {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp();
         let npm = dir.path().join("npm");
         let data = dir.path().join("data");
-        let right = package(&npm, "one", "plain", "2.0.0", None, "cli", "#!/bin/sh\n");
+        let root = install(&npm, "plain@2.0.0", "plain", "2.0.0", json!("cli.js"));
+        let right = fs::canonicalize(root.join("node_modules/plain/cli.js")).unwrap();
         fs::set_permissions(&right, fs::Permissions::from_mode(0o755)).unwrap();
         let i = invocation("plain@2.0.0");
         let key = json!([i.package_spec, ""]).to_string();
-        assert_eq!(resolve_in(&npm, &i, &data, None).unwrap().bin, right);
+        assert_eq!(resolve_here(&npm, &i, &data).unwrap().bin, right);
         let file = data.join("mcp-cache/npx.json");
         for poison in [
             json!({"bin":123}),
@@ -811,17 +999,50 @@ mod tests {
                 json!({"version":2,"entries":{&key:poison}}).to_string(),
             )
             .unwrap();
-            assert_eq!(resolve_in(&npm, &i, &data, None).unwrap().bin, right);
+            assert_eq!(resolve_here(&npm, &i, &data).unwrap().bin, right);
         }
         let mut payload = json_file(&file).unwrap();
         payload["entries"][&key]["version"] = json!("1.0.0");
         fs::write(&file, payload.to_string()).unwrap();
-        assert_eq!(resolve_in(&npm, &i, &data, None).unwrap().version, "2.0.0");
+        assert_eq!(resolve_here(&npm, &i, &data).unwrap().version, "2.0.0");
         let mut payload = json_file(&file).unwrap();
         payload["entries"][&key]["resolved_at"] = json!(1);
         fs::write(&file, payload.to_string()).unwrap();
-        assert!(resolve_in(&npm, &i, &data, None).unwrap().version == "2.0.0");
-        fs::remove_file(right).unwrap();
-        assert!(resolve_in(&npm, &i, &data, None).is_none());
+        assert!(resolve_here(&npm, &i, &data).unwrap().version == "2.0.0");
+        fs::remove_file(&right).unwrap();
+        assert!(resolve_here(&npm, &i, &data).is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn floating_resolutions_are_handed_back_to_npx_once_a_day() {
+        let dir = temp();
+        let npm = dir.path().join("npm");
+        let data = dir.path().join("data");
+        install(&npm, "plain@latest", "plain", "1.0.0", json!("cli.js"));
+        let i = invocation("plain@latest");
+        let key = json!([i.package_spec, ""]).to_string();
+        let file = data.join("mcp-cache/npx.json");
+        let stamp = |file: &Path| json_file(file).unwrap()["entries"][&key]["resolved_at"].clone();
+        assert!(resolve_here(&npm, &i, &data).is_some());
+        let first = stamp(&file);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(resolve_here(&npm, &i, &data).is_some());
+        assert_eq!(
+            stamp(&file),
+            first,
+            "serving a version must not extend its lifetime"
+        );
+        let mut payload = json_file(&file).unwrap();
+        payload["entries"][&key]["resolved_at"] = json!(cache::now_ms() - CACHE_TTL_MS - 1);
+        fs::write(&file, payload.to_string()).unwrap();
+        // Expired: npx runs once (and refreshes its own cache), then the clock restarts.
+        assert!(resolve_here(&npm, &i, &data).is_none());
+        assert!(resolve_here(&npm, &i, &data).is_some());
+        // A newer version that appeared meanwhile is served immediately.
+        let mut payload = json_file(&file).unwrap();
+        payload["entries"][&key]["resolved_at"] = json!(1);
+        fs::write(&file, payload.to_string()).unwrap();
+        install(&npm, "plain@latest", "plain", "2.0.0", json!("cli.js"));
+        assert_eq!(resolve_here(&npm, &i, &data).unwrap().version, "2.0.0");
     }
 }
