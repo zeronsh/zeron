@@ -38,6 +38,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+mod mcp_servers;
 mod memory_pressure;
 pub mod profile;
 pub mod project_actions;

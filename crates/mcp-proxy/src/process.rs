@@ -19,6 +19,7 @@ pub struct Process {
     pub pgid: u32,
     pub groups: BTreeSet<u32>,
     pub run_dir: Option<PathBuf>,
+    pub server: String,
     #[cfg(windows)]
     job: windows::Job,
 }
@@ -85,6 +86,7 @@ impl Process {
             pgid,
             groups: BTreeSet::from([pgid]),
             run_dir: c.run_dir.clone(),
+            server: c.server.clone(),
             #[cfg(windows)]
             job,
         };
@@ -97,9 +99,7 @@ impl Process {
     }
     fn mark(&self, pgid: u32) -> io::Result<()> {
         if let Some(dir) = &self.run_dir {
-            fs::create_dir_all(dir)?;
-            let value = serde_json::json!({"pgid":pgid,"start":start_id(pgid),"boot":boot_id()});
-            cache::atomic_write(&dir.join(pgid.to_string()), value.to_string().as_bytes())?;
+            record_group_marker(dir, pgid, &self.server)?;
         }
         Ok(())
     }
@@ -330,6 +330,97 @@ fn signal_group(group: u32, force: bool) {
     }
     #[cfg(not(unix))]
     let _ = (group, force);
+}
+
+/// One confirmed-live process group recorded under a proxy run directory.
+pub struct LiveGroup {
+    pub pgid: u32,
+    pub server: String,
+}
+
+/// Write the marker `cleanup_run_dir` and `live_groups` both understand.
+/// `server` is the MCP name. Older markers omit it.
+pub fn record_group_marker(dir: &Path, pgid: u32, server: &str) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let value = serde_json::json!({
+        "pgid": pgid,
+        "start": start_id(pgid),
+        "boot": boot_id(),
+        "server": server,
+    });
+    cache::atomic_write(&dir.join(pgid.to_string()), value.to_string().as_bytes())
+}
+
+/// Live groups in `dir`. Read-only: nothing is signalled or removed.
+///
+/// A group counts only when its leader is the process the marker recorded
+/// (same boot, same start tick, not a zombie). A gone leader is not counted;
+/// cleanup may still reap that marker, because a pid cannot be reused while
+/// its group has members.
+pub fn live_groups(dir: &Path) -> Vec<LiveGroup> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut groups = Vec::new();
+    for entry in entries.flatten() {
+        let Some(group) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .filter(|group| *group > 1 && *group <= i32::MAX as u32)
+        else {
+            continue;
+        };
+        let Ok(raw) = fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if !marker_is_live(group, &value) {
+            continue;
+        }
+        groups.push(LiveGroup {
+            pgid: group,
+            server: value["server"].as_str().unwrap_or("").to_owned(),
+        });
+    }
+    groups
+}
+
+fn marker_is_live(group: u32, value: &serde_json::Value) -> bool {
+    if value["pgid"] != group {
+        return false;
+    }
+    let boot = boot_id();
+    if value["boot"]
+        .as_str()
+        .is_some_and(|recorded| !recorded.is_empty() && !boot.is_empty() && recorded != boot)
+    {
+        return false;
+    }
+    let current = start_id(group);
+    let recorded = value["start"].as_str().unwrap_or_default();
+    !current.is_empty() && recorded == current && !leader_is_zombie(group)
+}
+
+#[cfg(target_os = "linux")]
+fn leader_is_zombie(pgid: u32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pgid}/stat")) else {
+        return true;
+    };
+    match stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+    {
+        Some(state) => state.starts_with('Z'),
+        None => true,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn leader_is_zombie(_pgid: u32) -> bool {
+    false
 }
 
 /// Sweep only numeric proxy-owned marker files. Non-marker run files are untouched.
@@ -573,5 +664,42 @@ mod tests {
         assert!(dir.path().join("hibernate-capture").exists());
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn live_groups_reports_a_live_marker_and_skips_a_reused_pid() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        struct Reap(Option<std::process::Child>);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                if let Some(child) = self.0.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let child = Reap(Some(child));
+        let pgid = child.0.as_ref().unwrap().id();
+        record_group_marker(dir.path(), pgid, "playwright").unwrap();
+        let live = live_groups(dir.path());
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].pgid, pgid);
+        assert_eq!(live[0].server, "playwright");
+        fs::write(
+            dir.path().join("99"),
+            serde_json::json!({"pgid": 99, "start": "1", "boot": "nope", "server": "other"})
+                .to_string(),
+        )
+        .unwrap();
+        let live = live_groups(dir.path());
+        assert_eq!(live.len(), 1);
+        assert!(live.iter().all(|group| group.server != "other"));
+        drop(child);
     }
 }

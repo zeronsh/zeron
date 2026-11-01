@@ -9,7 +9,7 @@ pub mod rpc;
 pub mod shim;
 
 pub use config::{Config, Mode};
-pub use process::cleanup_run_dir;
+pub use process::{LiveGroup, cleanup_run_dir, live_groups, record_group_marker};
 use std::{io, path::PathBuf, time::Duration};
 
 pub fn data_dir() -> PathBuf {

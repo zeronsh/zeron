@@ -124,7 +124,9 @@ fn preserve_unknown_prefs(current: &mut serde_json::Value, old: serde_json::Valu
         for (key, value) in old {
             if let Some(existing) = current.get_mut(&key) {
                 // Server choices are a replaceable map, not a fixed schema.
-                if key != "servers" { preserve_unknown_prefs(existing, value); }
+                if key != "servers" {
+                    preserve_unknown_prefs(existing, value);
+                }
             } else {
                 current.insert(key, value);
             }
@@ -181,8 +183,8 @@ impl Default for McpPrefs {
     }
 }
 
-/// One server a snapshot has seen. Snapshots are a later unit, so
-/// [`McpSettings::servers`] is empty until then. The shape is fixed now.
+/// One server a fresh harness snapshot or Codex config has named.
+/// `GetMcpSettings` fills [`McpSettings::servers`] from this device's data dir.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredMcpServer {
@@ -686,7 +688,9 @@ impl HarnessRegistry {
             && let Ok(mut old) = serde_json::from_str::<serde_json::Value>(&text)
         {
             // The legacy allow-list is deliberately consumed during migration.
-            if let Some(object) = old.as_object_mut() { object.remove("enabled"); }
+            if let Some(object) = old.as_object_mut() {
+                object.remove("enabled");
+            }
             preserve_unknown_prefs(&mut value, old);
         }
         let json = match serde_json::to_string_pretty(&value) {
@@ -754,10 +758,38 @@ impl HarnessRegistry {
     }
 
     pub fn mcp_settings(&self) -> McpSettings {
-        McpSettings {
-            prefs: self.mcp_prefs(),
-            servers: Vec::new(),
-        }
+        let prefs = self.mcp_prefs();
+        let Some(data_dir) = self.data_dir() else {
+            return McpSettings {
+                prefs,
+                servers: Vec::new(),
+            };
+        };
+        let runtime = crate::mcp_servers::by_server(&data_dir);
+        let mut servers = zeron_harness::mcp_observed::discovered_servers(
+            &data_dir,
+            crate::mcp_servers::codex_config().as_deref(),
+        )
+        .into_iter()
+        .map(|server| {
+            let seen = runtime.get(&server.name);
+            DiscoveredMcpServer {
+                harness: server.harness,
+                name: server.name,
+                class: server.class,
+                scope: server.scope,
+                last_seen_pss_kib: seen.and_then(|seen| seen.pss_kib),
+                running: seen.map(|seen| seen.running).unwrap_or(0),
+            }
+        })
+        .collect::<Vec<_>>();
+        servers.sort_by(|left, right| {
+            left.harness
+                .as_str()
+                .cmp(right.harness.as_str())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        McpSettings { prefs, servers }
     }
 
     pub fn title_settings(&self) -> TitleSettings {
@@ -1848,10 +1880,7 @@ mod title_tests {
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         assert!(registry.mcp_lazy_enabled());
-        assert_eq!(
-            registry.server_modes(HarnessId::Codex, true).len(),
-            0
-        );
+        assert_eq!(registry.server_modes(HarnessId::Codex, true).len(), 0);
         registry.set_mcp_prefs(partial.mcp.clone());
         let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
         assert!(text.contains("buildJobs"), "{text}");
