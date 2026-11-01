@@ -72,7 +72,7 @@ impl Workload for Idle {
     }
 
     fn variant_key(&self) -> String {
-        format!("{}-{}", self.p.variant, self.tier.as_str())
+        format!("{}-w{}-{}", self.p.variant, self.p.window_s, self.tier.as_str())
     }
 
     fn profile(&self) -> Profile {
@@ -235,7 +235,7 @@ mod tests {
         let idle = Idle::from_params(Tier::Quick, &[]).unwrap();
         assert_eq!(idle.p.window_s, 120);
         assert_eq!(idle.p.window_s % 60, 0);
-        assert_eq!(idle.variant_key(), "ui-quick");
+        assert_eq!(idle.variant_key(), "ui-w120-quick");
         assert!(Idle::from_params(Tier::Quick, &[("variant".into(), "nope".into())]).is_err());
         let parked =
             Idle::from_params(Tier::Standard, &[("variant".into(), "parked".into())]).unwrap();
