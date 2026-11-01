@@ -37,6 +37,8 @@ export interface OrgMembership {
   readonly id: string;
   readonly organizationId: string;
   readonly name: string;
+  /** Role slug, e.g. `admin`; null when WorkOS names none. */
+  readonly role: string | null;
 }
 
 interface WireUser {
@@ -56,6 +58,7 @@ interface WireMembership {
   id: string;
   organization_id: string;
   organization_name?: string | null;
+  role?: { slug?: string | null } | null;
 }
 
 const failed = async (res: Response): Promise<never> => {
@@ -140,7 +143,8 @@ export const listOrgs = async (apiKey: string, userId: string): Promise<OrgMembe
   return r.data.map((m) => ({
     id: m.id,
     organizationId: m.organization_id,
-    name: m.organization_name ?? m.organization_id
+    name: m.organization_name ?? m.organization_id,
+    role: m.role?.slug ?? null
   }));
 };
 

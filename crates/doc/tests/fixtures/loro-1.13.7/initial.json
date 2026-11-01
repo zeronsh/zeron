@@ -1,0 +1,13 @@
+{
+  "text": "Hello 🌍",
+  "messages": [
+    "first"
+  ],
+  "queue": [
+    "one",
+    "two"
+  ],
+  "metadata": {
+    "author": "legacy"
+  }
+}
