@@ -230,6 +230,79 @@ impl SnapshotStore {
     pub fn save_caps(&self, caps: &ClaudeMcpCaps) -> io::Result<()> {
         atomic_private_json(&self.root.join("caps.json"), caps)
     }
+
+    /// Newest fresh snapshot for each fingerprint under this data dir.
+    /// A snapshot is fresh when its stored fingerprint still matches a
+    /// candidate layout of its config root and project. Pending rows, a
+    /// mismatched digest, a bad version, and a store that escapes the data
+    /// dir are omitted. Read errors fail closed.
+    pub fn latest_fresh(&self) -> Vec<ClaudeMcpSnapshot> {
+        let Some(data_dir) = self.root.parent() else {
+            return Vec::new();
+        };
+        let (Ok(data_dir), Ok(root)) = (data_dir.canonicalize(), self.root.canonicalize()) else {
+            return Vec::new();
+        };
+        if !root.starts_with(&data_dir) {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return Vec::new();
+        };
+        let mut fingerprints = BTreeMap::<(PathBuf, PathBuf), BTreeSet<String>>::new();
+        let mut best = BTreeMap::<String, ClaudeMcpSnapshot>::new();
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name.starts_with('.') || !name.ends_with(".json") {
+                continue;
+            }
+            let Ok(path) = entry.path().canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(&root) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(snapshot) = serde_json::from_slice::<ClaudeMcpSnapshot>(&bytes) else {
+                continue;
+            };
+            if snapshot.version != VERSION || snapshot.servers.iter().any(pending) {
+                continue;
+            }
+            if name != format!("{}.json", snapshot.key.digest()) {
+                continue;
+            }
+            let fresh = fingerprints
+                .entry((
+                    snapshot.key.config_root.clone(),
+                    snapshot.key.project_dir.clone(),
+                ))
+                .or_insert_with(|| {
+                    candidate_fingerprints(&snapshot.key.config_root, &snapshot.key.project_dir)
+                });
+            if !fresh.contains(&snapshot.key.fingerprint) {
+                continue;
+            }
+            let digest = snapshot.key.digest();
+            let replace = match best.get(&snapshot.key.fingerprint) {
+                Some(prev) => {
+                    snapshot.captured_at_ms > prev.captured_at_ms
+                        || (snapshot.captured_at_ms == prev.captured_at_ms
+                            && digest > prev.key.digest())
+                }
+                None => true,
+            };
+            if replace {
+                best.insert(snapshot.key.fingerprint.clone(), snapshot);
+            }
+        }
+        best.into_values().collect()
+    }
 }
 
 fn atomic_private_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
@@ -289,13 +362,7 @@ impl FingerprintInputs {
                 .unwrap_or_else(crate::executable::home_or_current_dir)
                 .join(".claude.json")
         };
-        let managed = if cfg!(target_os = "macos") {
-            PathBuf::from("/Library/Application Support/ClaudeCode")
-        } else if cfg!(windows) {
-            PathBuf::from(r"C:\Program Files\ClaudeCode")
-        } else {
-            PathBuf::from("/etc/claude-code")
-        };
+        let managed = platform_managed_dir();
         Ok(Self {
             config_root: absolute(&config_root)?,
             config_file,
@@ -316,6 +383,63 @@ impl FingerprintInputs {
             cli_binary_identity: binary_identity(cli)?,
         })
     }
+}
+
+/// Layout used when `config_root` itself holds `.claude.json`.
+/// The home layout (`~/.claude.json` with config root `~/.claude`) is the
+/// other candidate [`SnapshotStore::latest_fresh`] tries, and only when
+/// the config root's file name is `.claude`.
+pub fn fresh_capture_key(
+    config_root: &Path,
+    project_dir: &Path,
+    cli_identity: &str,
+) -> io::Result<CaptureKey> {
+    let config_root = absolute(config_root)?;
+    let inputs = FingerprintInputs {
+        config_file: config_root.join(".claude.json"),
+        config_root: config_root.clone(),
+        project_dir: absolute(project_dir)?,
+        managed_dirs: vec![platform_managed_dir()],
+    };
+    Ok(CaptureKey {
+        config_root,
+        project_dir: inputs.project_dir.clone(),
+        fingerprint: fingerprint(&inputs)?,
+        cli_binary_identity: cli_identity.to_owned(),
+    })
+}
+
+/// Claude Code's managed-settings directory on this platform.
+pub fn platform_managed_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    }
+}
+
+fn candidate_fingerprints(config_root: &Path, project_dir: &Path) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut consider = |config_file: PathBuf| {
+        let inputs = FingerprintInputs {
+            config_file,
+            config_root: config_root.to_path_buf(),
+            project_dir: project_dir.to_path_buf(),
+            managed_dirs: vec![platform_managed_dir()],
+        };
+        if let Ok(fingerprint) = fingerprint(&inputs) {
+            found.insert(fingerprint);
+        }
+    };
+    consider(config_root.join(".claude.json"));
+    if config_root.file_name().and_then(|name| name.to_str()) == Some(".claude")
+        && let Some(home) = config_root.parent()
+    {
+        consider(home.join(".claude.json"));
+    }
+    found
 }
 
 /// Same identity as engine::sessions::binary_identity; does not run the CLI.

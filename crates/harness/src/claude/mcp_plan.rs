@@ -66,7 +66,8 @@ fn servers(snapshot: &ClaudeMcpSnapshot, plan: &McpPlan, path: &std::ffi::OsStr)
                 .map(|a| a.as_str().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()?;
             let channel = row.extra.iter().any(|(k, v)| {
-                (k == "channelCapabilities" || k == "capabilities") && declares_channel(v)
+                (k == "channelCapabilities" || k == "capabilities")
+                    && mcp_policy::value_declares_channel(v)
             });
             let fact = McpServerFact {
                 name: row.name.clone(),
@@ -102,15 +103,6 @@ fn servers(snapshot: &ClaudeMcpSnapshot, plan: &McpPlan, path: &std::ffi::OsStr)
             })
         })
         .collect()
-}
-fn declares_channel(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::Object(m) => {
-            m.keys().any(|k| mcp_policy::declares_channel_capability(k))
-                || m.values().any(declares_channel)
-        }
-        _ => false,
-    }
 }
 
 /// V-8: channel_enable requires a marketplace plugin (source=plugin, even

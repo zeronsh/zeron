@@ -419,6 +419,7 @@ pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
+pub mod mcp_observed;
 pub mod mcp_policy;
 pub mod muse;
 mod model_context;

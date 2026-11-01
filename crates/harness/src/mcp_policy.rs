@@ -87,6 +87,17 @@ pub fn experimental_map_declares_channel(
         .any(|name| declares_channel_capability(name))
 }
 
+/// True when an object, or an object nested in it, declares a channel.
+/// Arrays and scalars do not. This is the shape Claude puts on a status row
+/// and Codex puts under `capabilities`.
+pub fn value_declares_channel(value: &serde_json::Value) -> bool {
+    let serde_json::Value::Object(map) = value else {
+        return false;
+    };
+    map.keys().any(|name| declares_channel_capability(name))
+        || map.values().any(value_declares_channel)
+}
+
 pub fn classify(fact: &McpServerFact) -> McpClass {
     if is_remote(fact) {
         return McpClass::Remote;

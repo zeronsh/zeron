@@ -271,6 +271,43 @@ fn codex_mcp_plan_overrides(
         .unwrap_or_default()
 }
 
+/// Remember a successful `config/read` for Settings. The plan's data dir wins.
+/// Otherwise an explicit `ZERON_DATA_DIR` on the request, then on the process.
+/// There is no home default: a missing dir means Settings falls back to a
+/// cheap read of `config.toml` instead of writing under `~/.zeron`.
+fn cache_codex_config(request: &RunRequest, config: &Value) {
+    let process = std::env::var("ZERON_DATA_DIR").ok();
+    let Some(dir) = mcp_cache_data_dir(
+        request.mcp_plan.as_ref().and_then(|plan| plan.data_dir()),
+        request.env.get("ZERON_DATA_DIR").map(String::as_str),
+        process.as_deref(),
+    ) else {
+        return;
+    };
+    if let Err(error) = crate::mcp_observed::remember_codex_config_read(&dir, config) {
+        tracing::warn!(
+            target: "zeron_harness::codex",
+            %error,
+            "could not cache config/read for MCP settings"
+        );
+    }
+}
+
+fn mcp_cache_data_dir(
+    plan: Option<&Path>,
+    request_env: Option<&str>,
+    process_env: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(dir) = plan {
+        return Some(dir.to_path_buf());
+    }
+    [request_env, process_env]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Resolved launch mode for `name`. `None` means leave the row alone.
 ///
 /// User choices in `plan.modes` go through `mcp_policy`, so a channel or
@@ -283,32 +320,7 @@ fn codex_server_mode(
     plan: &zeron_proto::McpPlan,
 ) -> Option<zeron_proto::McpMode> {
     let explicit = plan.modes.get(name).copied();
-    let fact = crate::mcp_policy::McpServerFact {
-        name: name.to_owned(),
-        transport: if row
-            .get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|c| !c.is_empty())
-        {
-            "stdio".to_owned()
-        } else if row.get("url").is_some() {
-            "http".to_owned()
-        } else {
-            row.get("transport")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned()
-        },
-        command: row
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        // config/read shows the configured command, not an npx cache path.
-        npx_resolved: false,
-        channel: codex_row_declares_channel(row),
-        scope: String::new(),
-    };
+    let fact = config_server_fact(name, row);
     let ctx = crate::mcp_policy::PolicyContext {
         worker: plan.worker,
         channel_owner: !plan.drop_channels,
@@ -332,6 +344,38 @@ fn codex_mode_choice(mode: zeron_proto::McpMode) -> zeron_proto::McpServerChoice
         zeron_proto::McpMode::Eager => zeron_proto::McpServerChoice::Eager,
         zeron_proto::McpMode::Lazy => zeron_proto::McpServerChoice::Lazy,
         zeron_proto::McpMode::LazyKeepAlive => zeron_proto::McpServerChoice::LazyKeepAlive,
+    }
+}
+
+pub(crate) fn config_server_fact(
+    name: &str,
+    row: &serde_json::Map<String, Value>,
+) -> crate::mcp_policy::McpServerFact {
+    crate::mcp_policy::McpServerFact {
+        name: name.to_owned(),
+        transport: if row
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| !command.is_empty())
+        {
+            "stdio".to_owned()
+        } else if row.get("url").is_some() {
+            "http".to_owned()
+        } else {
+            row.get("transport")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        },
+        command: row
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        // config/read shows the configured command, not an npx cache path.
+        npx_resolved: false,
+        channel: codex_row_declares_channel(row),
+        scope: String::new(),
     }
 }
 
@@ -1841,6 +1885,7 @@ async fn run_session(session: Session) {
             let config = client
                 .request("config/read", json!({"includeLayers": false}))
                 .await?;
+            cache_codex_config(&request, &config);
             if let Some(servers) = config["config"]["mcp_servers"].as_object() {
                 let overrides = start_params
                     .get_mut("config")
@@ -1862,7 +1907,9 @@ async fn run_session(session: Session) {
                 ),
             )
             .await;
-            if !matches!(&read, Ok(Ok(_))) {
+            if let Ok(Ok(config)) = &read {
+                cache_codex_config(&request, config);
+            } else {
                 let error = format!("{read:?}");
                 tracing::warn!(
                     target: "zeron_harness::codex",
@@ -4111,6 +4158,25 @@ mod mcp_injection_tests {
                 .any(|(key, _)| key == "mcp_servers.notes.command"),
             true
         );
+    }
+
+    #[test]
+    fn mcp_config_cache_dir_comes_from_the_plan_or_an_explicit_data_dir() {
+        let plan = Path::new("/var/lib/zeron");
+        assert_eq!(
+            mcp_cache_data_dir(Some(plan), Some("/from/env"), Some("/from/process")).as_deref(),
+            Some(plan)
+        );
+        assert_eq!(
+            mcp_cache_data_dir(None, Some(""), Some("/from/process")).as_deref(),
+            Some(Path::new("/from/process"))
+        );
+        assert_eq!(
+            mcp_cache_data_dir(None, Some("/from/env"), None).as_deref(),
+            Some(Path::new("/from/env"))
+        );
+        assert!(mcp_cache_data_dir(None, None, None).is_none());
+        assert!(mcp_cache_data_dir(None, Some(""), Some("")).is_none());
     }
 }
 
