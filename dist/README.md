@@ -60,6 +60,15 @@ checks remain required.
 | --- | --- | --- | --- |
 | staging | `Crew Staging.app` / `ai.ashler.comet.staging` | `comet-staging:` | `target/package/staging/comet-staging-0.2.116-macos-arm64.dmg`, `comet-staging-0.2.116-macos-arm64-app.tar.gz` |
 | production identity | `Crew.app` / `ai.ashler.comet` | `comet:` | `target/package/comet-0.2.116-macos-arm64.dmg`, `comet-0.2.116-macos-arm64-app.tar.gz` |
+| canary | `Crew Canary.app` / `ai.ashler.crew.upstream-canary` | `crew-upstream-canary:` | `target/package/canary/crew-upstream-canary-0.2.116-macos-arm64.dmg`, `crew-upstream-canary-0.2.116-macos-arm64-app.tar.gz` |
+
+Every release run also signs and notarizes `Crew Canary.app` in its own
+`macos-canary` job, uploaded as the private `macos-canary-arm64` Actions
+artifact. It is never part of a candidate or any publication. A build-only run
+(`promotion_target=none`, plus `reviewed_sha` for an unmerged branch) makes one
+from any reviewed source. Install it instead of a local Canary build: its stable
+Developer ID identity keeps macOS privacy grants such as Screen Recording and
+Accessibility, which every ad-hoc rebuild loses.
 
 Building production-identity candidate bytes does not publish production.
 `COMET_PACKAGE_ENVIRONMENT` defaults to `production` for legacy release

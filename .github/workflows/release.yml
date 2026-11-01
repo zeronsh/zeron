@@ -208,9 +208,11 @@ jobs:
       NOTARYTOOL_KEYCHAIN_PROFILE: crew-distribution
     steps:
       - uses: actions/checkout@v4
-      - name: Require Apple silicon runner
+      - &require-apple-silicon
+        name: Require Apple silicon runner
         run: test "$(uname -m)" = arm64
-      - name: Import Developer ID and notarization credentials
+      - &import-signing-credentials
+        name: Import Developer ID and notarization credentials
         shell: bash
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
@@ -263,7 +265,8 @@ jobs:
           codesign --force --options runtime --timestamp --verbose=4 \
             --sign "$CODESIGN_IDENTITY" --keychain "$CODESIGN_KEYCHAIN" "$probe"
           codesign --verify --strict --verbose=2 "$probe"
-      - name: Select checked-in Rust toolchain
+      - &rust-toolchain
+        name: Select checked-in Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - &apple-ticket-transport
@@ -313,7 +316,8 @@ jobs:
             target/package/staging/comet-staging-*-app.tar.gz
             target/package/staging/SHA256SUMS
           if-no-files-found: error
-      - name: Remove temporary signing credentials
+      - &remove-signing-credentials
+        name: Remove temporary signing credentials
         if: ${{ always() }}
         shell: bash
         run: |
@@ -322,6 +326,48 @@ jobs:
             security delete-keychain "$CODESIGN_KEYCHAIN"
           fi
           rm -f "$RUNNER_TEMP/crew-signing.p12"
+
+  # Signed, notarized Crew Canary.app for installing over local Canary builds.
+  # It is never part of the release candidate or any publication. Developer ID
+  # keeps one stable code identity, so macOS privacy grants (Screen Recording,
+  # Accessibility) survive Canary updates; ad-hoc builds lose them every rebuild.
+  macos-canary:
+    if: ${{ inputs.candidate_run_id == '' }}
+    needs: version
+    runs-on: macos-15
+    env:
+      COMET_RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.version.outputs.source_epoch }}
+      COMET_DEFAULT_ENVIRONMENT: canary
+      COMET_PACKAGE_ENVIRONMENT: canary
+      COMET_MACOS_SIGNING: distribution
+      COMET_MACOS_SIGNING_TEAM_ID: ${{ vars.MACOS_SIGNING_TEAM_ID }}
+      CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      NOTARYTOOL_KEYCHAIN_PROFILE: crew-distribution
+    steps:
+      - uses: actions/checkout@v4
+      - *require-apple-silicon
+      - *import-signing-credentials
+      - *rust-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - *apple-ticket-transport
+      - name: Package Crew Canary.app
+        run: scripts/package-macos.sh
+      - name: Verify packaged native handoff command
+        run: '"target/package/canary/Crew Canary.app/Contents/MacOS/comet" session handoff --help'
+      - name: Record canary artifact checksums
+        run: |
+          cd target/package/canary
+          shasum -a 256 crew-upstream-canary-*.dmg crew-upstream-canary-*-app.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-canary-arm64
+          path: |
+            target/package/canary/crew-upstream-canary-*.dmg
+            target/package/canary/crew-upstream-canary-*-app.tar.gz
+            target/package/canary/SHA256SUMS
+          if-no-files-found: error
+      - *remove-signing-credentials
 
   candidate:
     if: >-
