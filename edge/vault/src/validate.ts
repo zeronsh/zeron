@@ -25,10 +25,13 @@ export const isCaller = (value: unknown): value is VaultCaller => {
   return caller.kind === "runner" && isId(caller.deviceId);
 };
 
-/** Deduplicated device list, or undefined when malformed. */
+/** Authorizes every enrolled device (see `PutCredentialRequest.authorizedDevices`). */
+export const ALL_DEVICES = "*";
+
+/** Deduplicated device list (ids, or the `"*"` wildcard), or undefined when malformed. */
 export const parseDeviceList = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value) || value.length > MAX_AUTHORIZED_DEVICES) return undefined;
-  if (!value.every(isId)) return undefined;
+  if (!value.every((item) => item === ALL_DEVICES || isId(item))) return undefined;
   return [...new Set(value as string[])];
 };
 
@@ -44,7 +47,8 @@ export const isGrantRequest = (value: unknown): value is GrantRequest => {
     typeof request.sig === "string" &&
     request.sig.length > 0 &&
     request.sig.length <= MAX_SIG_CHARS &&
-    (request.repo === undefined || isRepoFullName(request.repo))
+    (request.repo === undefined || isRepoFullName(request.repo)) &&
+    (request.slot === undefined || isId(request.slot))
   );
 };
 

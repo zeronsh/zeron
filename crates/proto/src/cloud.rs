@@ -347,6 +347,32 @@ pub struct VaultConnection {
     pub has_active: bool,
 }
 
+/// `authorizedDevices` entry meaning "every device the user enrolled with
+/// the vault" (laptops and Cloud alike; revoked ones excluded). Synced
+/// subscription logins are stored with it, so a device added later — or
+/// Cloud — can use them without anyone re-authorizing each login.
+pub const VAULT_ALL_DEVICES: &str = "*";
+
+/// Whether a device shares its Claude Code and Codex subscription logins
+/// through the vault (`GetAccountSync` / `SetAccountSync`). While on, the
+/// device's logins for those two agents live in the vault (the only
+/// refresher); the device holds short-lived access tokens only, rewritten
+/// ahead of expiry. Cloud draws from the same logins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncStatus {
+    pub enabled: bool,
+    /// Whether this device can sync at all: signed in to a Zeron account
+    /// whose vault is reachable. `false` with `message` saying why.
+    pub available: bool,
+    /// User-facing state: why it's unavailable, or the last sync error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Unix ms this device last pushed its logins / refreshed its tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_at: Option<i64>,
+}
+
 /// The `targetDeviceId` the Providers page uses for Cloud: account calls
 /// (list, switch, forget, sign in) aimed at it are answered by this device's
 /// engine from the vault — Cloud's logins live there, not on a machine.

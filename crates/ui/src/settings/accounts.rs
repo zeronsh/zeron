@@ -22,7 +22,7 @@ use gpui::{
 use std::time::Duration;
 
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
+    AccountSyncStatus, AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
     AgentLoginStatus, CLOUD_ACCOUNTS_DEVICE, HarnessId, VaultProvider,
 };
 use zeron_rpc::methods;
@@ -241,6 +241,107 @@ fn cloud_login_copy(harness: HarnessId) -> &'static str {
     }
 }
 
+/// The sign-in dialog's sentence for a Claude Code / Codex login while the
+/// device syncs its logins: the browser flow is the same, but the login goes
+/// to the Zeron account. Pure.
+const SYNCED_LOGIN_COPY: &str = "Finish signing in in your browser. The login is saved to your \
+                                 Zeron account and synced to your devices.";
+
+/// What the sign-in dialog says: Cloud's, the synced one (this device's
+/// Claude Code / Codex logins live in the vault), or the provider's own. Pure.
+fn login_dialog_copy(
+    harness: HarnessId,
+    provider: Option<&str>,
+    cloud: bool,
+    synced: bool,
+) -> &'static str {
+    if cloud {
+        cloud_login_copy(harness)
+    } else if synced && shares_logins(harness) {
+        SYNCED_LOGIN_COPY
+    } else {
+        login_copy(harness, provider)
+    }
+}
+
+/// Whether `harness` is one of the two agents whose logins a device can sync
+/// through the vault. Pure.
+pub fn shares_logins(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::ClaudeCode | HarnessId::Codex)
+}
+
+/// A row that lives in the vault: while a device syncs, the vault's logins
+/// carry ids like `claude:{slot}` (a local slot id never has a `:`). Cloud's
+/// rows are all vault-kept, so they aren't "synced" in this sense. Pure.
+pub fn is_synced_account(id: &str, cloud: bool) -> bool {
+    !cloud && id.contains(':')
+}
+
+/// The row menu's remove action. Removing a synced login drops it from the
+/// vault, so every device and Cloud lose it. Pure.
+fn remove_account_label(id: &str, cloud: bool) -> &'static str {
+    if is_synced_account(id, cloud) {
+        "Remove from all devices"
+    } else {
+        "Remove account"
+    }
+}
+
+/// What the remove confirmation says for a synced login. Pure.
+fn remove_synced_body(account: &AgentAccount) -> String {
+    let who = account
+        .email
+        .as_deref()
+        .or(account.display_name.as_deref())
+        .unwrap_or("This login");
+    format!(
+        "{who} is shared through your Zeron account. Removing it signs it out on all of \
+         your devices and on Cloud."
+    )
+}
+
+const SYNC_TITLE: &str = "Sync logins across your devices";
+const SYNC_DESCRIPTION: &str = "Keeps your Claude Code and Codex logins in your Zeron account, \
+                                refreshed there, so your other devices and Cloud can use them.";
+
+/// How the sync toggle reads: its position, whether it can be flipped, and
+/// the status line under the description. Pure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncRow {
+    on: bool,
+    interactive: bool,
+    /// A `SetAccountSync` call is in flight (`on` is the requested position).
+    busy: bool,
+    /// Why sync is unavailable (muted).
+    note: Option<String>,
+    /// The last sync error while on (amber).
+    warning: Option<String>,
+}
+
+/// The toggle for `harness` on a device whose sync is `status`; `None` hides
+/// it — Cloud (it always reads from the vault), an agent that isn't synced,
+/// or a device that hasn't answered (an older engine). `pending` is the
+/// position requested by an in-flight call. Pure.
+fn sync_row(
+    harness: HarnessId,
+    cloud: bool,
+    status: Option<&AccountSyncStatus>,
+    pending: Option<bool>,
+) -> Option<SyncRow> {
+    if cloud || !shares_logins(harness) {
+        return None;
+    }
+    let status = status?;
+    let message = status.message.clone().filter(|m| !m.trim().is_empty());
+    Some(SyncRow {
+        on: pending.unwrap_or(status.enabled),
+        interactive: status.available && pending.is_none(),
+        busy: pending.is_some(),
+        note: message.clone().filter(|_| !status.available),
+        warning: message.filter(|_| status.available && status.enabled),
+    })
+}
+
 /// The API key a Cloud provider card also takes: (vault provider, field
 /// label). `None` for providers Cloud doesn't run. Pure.
 pub fn cloud_api_key(harness: HarnessId) -> Option<(VaultProvider, &'static str)> {
@@ -433,6 +534,13 @@ pub struct AccountsPage {
     target_device: Option<String>,
     device_select: widgets::SelectState,
     snapshot: Loadable<AgentAccountsSnapshot>,
+    /// Whether the target device syncs its Claude Code / Codex logins;
+    /// `None` until it answers (and for Cloud, which has no such switch).
+    sync: Option<AccountSyncStatus>,
+    /// The position a `SetAccountSync` call in flight asked for.
+    sync_pending: Option<bool>,
+    /// Bumped when the target changes, so a reply for the old device is dropped.
+    sync_epoch: u64,
     /// A list is in flight over an already-painted snapshot.
     refreshing: bool,
     /// Account id with an in-flight Switch/Forget.
@@ -445,6 +553,9 @@ pub struct AccountsPage {
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
+    sync_task: Option<Task<()>>,
+    /// A synced login waiting on the user's confirmation to leave the vault.
+    confirm_remove: Option<AgentAccount>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _observe: Subscription,
@@ -487,6 +598,9 @@ impl AccountsPage {
             target_device,
             device_select: widgets::SelectState::default(),
             snapshot: Loadable::Idle,
+            sync: None,
+            sync_pending: None,
+            sync_epoch: 0,
             refreshing: false,
             busy_account: None,
             row_menu: popover::Popup::default(),
@@ -496,6 +610,8 @@ impl AccountsPage {
             error: None,
             code_input,
             load_task: None,
+            sync_task: None,
+            confirm_remove: None,
             action_task: None,
             poll_task: None,
             _observe: observe,
@@ -524,6 +640,11 @@ impl AccountsPage {
         self.login = None;
         self.api_key = None;
         self.busy_account = None;
+        self.sync = None;
+        self.sync_pending = None;
+        self.sync_task = None;
+        self.confirm_remove = None;
+        self.sync_epoch += 1;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
@@ -533,6 +654,7 @@ impl AccountsPage {
             self.embedded_harness = Some(harness);
             self.login = None;
             self.api_key = None;
+            self.confirm_remove = None;
             self.error = None;
             cx.notify();
         }
@@ -672,6 +794,7 @@ impl AccountsPage {
         }
         let paint_first = force_usage && !matches!(self.snapshot, Loadable::Ready(_));
         self.refreshing = true;
+        self.load_sync(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         let plain = self.params(serde_json::json!({ "forceUsage": false }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
@@ -715,6 +838,84 @@ impl AccountsPage {
                         page.error = Some(err.into());
                     }
                     Err(err) => page.snapshot = Loadable::Error(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The target device's sync state, beside its accounts. An older engine
+    /// (or a device that can't answer) leaves it unknown and the toggle
+    /// hidden. Cloud has no switch: its logins always come from the vault.
+    fn load_sync(&mut self, cx: &mut Context<Self>) {
+        if self.targets_cloud() {
+            self.sync = None;
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let epoch = self.sync_epoch;
+        let params = self.params(serde_json::json!({}));
+        self.sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_ACCOUNT_SYNC, params)
+                .await
+                .map_err(|err| err.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<AccountSyncStatus>(value)
+                        .map_err(|err| err.to_string())
+                });
+            this.update(cx, |page, cx| {
+                // A call in flight owns the status until its reply lands.
+                if page.sync_epoch == epoch && page.sync_pending.is_none() {
+                    page.sync = result.ok();
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Turn login sync on or off for the target device. Turning it on
+    /// uploads the logins, so the switch shows the requested position and
+    /// holds still until the engine answers; then the list reloads, because
+    /// the rows change (vault logins appear or go).
+    fn set_account_sync(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.sync_pending.is_some() || self.targets_cloud() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.sync_pending = Some(enabled);
+        self.error = None;
+        let epoch = self.sync_epoch;
+        let params = self.params(serde_json::json!({ "enabled": enabled }));
+        self.sync_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SET_ACCOUNT_SYNC, params)
+                .await
+                .map_err(|err| err.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<AccountSyncStatus>(value)
+                        .map_err(|err| err.to_string())
+                });
+            this.update(cx, |page, cx| {
+                if page.sync_epoch != epoch {
+                    return;
+                }
+                page.sync_pending = None;
+                match result {
+                    Ok(status) => {
+                        page.sync = Some(status);
+                        page.load(force_usage_for(LoadTrigger::PostAction), cx);
+                    }
+                    Err(err) => page.error = Some(err.into()),
                 }
                 cx.notify();
             })
@@ -1031,12 +1232,16 @@ impl AccountsPage {
 
     /// Whether a dialog [`Self::dismiss_on_escape`] would close is open.
     pub(crate) fn has_escape_surface(&self) -> bool {
-        self.api_key.is_some() || self.login.is_some()
+        self.api_key.is_some() || self.login.is_some() || self.confirm_remove.is_some()
     }
 
     /// Escape that reached Settings unclaimed cancels an open login first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.confirm_remove.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.api_key.take().is_some() {
             cx.notify();
             return true;
@@ -1046,6 +1251,67 @@ impl AccountsPage {
         }
         self.cancel_login(cx);
         true
+    }
+
+    /// Remove `account`. A synced login lives in the vault, so removing it
+    /// reaches every device and Cloud: that one waits for a confirmation.
+    fn request_remove(&mut self, account: &AgentAccount, cx: &mut Context<Self>) {
+        if is_synced_account(&account.id, self.targets_cloud()) {
+            self.confirm_remove = Some(account.clone());
+            cx.notify();
+        } else {
+            self.account_action(methods::FORGET_AGENT_ACCOUNT, account, cx);
+        }
+    }
+
+    fn confirm_remove(&mut self, cx: &mut Context<Self>) {
+        if let Some(account) = self.confirm_remove.take() {
+            self.account_action(methods::FORGET_AGENT_ACCOUNT, &account, cx);
+        }
+    }
+
+    /// The remove confirmation: the sidebar's dialog card, a danger action.
+    fn render_remove_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let account = self.confirm_remove.as_ref()?;
+        let body = remove_synced_body(account);
+        let theme = Theme::of(cx).for_popup();
+        let card = popover::dialog_card(&theme)
+            .id("remove-synced-card")
+            .role(gpui::Role::Dialog)
+            .aria_label("Remove from all devices?")
+            .child(popover::dialog_title(&theme, "Remove from all devices?"))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .child(popover::dialog_body(&theme, body)),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "remove-synced-cancel")
+                            .id("remove-synced-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_remove = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove")
+                            .id("remove-synced-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_remove(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("remove-synced-dialog", viewport, card))
     }
 
     // ---- Cloud API keys ----
@@ -1451,13 +1717,12 @@ impl AccountsPage {
                             .text_color(popup.danger_muted)
                             .on_click(cx.listener(move |page, _, _, cx| {
                                 page.close_row_menu(cx);
-                                page.account_action(
-                                    methods::FORGET_AGENT_ACCOUNT,
-                                    &forget_account,
-                                    cx,
-                                );
+                                page.request_remove(&forget_account, cx);
                             }))
-                            .child(SharedString::from("Remove account")),
+                            .child(SharedString::from(remove_account_label(
+                                &account.id,
+                                self.targets_cloud(),
+                            ))),
                     )
                 })
                 .into_any_element();
@@ -1521,6 +1786,106 @@ impl AccountsPage {
             .py(px(2.0))
             .child(body)
             .into_any_element()
+    }
+
+    /// The "Sync logins across your devices" switch under a Claude Code /
+    /// Codex section. One state per device, so both sections show the same
+    /// switch; `None` where it doesn't apply (see [`sync_row`]).
+    fn render_sync_row(
+        &self,
+        harness: HarnessId,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let row = sync_row(
+            harness,
+            self.targets_cloud(),
+            self.sync.as_ref(),
+            self.sync_pending,
+        )?;
+        let SyncRow {
+            on,
+            interactive,
+            busy,
+            note,
+            warning,
+        } = row;
+        let toggle = cx.listener(move |page, _, _, cx| page.set_account_sync(!on, cx));
+        let on_key = cx.listener(move |page, event: &gpui::KeyDownEvent, _, cx| {
+            if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                page.set_account_sync(!on, cx);
+                cx.stop_propagation();
+            }
+        });
+        let mut lines = vec![div().child(SYNC_DESCRIPTION).into_any_element()];
+        if busy {
+            lines.push(
+                div()
+                    .child(if on {
+                        "Turning on…"
+                    } else {
+                        "Turning off…"
+                    })
+                    .into_any_element(),
+            );
+        }
+        lines.extend(note.map(|note| div().child(SharedString::from(note)).into_any_element()));
+        let control = div()
+            .id(format!("account-sync-switch-{harness:?}"))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .when(busy, |el| {
+                el.child(crate::loaders::ring_spinner(
+                    format!("account-sync-busy-{harness:?}"),
+                    14.0,
+                    theme.text_muted,
+                ))
+            })
+            .child(
+                widgets::toggle_switch(theme, on, format!("account-sync-{harness:?}"))
+                    .when(!interactive, |switch| switch.opacity(0.5)),
+            );
+        let row = div()
+            .id(format!("account-sync-{harness:?}"))
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .role(gpui::Role::Switch)
+            .aria_label(SYNC_TITLE)
+            .aria_toggled(if on {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .when(interactive, |row| {
+                row.tab_index(0)
+                    .cursor_pointer()
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(toggle)
+                    .on_key_down(on_key)
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, SYNC_TITLE))
+                    .child(widgets::meta_line(theme, lines)),
+            )
+            .child(control);
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(row)
+                .children(warning.map(|warning| widgets::warning_strip(theme, warning)))
+                .into_any_element(),
+        )
     }
 
     /// A ghost of [`Self::render_account_row`] for an expanded provider:
@@ -1617,8 +1982,12 @@ impl AccountsPage {
                  code Anthropic shows you below. Your current login is untouched until you \
                  switch."
             }
-            _ if self.targets_cloud() => cloud_login_copy(login.harness),
-            _ => login_copy(login.harness, login.provider),
+            _ => login_dialog_copy(
+                login.harness,
+                login.provider,
+                self.targets_cloud(),
+                self.sync.as_ref().is_some_and(|sync| sync.enabled),
+            ),
         };
         // "Reopen the sign-in page" (zeron: `text-[12px]
         // text-muted-foreground/60 hover:underline`), once there is a page.
@@ -2009,6 +2378,14 @@ impl AccountsPage {
                 )
             })
             .child(content)
+            .children(self.render_sync_row(harness, theme, cx).map(|row| {
+                div()
+                    .mt(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .child(widgets::details_label(theme, "Sync"))
+                    .child(row)
+            }))
             .when_some(dialog, |el, dialog| el.child(dialog))
             .into_any_element()
     }
@@ -2019,7 +2396,10 @@ impl Render for AccountsPage {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
-        let dialog = self.render_login_dialog(window.viewport_size(), cx);
+        let viewport = window.viewport_size();
+        let dialog = self
+            .render_login_dialog(viewport, cx)
+            .or_else(|| self.render_remove_dialog(viewport, cx));
         if let Some(entry) = self.api_key.as_mut()
             && std::mem::take(&mut entry.focus_pending)
         {
@@ -2273,6 +2653,7 @@ impl Render for AccountsPage {
                                     .child(SharedString::from(note))
                             }))
                             .child(card)
+                            .children(self.render_sync_row(harness, &theme, cx))
                             .into_any_element()
                     })
                     .collect()
@@ -2837,6 +3218,204 @@ mod tests {
             .unwrap();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
+    }
+
+    fn sync_status(enabled: bool, available: bool, message: Option<&str>) -> AccountSyncStatus {
+        AccountSyncStatus {
+            enabled,
+            available,
+            message: message.map(str::to_string),
+            synced_at: None,
+        }
+    }
+
+    #[test]
+    fn the_sync_row_follows_the_device_status() {
+        let row = |harness, cloud, status: Option<AccountSyncStatus>, pending| {
+            sync_row(harness, cloud, status.as_ref(), pending)
+        };
+        let claude = HarnessId::ClaudeCode;
+        // Only Claude Code and Codex, never Cloud, never before the device answered.
+        assert!(row(HarnessId::Cursor, false, Some(sync_status(true, true, None)), None).is_none());
+        assert!(row(claude, true, Some(sync_status(true, true, None)), None).is_none());
+        assert!(row(claude, false, None, None).is_none());
+
+        let off = row(HarnessId::Codex, false, Some(sync_status(false, true, None)), None).unwrap();
+        assert_eq!((off.on, off.interactive, off.busy), (false, true, false));
+        assert_eq!((off.note, off.warning), (None, None));
+
+        // Signed out of Zeron: inert, and the status says why.
+        let unavailable = row(
+            claude,
+            false,
+            Some(sync_status(false, false, Some("Sign in to Zeron to sync."))),
+            None,
+        )
+        .unwrap();
+        assert!(!unavailable.interactive);
+        assert_eq!(unavailable.note.as_deref(), Some("Sign in to Zeron to sync."));
+        assert_eq!(unavailable.warning, None);
+
+        // On with a sync error: a warning, still flippable.
+        let warned = row(
+            claude,
+            false,
+            Some(sync_status(true, true, Some("Couldn't refresh Codex."))),
+            None,
+        )
+        .unwrap();
+        assert!(warned.on && warned.interactive);
+        assert_eq!(warned.warning.as_deref(), Some("Couldn't refresh Codex."));
+        assert_eq!(warned.note, None);
+
+        // A call in flight shows the requested position and blocks a second flip.
+        let busy = row(claude, false, Some(sync_status(false, true, None)), Some(true)).unwrap();
+        assert!(busy.on && busy.busy && !busy.interactive);
+
+        // A blank message is no message.
+        let blank = row(claude, false, Some(sync_status(true, true, Some("  "))), None).unwrap();
+        assert_eq!(blank.warning, None);
+    }
+
+    #[test]
+    fn synced_rows_say_removal_reaches_every_device() {
+        assert!(is_synced_account("claude:a1", false));
+        assert!(is_synced_account("codex:b2", false));
+        assert!(!is_synced_account("a1", false));
+        // Cloud's rows are all vault-kept: its own copy applies.
+        assert!(!is_synced_account("claude:a1", true));
+        assert_eq!(remove_account_label("claude:a1", false), "Remove from all devices");
+        assert_eq!(remove_account_label("a1", false), "Remove account");
+        assert_eq!(remove_account_label("claude:a1", true), "Remove account");
+    }
+
+    /// Removing a synced login asks first; a local one goes at once.
+    #[gpui::test]
+    fn removing_a_synced_login_asks_first(cx: &mut gpui::TestAppContext) {
+        let window = page(cx);
+        let account = |id: &str| AgentAccount {
+            id: id.into(),
+            harness: HarnessId::ClaudeCode,
+            email: Some("you@acme.dev".into()),
+            plan_label: None,
+            active: false,
+            usage_windows: vec![],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: None,
+        };
+        assert!(remove_synced_body(&account("claude:a1")).contains("you@acme.dev"));
+        window
+            .update(cx, |page, _, cx| {
+                page.set_embedded_harness(HarnessId::ClaudeCode, cx);
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot::default());
+                // A local slot has no dialog to wait on.
+                page.request_remove(&account("slot-1"), cx);
+                assert!(page.confirm_remove.is_none());
+                assert!(!page.has_escape_surface());
+                // A synced one waits, and escape backs out without removing.
+                page.request_remove(&account("claude:a1"), cx);
+                assert_eq!(page.confirm_remove.as_ref().map(|a| a.id.as_str()), Some("claude:a1"));
+                assert!(page.has_escape_surface());
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |page, _, cx| {
+                assert!(page.dismiss_on_escape(cx));
+                assert!(page.confirm_remove.is_none());
+                // Confirming consumes the request (the engine call needs a
+                // connected engine, absent here).
+                page.request_remove(&account("codex:b2"), cx);
+                page.confirm_remove(cx);
+                assert!(page.confirm_remove.is_none());
+                // Cloud's rows are all vault-kept and keep their own flow.
+                page.set_target_device(Some(CLOUD_ACCOUNTS_DEVICE.into()), cx);
+                page.request_remove(&account("anthropic-key:a1"), cx);
+                assert!(page.confirm_remove.is_none());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sign_in_copy_says_where_a_synced_login_goes() {
+        let synced = "Finish signing in in your browser. The login is saved to your Zeron \
+                      account and synced to your devices.";
+        for harness in [HarnessId::ClaudeCode, HarnessId::Codex] {
+            assert_eq!(login_dialog_copy(harness, None, false, true), synced);
+            assert_eq!(
+                login_dialog_copy(harness, None, false, false),
+                login_copy(harness, None)
+            );
+            // Cloud keeps its own sentence whatever the device does.
+            assert_eq!(
+                login_dialog_copy(harness, None, true, true),
+                cloud_login_copy(harness)
+            );
+        }
+        // Agents that aren't synced keep theirs.
+        assert_eq!(
+            login_dialog_copy(HarnessId::Cursor, None, false, true),
+            login_copy(HarnessId::Cursor, None)
+        );
+    }
+
+    /// The toggle renders under Claude Code and Codex on a device that
+    /// answered, says why it is inert when signed out, and is gone for Cloud.
+    #[gpui::test]
+    fn the_sync_toggle_renders_per_target(cx: &mut gpui::TestAppContext) {
+        let window = page(cx);
+        let titles = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            widgets::take_row_titles()
+                .iter()
+                .any(|title| title.as_ref() == SYNC_TITLE)
+        };
+        window
+            .update(cx, |page, _, cx| {
+                page.set_embedded_harness(HarnessId::ClaudeCode, cx);
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot::default());
+            })
+            .unwrap();
+        // Not answered yet: no toggle.
+        assert!(!titles(cx));
+
+        window
+            .update(cx, |page, _, _| {
+                page.sync = Some(sync_status(true, true, Some("Token refresh failed.")));
+            })
+            .unwrap();
+        assert!(titles(cx), "Claude Code shows the device's switch");
+        window
+            .update(cx, |page, _, cx| page.set_embedded_harness(HarnessId::Codex, cx))
+            .unwrap();
+        assert!(titles(cx), "so does Codex");
+        window
+            .update(cx, |page, _, cx| {
+                page.sync = Some(sync_status(false, false, Some("Sign in to Zeron first.")));
+                page.set_embedded_harness(HarnessId::Cursor, cx);
+            })
+            .unwrap();
+        assert!(!titles(cx), "other agents don't sync");
+
+        // Cloud always reads from the vault: retargeting drops the status.
+        window
+            .update(cx, |page, _, cx| {
+                page.set_embedded_harness(HarnessId::ClaudeCode, cx);
+                page.set_target_device(Some(CLOUD_ACCOUNTS_DEVICE.into()), cx);
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot::default());
+                assert!(page.sync.is_none());
+                page.sync = Some(sync_status(true, true, None));
+            })
+            .unwrap();
+        assert!(!titles(cx));
     }
 
     #[test]

@@ -58,6 +58,47 @@ describe("/vault routes → VAULT service binding", () => {
     expect((await lastCall("accountUsage")).args).toEqual([caller, "claude", "a1"]);
   });
 
+  it("passes slot, activate and the \"*\" wildcard through", async () => {
+    const u = newUser();
+    const bearer = userBearer(u);
+    const caller = { userId: u.userId, orgId: "org1", kind: "user" };
+
+    const put = { material: { authJson: {} }, authorizedDevices: ["*"], activate: false };
+    expect((await call("PUT", "/vault/org1/credentials/codex", bearer, put)).status).toBe(200);
+    expect((await lastCall("putCredential")).args).toEqual([caller, "codex", put]);
+    // `activate` is omitted from the RPC unless the client sent it.
+    const plain = { material: { authJson: {} }, authorizedDevices: ["*", "cloud-1"] };
+    expect((await call("PUT", "/vault/org1/credentials/codex", bearer, plain)).status).toBe(200);
+    expect((await lastCall("putCredential")).args).toEqual([caller, "codex", plain]);
+
+    expect((await call("PATCH", "/vault/org1/credentials/claude", bearer, { authorizedDevices: ["*"] })).status).toBe(200);
+    expect((await lastCall("authorize")).args).toEqual([caller, "claude", ["*"]]);
+    expect((await call("POST", "/vault/org1/github/device", bearer, { authorizedDevices: ["*"] })).status).toBe(200);
+    expect((await lastCall("githubDeviceStart")).args).toEqual([caller, ["*"]]);
+
+    const grant = { provider: "claude", deviceId: "laptop-2", ts: 1_800_000_000_000, sig: "c2ln", slot: "s_2-b" };
+    expect((await call("POST", "/vault/org1/grant", bearer, grant)).status).toBe(200);
+    expect((await lastCall("grant")).args).toEqual([caller, grant]);
+    const noSlot = { provider: "claude", deviceId: "laptop-2", ts: 1_800_000_000_001, sig: "c2ln" };
+    expect((await call("POST", "/vault/org1/grant", bearer, noSlot)).status).toBe(200);
+    expect((await lastCall("grant")).args).toEqual([caller, noSlot]);
+  });
+
+  it("refuses a slot-picking grant from a runner bearer", async () => {
+    const u = newUser();
+    const runner = `Bearer runner:${u.userId}@org1:cloud-x`;
+    const before = (await env.VAULT.calls()).length;
+    const grant = { provider: "claude", deviceId: "cloud-x", ts: 1_800_000_000_000, sig: "c2ln", slot: "s1" };
+    const refused = await call("POST", "/vault/org1/grant", runner, grant);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ error: "forbidden" });
+    expect((await env.VAULT.calls()).length).toBe(before);
+    // The same runner without a slot reaches the vault.
+    const { slot: _slot, ...plain } = grant;
+    expect((await call("POST", "/vault/org1/grant", runner, plain)).status).toBe(200);
+    expect((await lastCall("grant")).args).toEqual([{ userId: u.userId, orgId: "org1", kind: "runner", deviceId: "cloud-x" }, plain]);
+  });
+
   it("validates shapes before calling the vault", async () => {
     const bearer = userBearer(newUser());
     const bad = async (method: string, path: string, body?: unknown) =>
@@ -72,6 +113,12 @@ describe("/vault routes → VAULT service binding", () => {
     await bad("POST", "/vault/org1/grant", { provider: "nope", deviceId: "d", ts: 1, sig: "s" });
     await bad("POST", "/vault/org1/grant", { provider: "codex", deviceId: "d", ts: "1", sig: "s" });
     await bad("POST", "/vault/org1/grant", { provider: "github", deviceId: "d", ts: 1, sig: "c2ln", repo: 7 });
+    await bad("PUT", "/vault/org1/credentials/codex", { material: {}, authorizedDevices: [], activate: "no" });
+    await bad("PUT", "/vault/org1/credentials/codex", { material: {}, authorizedDevices: ["**"] });
+    await bad("PATCH", "/vault/org1/credentials/codex", { authorizedDevices: ["*", "bad id!"] });
+    await bad("POST", "/vault/org1/github/device", { authorizedDevices: ["a*"] });
+    await bad("POST", "/vault/org1/grant", { provider: "claude", deviceId: "d", ts: 1, sig: "s", slot: "bad id!" });
+    await bad("POST", "/vault/org1/grant", { provider: "claude", deviceId: "d", ts: 1, sig: "s", slot: 7 });
     await bad("GET", "/vault/org1/github/branches");
     await bad("GET", "/vault/org1/accounts/bogus");
     await bad("POST", "/vault/org1/accounts/codex/active", { slot: "bad id!" });

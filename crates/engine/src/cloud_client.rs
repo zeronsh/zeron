@@ -678,6 +678,128 @@ impl CloudClient {
             .map_err(Failure::into_error)
     }
 
+    /// `PUT /vault/{orgId}/credentials/{provider}` for a synced login:
+    /// `authorizedDevices: ["*"]` (every device the user enrolled, Cloud
+    /// included) and `activate: false` — it becomes the provider's active
+    /// account (what Cloud uses) only when there is none, so syncing a
+    /// laptop never switches Cloud's account. Answers the vault slot the
+    /// login landed in.
+    pub async fn put_synced_login(
+        &self,
+        provider: VaultProvider,
+        material: serde_json::Value,
+        profile: Option<VaultAccountProfile>,
+    ) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct Stored {
+            #[serde(default)]
+            slot: Option<String>,
+        }
+        let mut body = serde_json::json!({
+            "material": material,
+            "authorizedDevices": [zeron_proto::VAULT_ALL_DEVICES],
+            "activate": false,
+        });
+        if let Some(profile) = profile {
+            body["profile"] = serde_json::to_value(profile).unwrap_or_default();
+        }
+        let stored = self
+            .target()?
+            .call::<Stored>(
+                reqwest::Method::PUT,
+                &["vault", "credentials", provider.as_str()],
+                &[],
+                Some(body),
+                "Sync a login",
+            )
+            .await
+            .map_err(Failure::into_error)?;
+        // The vault names the slot; only a reply without one (an older
+        // vault) falls back to "the newest account".
+        if let Some(slot) = stored.slot.filter(|slot| !slot.is_empty()) {
+            return Ok(slot);
+        }
+        self.vault_accounts(provider)
+            .await?
+            .into_iter()
+            .max_by_key(|account| account.updated_at)
+            .map(|account| account.slot)
+            .ok_or_else(|| EngineError::Other("the vault lost the uploaded login".into()))
+    }
+
+    /// `POST /vault/{orgId}/devices/enroll` — this laptop's grant key.
+    pub async fn vault_enroll_laptop(
+        &self,
+        device_id: &str,
+        public_key: &str,
+    ) -> Result<VaultStatus, EngineError> {
+        self.target()?
+            .call::<VaultStatus>(
+                reqwest::Method::POST,
+                &["vault", "devices", "enroll"],
+                &[],
+                Some(serde_json::json!({
+                    "deviceId": device_id,
+                    "kind": "laptop",
+                    "publicKey": public_key,
+                })),
+                "Enroll this device",
+            )
+            .await
+            .map(available_vault)
+            .map_err(Failure::into_error)
+    }
+
+    /// `POST /vault/{orgId}/grant` as the signed-in user, with a body this
+    /// device signed (see [`crate::account_sync`]). Classified like the
+    /// Cloud broker's grants.
+    pub(crate) async fn vault_grant(
+        &self,
+        body: serde_json::Value,
+    ) -> crate::credentials::GrantOutcome {
+        use crate::credentials::GrantOutcome;
+        let Some(target) = self.target.as_deref() else {
+            return GrantOutcome::Unavailable(UNAVAILABLE.into());
+        };
+        let url = match target.url(&["vault", "grant"], &[]) {
+            Ok(url) => url,
+            Err(error) => return GrantOutcome::Unavailable(error.to_string()),
+        };
+        let token = match target.token.token().await {
+            Ok(token) => token,
+            Err(error) => return GrantOutcome::Unavailable(error.to_string()),
+        };
+        let response = match target
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return GrantOutcome::Unavailable(describe_http_error(error)),
+        };
+        let status = response.status().as_u16();
+        if response.status().is_success() {
+            return match response.json::<crate::credentials::Grant>().await {
+                Ok(grant) if !grant.access_token.is_empty() => GrantOutcome::Granted(grant),
+                Ok(_) => GrantOutcome::Unavailable("the vault returned an empty grant".into()),
+                Err(error) => GrantOutcome::Unavailable(format!(
+                    "malformed grant: {}",
+                    describe_http_error(error)
+                )),
+            };
+        }
+        let body = crate::runner::EdgeErrorBody::read(response).await;
+        // The replay fence answers 401 `stale`: not an outage, a timestamp
+        // to retry with (the caller does, as the Cloud broker does).
+        if body.error == "stale" {
+            return GrantOutcome::NotConnected(body.describe());
+        }
+        crate::credentials::classify_grant_failure(status, &body)
+    }
+
     /// `PATCH /vault/{orgId}/credentials/{provider}` with `{authorizedDevices}`.
     pub async fn authorize(
         &self,

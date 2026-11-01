@@ -36,10 +36,11 @@ const bad = (message: string): Response => json({ error: "bad_request", message 
 const isProvider = (value: unknown): value is VaultProviderId =>
   typeof value === "string" && (VAULT_PROVIDERS as readonly string[]).includes(value);
 
+/** Device ids, or the literal `"*"` (every device the user enrolled). */
 const deviceList = (value: unknown): string[] | undefined =>
   Array.isArray(value) &&
   value.length <= MAX_AUTHORIZED_DEVICES &&
-  value.every((d) => typeof d === "string" && ID_RE.test(d))
+  value.every((d) => typeof d === "string" && (d === "*" || ID_RE.test(d)))
     ? (value as string[])
     : undefined;
 
@@ -119,14 +120,16 @@ export const handleVaultRoute = async (
       if (b instanceof Response) return b;
       const authorizedDevices = deviceList(b.authorizedDevices);
       if (!isObject(b.material) || !authorizedDevices) {
-        return bad("Expected {material, authorizedDevices, profile?}.");
+        return bad("Expected {material, authorizedDevices, profile?, activate?}.");
       }
+      if (b.activate !== undefined && typeof b.activate !== "boolean") return bad("activate must be a boolean.");
       const profile = b.profile === undefined ? undefined : accountProfile(b.profile);
       if (profile === null) return bad("profile must be {email?, displayName?, organization?, plan?} strings.");
       const req = {
         material: b.material,
         authorizedDevices,
-        ...(profile ? { profile } : {})
+        ...(profile ? { profile } : {}),
+        ...(b.activate !== undefined ? { activate: b.activate } : {})
       } as unknown as PutCredentialRequest;
       return call(() => vault.putCredential(caller, provider, req));
     }
@@ -203,7 +206,7 @@ export const handleVaultRoute = async (
   if (rest[0] === "grant" && rest.length === 1 && method === "POST") {
     const b = await body();
     if (b instanceof Response) return b;
-    const { provider, deviceId, ts, sig, repo } = b;
+    const { provider, deviceId, ts, sig, repo, slot } = b;
     if (!isProvider(provider)) return bad("Unknown provider.");
     if (typeof deviceId !== "string" || !ID_RE.test(deviceId)) return bad("Bad deviceId.");
     if (typeof ts !== "number" || !Number.isSafeInteger(ts)) return bad("Bad ts.");
@@ -211,8 +214,16 @@ export const handleVaultRoute = async (
     // `github` grants name the repository (owner/name) the vault mints an
     // installation token for; the vault validates it.
     if (repo !== undefined && (typeof repo !== "string" || repo.length > 200)) return bad("Bad repo.");
+    // `slot` picks one stored account instead of the active one; like `repo`
+    // it is not part of the signed message. The vault enforces the rest.
+    if (slot !== undefined && (typeof slot !== "string" || !ID_RE.test(slot))) return bad("Bad slot.");
     if (auth.kind === "runner" && deviceId !== auth.deviceId) {
       return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
+    }
+    // A Cloud machine uses the provider's active account, nothing else:
+    // picking a login by slot is for the user's own (signed-in) devices.
+    if (auth.kind === "runner" && slot !== undefined) {
+      return json({ error: "forbidden", message: "A Cloud machine uses the active account." }, 403);
     }
     // A Cloud machine's GitHub access is its own chat's repository, nothing
     // else the user's GitHub reaches.
@@ -228,7 +239,14 @@ export const handleVaultRoute = async (
         return json({ error: "forbidden", message: "A Cloud machine may only get GitHub access to its own chat's repository." }, 403);
       }
     }
-    const req: GrantRequest = { provider, deviceId, ts, sig, ...(repo !== undefined ? { repo } : {}) };
+    const req: GrantRequest = {
+      provider,
+      deviceId,
+      ts,
+      sig,
+      ...(repo !== undefined ? { repo } : {}),
+      ...(slot !== undefined ? { slot } : {})
+    };
     return call(() => vault.grant(caller, req));
   }
 

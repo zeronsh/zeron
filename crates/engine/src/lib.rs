@@ -15,6 +15,7 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use zeron_sync::DocsStore;
 
+pub mod account_sync;
 pub mod agent_accounts;
 pub mod auth;
 mod change_request_store;
@@ -168,6 +169,8 @@ pub struct EngineCore {
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
+    /// Synced subscriptions (attached by [`Engine::run`] on synced devices).
+    account_sync: std::sync::Mutex<Option<account_sync::AccountSync>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
     links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
@@ -382,6 +385,7 @@ impl EngineCore {
             local_import,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
+            account_sync: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
@@ -393,6 +397,21 @@ impl EngineCore {
 
     pub fn workspace_scope(&self) -> WorkspaceScope {
         self.workspace_scope
+    }
+
+    /// Attach synced subscriptions (every synced device but a Cloud runner).
+    pub fn set_account_sync(&self, sync: account_sync::AccountSync) {
+        *self
+            .account_sync
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sync);
+    }
+
+    pub fn account_sync(&self) -> Option<account_sync::AccountSync> {
+        self.account_sync
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Attach the auth service (before building the RPC service / relays).
@@ -535,6 +554,9 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
+        if let Some(sync) = self.account_sync() {
+            rpc = rpc.with_account_sync(sync);
+        }
         Arc::new(rpc)
     }
 
@@ -606,6 +628,9 @@ impl EngineCore {
         self.terminals.shutdown();
         self.sessions.stop_activity_projection().await;
         self.agent_accounts.shutdown();
+        if let Some(sync) = self.account_sync() {
+            sync.shutdown();
+        }
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a
         // replaced synced runtime must not keep polling releases or draining
@@ -993,6 +1018,34 @@ impl Engine {
                 });
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
+        } else if core.workspace_scope() == WorkspaceScope::Synced {
+            // Every other device can share its Claude Code / Codex logins
+            // through the vault (Settings → Providers → Sync logins).
+            let workspace = core.workspace.clone();
+            let sync_auth = auth.clone();
+            let context: account_sync::ContextFn = Arc::new(move || {
+                let cloud = rpc::cloud_client_for(
+                    WorkspaceScope::Synced,
+                    &workspace,
+                    Some(&sync_auth),
+                );
+                if !cloud.is_available() {
+                    return None;
+                }
+                Some(account_sync::SyncContext {
+                    cloud,
+                    user_id: sync_auth.user_id()?,
+                })
+            });
+            let sync = account_sync::AccountSync::new(
+                &device_root,
+                &core.device_id,
+                core.agent_accounts.clone(),
+                context,
+            );
+            core.registry.set_run_environment(Arc::new(sync.clone()));
+            sync.start();
+            core.set_account_sync(sync);
         }
         let preview_workspace = core.workspace.clone();
         let preview_device = core.device_id.clone();
