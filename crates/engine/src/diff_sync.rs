@@ -3946,10 +3946,11 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc c.txt\0\
             tmp.path().join("excludes"),
             identity.git_dir.join("config.worktree"),
         ] {
-            let absolute = |p: &Path| {
-                std::fs::canonicalize(p.parent().unwrap())
-                    .unwrap()
-                    .join(p.file_name().unwrap())
+            // Inputs outside the fixture (`~/.config/git/attributes`) may
+            // have no parent directory on this machine.
+            let absolute = |p: &Path| match std::fs::canonicalize(p.parent().unwrap()) {
+                Ok(parent) => parent.join(p.file_name().unwrap()),
+                Err(_) => p.to_path_buf(),
             };
             assert!(
                 gate.inputs
