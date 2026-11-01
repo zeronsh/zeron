@@ -44,6 +44,8 @@ pub(crate) struct ChatPersistence {
     writes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     before_export: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    pub(crate) verify_deltas: AtomicBool,
 }
 
 impl ChatPersistence {
@@ -76,6 +78,8 @@ impl ChatPersistence {
             writes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             before_export: Mutex::new(None),
+            #[cfg(test)]
+            verify_deltas: AtomicBool::new(true),
         });
         if let Some(runtime) = runtime {
             runtime.spawn(Self::run(Arc::downgrade(&this), rx));
@@ -219,6 +223,11 @@ impl ChatPersistence {
         self.flush(true);
     }
 
+    #[cfg(test)]
+    pub(crate) fn flush_delta_for_test(&self) {
+        self.flush(false);
+    }
+
     fn flush(&self, compact: bool) {
         let flush = || {
             let mut write = self.write.lock().unwrap_or_else(|e| e.into_inner());
@@ -314,10 +323,12 @@ impl ChatPersistence {
                     write.verifications += 1;
                     // The oracle uses the full snapshot at exactly the
                     // persisted frontier, so a racing edit is not a mismatch.
-                    if cfg!(debug_assertions)
+                    let verify = cfg!(debug_assertions)
                         || (std::env::var("ZERON_PERF_VERIFY").as_deref() == Ok("1")
-                            && write.verifications % 32 == 0)
-                    {
+                            && write.verifications % 32 == 0);
+                    #[cfg(test)]
+                    let verify = verify && self.verify_deltas.load(Ordering::Relaxed);
+                    if verify {
                         if let Err(error) = self.verify_full(&doc, &vv_now) {
                             tracing::error!(chat = %self.chat_id, %error, "snapshot delta mismatch; using full snapshot");
                             self.save_full(&doc, cursor)?;

@@ -222,8 +222,16 @@ pub struct ChatState {
     pub ignored_deltas: usize,
 }
 
-/// A callback that must return before a snapshot is written.
-pub type SnapshotBarrier = dyn Fn(&str, &[u8]) -> Result<(), StoreError> + Send + Sync;
+/// Content about to become durable. A delta needs its persisted dependencies
+/// before it can be used as an independent source of publication operations.
+#[derive(Clone, Copy, Debug)]
+pub enum SnapshotWrite<'a> {
+    Full(&'a [u8]),
+    Delta(&'a [u8]),
+}
+
+/// A callback that must return before a snapshot or delta is written.
+pub type SnapshotBarrier = dyn Fn(&str, SnapshotWrite<'_>) -> Result<(), StoreError> + Send + Sync;
 
 impl DocsStore {
     /// Open (creating directory, database, and schema as needed).
@@ -375,7 +383,11 @@ impl DocsStore {
         barriers.push(Arc::downgrade(barrier));
     }
 
-    fn run_snapshot_barriers(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+    fn run_snapshot_barriers(
+        &self,
+        doc_id: &str,
+        write: SnapshotWrite<'_>,
+    ) -> Result<(), StoreError> {
         let live: Vec<_> = self
             .snapshot_barriers
             .lock()
@@ -384,7 +396,7 @@ impl DocsStore {
             .filter_map(Weak::upgrade)
             .collect();
         for barrier in live {
-            barrier(doc_id, bytes)?;
+            barrier(doc_id, write)?;
         }
         Ok(())
     }
@@ -633,8 +645,8 @@ impl DocsStore {
     }
 
     /// Append one durable update + cursor and the registry from
-    /// [`Self::snapshot_roots`]. Publication barriers are identical to full
-    /// saves, but this log neither acknowledges nor drains the outbox.
+    /// [`Self::snapshot_roots`]. The barrier receives a delta, not a standalone
+    /// snapshot. This log neither acknowledges nor drains the outbox.
     pub fn append_snapshot_delta(
         &self,
         doc_id: &str,
@@ -642,8 +654,20 @@ impl DocsStore {
         cursor: u64,
         roots: &[u8],
     ) -> Result<(), StoreError> {
-        self.run_snapshot_barriers();
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Delta(bytes))?;
         store_blocking(|| {
+            // Lock order matches outbox insertion. Unlike a full snapshot's
+            // replay-marker fallback, a delta must not outlive an unwritten
+            // prefix: a crash would leave later ops without their dependencies.
+            let failed = self
+                .failed_updates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if failed.contains_key(doc_id) {
+                return Err(StoreError::Io(std::io::Error::other(
+                    "cannot append snapshot delta: outbox prefix is not durable",
+                )));
+            }
             let mut conn = self.conn();
             let tx = conn.transaction()?;
             zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
@@ -708,7 +732,7 @@ impl DocsStore {
 
     /// Save (upsert) the snapshot for `doc_id`.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        self.run_snapshot_barriers(doc_id, bytes)?;
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
     }
 
@@ -740,7 +764,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
-        self.run_snapshot_barriers(doc_id, bytes)?;
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| self.save_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch))
     }
 
@@ -775,7 +799,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
-        self.run_snapshot_barriers(doc_id, bytes)?;
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| {
             self.save_verified_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch)
         })
@@ -2312,6 +2336,99 @@ mod tests {
         assert_eq!(ids, ["first", "second"]);
         store.enqueue_chat_update("a", "first", b"1").unwrap();
         assert_eq!(store.pending_chat_updates("a").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delta_barriers_receive_the_incremental_blob_and_can_reject_the_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("body").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        let expected = delta.clone();
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move |chat, write| {
+            assert_eq!(chat, "chat");
+            let SnapshotWrite::Delta(bytes) = write else {
+                panic!("expected delta");
+            };
+            assert_eq!(bytes, expected);
+            Err(StoreError::Io(std::io::Error::other(
+                "injected barrier failure",
+            )))
+        });
+        store.add_snapshot_barrier(&barrier);
+        assert!(
+            store
+                .append_snapshot_delta("chat", &delta, 1, &roots)
+                .is_err()
+        );
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.delta_count, 0);
+        assert_eq!(state.cursor, 0);
+        drop(barrier);
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            1
+        );
+    }
+
+    #[test]
+    fn a_delta_cannot_become_durable_while_its_outbox_prefix_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("body").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_outbox BEFORE INSERT ON chat_outbox BEGIN SELECT RAISE(FAIL,'injected'); END;").unwrap();
+        assert!(store.enqueue_chat_update("chat", "batch", &delta).is_err());
+        assert!(
+            store
+                .append_snapshot_delta("chat", &delta, 1, &roots)
+                .unwrap_err()
+                .to_string()
+                .contains("outbox prefix is not durable")
+        );
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            0
+        );
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER fail_outbox;")
+            .unwrap();
+        store.enqueue_chat_update("chat", "batch", &delta).unwrap();
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            1
+        );
     }
 
     #[test]

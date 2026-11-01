@@ -2337,7 +2337,8 @@ impl DocHost {
                 let snapshot_outbox = outbox.clone();
                 let snapshot_weak = weak_push.clone();
                 let snapshot_chat = publication_chat.clone();
-                let barrier: Arc<zeron_sync::SnapshotBarrier> = Arc::new(move |chat, bytes| {
+                let snapshot_store = self.inner.store.clone();
+                let barrier: Arc<zeron_sync::SnapshotBarrier> = Arc::new(move |chat, write| {
                     if chat != snapshot_chat {
                         return Ok(());
                     }
@@ -2347,15 +2348,44 @@ impl DocHost {
                     if handle.retired.load(Ordering::Acquire) {
                         return Ok(());
                     }
+                    // Reconstruct only a lagging delta's dependencies, and
+                    // do the SQLite read outside own_order so hooks never wait
+                    // behind that read. Recheck the frontier under the lock:
+                    // the hook may have caught up during reconstruction.
+                    let delta_source = if let zeron_sync::SnapshotWrite::Delta(bytes) = write {
+                        let needed = lock(&snapshot_order)
+                            .needs_prefix(bytes)
+                            .map_err(std::io::Error::other)?;
+                        if needed {
+                            Some(
+                                snapshot_store
+                                    .load_chat_state(chat)?
+                                    .ok_or_else(|| {
+                                        std::io::Error::other(
+                                            "snapshot delta has no persisted base",
+                                        )
+                                    })?
+                                    .doc,
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     {
                         let mut order = lock(&snapshot_order);
                         if handle.purged.load(Ordering::Acquire) {
                             return Ok(());
                         }
-                        for update in order
-                            .snapshot_prefix(bytes)
-                            .map_err(std::io::Error::other)?
-                        {
+                        let updates = match write {
+                            zeron_sync::SnapshotWrite::Full(bytes) => order.snapshot_prefix(bytes),
+                            zeron_sync::SnapshotWrite::Delta(bytes) => order.delta_prefix(bytes, || {
+                                delta_source.ok_or_else(|| "snapshot delta publication frontier changed during restore".to_string())
+                            }),
+                        }
+                        .map_err(std::io::Error::other)?;
+                        for update in updates {
                             snapshot_outbox.submit(
                                 chat,
                                 snapshot_weak.clone(),
@@ -8377,6 +8407,139 @@ mod publication_eviction_tests {
         host.inner.outbox.flush();
         assert_eq!(replay_in_order(&store, "late-hook").1, "already committed");
         host.shutdown_workers().await;
+    }
+
+    /// Exercise the real persister's write mutex and delta path. Reopen before
+    /// any graceful shutdown can compact the chain and hide a lost delta.
+    async fn delta_append_waits_for_outbox_and_reopens(hook_lag: bool) {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("delta-barrier").unwrap();
+        let persistence = handle.persistence.as_ref().unwrap().clone();
+        persistence.verify_deltas.store(false, Ordering::Relaxed);
+        commit_text(&handle, "base,");
+        persistence.flush_sync();
+        // A previous delta is part of the dependency source, too.
+        commit_text(&handle, "prior delta,");
+        persistence.flush_delta_for_test();
+        let before = store.load_chat_state("delta-barrier").unwrap().unwrap();
+        assert_eq!(before.delta_count, 1);
+        host.inner.outbox.flush();
+        let baseline = store.pending_chat_updates("delta-barrier").unwrap().len();
+        let outbox = host.inner.outbox.clone();
+        let pause = outbox.pause();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let committing = if hook_lag {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            *lock(&handle.before_outbox_submit) = Some(Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            }));
+            let handle = handle.clone();
+            let committing = std::thread::spawn(move || commit_text(&handle, "in flight"));
+            tokio::task::spawn_blocking(move || {
+                entered_rx.recv_timeout(Duration::from_secs(10)).unwrap()
+            })
+            .await
+            .unwrap();
+            Some(committing)
+        } else {
+            commit_text(&handle, "in flight");
+            None
+        };
+        let expected = handle.doc.doc().oplog_vv();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        let saving = {
+            let persistence = persistence.clone();
+            std::thread::spawn(move || {
+                persistence.flush_delta_for_test();
+                saved_tx.send(persistence.is_clean()).unwrap();
+            })
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !outbox.has_in_flight("delta-barrier") && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let submitted = outbox.has_in_flight("delta-barrier");
+        let held_rows = store.pending_chat_updates("delta-barrier").unwrap().len();
+        let held_deltas = store
+            .load_chat_state("delta-barrier")
+            .unwrap()
+            .unwrap()
+            .delta_count;
+        // Keep the hook held: the barrier must complete independently of it.
+        drop(pause);
+        let saved =
+            tokio::task::spawn_blocking(move || saved_rx.recv_timeout(Duration::from_secs(10)))
+                .await
+                .unwrap();
+        if hook_lag {
+            let _ = release_tx.send(());
+        }
+        if let Some(committing) = committing {
+            committing.join().unwrap();
+        }
+        saving.join().unwrap();
+        assert!(submitted, "barrier did not supply the late hook's prefix");
+        assert_eq!(held_rows, baseline);
+        assert_eq!(held_deltas, 1, "delta landed before its outbox row");
+        assert!(saved.expect("delta barrier waited for the hook"));
+        outbox.flush();
+        assert_eq!(
+            store.pending_chat_updates("delta-barrier").unwrap().len(),
+            baseline + 1
+        );
+        let restored = store.load_chat_state("delta-barrier").unwrap().unwrap();
+        assert_eq!(
+            restored.delta_count, 2,
+            "oracle/full fallback masked the delta path"
+        );
+        assert_eq!(restored.base_snapshot, before.base_snapshot);
+        assert_eq!(restored.doc.oplog_vv(), expected);
+        assert_eq!(
+            replay_in_order(&store, "delta-barrier").1,
+            "base,prior delta,in flight"
+        );
+        // A new store and host reconstruct from disk while the original host
+        // has not run shutdown or written a newer full snapshot.
+        let fresh_store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        assert_eq!(
+            fresh_store
+                .load_chat_state("delta-barrier")
+                .unwrap()
+                .unwrap()
+                .delta_count,
+            2
+        );
+        let reopened = DocHost::new(
+            fresh_store,
+            DocHostConfig {
+                device_id: "reopen".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let recovered = reopened.open_local("delta-barrier").unwrap();
+        assert_eq!(recovered.doc.doc().oplog_vv(), expected);
+        assert_eq!(
+            recovered.doc.doc().get_text("body").to_string(),
+            "base,prior delta,in flight"
+        );
+        drop(recovered);
+        reopened.shutdown_workers().await;
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delta_append_covers_a_late_local_hook_without_the_oracle() {
+        delta_append_waits_for_outbox_and_reopens(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delta_append_waits_for_in_flight_ops_and_reopens_without_compaction() {
+        delta_append_waits_for_outbox_and_reopens(false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

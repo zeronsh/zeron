@@ -643,14 +643,43 @@ impl OwnOpsOrder {
     /// prefix from the immutable snapshot, without acquiring the live doc's
     /// locks or implicitly committing another task's pending transaction.
     pub(crate) fn snapshot_prefix(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        self.prefix_from(bytes, || Ok(loro::LoroDoc::new()))
+    }
+
+    /// Only load the persisted base + prior deltas if the hook is behind. A
+    /// delta alone may park on missing dependencies in an empty document.
+    pub(crate) fn delta_prefix(
+        &mut self,
+        bytes: &[u8],
+        restore: impl FnOnce() -> Result<loro::LoroDoc, String>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        self.prefix_from(bytes, restore)
+    }
+
+    pub(crate) fn needs_prefix(&self, bytes: &[u8]) -> Result<bool, String> {
+        Ok(self.prefix_end(bytes)? > self.next)
+    }
+
+    fn prefix_end(&self, bytes: &[u8]) -> Result<loro::Counter, String> {
         let meta =
             loro::LoroDoc::decode_import_blob_meta(bytes, true).map_err(|e| e.to_string())?;
-        let end = meta.partial_end_vv.get(&self.peer).copied().unwrap_or(0);
+        Ok(meta.partial_end_vv.get(&self.peer).copied().unwrap_or(0))
+    }
+
+    fn prefix_from(
+        &mut self,
+        bytes: &[u8],
+        restore: impl FnOnce() -> Result<loro::LoroDoc, String>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let end = self.prefix_end(bytes)?;
         if end <= self.next {
             return Ok(Vec::new());
         }
-        let snapshot = loro::LoroDoc::new();
-        snapshot.import(bytes).map_err(|e| e.to_string())?;
+        let snapshot = restore()?;
+        let status = snapshot.import(bytes).map_err(|e| e.to_string())?;
+        if status.pending.is_some() {
+            return Err("snapshot publication prefix is missing causal dependencies".into());
+        }
         let update = snapshot
             .export(loro::ExportMode::updates_in_range(vec![loro::IdSpan::new(
                 self.peer, self.next, end,
@@ -764,6 +793,38 @@ mod own_ops_order_tests {
         }
         assert_eq!(reader.get_list("messages").len(), 3);
         assert_eq!(reader.get_text("pending").to_string(), "");
+    }
+
+    #[test]
+    fn delta_prefix_uses_dependencies_and_does_not_advance_on_a_pending_import() {
+        let (doc, mut order, hooks) = three_commits();
+        let first = order.order(&hooks[0]);
+        let base = loro::LoroDoc::new();
+        for bytes in &first {
+            base.import(bytes).unwrap();
+        }
+        let delta = doc
+            .export(loro::ExportMode::updates(&base.oplog_vv()))
+            .unwrap();
+        assert!(
+            order
+                .delta_prefix(&delta, || Ok(loro::LoroDoc::new()))
+                .is_err()
+        );
+        let prefix = order.delta_prefix(&delta, || Ok(base)).unwrap();
+        let reader = loro::LoroDoc::new();
+        for bytes in first.into_iter().chain(prefix) {
+            assert!(reader.import(&bytes).unwrap().pending.is_none());
+        }
+        assert_eq!(reader.oplog_vv(), doc.oplog_vv());
+        assert!(order.order(&hooks[1]).is_empty());
+        assert!(order.order(&hooks[2]).is_empty());
+        assert!(
+            order
+                .delta_prefix(&delta, || panic!("hook already supplied the frontier"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
