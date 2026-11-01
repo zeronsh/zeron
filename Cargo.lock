@@ -13636,7 +13636,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-counters"
-version = "0.2.130"
+version = "0.2.131"
 
 [[package]]
 name = "zeron-doc"
