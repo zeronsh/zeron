@@ -46,7 +46,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/windows-ci-setup
         with:
           save-rust-cache: 'true'
@@ -81,7 +81,7 @@ jobs:
           -E "(package(zeron-ui) & kind(lib)) | package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-voice-media) & kind(lib)) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::codex_catalog) | binary_id(zeron-engine::codex_login_resolution) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_)))) | (not package(zeron-ui) & not package(zeron-harness) & not package(zeron) & not package(zeron-update) & not package(zeron-proto) & not package(zeron-engine) & not package(zeron-voice-media) & test(layout))"
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-tests
@@ -92,7 +92,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/windows-ci-setup
       - name: Build application
         run: cargo build --release --locked -p zeron
@@ -142,7 +142,7 @@ jobs:
         run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
       - name: Upload GUI test binaries
         if: ${{ inputs.native_gui }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-gui-binaries
           path: |
@@ -152,7 +152,7 @@ jobs:
           retention-days: 1
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-app
@@ -163,8 +163,8 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: windows-gui-binaries
           path: target/release
@@ -174,7 +174,7 @@ jobs:
         run: ./scripts/test-windows-rendering.ps1
       - name: Upload GUI test results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-native-probes
           path: |

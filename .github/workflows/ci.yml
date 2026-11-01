@@ -76,7 +76,7 @@ jobs:
     steps:
       # The Rust sources too: the fingerprints scan them for files they read from
       # outside their packages. (~30 MB; root files such as Cargo.lock come with cone mode.)
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: |
             scripts/ci
@@ -105,7 +105,7 @@ jobs:
       pull-requests: read  # ci:priority / ci:lock labels and pull request heads
       issues: read  # when ci:lock was added
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: scripts/ci
       - env:
