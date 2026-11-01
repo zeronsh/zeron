@@ -32,13 +32,13 @@ cd "$(dirname "$0")/../.."
 # every test is #[ignore]d because it needs a live service or a real CLI.
 skip=" codex_availability windows_native managed_install muse_account_live pi_live real_acp_lifecycle real_quiet_survey coordinator "
 tests=()
-for f in crates/harness/tests/*.rs crates/preview/tests/*.rs; do
+for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.rs; do
   name="$(basename "$f" .rs)"
   [[ "$skip" == *" $name "* ]] || tests+=(--test "$name")
 done
 # `misc` (harness, engine and preview): the small suites, one binary each.
 # The orb geometry tests live in zeron-orb's `geometry`.
-for t in misc geometry session_publication restart_resume side_chats message_queue attachments_roundtrip voice_runtime device_routing device_room; do
+for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room; do
   tests+=(--test "$t")
 done
 
