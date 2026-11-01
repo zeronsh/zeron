@@ -3846,6 +3846,7 @@ impl Shell {
                 drag.prev_over = drag.over;
                 drag.over = over;
                 drag.epoch = drag.epoch.wrapping_add(1);
+                crate::haptics::reorder_step();
                 cx.notify();
             }
             Some(drag)
@@ -3995,6 +3996,7 @@ impl Shell {
             drag.prev_over = drag.over;
             drag.over = over;
             drag.epoch = drag.epoch.wrapping_add(1);
+            crate::haptics::reorder_step();
         }
         cx.notify();
         true
