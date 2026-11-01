@@ -6,41 +6,32 @@
 //! `ChatClient::enqueue_batch`, each on the stream task, each behind the single
 //! SQLite connection mutex that multi-MB snapshot upserts also hold. While the
 //! stream task waited there it did not read the harness's stdout. Now the hook
-//! only hands the update to a bounded queue; this thread batches whatever has
+//! only hands the update to a queue; this thread batches whatever has
 //! queued into ONE transaction and then, per item in FIFO order, hands the
 //! update to its chat (`OutboxSink`), which gives it to the room client without
 //! a second INSERT.
 //!
-//! What stays as it was:
-//! - Insert before send. The client sees an update only after its row is
-//!   committed (or after the write failed and the update is held back as
-//!   non-durable), so a push acknowledgement can never delete a row that does
-//!   not exist yet.
-//! - Per-chat commit order. The hook orders and submits under one lock and this
-//!   is the only consumer, so rows and wire order follow commit order.
-//! - Nothing relies on an update the outbox does not have yet. Three barriers
-//!   enforce that, each a [`OutboxWriter::flush`]: before any snapshot is
-//!   written (a snapshot may only land once the rows for the operations it
-//!   contains, or the record that a row failed, are on disk), after a command is
-//!   queued (so the RPC that accepted it still means "in the outbox"), and at
-//!   shutdown.
+//! Rows are inserted before client delivery. A separate delivery thread may
+//! wait for a client lock without holding up persistence. Snapshot barriers
+//! wait for write attempts only; explicit shutdown flushes also wait for
+//! delivery. Failed attempts invalidate the outbox bootstrap marker when the
+//! snapshot is saved, retaining the full-replay recovery obligation.
 //!
-//! The one relaxation: a streaming commit is in the outbox when the writer
-//! flushes (about a millisecond), not when `commit()` returns. A process kill in
-//! that window loses an update that no peer, no push and no snapshot has seen.
+//! Streaming commits queue in memory. Storage stalls can extend this crash
+//! window and grow the queue; there is no hard one-millisecond bound. Raw
+//! agent events remain in the run journal, but boot's journal-tail recovery
+//! only classifies the interrupted turn; it does not restore lost transcript
+//! content or regenerate its CRDT operations.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 
 use zeron_sync::DocsStore;
 use zeron_sync::SnapshotBarrier;
 
-/// Updates that may queue before a commit waits for the writer. Backpressure,
-/// not a limit on commits: a full queue means the disk is behind.
-pub(crate) const QUEUE_CAP: usize = 1024;
 /// Rows in one transaction.
 pub(crate) const MAX_BATCH: usize = 64;
 
@@ -52,6 +43,7 @@ pub(crate) trait OutboxSink: Send + Sync {
     fn outbox_written(&self, batch_id: String, bytes: Vec<u8>, durable: bool);
 }
 
+#[derive(Clone)]
 struct Item {
     chat_id: String,
     sink: Weak<dyn OutboxSink>,
@@ -63,6 +55,7 @@ struct Item {
 struct Counts {
     submitted: u64,
     completed: u64,
+    written: u64,
     /// Items per chat between `submit` and the end of their delivery.
     in_flight: HashMap<String, usize>,
 }
@@ -71,9 +64,10 @@ struct Shared {
     counts: Mutex<Counts>,
     done: Condvar,
     batches: AtomicU64,
-    blocked: AtomicU64,
     #[cfg(test)]
     gate: Gate,
+    #[cfg(test)]
+    panic_write_once: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -99,8 +93,7 @@ fn block_scope<T>(f: impl FnOnce() -> T) -> T {
 }
 
 pub(crate) struct OutboxWriter {
-    tx: SyncSender<Item>,
-    store: Arc<DocsStore>,
+    tx: Sender<Item>,
     shared: Arc<Shared>,
     /// Registered with the store; dropping the writer unregisters it.
     _barrier: Arc<SnapshotBarrier>,
@@ -108,42 +101,46 @@ pub(crate) struct OutboxWriter {
 
 impl OutboxWriter {
     pub(crate) fn new(store: Arc<DocsStore>) -> Self {
-        Self::with_capacity(store, QUEUE_CAP)
-    }
-
-    fn with_capacity(store: Arc<DocsStore>, capacity: usize) -> Self {
-        let (tx, rx) = sync_channel(capacity);
+        let (tx, rx) = channel();
+        let (delivery_tx, delivery_rx) = channel();
         let shared = Arc::new(Shared {
             counts: Mutex::new(Counts::default()),
             done: Condvar::new(),
             batches: AtomicU64::new(0),
-            blocked: AtomicU64::new(0),
             #[cfg(test)]
             gate: Gate::default(),
+            #[cfg(test)]
+            panic_write_once: std::sync::atomic::AtomicBool::new(false),
         });
         let thread_store = store.clone();
         let thread_shared = shared.clone();
-        let spawned = std::thread::Builder::new()
+        // Delivery can acquire the client lock. Keep it off the persistence
+        // thread: snapshots may wait for disk while holding a client lock.
+        let delivery_shared = shared.clone();
+        std::thread::Builder::new()
+            .name("outbox-delivery".into())
+            .spawn(move || deliver(&delivery_shared, delivery_rx))
+            .expect("start outbox delivery thread");
+        std::thread::Builder::new()
             .name("outbox-writer".into())
-            .spawn(move || run(&thread_store, &thread_shared, rx));
-        if let Err(err) = spawned {
-            // The receiver went with the failed closure: every submit now
-            // falls back to writing inline, as the hook did before.
-            tracing::error!(%err, "outbox writer thread failed to start; writing inline");
-        }
+            .spawn(move || run(&thread_store, &thread_shared, rx, delivery_tx))
+            .expect("start outbox writer thread");
         let barrier_shared = shared.clone();
-        let barrier: Arc<SnapshotBarrier> = Arc::new(move || flush_shared(&barrier_shared));
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move |_, _| {
+            flush_shared(&barrier_shared, false);
+            Ok(())
+        });
         store.add_snapshot_barrier(&barrier);
         Self {
             tx,
-            store,
             shared,
             _barrier: barrier,
         }
     }
 
-    /// Queue one update. Never touches SQLite unless the writer is gone; blocks
-    /// only while [`QUEUE_CAP`] updates are already waiting.
+    /// Queue without waiting for disk or client delivery. Pending memory grows
+    /// during storage stalls; a bounded blocking channel would stall commits
+    /// (and harness stdout reads) precisely when snapshots hold SQLite.
     pub(crate) fn submit(
         &self,
         chat_id: &str,
@@ -151,36 +148,29 @@ impl OutboxWriter {
         batch_id: String,
         bytes: Vec<u8>,
     ) {
-        {
-            let mut counts = lock(&self.shared.counts);
-            counts.submitted += 1;
-            *counts.in_flight.entry(chat_id.to_string()).or_default() += 1;
-        }
-        let item = Item {
-            chat_id: chat_id.to_string(),
-            sink,
-            batch_id,
-            bytes,
-        };
-        let item = match self.tx.try_send(item) {
-            Ok(()) => return,
-            Err(TrySendError::Full(item)) => {
-                self.shared.blocked.fetch_add(1, Ordering::Relaxed);
-                match block_scope(|| self.tx.send(item)) {
-                    Ok(()) => return,
-                    Err(err) => err.0,
-                }
-            }
-            Err(TrySendError::Disconnected(item)) => item,
-        };
-        write_batch(&self.store, &self.shared, vec![item]);
+        let mut counts = lock(&self.shared.counts);
+        // Sending under this lock makes the flush watermark match FIFO order.
+        self.tx
+            .send(Item {
+                chat_id: chat_id.to_string(),
+                sink,
+                batch_id,
+                bytes,
+            })
+            .expect("outbox writer stopped");
+        counts.submitted += 1;
+        *counts.in_flight.entry(chat_id.to_string()).or_default() += 1;
     }
 
     /// Block until every update submitted before this call has been written
     /// and handed to its chat. Must not be called with a chat's client lock
     /// held, or from `OutboxSink::outbox_written`.
     pub(crate) fn flush(&self) {
-        flush_shared(&self.shared);
+        flush_shared(&self.shared, true);
+    }
+
+    pub(crate) fn flush_writes(&self) {
+        flush_shared(&self.shared, false);
     }
 
     /// Whether `chat_id` has updates the outbox has not taken yet.
@@ -195,12 +185,6 @@ impl OutboxWriter {
     #[cfg(test)]
     pub(crate) fn batches(&self) -> u64 {
         self.shared.batches.load(Ordering::Relaxed)
-    }
-
-    /// Submits that found the queue full and had to wait.
-    #[cfg(test)]
-    pub(crate) fn blocked_submits(&self) -> u64 {
-        self.shared.blocked.load(Ordering::Relaxed)
     }
 
     /// Hold the writer before its next write until the guard drops.
@@ -222,11 +206,16 @@ impl Drop for PauseGuard<'_> {
     }
 }
 
-fn flush_shared(shared: &Shared) {
+fn flush_shared(shared: &Shared, delivery: bool) {
     block_scope(|| {
         let mut counts = lock(&shared.counts);
         let target = counts.submitted;
-        while counts.completed < target {
+        while (if delivery {
+            counts.completed
+        } else {
+            counts.written
+        }) < target
+        {
             counts = shared
                 .done
                 .wait(counts)
@@ -235,7 +224,12 @@ fn flush_shared(shared: &Shared) {
     });
 }
 
-fn run(store: &Arc<DocsStore>, shared: &Arc<Shared>, rx: Receiver<Item>) {
+fn run(
+    store: &Arc<DocsStore>,
+    shared: &Arc<Shared>,
+    rx: Receiver<Item>,
+    delivery: Sender<(Item, bool)>,
+) {
     let mut batch = Vec::with_capacity(MAX_BATCH);
     while let Ok(first) = rx.recv() {
         #[cfg(test)]
@@ -257,8 +251,26 @@ fn run(store: &Arc<DocsStore>, shared: &Arc<Shared>, rx: Receiver<Item>) {
             }
         }
         let items = std::mem::replace(&mut batch, Vec::with_capacity(MAX_BATCH));
-        if catch_unwind(AssertUnwindSafe(|| write_batch(store, shared, items))).is_err() {
-            tracing::error!("outbox writer: a batch panicked; continuing");
+        let durable = loop {
+            match catch_unwind(AssertUnwindSafe(|| write_rows(store, shared, &items))) {
+                Ok(durable) => break durable,
+                Err(_) => {
+                    // Keep the batch and its watermark outstanding. Retrying
+                    // stable IDs is safe even if the transaction committed.
+                    tracing::error!("outbox writer panicked; retaining and retrying batch");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        {
+            let mut counts = lock(&shared.counts);
+            counts.written += items.len() as u64;
+        }
+        shared.done.notify_all();
+        for (item, durable) in items.into_iter().zip(durable) {
+            delivery
+                .send((item, durable))
+                .expect("outbox delivery stopped");
         }
     }
 }
@@ -266,7 +278,12 @@ fn run(store: &Arc<DocsStore>, shared: &Arc<Shared>, rx: Receiver<Item>) {
 /// One transaction for the batch; if that fails, one per row so a single
 /// unwritable row (and its doc's failed-publication record) does not take the
 /// rest down with it. Then, per item in order, the hand-off to its chat.
-fn write_batch(store: &DocsStore, shared: &Shared, items: Vec<Item>) {
+fn write_rows(store: &DocsStore, shared: &Shared, items: &[Item]) -> Vec<bool> {
+    #[cfg(test)]
+    assert!(
+        !shared.panic_write_once.swap(false, Ordering::SeqCst),
+        "injected write panic"
+    );
     let rows: Vec<_> = items
         .iter()
         .map(|item| {
@@ -288,7 +305,11 @@ fn write_batch(store: &DocsStore, shared: &Shared, items: Vec<Item>) {
     };
     drop(rows);
     shared.batches.fetch_add(1, Ordering::Relaxed);
-    for (item, durable) in items.into_iter().zip(durable) {
+    durable
+}
+
+fn deliver(shared: &Shared, rx: Receiver<(Item, bool)>) {
+    while let Ok((item, durable)) = rx.recv() {
         let Item {
             chat_id,
             sink,
@@ -296,14 +317,16 @@ fn write_batch(store: &DocsStore, shared: &Shared, items: Vec<Item>) {
             bytes,
         } = item;
         match sink.upgrade() {
-            Some(sink) => {
+            Some(sink) => loop {
                 let delivered = catch_unwind(AssertUnwindSafe(|| {
-                    sink.outbox_written(batch_id, bytes, durable);
+                    sink.outbox_written(batch_id.clone(), bytes.clone(), durable);
                 }));
-                if delivered.is_err() {
-                    tracing::error!(chat = %chat_id, "outbox writer: hand-off to the chat panicked");
+                if delivered.is_ok() {
+                    break;
                 }
-            }
+                tracing::error!(chat = %chat_id, "outbox hand-off panicked; retaining and retrying update");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            },
             // The chat was evicted. A written row is picked up by its next
             // join; an unwritten one has nowhere to be retried from.
             None if !durable => {
@@ -319,8 +342,8 @@ fn write_batch(store: &DocsStore, shared: &Shared, items: Vec<Item>) {
                 counts.in_flight.remove(&chat_id);
             }
         }
+        shared.done.notify_all();
     }
-    shared.done.notify_all();
 }
 
 #[cfg(test)]
@@ -534,40 +557,98 @@ mod tests {
     }
 
     #[test]
-    fn a_full_queue_makes_submit_wait_instead_of_dropping() {
+    fn snapshots_do_not_wait_for_client_delivery() {
+        struct BlockedSink(Mutex<()>, std::sync::mpsc::Sender<()>);
+        impl OutboxSink for BlockedSink {
+            fn outbox_written(&self, _: String, _: Vec<u8>, _: bool) {
+                self.1.send(()).unwrap();
+                let _guard = lock(&self.0);
+            }
+        }
         let (_dir, store) = store();
-        let writer = Arc::new(OutboxWriter::with_capacity(store.clone(), 4));
+        let writer = OutboxWriter::new(store.clone());
+        let (entered_tx, entered_rx) = channel();
+        let sink = Arc::new(BlockedSink(Mutex::new(()), entered_tx));
+        let held = lock(&sink.0);
+        let weak = Arc::downgrade(&(sink.clone() as Arc<dyn OutboxSink>));
+        writer.submit("chat", weak.clone(), "first".into(), vec![1]);
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        // Also require a second transaction while delivery of the first is blocked.
+        writer.submit("chat", weak, "second".into(), vec![2]);
+        let (done_tx, done_rx) = channel();
+        let snapshot_store = store.clone();
+        let saver = std::thread::spawn(move || {
+            snapshot_store.save_snapshot("chat", b"snapshot").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        saver.join().unwrap();
+        result.expect("snapshot waited for the client lock");
+        writer.flush();
+        assert_eq!(ids(&store, "chat"), ["first", "second"]);
+    }
+
+    #[test]
+    fn a_panicking_write_keeps_its_batch_and_flush_watermark() {
+        let (_dir, store) = store();
+        let writer = OutboxWriter::new(store.clone());
+        let sink = Recorder::new(&store, "chat");
+        writer.shared.panic_write_once.store(true, Ordering::SeqCst);
+        writer.submit("chat", sink.weak(), "kept".into(), vec![1]);
+        writer.flush();
+        assert_eq!(ids(&store, "chat"), ["kept"]);
+        assert_eq!(*lock(&sink.seen), [("kept".into(), true)]);
+        assert!(!writer.has_in_flight("chat"));
+    }
+
+    #[test]
+    fn panicking_delivery_is_retried_before_flush_completes() {
+        struct PanicOnce(std::sync::atomic::AtomicBool, AtomicUsize);
+        impl OutboxSink for PanicOnce {
+            fn outbox_written(&self, _: String, _: Vec<u8>, _: bool) {
+                assert!(!self.0.swap(false, Ordering::SeqCst), "injected panic");
+                self.1.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (_dir, store) = store();
+        let writer = OutboxWriter::new(store.clone());
+        let sink = Arc::new(PanicOnce(
+            std::sync::atomic::AtomicBool::new(true),
+            AtomicUsize::new(0),
+        ));
+        let weak = Arc::downgrade(&(sink.clone() as Arc<dyn OutboxSink>));
+        writer.submit("chat", weak, "kept".into(), vec![1]);
+        writer.flush();
+        assert_eq!(sink.1.load(Ordering::SeqCst), 1);
+        assert!(!writer.has_in_flight("chat"));
+    }
+
+    #[test]
+    fn a_stalled_writer_does_not_block_more_than_1024_submits() {
+        let (_dir, store) = store();
+        let writer = Arc::new(OutboxWriter::new(store.clone()));
         let sink = Recorder::new(&store, "chat");
         let pause = writer.pause();
-        let submitted = Arc::new(AtomicUsize::new(0));
+        let (done_tx, done_rx) = channel();
         let producer = {
-            let (writer, sink, submitted) = (writer.clone(), sink.clone(), submitted.clone());
+            let (writer, sink) = (writer.clone(), sink.clone());
             std::thread::spawn(move || {
-                for i in 0..20 {
-                    writer.submit("chat", sink.weak(), format!("b{i:02}"), vec![0]);
-                    submitted.fetch_add(1, Ordering::SeqCst);
+                for i in 0..4096 {
+                    writer.submit("chat", sink.weak(), format!("b{i:04}"), vec![0]);
                 }
+                done_tx.send(()).unwrap();
             })
         };
-        // The writer holds one item, the queue holds four: the sixth blocks.
-        let started = std::time::Instant::now();
-        while writer.blocked_submits() == 0 {
-            assert!(
-                started.elapsed().as_secs() < 5,
-                "producer never hit the cap"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert!(
-            submitted.load(Ordering::SeqCst) <= 5,
-            "submitted past the cap"
-        );
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(5));
         assert!(ids(&store, "chat").is_empty());
         drop(pause);
         producer.join().unwrap();
+        result.expect("committing thread waited for the stalled writer");
         writer.flush();
-        let expected: Vec<String> = (0..20).map(|i| format!("b{i:02}")).collect();
-        assert_eq!(ids(&store, "chat"), expected, "backpressure drops nothing");
+        assert_eq!(ids(&store, "chat").len(), 4096);
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub(crate) struct ChatPersistence {
     snapshot_bytes: AtomicUsize,
     delta_bytes: AtomicUsize,
     urgent: AtomicBool,
+    stopped: AtomicBool,
     write: Mutex<WriteState>,
     wake: Option<mpsc::Sender<()>>,
     /// Seeded from the store, then set by the first verified write: cursor
@@ -67,6 +68,7 @@ impl ChatPersistence {
             snapshot_bytes: AtomicUsize::new(0),
             delta_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             write: Mutex::new(WriteState::default()),
             wake: runtime.as_ref().map(|_| tx),
             cursor_verified: AtomicBool::new(verified),
@@ -193,7 +195,7 @@ impl ChatPersistence {
                 (write.delta_count > 0 || write.needs_compaction)
                     .then(|| tokio::time::Instant::now() + QUIET_INTERVAL)
             };
-            if this.doc.strong_count() == 0 {
+            if this.stopped.load(Ordering::Acquire) || this.doc.strong_count() == 0 {
                 return;
             }
             if this.saved.load(Ordering::Acquire) != this.generation.load(Ordering::Acquire) {
@@ -206,6 +208,13 @@ impl ChatPersistence {
         }
     }
 
+    /// Serialize deletion with an already-running snapshot and disable later
+    /// debounce jobs, including jobs holding an upgraded persistence handle.
+    pub(crate) fn stop(&self) {
+        let _write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        self.stopped.store(true, Ordering::Release);
+    }
+
     pub(crate) fn flush_sync(&self) {
         self.flush(true);
     }
@@ -213,6 +222,9 @@ impl ChatPersistence {
     fn flush(&self, compact: bool) {
         let flush = || {
             let mut write = self.write.lock().unwrap_or_else(|e| e.into_inner());
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
             let generation = self.generation.load(Ordering::Acquire);
             if generation == self.saved.load(Ordering::Acquire)
                 && !(compact && write.delta_count > 0)

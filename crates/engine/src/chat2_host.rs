@@ -618,18 +618,15 @@ pub(crate) fn publication_updates(doc: &loro::LoroDoc) -> Result<Vec<Vec<u8>>, S
     Ok(out)
 }
 
-/// Puts this device's own local updates back in commit order for
-/// publication. Loro runs local-update hooks after the commit, outside its
-/// lock, so two tasks committing at once (a run writing its first entry
-/// while a steered message lands) can see their hooks run in either order.
-/// Published as they come, the later commit reaches the room first and
-/// every reader parks it on missing causal history. Ops of one peer are a
-/// contiguous counter range, so: when a hook starts past what went out,
-/// publish the missing range from the doc first; when the late hook comes,
-/// its ops already went out.
+/// Puts this device's local callbacks back in commit order. A callback may
+/// arrive late, so hold later ranges until the missing callback arrives (or
+/// a snapshot barrier supplies the prefix). Never export the live doc while
+/// holding the ordering lock: export implicitly commits pending edits and
+/// can reenter this subscription.
 pub(crate) struct OwnOpsOrder {
     peer: loro::PeerID,
     next: loro::Counter,
+    pending: std::collections::BTreeMap<loro::Counter, (loro::Counter, Vec<u8>)>,
 }
 
 impl OwnOpsOrder {
@@ -638,11 +635,35 @@ impl OwnOpsOrder {
         Self {
             peer,
             next: doc.oplog_vv().get(&peer).copied().unwrap_or(0),
+            pending: Default::default(),
         }
     }
 
+    /// A snapshot can overtake a committed update's local hook. Fill that
+    /// prefix from the immutable snapshot, without acquiring the live doc's
+    /// locks or implicitly committing another task's pending transaction.
+    pub(crate) fn snapshot_prefix(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        let meta =
+            loro::LoroDoc::decode_import_blob_meta(bytes, true).map_err(|e| e.to_string())?;
+        let end = meta.partial_end_vv.get(&self.peer).copied().unwrap_or(0);
+        if end <= self.next {
+            return Ok(Vec::new());
+        }
+        let snapshot = loro::LoroDoc::new();
+        snapshot.import(bytes).map_err(|e| e.to_string())?;
+        let update = snapshot
+            .export(loro::ExportMode::updates_in_range(vec![loro::IdSpan::new(
+                self.peer, self.next, end,
+            )]))
+            .map_err(|e| e.to_string())?;
+        self.next = end;
+        let mut updates = vec![update];
+        updates.extend(self.drain_ready());
+        Ok(updates)
+    }
+
     /// The batches one local-update hook publishes, in order.
-    pub(crate) fn order(&mut self, doc: &loro::LoroDoc, bytes: &[u8]) -> Vec<Vec<u8>> {
+    pub(crate) fn order(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let Ok(meta) = loro::LoroDoc::decode_import_blob_meta(bytes, false) else {
             return vec![bytes.to_vec()];
         };
@@ -655,31 +676,30 @@ impl OwnOpsOrder {
             // A new peer id counts from its own start.
             self.peer = peer;
             self.next = start;
+            self.pending.clear();
         }
         if end <= self.next {
             return Vec::new();
         }
-        let range = |from, to| {
-            doc.export(loro::ExportMode::updates_in_range(vec![loro::IdSpan::new(
-                peer, from, to,
-            )]))
-        };
+        self.pending
+            .entry(start)
+            .or_insert_with(|| (end, bytes.to_vec()));
+        self.drain_ready()
+    }
+
+    fn drain_ready(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        if start != self.next {
-            // Ahead: an earlier commit's hook hasn't run yet. Behind: part of
-            // this batch went out with a gap fill. Either way the doc has
-            // exactly the ops from `next`.
-            match range(self.next, end) {
-                Ok(missing) => out.push(missing),
-                Err(err) => {
-                    tracing::warn!(%err, "chat2: couldn't reorder a local update; publishing it as is");
-                    out.push(bytes.to_vec());
-                }
+        while self
+            .pending
+            .first_key_value()
+            .is_some_and(|(start, _)| *start <= self.next)
+        {
+            let (_, (end, bytes)) = self.pending.pop_first().unwrap();
+            if end > self.next {
+                self.next = end;
+                out.push(bytes);
             }
-        } else {
-            out.push(bytes.to_vec());
         }
-        self.next = end;
         out
     }
 }
@@ -715,13 +735,9 @@ mod own_ops_order_tests {
         // The third commit's hook runs first, then the first's, then the second's.
         let published: Vec<Vec<u8>> = [2, 0, 1]
             .into_iter()
-            .flat_map(|i| order.order(&doc, &hooks[i]))
+            .flat_map(|i| order.order(&hooks[i]))
             .collect();
-        assert_eq!(
-            published.len(),
-            1,
-            "the early hook carries the missing range"
-        );
+        assert_eq!(published.len(), 3, "callbacks drain in commit order");
         let reader = loro::LoroDoc::new();
         for batch in &published {
             assert!(
@@ -733,9 +749,27 @@ mod own_ops_order_tests {
     }
 
     #[test]
-    fn hooks_in_commit_order_publish_their_own_bytes() {
+    fn snapshot_fills_a_late_hook_without_committing_pending_live_edits() {
         let (doc, mut order, hooks) = three_commits();
-        let published: Vec<Vec<u8>> = hooks.iter().flat_map(|h| order.order(&doc, h)).collect();
+        assert!(order.order(&hooks[2]).is_empty());
+        let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
+        doc.get_text("pending").insert(0, "still pending").unwrap();
+        let published = order.snapshot_prefix(&snapshot).unwrap();
+        assert!(doc.get_pending_txn_len() > 0);
+        assert!(order.order(&hooks[0]).is_empty());
+        assert!(order.order(&hooks[1]).is_empty());
+        let reader = loro::LoroDoc::new();
+        for bytes in published {
+            assert!(reader.import(&bytes).unwrap().pending.is_none());
+        }
+        assert_eq!(reader.get_list("messages").len(), 3);
+        assert_eq!(reader.get_text("pending").to_string(), "");
+    }
+
+    #[test]
+    fn hooks_in_commit_order_publish_their_own_bytes() {
+        let (_doc, mut order, hooks) = three_commits();
+        let published: Vec<Vec<u8>> = hooks.iter().flat_map(|h| order.order(h)).collect();
         assert_eq!(published, hooks);
     }
 }

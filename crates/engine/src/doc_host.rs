@@ -729,6 +729,7 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
+    purged: AtomicBool,
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
@@ -752,6 +753,10 @@ pub struct ChatDocHandle {
     publication_failed: AtomicBool,
     /// Local-update feed into the chat2 client (drop = unsubscribe).
     chat2_local_sub: Mutex<Option<loro::Subscription>>,
+    publication_barrier: Mutex<Option<Arc<zeron_sync::SnapshotBarrier>>>,
+    own_ops_order: Mutex<Option<Arc<Mutex<crate::chat2_host::OwnOpsOrder>>>>,
+    #[cfg(test)]
+    before_outbox_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Doc subscription (drop = unsubscribe) — bumps the change watch on every commit.
     _sub: loro::Subscription,
 }
@@ -1653,6 +1658,12 @@ impl DocHost {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
+        // Deliver all queued commits before stopping the room actors. Their
+        // final persistence may itself run a snapshot barrier.
+        let outbox = self.inner.outbox.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || outbox.flush()).await {
+            tracing::error!(%error, "shutdown outbox flush failed");
+        }
         // Stop room actors before the final snapshot so shutdown does not
         // leave a scheduled debounce behind an already-dropped document.
         let clients: Vec<_> = lock(&self.inner.handles)
@@ -2260,6 +2271,7 @@ impl DocHost {
             snapshot_bytes: AtomicUsize::new(snapshot_len),
             room_gen,
             retired: AtomicBool::new(false),
+            purged: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             sync_cadence: Mutex::new(SyncCadence::default()),
             writer_wake,
@@ -2279,6 +2291,10 @@ impl DocHost {
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
+            publication_barrier: Mutex::new(None),
+            own_ops_order: Mutex::new(None),
+            #[cfg(test)]
+            before_outbox_submit: Mutex::new(None),
             _sub: sub,
         });
         // Snapshot recovery may restore several independently edited rows.
@@ -2314,11 +2330,56 @@ impl DocHost {
                 let publication_chat = chat_id.to_string();
                 // Concurrent commits can run their hooks out of order; this
                 // device's ops still go out in commit order (OwnOpsOrder).
-                let own_order = Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc()));
+                let own_order =
+                    Arc::new(Mutex::new(crate::chat2_host::OwnOpsOrder::new(doc.doc())));
+                *lock(&handle.own_ops_order) = Some(own_order.clone());
+                let snapshot_order = own_order.clone();
+                let snapshot_outbox = outbox.clone();
+                let snapshot_weak = weak_push.clone();
+                let snapshot_chat = publication_chat.clone();
+                let barrier: Arc<zeron_sync::SnapshotBarrier> = Arc::new(move |chat, bytes| {
+                    if chat != snapshot_chat {
+                        return Ok(());
+                    }
+                    let Some(handle) = snapshot_weak.upgrade() else {
+                        return Ok(());
+                    };
+                    if handle.retired.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    {
+                        let mut order = lock(&snapshot_order);
+                        if handle.purged.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        for update in order
+                            .snapshot_prefix(bytes)
+                            .map_err(std::io::Error::other)?
+                        {
+                            snapshot_outbox.submit(
+                                chat,
+                                snapshot_weak.clone(),
+                                uuid::Uuid::new_v4().to_string(),
+                                update,
+                            );
+                        }
+                    }
+                    snapshot_outbox.flush_writes();
+                    Ok(())
+                });
+                self.inner.store.add_snapshot_barrier(&barrier);
+                *lock(&handle.publication_barrier) = Some(barrier);
                 let sub = doc
                     .doc()
                     .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
                         if let Some(handle) = weak_push.upgrade() {
+                            #[cfg(test)]
+                            {
+                                let hook = lock(&handle.before_outbox_submit).take();
+                                if let Some(hook) = hook {
+                                    hook();
+                                }
+                            }
                             // No I/O here: the commit may be a stream task. The
                             // outbox writer inserts the row, then hands the
                             // update to `ChatDocHandle::outbox_written`, which
@@ -2327,7 +2388,10 @@ impl DocHost {
                             // Ordering and submitting share one lock so two
                             // hooks cannot swap their updates on the queue.
                             let mut order = lock(&own_order);
-                            for bytes in order.order(handle.doc.doc(), bytes) {
+                            if handle.purged.load(Ordering::Acquire) {
+                                return true;
+                            }
+                            for bytes in order.order(bytes) {
                                 let batch_id = uuid::Uuid::new_v4().to_string();
                                 outbox.submit(
                                     &publication_chat,
@@ -3926,6 +3990,9 @@ impl DocHost {
     }
 
     fn pinned(&self, handle: &Arc<ChatDocHandle>) -> bool {
+        if self.inner.outbox.has_in_flight(&handle.chat_id) {
+            return true;
+        }
         if handle.sync_started.load(Ordering::Acquire) {
             return true;
         }
@@ -4250,8 +4317,24 @@ impl DocHost {
     /// chat is gone (DeleteChat / DeleteSpace cascade). Watchers see the
     /// stream end; a racing writer keeps its orphaned doc until the run ends.
     pub fn purge_chat(&self, chat_id: &str) {
+        let _opening = lock(&self.inner.opening);
         let removed = lock(&self.inner.handles).remove(chat_id);
-        drop(removed);
+        if let Some(handle) = &removed {
+            // A racing orphaned writer may already have entered its callback.
+            // Fence its submit before draining and deleting the outbox.
+            let order = lock(&handle.own_ops_order).clone();
+            let _order = order.as_ref().map(|order| lock(order));
+            handle.purged.store(true, Ordering::Release);
+        }
+        if let Some(handle) = &removed {
+            lock(&handle.chat2_local_sub).take();
+            lock(&handle.publication_barrier).take();
+            if let Some(persistence) = &handle.persistence {
+                persistence.stop();
+            }
+            lock(&handle.chat2).take();
+        }
+        self.inner.outbox.flush();
         if let Err(err) = self.inner.store.delete_snapshot(chat_id) {
             tracing::warn!(chat = %chat_id, error = %err, "snapshot delete failed");
         }
@@ -6857,6 +6940,9 @@ impl DocHost {
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {
+        if handle.purged.load(Ordering::Acquire) {
+            return;
+        }
         if handle.retired.load(Ordering::Relaxed) {
             // A chat2 seed replaced this lineage on disk; persisting this
             // handle's fat doc would clobber the thin one. But retired with
@@ -8246,6 +8332,54 @@ mod publication_eviction_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_snapshot_covers_commits_whose_local_hook_has_not_submitted_yet() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("late-hook").unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *lock(&handle.before_outbox_submit) = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let committing = {
+            let handle = handle.clone();
+            std::thread::spawn(move || commit_text(&handle, "already committed"))
+        };
+        tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let snapshot = handle.doc.export_snapshot().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let saving = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.save_snapshot("late-hook", &snapshot).unwrap();
+                done_tx.send(()).unwrap();
+            })
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            done_rx.recv_timeout(std::time::Duration::from_secs(5))
+        })
+        .await
+        .unwrap();
+        // Always release the hook, including on a regression, so the test cleans up.
+        release_tx.send(()).unwrap();
+        committing.join().unwrap();
+        saving.join().unwrap();
+        result.expect("snapshot barrier deadlocked with the late hook");
+        host.inner.outbox.flush();
+        assert_eq!(replay_in_order(&store, "late-hook").1, "already committed");
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_accepted_command_is_in_the_outbox_before_the_call_returns() {
         let _budget_guard = SYNC_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
@@ -8315,6 +8449,36 @@ mod publication_eviction_tests {
         let recovered = reopened.open_local("shutdown").unwrap();
         assert_eq!(recovered.doc.doc().get_text("body").to_string(), text);
         reopened.shutdown_workers().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_drains_queued_rows_and_disables_orphaned_writers_and_snapshots() {
+        let _budget_guard = SYNC_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = outbox_host(&store);
+        let handle = host.open_local("deleted").unwrap();
+        let outbox = host.inner.outbox.clone();
+        let pause = outbox.pause();
+        commit_text(&handle, "queued before delete");
+        assert!(host.pinned(&handle), "queued updates must pin the handle");
+        let purging = {
+            let host = host.clone();
+            std::thread::spawn(move || host.purge_chat("deleted"))
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(pause);
+        tokio::task::spawn_blocking(move || purging.join().unwrap())
+            .await
+            .unwrap();
+        commit_text(&handle, "orphaned after delete");
+        handle.persistence.as_ref().unwrap().dirty(true);
+        handle.persistence.as_ref().unwrap().flush_sync();
+        host.save_snapshot(&handle);
+        outbox.flush();
+        assert!(!store.has_snapshot("deleted").unwrap());
+        assert!(store.pending_chat_updates("deleted").unwrap().is_empty());
+        host.shutdown_workers().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
