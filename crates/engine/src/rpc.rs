@@ -34,6 +34,10 @@
 //!   `{harness, accountId}` → snapshot, `StartAgentLogin {harness}` →
 //!   `{loginId, url, mode}`, `CompleteAgentLogin {loginId, code}` → snapshot,
 //!   `PollAgentLogin {loginId}`, `CancelAgentLogin {loginId}`.
+//!   `GetAccountSync` / `SetAccountSync {enabled}` → `AccountSyncStatus`:
+//!   the device's Claude Code / Codex logins shared through the vault
+//!   (`crate::account_sync`); while on, the list's rows for those two are the
+//!   vault's logins (`"{provider}:{slot}"` ids).
 //! - Uploads (§3.7): `UploadChunk {uploadId, data, seq?}`,
 //!   `UploadCommit {uploadId, fileName}` → `{path}`,
 //!   `ReadAttachmentChunk {path, offset}` → `{name, mimeType, data, nextOffset,
@@ -804,6 +808,8 @@ pub struct EngineRpc {
     local_import: Option<crate::local_import::LocalImporter>,
     /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
     credentials: Option<crate::credentials::CredentialBroker>,
+    /// Synced devices (not Cloud runners): shared Claude Code / Codex logins.
+    account_sync: Option<crate::account_sync::AccountSync>,
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
     engine_info: EngineInfo,
@@ -864,6 +870,7 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             credentials: None,
+            account_sync: None,
             viewport_focus: Default::default(),
             engine_info,
         }
@@ -944,25 +951,31 @@ impl EngineRpc {
     /// stand-in (local profile, development without an edge, signed out, no
     /// organization), which answers without any network call.
     fn cloud(&self) -> crate::cloud_client::CloudClient {
-        use crate::cloud_client::CloudClient;
-        if self.engine_info.workspace_scope == WorkspaceScope::Local {
-            return CloudClient::unavailable();
+        cloud_client_for(
+            self.engine_info.workspace_scope,
+            &self.workspace,
+            self.auth.as_ref(),
+        )
+    }
+
+    /// Attach synced subscriptions (`GetAccountSync` / `SetAccountSync`, and
+    /// the vault's logins on the Providers page while sync is on).
+    pub fn with_account_sync(mut self, sync: crate::account_sync::AccountSync) -> Self {
+        self.account_sync = Some(sync);
+        self
+    }
+
+    /// The device's account list as the Providers page shows it: synced
+    /// Claude Code / Codex logins in place of local slots while sync is on.
+    async fn accounts_view(
+        &self,
+        snapshot: zeron_proto::AgentAccountsSnapshot,
+        force_usage: bool,
+    ) -> zeron_proto::AgentAccountsSnapshot {
+        match &self.account_sync {
+            Some(sync) => sync.list(snapshot, force_usage).await,
+            None => snapshot,
         }
-        let Some(edge) = self.workspace.edge() else {
-            return CloudClient::unavailable();
-        };
-        let org_id = match &self.auth {
-            Some(auth) if auth.workos_enabled() => match auth.state() {
-                crate::auth::AuthState::SignedIn {
-                    org_id: Some(org_id),
-                    ..
-                } => org_id,
-                _ => return CloudClient::unavailable(),
-            },
-            // Development bearer: the profile's org scopes every room.
-            _ => self.workspace.org_id().to_string(),
-        };
-        CloudClient::new(edge.url.clone(), org_id, edge.token.clone())
     }
 
     /// Whether the engine hosting `chat_id` can switch its provider: this one
@@ -2142,6 +2155,36 @@ fn forward_deadline(method: &str) -> std::time::Duration {
 /// running engine reaps an abandoned login after the same 15 minutes.
 const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// The edge client the IPC-only Cloud / vault methods act through, as the
+/// signed-in user of this runtime's organization — or the unavailable
+/// stand-in (local profile, development without an edge, signed out, no
+/// organization), which answers without any network call.
+pub(crate) fn cloud_client_for(
+    scope: WorkspaceScope,
+    workspace: &WorkspaceHost,
+    auth: Option<&Auth>,
+) -> crate::cloud_client::CloudClient {
+    use crate::cloud_client::CloudClient;
+    if scope == WorkspaceScope::Local {
+        return CloudClient::unavailable();
+    }
+    let Some(edge) = workspace.edge() else {
+        return CloudClient::unavailable();
+    };
+    let org_id = match auth {
+        Some(auth) if auth.workos_enabled() => match auth.state() {
+            crate::auth::AuthState::SignedIn {
+                org_id: Some(org_id),
+                ..
+            } => org_id,
+            _ => return CloudClient::unavailable(),
+        },
+        // Development bearer: the profile's org scopes every room.
+        _ => workspace.org_id().to_string(),
+    };
+    CloudClient::new(edge.url.clone(), org_id, edge.token.clone())
+}
+
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
@@ -2249,6 +2292,8 @@ fn forwardable(method: &str) -> bool {
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
             | methods::RELAY_AGENT_LOGIN_CALLBACK
+            | methods::GET_ACCOUNT_SYNC
+            | methods::SET_ACCOUNT_SYNC
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -4586,32 +4631,113 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_AGENT_ACCOUNTS => {
                 let p: ListAgentAccountsParams = parse_params(params)?;
+                let force = p.force_usage.unwrap_or(false);
                 let snapshot = self
                     .agent_accounts
-                    .list(p.force_usage.unwrap_or(false))
+                    .list(force)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
+                RpcReply::value(&self.accounts_view(snapshot, force).await)
             }
             methods::ACTIVATE_AGENT_ACCOUNT => {
                 self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
+                match &self.account_sync {
+                    Some(sync) if sync.handles(p.harness, &p.account_id) => {
+                        sync.activate(p.harness, &p.account_id)
+                            .await
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    }
+                    sync => {
+                        self.agent_accounts
+                            .activate(p.harness, &p.account_id)
+                            .await
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                        // A local login (an API key) now in use: synced
+                        // grants must not be installed over it.
+                        if let Some(sync) = sync {
+                            sync.release(p.harness);
+                        }
+                    }
+                }
                 let snapshot = self
                     .agent_accounts
-                    .activate(p.harness, &p.account_id)
+                    .list(false)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
+                RpcReply::value(&self.accounts_view(snapshot, false).await)
             }
             methods::FORGET_AGENT_ACCOUNT => {
                 self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
-                let snapshot = self
-                    .agent_accounts
-                    .forget(p.harness, &p.account_id)
+                let snapshot = match &self.account_sync {
+                    Some(sync) if sync.handles(p.harness, &p.account_id) => {
+                        sync.forget(p.harness, &p.account_id)
+                            .await
+                            .map_err(|e| RpcError::Failed(e.to_string()))?;
+                        self.agent_accounts.list(false).await
+                    }
+                    _ => {
+                        self.agent_accounts
+                            .forget(p.harness, &p.account_id)
+                            .await
+                    }
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&self.accounts_view(snapshot, false).await)
+            }
+            methods::GET_ACCOUNT_SYNC => RpcReply::value(&match &self.account_sync {
+                Some(sync) => sync.status(),
+                None => zeron_proto::AccountSyncStatus {
+                    message: Some(crate::account_sync::NOT_SIGNED_IN.into()),
+                    ..Default::default()
+                },
+            }),
+            methods::SET_ACCOUNT_SYNC => {
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    enabled: bool,
+                }
+                let p: Params = parse_params(params)?;
+                // Turning sync on can change which login the agents use.
+                self.voice.retire();
+                let sync = self.account_sync.as_ref().ok_or_else(|| {
+                    RpcError::Failed(crate::account_sync::NOT_SIGNED_IN.into())
+                })?;
+                let status = sync
+                    .set_enabled(p.enabled)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
+                RpcReply::value(&status)
+            }
+            // A sign-in on a synced device goes to the vault (every device's
+            // login), then this device uses it. Signed out of Zeron, or a
+            // sign-in relayed from another device's browser (the capture flow
+            // publishes no callback route): the ordinary flow runs, and the
+            // background pass uploads the new login once it can.
+            methods::START_AGENT_LOGIN
+                if self.account_sync.as_ref().is_some_and(|sync| {
+                    sync.is_enabled()
+                        && sync.status().available
+                        && parse_params::<StartAgentLoginParams>(params.clone()).is_ok_and(
+                            |p| {
+                                p.provider.is_none()
+                                    && crate::agent_accounts::SYNCED_HARNESSES.contains(&p.harness)
+                                    && p.requester_device_id.as_deref().is_none_or(|r| {
+                                        r.is_empty() || r == self.doc_host.device_id()
+                                    })
+                            },
+                        )
+                }) =>
+            {
+                let p: StartAgentLoginParams = parse_params(params)?;
+                let sync = self.account_sync.as_ref().expect("guarded");
+                let start = self
+                    .agent_accounts
+                    .start_capture_login(p.harness, sync.login_sink(p.harness))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&start)
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
@@ -4653,7 +4779,7 @@ impl RpcService for EngineRpc {
                     .complete_login(&p.login_id, &p.code)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&snapshot)
+                RpcReply::value(&self.accounts_view(snapshot, false).await)
             }
             methods::POLL_AGENT_LOGIN => {
                 let p: LoginIdParams = parse_params(params)?;

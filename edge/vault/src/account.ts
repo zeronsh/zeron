@@ -22,7 +22,8 @@
  *
  * Accounts: a sign-in to a login already stored (same email + organization,
  * same ChatGPT account, same API key, same GitHub login) replaces it; any
- * other adds one; either way it becomes active. Forgetting the active account
+ * other adds one; either way it becomes active (unless the upload asks not to
+ * disturb the active account; see `store`). Forgetting the active account
  * leaves none active until the user picks one.
  *
  * Failure semantics (design "Grants"): `reconnect` from the adapter marks the
@@ -60,6 +61,7 @@ import { filterRepos, listGithubBranches, listGithubRepos } from "./providers/gi
 import type { FetchFn, GrantMaterial, ProviderAdapter } from "./providers/types";
 import { fetchUsage, hasUsage } from "./providers/usage";
 import { fail, ok, type VaultFailure } from "./result";
+import { ALL_DEVICES } from "./validate";
 
 /** A refresh attempted this recently is not retried while the current token
  * is still good: bounds upstream traffic during a provider outage, and for
@@ -317,8 +319,9 @@ export class VaultAccount extends DurableObject<Env> {
     provider: VaultProviderId,
     material: VaultMaterial,
     authorizedDevices: string[],
-    profile?: VaultAccountProfile
-  ): Promise<VaultResult<null>> {
+    profile?: VaultAccountProfile,
+    activate = true
+  ): Promise<VaultResult<string>> {
     const owner = this.claim(userId, provider);
     if (owner) return Promise.resolve(owner);
     return this.guard(async () => {
@@ -326,8 +329,8 @@ export class VaultAccount extends DurableObject<Env> {
       if (!adapter.parseUpload) return fail("bad_request", `${provider} cannot be uploaded; use the device flow`);
       const parsed = adapter.parseUpload(material, Date.now());
       if (!parsed.ok) return fail("bad_request", parsed.message);
-      const stored = await this.store(parsed.secret, authorizedDevices, cleanProfile(profile));
-      return stored.ok ? ok(null) : stored;
+      const stored = await this.store(parsed.secret, authorizedDevices, cleanProfile(profile), activate);
+      return stored;
     });
   }
 
@@ -381,11 +384,12 @@ export class VaultAccount extends DurableObject<Env> {
     return ok({ removed });
   }
 
-  /** Issue a grant from the ACTIVE account to an already-authenticated
+  /** Issue a grant from the ACTIVE account (or the named `slot`) to an already-authenticated
    * device (VaultDevices verified the signature, the fence, and that neither
    * the device nor its parent is revoked). Authorized when the account's
    * `authorizedDevices` lists the device OR its parent (a Cloud session
-   * sandbox under the logical Cloud device). A `github` grant is an App
+   * sandbox under the logical Cloud device), or `"*"` (every enrolled
+   * device). A `github` grant is an App
    * installation token for `repo`'s owner; the user token itself is never
    * granted. */
   grant(
@@ -393,25 +397,34 @@ export class VaultAccount extends DurableObject<Env> {
     provider: VaultProviderId,
     deviceId: string,
     parentId?: string,
-    repo?: string
+    repo?: string,
+    slot?: string
   ): Promise<VaultResult<Grant>> {
     const owner = this.claim(userId, provider);
     if (owner) return Promise.resolve(owner);
     return this.guard(async () => {
-      const active = this.activeRow();
-      if (!active) {
-        return fail("not_found", this.rows().length > 0 ? `no ${provider} account is active` : `no ${provider} credential`);
+      let source: string;
+      if (slot !== undefined) {
+        if (provider === "github") return fail("bad_request", "github grants cannot name an account");
+        source = slot;
+      } else {
+        const active = this.activeRow();
+        if (!active) {
+          return fail("not_found", this.rows().length > 0 ? `no ${provider} account is active` : `no ${provider} credential`);
+        }
+        source = active.slot;
       }
-      const usable = await this.usableMaterial(active.slot, (row) => {
+      const usable = await this.usableMaterial(source, (row) => {
         const allowed = parseDevices(row.authorized_devices);
-        return allowed.includes(deviceId) || (parentId !== undefined && allowed.includes(parentId))
+        return allowed.includes(ALL_DEVICES) ||
+          allowed.includes(deviceId) || (parentId !== undefined && allowed.includes(parentId))
           ? undefined
           : fail("not_authorized", `device is not authorized for ${provider}`);
       });
       if (!usable.ok) return usable;
-      if (provider !== "github") return ok(this.toGrant(usable.value.generation, usable.value.material));
+      if (provider !== "github") return ok(this.toGrant(source, usable.value.generation, usable.value.material));
       if (repo === undefined) return fail("bad_request", "github grants need the repository they are for");
-      return this.installationGrant(active.slot, usable.value.generation, usable.value.material, repo);
+      return this.installationGrant(source, usable.value.generation, usable.value.material, repo);
     });
   }
 
@@ -637,7 +650,7 @@ export class VaultAccount extends DurableObject<Env> {
     const readOnly = !access.push;
     const key = repoTokenKey(found.id, repo, readOnly);
     const grant = (token: string, expiresAt: number): VaultResult<Grant> =>
-      ok({ provider: "github", accessToken: token, expiresAt, generation, ...(user.account ? { account: user.account } : {}) });
+      ok({ provider: "github", slot, accessToken: token, expiresAt, generation, ...(user.account ? { account: user.account } : {}) });
 
     const cached = await this.cachedRepoToken(key);
     if (cached) return grant(cached.token, cached.expiresAt);
@@ -869,9 +882,16 @@ export class VaultAccount extends DurableObject<Env> {
   /**
    * Seal `secret` as the next generation of the account it identifies (the
    * same login signed in again) or of a new account, and make that account
-   * active — a sign-in is a request to use it.
+   * active — a sign-in is a request to use it. With `activate` false the
+   * active account is left alone, unless there is none (or its row is gone),
+   * in which case this one becomes active so the provider is usable.
    */
-  private async store(secret: unknown, authorizedDevices: string[], profile: VaultAccountProfile): Promise<VaultResult<string>> {
+  private async store(
+    secret: unknown,
+    authorizedDevices: string[],
+    profile: VaultAccountProfile,
+    activate = true
+  ): Promise<VaultResult<string>> {
     const keyring = await this.keyring();
     const identity = await this.identityOf(secret, profile);
     const adapter = this.adapter();
@@ -890,7 +910,8 @@ export class VaultAccount extends DurableObject<Env> {
          VALUES (?, ?, 'connected', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0)
          ON CONFLICT(slot) DO UPDATE SET generation = excluded.generation, status = excluded.status,
            kind = excluded.kind, identity = excluded.identity, account = excluded.account,
-           profile = excluded.profile, authorized_devices = excluded.authorized_devices,
+           profile = CASE WHEN excluded.profile = '{}' THEN accounts.profile ELSE excluded.profile END,
+           authorized_devices = excluded.authorized_devices,
            envelope = excluded.envelope, updated_at = excluded.updated_at,
            hard_expires_at = excluded.hard_expires_at, last_refresh_at = NULL,
            last_attempt_at = NULL, last_error = NULL, failures = 0`,
@@ -907,7 +928,7 @@ export class VaultAccount extends DurableObject<Env> {
         adapter.hardExpiresAt?.(secret) ?? null
       );
       this.setMeta("last_generation", String(generation));
-      this.setMeta("active", slot);
+      if (activate || !this.activeRow()) this.setMeta("active", slot);
       return ok(slot);
     });
   }
@@ -932,9 +953,10 @@ export class VaultAccount extends DurableObject<Env> {
     }
   }
 
-  private toGrant(generation: number, material: GrantMaterial): Grant {
+  private toGrant(slot: string, generation: number, material: GrantMaterial): Grant {
     return {
       provider: this.provider,
+      slot,
       accessToken: material.accessToken,
       expiresAt: material.expiresAt,
       generation,

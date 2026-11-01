@@ -110,6 +110,8 @@ mod oauth;
 mod provider_tests;
 pub use muse::MuseRunEnvironment;
 mod stores;
+mod synced;
+pub(crate) use synced::{Handoff, LocalLogin, SYNCED_HARNESSES};
 mod usage;
 
 // Claude Code's public OAuth client (the one the CLI itself uses for the manual
