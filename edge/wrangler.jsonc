@@ -15,16 +15,25 @@
   "name": "comet-native-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  // Node's built-ins for @cloudflare/puppeteer (src/card-image.ts), which
+  // imports node:buffer; every environment inherits it.
+  "compatibility_flags": ["nodejs_compat"],
   "account_id": "b57dde68ee5964dccc025437b5478a5b",
   "workers_dev": true,
-  // Public hostname on the zeron.sh zone, plus the install surface carved out
-  // of the landing host: path routes beat the landing worker's custom
-  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
-  // while the rest of zeron.sh serves the landing page.
+  // Public hostname on the zeron.sh zone, plus the install surface and member
+  // card pages carved out of the landing host: path routes beat the landing
+  // worker's custom domain, so `curl -fsSL https://zeron.sh/install.sh | sh`
+  // installs Zeron and zeron.sh/@wing is a card, while the rest of zeron.sh
+  // serves the landing page.
   "routes": [
     { "pattern": "edge.zeron.sh", "custom_domain": true },
     { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
     { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
+    { "pattern": "zeron.sh/@*", "zone_name": "zeron.sh" },
+    { "pattern": "zeron.sh/c/*", "zone_name": "zeron.sh" },
+    // The card pages' script, style, fonts and art (public/card, built by
+    // scripts/card-assets.mjs from apps/card-web; static assets below).
+    { "pattern": "zeron.sh/card/*", "zone_name": "zeron.sh" },
     // Legacy comet hostnames — keep until 0.1.x clients are gone.
     { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
     { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
@@ -32,6 +41,13 @@
   ],
   // Serve src/install.sh as a string (the /install.sh route).
   "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  // The member card pages' static files at /card/* (apps/card-web/site and
+  // its art), copied into public/ by `npm run card-assets` before a deploy;
+  // the folder isn't committed. Paths that aren't files fall through to the
+  // worker.
+  "assets": { "directory": "public" },
+  // Browser Run draws each card's still picture (src/card-image.ts).
+  "browser": { "binding": "BROWSER" },
   // loro-crdt's default entry loads its WASM via URL fetch, which workerd
   // cannot do at runtime; the base64 entry inlines the module instead.
   "alias": {
@@ -91,6 +107,9 @@
   // Hourly: Cloud usage reconcile backstop + daily orphan scan (00:17 UTC) +
   // closed-month exports to R2 usage/{YYYY-MM}.json (src/cloud/billing.ts).
   "triggers": { "crons": ["17 * * * *"] },
+  // Public card reads per client IP a minute, per Cloudflare location
+  // (src/card-gate.ts). Namespace ids are account-wide: staging has its own.
+  "ratelimits": [{ "name": "CARD_READS", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }],
   "r2_buckets": [
     {
       "binding": "BLOBS",
@@ -100,6 +119,12 @@
       // Release artifacts for /releases/* (curl-install + dmg downloads).
       "binding": "RELEASES",
       "bucket_name": "comet-native-releases"
+    },
+    {
+      // The member cards' still pictures (src/card-image.ts), keyed by the
+      // public card they show.
+      "binding": "CARD_IMAGES",
+      "bucket_name": "comet-native-card-images"
     }
   ],
   "vars": {
@@ -191,8 +216,12 @@
   "env": {
     "staging": {
       "name": "zeron-edge-staging",
+      // Both ways in: the worker's own URL (scripts/staging-app.sh and
+      // CLOUD_EDGE_URL still use it) and staging.zeron.sh, a custom domain
+      // on the zeron.sh zone (its record wins over the zone's *.zeron.sh
+      // wildcard for this one name).
       "workers_dev": true,
-      "routes": [],
+      "routes": [{ "pattern": "staging.zeron.sh", "custom_domain": true }],
       "durable_objects": {
         "bindings": [
           { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
@@ -213,10 +242,13 @@
       ],
       "services": [{ "binding": "VAULT", "service": "zeron-vault-staging", "entrypoint": "VaultApi" }],
       "triggers": { "crons": ["17 * * * *"] },
+      "ratelimits": [{ "name": "CARD_READS", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } }],
       "r2_buckets": [
         { "binding": "BLOBS", "bucket_name": "zeron-staging-blobs" },
-        { "binding": "RELEASES", "bucket_name": "zeron-staging-releases" }
+        { "binding": "RELEASES", "bucket_name": "zeron-staging-releases" },
+        { "binding": "CARD_IMAGES", "bucket_name": "zeron-staging-card-images" }
       ],
+      "browser": { "binding": "BROWSER" },
       "vars": {
         "WORKOS_CLIENT_ID": "client_01KWD0E9SYPV2WE4QN9TP9DP0W",
         "AUTH_MODE": "workos",

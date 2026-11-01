@@ -1,6 +1,8 @@
 import { chatRoute } from "../../src/chat-route";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authenticate } from "../../src/auth";
+import { handlePublicCardRoute, handleUsernameRoute } from "../../src/card-routes";
+import { publicCardGate } from "../../src/card-gate";
 import { handleAdminRoute } from "../../src/cloud/billing";
 import {
   autoWakeCloudDevice,
@@ -121,10 +123,14 @@ export default {
     if (runner) return runner;
     const users = await handleUserDirectoryRoute(request, env, url);
     if (users) return users;
+    const card = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (card) return card;
     const auth = await authenticate(env, request);
     if (!auth) return new Response("Unauthorized", { status: 401 });
     const refused = runnerRefusal(auth, request.method, url);
     if (refused) return json({ error: "forbidden", message: refused }, 403);
+    const username = await handleUsernameRoute(request, env, auth, url);
+    if (username) return username;
     const cloud = await handleCloudRoute(request, env, auth, url);
     if (cloud) return cloud;
     const vault = await handleVaultRoute(request, env, auth, url);

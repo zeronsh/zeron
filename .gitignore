@@ -10,6 +10,8 @@ node_modules
 .wrangler
 build/
 edge/dist/
+# the card pages' static files, copied in by `npm -C edge run card-assets`
+edge/public/
 .agents
 .claude
 CLAUDE.md
