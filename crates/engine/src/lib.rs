@@ -37,6 +37,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+pub mod package_scripts;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
