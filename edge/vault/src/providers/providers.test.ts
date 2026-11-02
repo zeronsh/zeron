@@ -300,6 +300,55 @@ describe("api keys", () => {
     expect(openaiKeyAdapter.parseUpload!({ key: "sk-has space-in-it" }, NOW).ok).toBe(false);
     expect(openaiKeyAdapter.parseUpload!({ authJson: {} }, NOW).ok).toBe(false);
   });
+
+  it("seals an Anthropic key's base URL with it, labels its host and grants it beside the key", () => {
+    const parsed = anthropicKeyAdapter.parseUpload!(
+      { key: "sk-gateway-abcdef1234", baseUrl: " https://LLM-Gateway.example.com:8443/anthropic// " },
+      NOW
+    );
+    expect(parsed).toEqual({
+      ok: true,
+      secret: { key: "sk-gateway-abcdef1234", baseUrl: "https://LLM-Gateway.example.com:8443/anthropic" }
+    });
+    if (!parsed.ok) return;
+    expect(anthropicKeyAdapter.account(parsed.secret)).toBe("…1234 · llm-gateway.example.com:8443");
+    expect(anthropicKeyAdapter.grant(parsed.secret, NOW)).toEqual({
+      accessToken: "sk-gateway-abcdef1234",
+      expiresAt: NOW + HOUR,
+      account: "…1234 · llm-gateway.example.com:8443",
+      baseUrl: "https://LLM-Gateway.example.com:8443/anthropic"
+    });
+    // Empty is Anthropic's own API, for either provider.
+    for (const adapter of [anthropicKeyAdapter, openaiKeyAdapter]) {
+      expect(adapter.parseUpload!({ key: "sk-ant-api03-abcdef1234", baseUrl: "  " }, NOW)).toEqual({
+        ok: true,
+        secret: { key: "sk-ant-api03-abcdef1234" }
+      });
+    }
+  });
+
+  it("refuses base URLs Claude Code can't use, and any on an OpenAI key", () => {
+    const refused = (baseUrl: unknown) =>
+      anthropicKeyAdapter.parseUpload!({ key: "sk-ant-api03-abcdef1234", baseUrl } as never, NOW);
+    for (const baseUrl of [
+      "http://llm-gateway.example.com",
+      "llm-gateway.example.com",
+      "https://",
+      "https://user:secret@gw.example.com",
+      "https://gw.example.com/?key=1",
+      "https://gw.example.com/#top",
+      "https://gw.example.com/v1",
+      "https://gw.example.com/anthropic/V1/",
+      "https://gw.example.com/a b",
+      `https://gw.example.com/${"a".repeat(512)}`,
+      42
+    ]) {
+      expect(refused(baseUrl), String(baseUrl)).toMatchObject({ ok: false });
+    }
+    expect(
+      openaiKeyAdapter.parseUpload!({ key: "sk-proj-abcdef1234", baseUrl: "https://api.openai.com" }, NOW)
+    ).toEqual({ ok: false, message: "openai-key takes no baseUrl" });
+  });
 });
 
 describe("claude", () => {

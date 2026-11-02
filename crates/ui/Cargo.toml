@@ -18,6 +18,7 @@ browser-fixture = ["gpui/bench"]
 windows-render-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 pull-request-fixture = ["gpui_platform/test-support"]
+cloud-api-key-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
 [[example]]
@@ -107,6 +108,10 @@ required-features = ["appshots-fixture"]
 [[example]]
 name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "cloud-api-key-fixture"
+required-features = ["cloud-api-key-fixture"]
 
 [dependencies]
 zeron-voice-media.workspace = true

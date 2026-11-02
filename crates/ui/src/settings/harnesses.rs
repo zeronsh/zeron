@@ -1629,6 +1629,69 @@ impl Render for HarnessesPage {
     }
 }
 
+/// Fixture hooks (`cloud-api-key-fixture`): Settings → Providers on Cloud,
+/// Claude Code open on `accounts`, and its API-key dialog as `dialog` opens
+/// it — the page as the user reaches it, without an engine behind it.
+#[cfg(feature = "cloud-api-key-fixture")]
+impl HarnessesPage {
+    pub fn fixture_cloud_providers(
+        &mut self,
+        accounts: Vec<zeron_proto::AgentAccount>,
+        dialog: Option<accounts::KeyDialogScene>,
+        cx: &mut Context<Self>,
+    ) {
+        let descriptor = |id, name: &str| HarnessDescriptor {
+            id,
+            name: name.into(),
+            supports_steering: false,
+            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: Some(true),
+        };
+        self.harnesses = Loadable::Ready(vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ]);
+        self.updates = Loadable::Ready(Vec::new());
+        self.target_device = Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into());
+        // The provider whose dialog it is stays open behind it.
+        let harness = dialog
+            .as_ref()
+            .map_or(HarnessId::ClaudeCode, |dialog| dialog.harness);
+        self.expanded_harness = Some(harness);
+        // The rows' account counts read the shared list, as after a load.
+        let mut cache = cx
+            .try_global::<accounts::AccountsSnapshotCache>()
+            .map(|cache| cache.0.clone())
+            .unwrap_or_default();
+        cache.insert(
+            self.target_device.clone(),
+            zeron_proto::AgentAccountsSnapshot {
+                accounts: accounts.clone(),
+                warnings: Vec::new(),
+            },
+        );
+        cx.set_global(accounts::AccountsSnapshotCache(cache));
+        let page = match &self.accounts_page {
+            Some(page) => page.clone(),
+            None => {
+                let (state, target) = (self.state.clone(), self.target_device.clone());
+                let page = cx.new(|cx| AccountsPage::new_embedded(state, target, harness, cx));
+                self._observe_accounts = Some(cx.observe(&page, |_, _, cx| cx.notify()));
+                self.accounts_page = Some(page.clone());
+                page
+            }
+        };
+        page.update(cx, |page, cx| {
+            page.set_embedded_harness(harness, cx);
+            page.fixture_cloud_api_key(accounts, dialog, cx)
+        });
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A failed run's "Log in" waits for the rows, then opens that agent's

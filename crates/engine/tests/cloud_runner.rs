@@ -400,6 +400,14 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+/// The `ANTHROPIC_API_KEY` a Claude Code spawn would get.
+async fn claude_key(broker: &CredentialBroker) -> Option<String> {
+    broker
+        .prepare_claude()
+        .await
+        .map(|grant| grant.access_token)
+}
+
 // ---------------------------------------------------------------------------
 // Enrollment + identity
 // ---------------------------------------------------------------------------
@@ -819,7 +827,8 @@ async fn claude_grant_is_written_to_the_cli_credentials_without_a_refresh_token(
     rig.grant(
         "anthropic-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant-api", "expiresAt": in_ms(86_400), "generation": 1}),
+        json!({"provider": "anthropic-key", "accessToken": "sk-ant-api", "expiresAt": in_ms(86_400),
+               "baseUrl": "https://llm-gateway.example.com", "generation": 1}),
     );
     let broker = rig.broker(identity, "http://127.0.0.1:9");
     let mut request = run_request();
@@ -828,8 +837,10 @@ async fn claude_grant_is_written_to_the_cli_credentials_without_a_refresh_token(
         .await
         .unwrap();
 
-    // The grant goes to the CLI's own credential file, never the env.
+    // The grant goes to the CLI's own credential file, never the env — and
+    // the subscription never travels to the key's gateway.
     assert!(!request.env.contains_key("ANTHROPIC_API_KEY"));
+    assert!(!request.env.contains_key("ANTHROPIC_BASE_URL"));
     assert!(!request.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
     let path = rig.home.join(".claude/.credentials.json");
     let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -889,7 +900,42 @@ async fn native_claude_login_is_left_alone_then_api_key_is_the_fallback() {
         request.env.get("ANTHROPIC_API_KEY").map(String::as_str),
         Some("sk-ant-api")
     );
+    assert!(
+        !request.env.contains_key("ANTHROPIC_BASE_URL"),
+        "a key without one runs on Anthropic's own API"
+    );
     assert!(!path.exists(), "no credential file is ever invented");
+}
+
+/// A key for an LLM gateway: Claude Code is pointed at the gateway with it.
+#[tokio::test]
+async fn an_anthropic_key_brings_its_base_url() {
+    let rig = Rig::new().await;
+    let identity = rig.enrolled().await;
+    rig.grant(
+        "anthropic-key",
+        200,
+        json!({"provider": "anthropic-key", "accessToken": "sk-gateway", "expiresAt": in_ms(86_400),
+               "baseUrl": "https://llm-gateway.example.com", "generation": 2}),
+    );
+    let broker = rig.broker(identity, "http://127.0.0.1:9");
+    let mut request = run_request();
+    broker
+        .prepare(HarnessId::ClaudeCode, &mut request)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.env.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("sk-gateway")
+    );
+    assert_eq!(
+        request.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+        Some("https://llm-gateway.example.com")
+    );
+    // A Codex run never receives either.
+    let mut codex = run_request();
+    assert!(broker.prepare(HarnessId::Codex, &mut codex).await.is_err());
+    assert!(!codex.env.contains_key("ANTHROPIC_BASE_URL"));
 }
 
 #[tokio::test]
@@ -1030,15 +1076,15 @@ async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
         json!({"provider": "anthropic-key", "accessToken": "k1", "expiresAt": in_ms(240), "generation": 1}),
     );
     let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    assert_eq!(claude_key(&broker).await.as_deref(), Some("k1"));
 
     // Vault unreachable (503): the cached, still-valid grant keeps working.
     rig.grant("anthropic-key", 503, json!({"error": "unavailable"}));
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    assert_eq!(claude_key(&broker).await.as_deref(), Some("k1"));
 
     // Revoked (403): the cached grant is dropped immediately.
     rig.grant("anthropic-key", 403, json!({"error": "device_revoked"}));
-    assert_eq!(broker.prepare_claude().await, None);
+    assert_eq!(claude_key(&broker).await, None);
 
     // A long-lived grant is served from cache without asking again.
     rig.grant(
@@ -1048,9 +1094,9 @@ async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
     );
     // (Same identity: one process has one strictly increasing ts counter.)
     let broker2 = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker2.prepare_claude().await.as_deref(), Some("k2"));
+    assert_eq!(claude_key(&broker2).await.as_deref(), Some("k2"));
     let asked = rig.edge.requests("/vault/").len();
-    assert_eq!(broker2.prepare_claude().await.as_deref(), Some("k2"));
+    assert_eq!(claude_key(&broker2).await.as_deref(), Some("k2"));
     // Both the key and the (briefly cached) "claude not connected" answer
     // come from cache: no new vault round trip.
     assert_eq!(rig.edge.requests("/vault/").len(), asked);
@@ -1113,7 +1159,7 @@ async fn a_stale_grant_timestamp_is_retried_once_with_a_larger_ts() {
     );
     rig.state.lock().unwrap().stale_once = true;
     let broker = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    assert_eq!(claude_key(&broker).await.as_deref(), Some("k1"));
     let ts: Vec<i64> = rig
         .edge
         .requests("/vault/")
@@ -1332,7 +1378,7 @@ async fn a_claude_grant_displacing_a_native_login_backs_it_up_and_restores_it() 
         json!({"provider": "claude", "accessToken": "oat", "expiresAt": in_ms(3600), "generation": 1}),
     );
     let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await, None);
+    assert_eq!(claude_key(&broker).await, None);
     let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(creds["claudeAiOauth"]["accessToken"], "oat");
     assert!(
@@ -1344,7 +1390,7 @@ async fn a_claude_grant_displacing_a_native_login_backs_it_up_and_restores_it() 
     // Grant revoked: the native login comes back, untouched.
     rig.state.lock().unwrap().grants.clear();
     let broker = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await, None, "native login: no env");
+    assert_eq!(claude_key(&broker).await, None, "native login: no env");
     let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(creds["claudeAiOauth"], native);
     assert!(creds.get("mcpOAuth").is_some());

@@ -1389,6 +1389,11 @@ pub struct AgentAccount {
     /// most one of them is in use. `None` for single-login agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// An API key stored for an LLM gateway or proxy: the host its requests
+    /// go to instead of the provider's own API. Display only — the key's
+    /// grant carries the base URL itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

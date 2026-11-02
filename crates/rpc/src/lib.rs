@@ -346,8 +346,9 @@ pub mod methods {
     /// code}` (its reply is this device's unchanged `AgentAccountsSnapshot`;
     /// the upload has happened once it returns), then `VaultStatus`.
     pub const VAULT_CONNECT_CLAUDE: &str = "VaultConnectClaude";
-    /// `{provider: "anthropic-key"|"openai-key", key, authorizedDevices}` →
-    /// `VaultStatus`.
+    /// `{provider: "anthropic-key"|"openai-key", key, baseUrl?,
+    /// authorizedDevices}` → `VaultStatus`. `baseUrl` (Anthropic keys only):
+    /// the LLM gateway or proxy Claude Code sends requests to with this key.
     pub const VAULT_PUT_API_KEY: &str = "VaultPutApiKey";
     /// `{provider, authorizedDevices}` → `VaultStatus`.
     pub const VAULT_AUTHORIZE: &str = "VaultAuthorize";

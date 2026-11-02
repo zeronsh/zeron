@@ -269,7 +269,7 @@ class CloudStore(private val scope: CoroutineScope, private val client: () -> Co
 
     suspend fun saveKey(key: String, agent: Agent) {
         val c = client() ?: return
-        c.vaultPutApiKey(agent.key, key)
+        c.vaultPutApiKey(agent.key, key, baseUrl = null)
         refreshAccounts()
     }
 
