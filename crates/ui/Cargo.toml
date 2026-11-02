@@ -108,6 +108,10 @@ required-features = ["appshots-fixture"]
 name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
 
+[[example]]
+name = "side-chat-seen-fixture"
+required-features = ["appshots-fixture"]
+
 [dependencies]
 zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true
