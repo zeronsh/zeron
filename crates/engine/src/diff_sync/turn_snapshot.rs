@@ -684,7 +684,9 @@ mod tests {
                 let path = entry.path();
                 if path.is_dir() {
                     collect(&path, base, out);
-                } else {
+                } else if entry.file_name() != "maintenance.lock" {
+                    // `git status` may start auto-maintenance, which holds
+                    // this lock file for a moment; it is not an object.
                     out.insert(path.strip_prefix(base).expect("under base").to_path_buf());
                 }
             }
