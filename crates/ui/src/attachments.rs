@@ -1286,6 +1286,7 @@ pub(crate) fn lightbox_with_size(
         Some(natural) => preview.viewer.render(
             preview.image.clone(),
             natural,
+            Some(gpui::size(max_w, max_h)),
             None,
             preview.plate,
             window,
