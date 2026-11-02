@@ -6781,6 +6781,7 @@ impl Transcript {
                     Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
                         this.open_chip_image(path, window, cx);
                     })),
+                    self.link_ui(cx),
                 ),
             });
         // The fade covers the last line and a half, so the clip never shows
@@ -9612,8 +9613,9 @@ fn plain_markdown(tree: &BlockTree) -> bool {
     })
 }
 
-/// The bubble text's runs: body text in the sans font, and chips as labels in
-/// it with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`].
+/// The bubble text's runs: body text in the sans font, bare URLs underlined
+/// like a reply's links, and chips as labels in it with their padding pinned
+/// to [`crate::composer::CHIP_PAD_FAMILY`].
 fn user_bubble_runs(
     text: &str,
     mentions: &[crate::composer::SentMentionSpan],
@@ -9629,12 +9631,36 @@ fn user_bubble_runs(
         underline: None,
         strikethrough: None,
     };
-    let mut runs = Vec::with_capacity(mentions.len() * 2 + 1);
+    let link_run = |len: usize| TextRun {
+        underline: Some(gpui::UnderlineStyle {
+            color: Some(theme.text_muted),
+            thickness: px(1.0),
+            wavy: false,
+        }),
+        ..body_run(len)
+    };
+    // URLs never overlap a chip, so each sits inside one stretch of body text.
+    let urls = user_bubble_urls(text, mentions);
+    let push_body = |runs: &mut Vec<TextRun>, body: Range<usize>| {
+        let mut at = body.start;
+        for url in urls
+            .iter()
+            .filter(|url| body.start <= url.start && url.end <= body.end)
+        {
+            if at < url.start {
+                runs.push(body_run(url.start - at));
+            }
+            runs.push(link_run(url.len()));
+            at = url.end;
+        }
+        if at < body.end {
+            runs.push(body_run(body.end - at));
+        }
+    };
+    let mut runs = Vec::with_capacity(mentions.len() * 2 + urls.len() * 2 + 1);
     let mut at = 0;
     for span in mentions.iter() {
-        if at < span.range.start {
-            runs.push(body_run(span.range.start - at));
-        }
+        push_body(&mut runs, at..span.range.start);
         // Chips are labels in the body font, like the composer's, with their
         // padding pinned to the face its insets are tuned for.
         let [lead, trail] = crate::composer::chip_pad_ranges(&span.range);
@@ -9653,10 +9679,24 @@ fn user_bubble_runs(
         }
         at = span.range.end;
     }
-    if at < text.len() {
-        runs.push(body_run(text.len() - at));
-    }
+    push_body(&mut runs, at..text.len());
     runs
+}
+
+/// The bubble text's bare `http(s)://` URLs, outside its chips. A prompt
+/// without chips renders as Markdown whenever it has one, which links it there.
+fn user_bubble_urls(
+    text: &str,
+    mentions: &[crate::composer::SentMentionSpan],
+) -> Vec<Range<usize>> {
+    zeron_markdown::bare_urls(text)
+        .into_iter()
+        .filter(|url| {
+            !mentions
+                .iter()
+                .any(|span| span.range.start < url.end && url.start < span.range.end)
+        })
+        .collect()
 }
 
 fn user_bubble_text(
@@ -9668,11 +9708,20 @@ fn user_bubble_text(
     entity_id: gpui::EntityId,
     overlays: Vec<ChipOverlay>,
     open_image: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
+    link: Option<render::LinkUi>,
 ) -> AnyElement {
     let runs = user_bubble_runs(&text, &mentions, theme);
+    let links: Vec<_> = user_bubble_urls(&text, &mentions)
+        .into_iter()
+        .map(|url| {
+            let target = render::LinkTarget::new(&text[url.clone()], &text[url.clone()]);
+            (url, target)
+        })
+        .collect();
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
     let chip_layout = layout.clone();
+    let link_layout = layout.clone();
     // A chip showing a status paints it over its icon well instead.
     let chip_icons: Vec<Option<crate::composer::ChipIcon>> = mentions
         .iter()
@@ -9738,6 +9787,18 @@ fn user_bubble_text(
         .child(underlay)
         .child(styled)
         .into_any_element();
+    let text = if links.is_empty() {
+        text
+    } else {
+        crate::markdown::link_interaction::LinkRanges {
+            id: format!("{row_id}-user-links").into(),
+            child: text,
+            layout: link_layout,
+            links,
+            ui: link,
+        }
+        .into_any_element()
+    };
     if overlays.is_empty() {
         return text;
     }
@@ -16983,6 +17044,60 @@ mod tests {
             .flat_map(|span| crate::composer::chip_pad_ranges(&span.range))
             .collect();
         assert_eq!(pads, expected);
+    }
+
+    /// A sent bubble with chips stays plain text, so its bare URLs are
+    /// underlined link ranges there, like a reply's, and chips keep theirs.
+    #[test]
+    fn bubble_urls_beside_chips_are_underlined_links() {
+        let raw = format!(
+            "see https://x.dev/pr/7, and {}",
+            zeron_proto::attachment_mentions::attachment_mention_link(1, Some("notes.md")),
+        );
+        let (text, spans) = crate::composer::sent_mention_display(&raw).expect("chips project");
+        let urls = user_bubble_urls(&text, &spans);
+        assert_eq!(
+            urls.iter()
+                .map(|url| &text[url.clone()])
+                .collect::<Vec<_>>(),
+            ["https://x.dev/pr/7"]
+        );
+        let theme = Theme::dark();
+        let runs = user_bubble_runs(&text, &spans, &theme);
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+        let mut at = 0;
+        let mut underlined = Vec::new();
+        for run in &runs {
+            if run.underline.is_some() {
+                underlined.push(at..at + run.len);
+            }
+            at += run.len;
+        }
+        assert_eq!(underlined, urls);
+        assert!(user_bubble_urls("no links here", &[]).is_empty());
+    }
+
+    /// A prompt without chips that holds a URL renders as Markdown, which
+    /// links it; the plain bubble only links URLs beside chips.
+    #[test]
+    fn chipless_prompts_with_urls_render_as_markdown_links() {
+        let rows = rows_for_entry(
+            &user_entry("u1", "see https://x.dev/pr/7"),
+            false,
+            false,
+            &mut parse,
+        );
+        let RowKind::User { markdown, .. } = &rows[0].kind else {
+            panic!("expected a user row");
+        };
+        let tree = markdown.as_ref().expect("a URL is Markdown").full.clone();
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(
+            runs.iter()
+                .any(|run| run.style.link.as_deref() == Some("https://x.dev/pr/7"))
+        );
     }
 
     /// A sent prompt's file mentions render as chips in the transcript: the
