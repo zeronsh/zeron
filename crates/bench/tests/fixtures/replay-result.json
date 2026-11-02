@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"errors":[],"result":"","session_id":"$SESSION_ID","usage":{"input_tokens":0,"output_tokens":0},"modelUsage":{},"num_turns":1,"duration_ms":0,"duration_api_ms":0,"total_cost_usd":0.0,"terminal_reason":"completed"}
