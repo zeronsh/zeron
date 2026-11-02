@@ -16819,6 +16819,83 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn voice_failure_notice_leaves_the_rest_of_the_window_clickable(cx: &mut TestAppContext) {
+        // The footer sits at the bottom, as it does in the window: the notice
+        // opens upward and must not cover the row, or swallow clicks outside it.
+        struct FooterHost(Entity<Shell>);
+        impl Render for FooterHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div().size_full().flex().flex_col().justify_end().child(
+                        div()
+                            .w(px(256.0))
+                            .child(shell.render_sidebar_footer(&Theme::default(), cx)),
+                    )
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            FooterHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| {
+            shell.voice.update(cx, |voice, _| {
+                voice.phase = zeron_proto::voice::VoicePhase::Failed;
+                voice.reason = Some(zeron_proto::voice::VoiceRejection::NativeRuntimeUnavailable);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("voice-failure-dismiss").is_some(),
+            "the failure notice is showing"
+        );
+        let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
+        cx.simulate_click(trigger, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(
+                matches!(shell.route, Route::Settings(SettingsSection::General)),
+                "settings still opens while the notice is up"
+            );
+            assert_eq!(
+                shell.voice.read(cx).phase,
+                zeron_proto::voice::VoicePhase::Failed,
+                "that click does not dismiss the notice"
+            );
+        });
+        let dismiss = cx.debug_bounds("voice-failure-dismiss").unwrap().center();
+        cx.simulate_click(dismiss, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.voice.read(cx).phase,
+                zeron_proto::voice::VoicePhase::Closed
+            );
+        });
+    }
+
+    #[gpui::test]
     fn settings_footer_keeps_the_pull_requests_entry(cx: &mut TestAppContext) {
         // Chat and Settings both render this row; host it alone so the full
         // shell's pages don't cover it.
