@@ -131,6 +131,8 @@ export interface VaultStatusView {
   /** Where the user installs the GitHub App on accounts / repositories
    * (absent when the App isn't configured). */
   readonly githubInstallUrl?: string;
+  /** `putCredential` only: the stored account (slot) the upload landed in. */
+  readonly slot?: string;
 }
 
 /**
@@ -156,9 +158,23 @@ export type VaultMaterial =
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
+  /**
+   * Device ids allowed to get grants. The literal `"*"` means every device
+   * the user has enrolled with the vault (still enrolled, not revoked, valid
+   * signature: those checks run before this one). Also accepted by `authorize`
+   * and the GitHub device flow.
+   */
   readonly authorizedDevices: readonly string[];
   /** The login's identity, when the uploader knows it (Claude: its profile). */
   readonly profile?: VaultAccountProfile;
+  /**
+   * Default `true`: the uploaded login becomes the provider's active account.
+   * `false`: it is stored (or refreshed in place, if already stored) without
+   * changing which account is active, except that it becomes active when the
+   * provider has no active account yet. Laptops syncing their own logins use
+   * this so they never switch the account Cloud machines run on.
+   */
+  readonly activate?: boolean;
 }
 
 export interface EnrollDeviceRequest {
@@ -192,6 +208,14 @@ export interface GrantRequest {
    * `owner`); the token then reaches every repository of that installation.
    */
   readonly repo?: string;
+  /**
+   * Grant from this stored account (`VaultAccountView.slot`) instead of the
+   * provider's active one; `not_found` if there is no such slot. Not for
+   * `github` (always the active connection). Like `repo`, it is NOT covered by
+   * `sig`, so the signed message is unchanged and older engines keep working;
+   * the authorization rules are the same as for the active account.
+   */
+  readonly slot?: string;
 }
 
 export interface Grant {
@@ -212,6 +236,9 @@ export interface Grant {
   /** GitHub login / account email, for display. */
   readonly account?: string;
   readonly generation: number;
+  /** The stored account (`VaultAccountView.slot`) the grant came from, so a
+   * consumer can tell which login it holds. */
+  readonly slot?: string;
 }
 
 export interface GithubDeviceStart {

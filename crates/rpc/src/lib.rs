@@ -244,6 +244,16 @@ pub mod methods {
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
+    /// `{}` → `AccountSyncStatus`: whether this device shares its Claude Code
+    /// and Codex logins through the vault (relay-forwardable).
+    pub const GET_ACCOUNT_SYNC: &str = "GetAccountSync";
+    /// `{enabled}` → `AccountSyncStatus`. Turning it on enrolls this device
+    /// with the vault, uploads its Claude Code / Codex logins (they then
+    /// refresh only in the vault) and makes every synced login usable here,
+    /// on the user's other synced devices and on Cloud. Turning it off keeps
+    /// the vault's logins; this device keeps its current access token until
+    /// it expires, then needs a sign-in of its own.
+    pub const SET_ACCOUNT_SYNC: &str = "SetAccountSync";
     /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
     /// callback the requesting device caught on its own loopback (a phone
     /// signing a computer's agent in). Answers `{status, location?}`.

@@ -179,8 +179,54 @@ fn not_cloud() -> RpcError {
     RpcError::Failed("Cloud runs Codex and Claude Code only".into())
 }
 
+/// The subscription logins of `harness` the vault holds, as a synced
+/// device lists them (`crate::account_sync`): ids `"{provider}:{slot}"`,
+/// `active` = the one THIS device uses (each device picks its own; Cloud's
+/// pick is the vault's active account), usage read by the vault.
+pub(crate) async fn synced_rows(
+    cloud: &CloudClient,
+    harness: HarnessId,
+    active_slot: Option<&str>,
+    force_usage: bool,
+) -> Result<Vec<AgentAccount>, String> {
+    let (login, _) = providers_of(harness).ok_or_else(|| not_cloud().to_string())?;
+    let logins = cloud
+        .vault_accounts(login)
+        .await
+        .map_err(|e| e.to_string())?;
+    let usage = futures::future::join_all(logins.iter().map(|account| async move {
+        if account.kind == "oauth" && account.status == VaultConnectionStatus::Connected {
+            Some(usage(cloud, harness, login, &account.slot, force_usage).await)
+        } else {
+            None
+        }
+    }))
+    .await;
+    Ok(logins
+        .iter()
+        .zip(usage)
+        .map(|(account, usage)| {
+            let reconnect = account.status == VaultConnectionStatus::NeedsReconnect;
+            let mut row = to_agent_account(
+                harness,
+                login,
+                account,
+                active_slot == Some(account.slot.as_str()),
+                usage,
+            );
+            if reconnect {
+                row.usage_error = Some("Sign in again — this synced login stopped working".into());
+            }
+            row
+        })
+        .collect())
+}
+
 /// `"{provider}:{slot}"` → the vault provider (one of `harness`'s) and slot.
-fn account_ref(harness: HarnessId, account_id: &str) -> Result<(VaultProvider, &str), RpcError> {
+pub(crate) fn account_ref(
+    harness: HarnessId,
+    account_id: &str,
+) -> Result<(VaultProvider, &str), RpcError> {
     let (login, key) = providers_of(harness).ok_or_else(not_cloud)?;
     let (provider, slot) = account_id
         .split_once(':')
@@ -326,7 +372,7 @@ fn usage_key(provider: VaultProvider, slot: &str) -> String {
     format!("{}:{slot}", provider.as_str())
 }
 
-fn forget_usage(provider: VaultProvider, slot: &str) {
+pub(crate) fn forget_usage(provider: VaultProvider, slot: &str) {
     usage_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

@@ -326,7 +326,9 @@ machine uses it from its next turn (the engine re-checks a cached grant older th
 a run). Uploading the same login again replaces its own account instead of adding one —
 identity is never secret material: Claude's profile `email|organization` (sent beside the
 blob), Codex's `id_token` email + `account_id`, an API key's key id (a hash), GitHub's login. A
-new upload becomes active. Forgetting the active account leaves none active (grants answer
+new upload becomes active, unless it is sent with `activate: false`: then the active account
+is kept (also when the login was already stored) and the upload only becomes active if the
+provider has none. Forgetting the active account leaves none active (grants answer
 `no {provider} account is active`); the generation counter is per provider, so AADs stay
 unique across accounts. The daily canary refreshes every account. A pre-accounts single
 `record` row migrates into one active account with the same generation and envelope.
@@ -339,6 +341,27 @@ prefer a subscription. Usage meters come from the vault, which alone holds the t
 the provider's usage endpoint (Claude `api.anthropic.com/api/oauth/usage`, Codex
 `chatgpt.com/backend-api/wham/usage`) and returns the body for the engine to parse; a 401/403
 there never marks the account.
+
+### Synced subscriptions (laptops)
+
+A laptop that turns on subscription sync (Settings → Providers, `SetAccountSync`; engine
+`crates/engine/src/account_sync.rs`) enrolls a key (`POST /vault/{org}/devices/enroll`, kind
+`laptop`) and uploads its Claude / Codex logins with `authorizedDevices: ["*"]` and
+`activate: false`, so its other laptops — and Cloud — can use them without the upload changing
+which account Cloud runs on (a provider with no active account takes the upload, so Cloud works
+without its own sign-in). Turning sync on also widens the provider's existing logins to `"*"`.
+A laptop then requests per-slot grants (`slot` in the grant request) for the login it uses;
+each device picks its own, Cloud keeps using the provider's active account.
+
+The vault stays the only refresher: every uploaded slot is deleted on the laptop (saved slots
+are refreshed by usage probes and switches — a second refresher would spend the rotating
+refresh token), and the CLI's own store (`~/.claude/.credentials.json` or the Keychain,
+`~/.codex/auth.json`) gets the grant's access token with an empty refresh token, rewritten
+~10 min before expiry while the engine runs, exactly as on a Cloud machine. A login the user
+signs in to later — through Zeron (captured straight into the vault) or the CLI itself (a real
+refresh token appears in the live store) — is uploaded the same way. Turning sync off keeps the
+vault's logins; the laptop keeps its last access token until it expires. Claude grants still go
+only to the unmodified Claude Code CLI on the user's own devices (see "Claude subscriptions").
 
 ### Encryption
 
@@ -394,14 +417,26 @@ The vault only refreshes. It owns each refresh token from upload on.
 
 ### Grants
 
-`POST /vault/{orgId}/grant {provider, deviceId, ts, sig}` (sig by the device key, same scheme
-as runner tokens with prefix `zeron-vault-grant`) → `{provider, accessToken, expiresAt,
-accountId?, generation}`. A grant requires: the device is enrolled and not revoked, the device
-is in the credential's `authorizedDevices`, the user is not disabled, and the global kill switch
+`POST /vault/{orgId}/grant {provider, deviceId, ts, sig, repo?, slot?}` (sig by the device key,
+same scheme as runner tokens with prefix `zeron-vault-grant`) → `{provider, accessToken,
+expiresAt, accountId?, generation, slot?}`. A grant requires: the device is enrolled and not
+revoked, the device (or its parent) is in the credential's `authorizedDevices` (or the list holds
+`"*"`, below), the user is not disabled, and the global kill switch
 (`VAULT_DISABLED=1`) is off. Grants are the provider's own access token, refreshed by the vault
 when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 days or the JWT has
 <1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
 refresh token.
+
+`slot` names a stored account to grant from instead of the provider's active one (`not_found`
+if there is no such slot; `bad_request` for `github`, which always uses the active
+connection). Like `repo` it is **not** part of the signed message, so the message format is
+unchanged and older engines keep working; every other check is the same, against that
+account's own `authorizedDevices`. The reply's `slot` says which account the grant came from.
+
+`authorizedDevices` may contain the literal `"*"`: every device the user enrolled with the
+vault. It is checked after the grant's device checks (enrolled, not revoked, valid fresh
+signature), so a revoked device is refused even then. Accepted wherever a list is (upload,
+`PATCH`, GitHub device start).
 
 Failure semantics: a refresh that returns `invalid_grant` marks the account `needs_reconnect`
 and stops issuing grants. An ambiguous failure (timeout/5xx) keeps the current generation and
@@ -434,8 +469,8 @@ The standard GitHub App model: sessions act as the App, never as the user.
 | Route (WorkOS bearer only) | Effect |
 | --- | --- |
 | `GET /vault/{orgId}` | Providers `{provider, status, authorizedDevices, updatedAt, account?}` + devices |
-| `PUT /vault/{orgId}/credentials/{provider}` | Upload `{material, authorizedDevices}` |
-| `PATCH /vault/{orgId}/credentials/{provider}` | Change `authorizedDevices` |
+| `PUT /vault/{orgId}/credentials/{provider}` | Upload `{material, authorizedDevices, profile?, activate?}` (`activate: false` keeps the active account) |
+| `PATCH /vault/{orgId}/credentials/{provider}` | Change `authorizedDevices` (ids or `"*"`) |
 | `DELETE /vault/{orgId}/credentials/{provider}` | Disconnect (wipe every account) |
 | `GET /vault/{orgId}/accounts/{provider}` | `{accounts}`: slot, status, active, kind, identity fields, devices |
 | `POST /vault/{orgId}/accounts/{provider}/active` | `{slot \| null}` → pick the active account (null: none) |

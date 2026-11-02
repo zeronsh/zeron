@@ -17,7 +17,7 @@ use std::sync::{LazyLock, Mutex};
 
 use tokio::io::AsyncWriteExt as _;
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode, AgentLoginPoll,
+    AccountSyncStatus, AgentAccount, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode, AgentLoginPoll,
     AgentLoginStart, AgentLoginStatus, HarnessId,
 };
 
@@ -329,6 +329,55 @@ impl Client {
         .await
     }
 
+    /// `GetAccountSync` on `device_id`: whether it shares its Claude Code and
+    /// Codex logins through the vault.
+    pub async fn device_account_sync(&self, device_id: &str) -> Result<AccountSyncStatus> {
+        self.sync_call(
+            device_id,
+            zeron_rpc::methods::GET_ACCOUNT_SYNC,
+            serde_json::json!({}),
+        )
+        .await
+    }
+
+    /// `SetAccountSync`: turn that sharing on or off for `device_id`. Turning
+    /// it on uploads the logins, so it can take a few seconds.
+    pub async fn device_set_account_sync(
+        &self,
+        device_id: &str,
+        enabled: bool,
+    ) -> Result<AccountSyncStatus> {
+        if self.inner.is_demo() {
+            *lock(&DEMO_SYNC) = enabled;
+        }
+        self.sync_call(
+            device_id,
+            zeron_rpc::methods::SET_ACCOUNT_SYNC,
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    async fn sync_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<AccountSyncStatus> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(AccountSyncStatus {
+                enabled: *lock(&DEMO_SYNC),
+                available: true,
+                message: None,
+                synced_at: None,
+            }),
+            Backend::Live(live) => {
+                let reply = live.relay.call(device_id, method, params).await?;
+                serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
     async fn accounts_call(
         &self,
         device_id: &str,
@@ -355,6 +404,7 @@ fn stop_relay(login_id: &str) {
 static DEMO_DISABLED: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
 static DEMO_ACTIVE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 static DEMO_FORGOTTEN: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Default::default);
+static DEMO_SYNC: LazyLock<Mutex<bool>> = LazyLock::new(Default::default);
 
 /// The demo catalog with the toggles applied.
 pub(crate) fn with_demo_toggles(demo: bool, mut list: Vec<HarnessInfo>) -> Vec<HarnessInfo> {

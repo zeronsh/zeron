@@ -42,8 +42,10 @@ describe("claude OAuth login", () => {
   it("grants the stored access token while more than 10 minutes remain", async () => {
     const { userId, caller, device, blob } = await withClaude(60 * MINUTE);
     const upstream = mockUpstream({});
+    const [account] = value(await vault().accounts(caller, "claude"));
     expect(value(await vault().grant(caller, await signedGrant(device, userId, "claude")))).toEqual({
       provider: "claude",
+      slot: account!.slot,
       accessToken: blob.accessToken,
       expiresAt: blob.expiresAt,
       scopes: blob.scopes,

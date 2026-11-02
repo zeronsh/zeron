@@ -14,7 +14,8 @@
  *    clean up and switch it back.
  * 4. Grants additionally need: device enrolled + not revoked (nor its parent),
  *    a valid fresh signature (VaultDevices), the device OR its parent ∈
- *    authorizedDevices, status connected (VaultAccount).
+ *    authorizedDevices (or authorizedDevices contains `"*"`), status connected
+ *    (VaultAccount).
  */
 import {
   VAULT_PROVIDERS,
@@ -39,7 +40,7 @@ import type { Env } from "./env";
 import { accountStub, devicesStub } from "./names";
 import { installUrl, isRepoFullName } from "./providers/github-app";
 import { fail, ok, type VaultFailure } from "./result";
-import { isCaller, isFlowId, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
+import { ALL_DEVICES, isCaller, isFlowId, isGrantRequest, isId, isProvider, parseDeviceList } from "./validate";
 
 export class Vault implements VaultRpc {
   constructor(private readonly env: Env) {}
@@ -70,10 +71,27 @@ export class Vault implements VaultRpc {
       if (profile !== undefined && (typeof profile !== "object" || profile === null)) {
         return fail("bad_request", "profile must be an object");
       }
-      const put = await accountStub(this.env, userId, provider).put(userId, provider, material, devices, profile);
+      const activate = (request as Partial<PutCredentialRequest>).activate;
+      if (activate !== undefined && typeof activate !== "boolean") return fail("bad_request", "activate must be a boolean");
+      const put = await accountStub(this.env, userId, provider).put(
+        userId,
+        provider,
+        material,
+        devices,
+        profile,
+        activate !== false
+      );
       if (!put.ok) return put;
-      await this.audit(userId, { event: "upload", orgId: caller.orgId, provider, detail: `devices=${devices.length}` });
-      return this.view(userId);
+      await this.audit(userId, {
+        event: "upload",
+        orgId: caller.orgId,
+        provider,
+        detail: `devices=${devices.length}${activate === false ? " inactive" : ""}`
+      });
+      // The slot the login landed in: an uploader that keeps using it (a
+      // synced laptop) must not guess it from a listing other writes race.
+      const view = await this.view(userId);
+      return view.ok ? ok({ ...view.value, slot: put.value }) : view;
     });
   }
 
@@ -112,6 +130,8 @@ export class Vault implements VaultRpc {
         return fail("bad_request", "expected {deviceId, kind: laptop|cloud, publicKey, parentId?}");
       }
       if (body.parentId !== undefined && !isId(body.parentId)) return fail("bad_request", "malformed parentId");
+      // `"*"` in authorizedDevices means every enrolled device: never a device's own id.
+      if (body.deviceId === ALL_DEVICES || body.parentId === ALL_DEVICES) return fail("bad_request", "reserved deviceId");
       const result = await devicesStub(this.env, userId).enroll(userId, caller.orgId, {
         deviceId: body.deviceId,
         kind: body.kind,
@@ -143,12 +163,16 @@ export class Vault implements VaultRpc {
 
   grant(caller: VaultCaller, request: GrantRequest): Promise<VaultResult<Grant>> {
     return this.run(caller, { runner: true }, async (userId) => {
-      if (!isGrantRequest(request)) return fail("bad_request", "expected {provider, deviceId, ts, sig, repo?}");
+      if (!isGrantRequest(request)) return fail("bad_request", "expected {provider, deviceId, ts, sig, repo?, slot?}");
       // A GitHub grant is an App installation token, and the repository
       // names which installation. Checked before the signature so the
       // device's `ts` isn't spent on a request that can't succeed.
       if (request.provider === "github" && request.repo === undefined) {
         return fail("bad_request", "github grants need the repository (owner/name) they are for");
+      }
+      // Github grants always come from the active connection.
+      if (request.provider === "github" && request.slot !== undefined) {
+        return fail("bad_request", "github grants cannot name an account");
       }
       if (caller.kind === "runner" && caller.deviceId !== request.deviceId) {
         return fail("forbidden", "runners may only request grants for their own device");
@@ -168,14 +192,15 @@ export class Vault implements VaultRpc {
         request.provider,
         request.deviceId,
         verified.value.parentId,
-        request.repo
+        request.repo,
+        request.slot
       );
       await this.audit(userId, {
         event: grant.ok ? "grant" : "grant_denied",
         orgId: caller.orgId,
         deviceId: request.deviceId,
         provider: request.provider,
-        detail: [grant.ok ? `generation ${grant.value.generation}` : grant.error, request.repo]
+        detail: [grant.ok ? `generation ${grant.value.generation}` : grant.error, request.repo, request.slot && `slot=${request.slot}`]
           .filter(Boolean)
           .join(" ")
       });

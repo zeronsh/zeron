@@ -135,6 +135,10 @@ pub struct Grant {
     pub subscription_type: Option<String>,
     #[serde(default)]
     pub generation: i64,
+    /// The stored account the grant came from (vaults that predate per-slot
+    /// grants leave it out).
+    #[serde(default)]
+    pub slot: Option<String>,
 }
 
 impl std::fmt::Debug for Grant {
@@ -1022,7 +1026,7 @@ impl CredentialBroker {
 /// cached grant alive; 403 (`device_unknown`/`device_revoked`/
 /// `not_authorized`/`forbidden`/`disabled`), 409 `needs_reconnect`, a bad
 /// signature, and either kill switch (`disabled`, even as a 503) drop it.
-fn classify_grant_failure(status: u16, body: &EdgeErrorBody) -> GrantOutcome {
+pub(crate) fn classify_grant_failure(status: u16, body: &EdgeErrorBody) -> GrantOutcome {
     let detail = body.describe();
     let error = body.error.as_str();
     if error == "disabled" || error == "bad_signature" {
@@ -1677,6 +1681,7 @@ mod tests {
             scopes: None,
             subscription_type: None,
             generation: 3,
+            slot: None,
         }
     }
 
