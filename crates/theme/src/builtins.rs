@@ -59,6 +59,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
             ),
             family("cobalt2", "Cobalt2", vec![cobalt2()]),
             family("andromeda", "Andromeda", vec![andromeda()]),
+            family("vesper", "Vesper", vec![vesper()]),
         ],
     })
 }
@@ -142,7 +143,7 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
         diff_hunk: accent.primary.with_alpha(if dark { 0.08 } else { 0.07 }),
     };
     let terminal_background = c(seed.terminal_background);
-    let mut variant = ThemeVariant {
+    let variant = ThemeVariant {
         id: seed.id.into(),
         family_id: seed.family_id.into(),
         name: seed.name.into(),
@@ -159,6 +160,10 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
         },
         source: seed.source,
     };
+    with_asset_hash(variant)
+}
+
+fn with_asset_hash(mut variant: ThemeVariant) -> ThemeVariant {
     // Hash the checked-in resolved definition itself (with the hash field
     // blanked), not merely its source URL. This makes provenance sensitive to
     // curation edits as well as upstream revision changes.
@@ -1335,4 +1340,74 @@ fn andromeda() -> ThemeVariant {
             "MIT",
         ),
     })
+}
+
+fn vesper() -> ThemeVariant {
+    let mut variant = variant(Seeds {
+        id: "vesper-dark",
+        family_id: "vesper",
+        name: "Vesper",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#101010",
+        shell: "#101010",
+        raised: "#161616",
+        card: "#101010",
+        text: "#ffffff",
+        muted: "#a0a0a0",
+        faint: "#8b8b8b",
+        accent: "#ffc799",
+        danger: "#ff8080",
+        warning: "#ffc799",
+        success: "#99ffe4",
+        terminal_background: "#101010",
+        ansi: [
+            "#101010", "#ff8080", "#99ffe4", "#ffc799", "#a0a0a0", "#ffc799", "#99ffe4", "#a0a0a0",
+            "#505050", "#ff9696", "#affffa", "#ffddaf", "#cdcdcd", "#ffddaf", "#affffa", "#ffffff",
+        ],
+        syntax: [
+            "#8b8b8b", "#a0a0a0", "#99ffe4", "#ffc799", "#ffc799", "#ffc799", "#ffffff", "#ffffff",
+            "#a0a0a0", "#ffc799", "#ffc799", "#ff8080",
+        ],
+        source: source(
+            "vesper-dark",
+            "vscode",
+            "https://github.com/raunofreiberg/vesper",
+            "9043f3849b776949445f0cd4990365959cca35a3",
+            "MIT",
+        ),
+    });
+
+    variant.colors.dialog = c("#161616");
+    variant.colors.overlay = c("#161616");
+    variant.colors.hover = c("#282828");
+    variant.colors.active = c("#232323");
+    variant.colors.border = c("#232323");
+    variant.colors.border_strong = c("#ffc799");
+    variant.colors.solid = c("#ffc799");
+    variant.colors.on_solid = Color::BLACK;
+    variant.colors.danger_muted = c("#ff9696");
+    variant.colors.warning_muted = c("#ffddaf");
+    variant.colors.success_muted = c("#affffa");
+    variant.colors.input = c("#1c1c1c");
+    variant.colors.cursor = c("#ffc799");
+    variant.colors.diff_hunk = c("#ffc79915");
+    variant.accent.wash = c("#ffc79926");
+    variant.accent.selection = c("#ffffff25");
+    variant.terminal.selection = c("#ffffff25");
+    for (role, color) in [
+        ("stringSpecial", "#ffffff"),
+        ("escape", "#a0a0a0"),
+        ("variableSpecial", "#ffffff"),
+        ("label", "#ffffff"),
+        ("markupHeading", "#ffc799"),
+        ("markupRaw", "#99ffe4"),
+        ("markupLink", "#ffc799"),
+        ("markupReference", "#ffc799"),
+        ("markupEmphasis", "#ffffff"),
+        ("markupStrong", "#ffffff"),
+    ] {
+        variant.syntax.insert(role.into(), c(color));
+    }
+    with_asset_hash(variant)
 }
