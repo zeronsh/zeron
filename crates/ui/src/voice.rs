@@ -7,11 +7,37 @@ use crate::state::EngineHandle;
 use gpui::{Context, Task};
 use gpui_tokio::Tokio;
 use zeron_proto::voice::*;
+mod call_menu;
+mod grok;
 mod permissions;
 mod remote;
 
+pub(crate) use call_menu::GrokCallMenu;
+
 pub enum VoiceControl {
     Mute(bool),
+    /// Voice, personality, speed, or microphone changed during a Grok call.
+    Retune(GrokStyle),
+}
+
+/// Voice, speed, personality, and microphone for a Grok call. Codex ignores it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrokStyle {
+    pub voice: Option<String>,
+    pub speed: f32,
+    pub personality: crate::settings::GrokPersonality,
+    pub input: Option<String>,
+}
+
+impl GrokStyle {
+    pub fn from_settings(settings: &crate::settings::UiSettings) -> Self {
+        Self {
+            voice: settings.grok_voice.clone(),
+            speed: zeron_grok_voice::snap_speed(settings.grok_voice_speed),
+            personality: settings.grok_personality,
+            input: settings.grok_input.clone(),
+        }
+    }
 }
 
 pub struct VoiceController {
@@ -31,17 +57,27 @@ pub struct VoiceController {
     pub active_since: Option<std::time::Instant>,
     engine: Option<EngineHandle>,
     controls: Option<tokio::sync::mpsc::Sender<VoiceControl>>,
+    /// Last style handed to the running Grok call.
+    sent_style: Option<GrokStyle>,
     epoch: u64,
     task: Option<Task<()>>,
     cancellation: tokio_util::sync::CancellationToken,
-    /// Whether this device's Codex is installed and enabled: no Codex, no
-    /// voice. `None` until the catalog answers.
+    /// Whether this device's Codex is installed and enabled. `None` until the
+    /// catalog answers; unread still counts as available.
     codex_ready: Option<bool>,
+    /// Local Grok sign-in. `None` until checked, and None is not available.
+    grok_ready: Option<bool>,
     /// The connection `codex_ready` was read from, and its read in flight.
     codex_engine: Option<EngineHandle>,
     codex_check: Option<Task<()>>,
     /// This call played its start sound and owes its end sound.
     cued: bool,
+    /// Ask-each-time chooser. A `Popup` so the trigger press that dismisses it
+    /// does not also reopen it: the card's outside press closes on mouse-down,
+    /// before the click.
+    provider_menu: crate::popover::Popup<()>,
+    /// Codex or Grok for the call that is up. Cleared with the session.
+    provider: Option<VoiceProvider>,
 }
 impl Default for VoiceController {
     fn default() -> Self {
@@ -59,25 +95,120 @@ impl Default for VoiceController {
             active_since: None,
             engine: None,
             controls: None,
+            sent_style: None,
             epoch: 0,
             task: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
             codex_ready: None,
+            grok_ready: None,
             codex_engine: None,
             codex_check: None,
             cued: false,
+            provider_menu: crate::popover::Popup::default(),
+            provider: None,
         }
     }
 }
 impl VoiceController {
-    /// Voice can be offered here. An unread catalog counts as yes, so a slow
-    /// or failed read never hides it; a live call or its failure stays.
+    /// Voice can be offered here. An unread Codex catalog counts as yes, so a
+    /// slow or failed read never hides it. Grok counts only once sign-in is
+    /// confirmed. A live call or its failure stays.
     pub fn offered(&self) -> bool {
-        self.codex_ready != Some(false) || self.is_live() || self.reason.is_some()
+        self.is_live()
+            || self.reason.is_some()
+            || self.codex_ready != Some(false)
+            || self.grok_ready == Some(true)
     }
 
-    /// Read whether `engine`'s device can take a call: installed and enabled
-    /// in Settings → Agents. `force` re-reads a connection already read.
+    /// What an idle microphone press does. `None` when neither provider can run.
+    pub(crate) fn resolve_provider(
+        &self,
+        preference: crate::settings::VoiceProviderChoice,
+    ) -> Option<ProviderDecision> {
+        let codex_possible = self.codex_ready != Some(false);
+        let grok_available = self.grok_ready == Some(true);
+        if codex_possible && grok_available {
+            return Some(match preference {
+                crate::settings::VoiceProviderChoice::Ask => ProviderDecision::Menu,
+                crate::settings::VoiceProviderChoice::Codex => {
+                    ProviderDecision::Start(VoiceProvider::Codex)
+                }
+                crate::settings::VoiceProviderChoice::Grok => {
+                    ProviderDecision::Start(VoiceProvider::Grok)
+                }
+            });
+        }
+        if codex_possible {
+            return Some(ProviderDecision::Start(VoiceProvider::Codex));
+        }
+        grok_available.then_some(ProviderDecision::Start(VoiceProvider::Grok))
+    }
+
+    /// Idle tooltip when nothing has failed. Codex-only keeps its old label.
+    pub(crate) fn idle_tooltip(
+        &self,
+        preference: crate::settings::VoiceProviderChoice,
+    ) -> &'static str {
+        match self.resolve_provider(preference) {
+            Some(ProviderDecision::Menu) => "Choose Codex or Grok",
+            Some(ProviderDecision::Start(VoiceProvider::Grok)) => "Start voice · Grok",
+            Some(ProviderDecision::Start(VoiceProvider::Codex)) | None => {
+                "Start voice · Codex orchestrator"
+            }
+        }
+    }
+
+    pub(crate) fn provider_menu_open(&self) -> bool {
+        self.provider_menu.is_open()
+    }
+
+    /// Mounted, including the exit animation. Render uses this.
+    pub(crate) fn provider_menu_mounted(&self) -> bool {
+        self.provider_menu.get().is_some()
+    }
+
+    pub(crate) fn provider_menu_closing(&self) -> Option<std::time::Instant> {
+        self.provider_menu.closing_since()
+    }
+
+    /// From the trigger's mouse-down, before the card's outside press closes it.
+    pub(crate) fn note_provider_press(&mut self) {
+        self.provider_menu.note_trigger_press();
+    }
+
+    /// `true` when this click's press found the menu mounted. Leave it closed.
+    pub(crate) fn take_provider_press_was_open(&mut self) -> bool {
+        self.provider_menu.take_press_was_open()
+    }
+
+    pub(crate) fn close_provider_menu(&mut self, cx: &mut Context<Self>) {
+        if self.provider_menu.begin_close() {
+            crate::popover::reap_popup(cx, |voice: &mut Self| &mut voice.provider_menu);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_provider_menu(&mut self, cx: &mut Context<Self>) {
+        if self.provider_menu.is_open() {
+            self.close_provider_menu(cx);
+        } else if !self.provider_menu.is_closing() {
+            self.provider_menu.open(());
+            cx.notify();
+        }
+    }
+
+    /// `(codex_ready, grok_ready)`. Grok's `None` is not availability.
+    pub(crate) fn provider_readiness(&self) -> (Option<bool>, Option<bool>) {
+        (self.codex_ready, self.grok_ready)
+    }
+
+    pub(crate) fn provider(&self) -> Option<VoiceProvider> {
+        self.provider
+    }
+
+    /// Read whether `engine`'s device can take a call. Codex must be installed
+    /// and enabled; Grok is a local sign-in file. Both answers land together.
+    /// `force` re-reads a connection already read.
     pub fn check_codex(&mut self, engine: &EngineHandle, force: bool, cx: &mut Context<Self>) {
         let same = self
             .codex_engine
@@ -88,6 +219,8 @@ impl VoiceController {
         }
         if !same {
             self.codex_ready = None;
+            self.grok_ready = None;
+            self.provider_menu = crate::popover::Popup::default();
         }
         self.codex_engine = Some(engine.clone());
         let engine = engine.clone();
@@ -108,9 +241,26 @@ impl VoiceController {
                             && zeron_engine::registry::descriptor_enabled(d)
                     })
                 });
+            // GPUI polls this task, so `spawn_blocking` has no current runtime
+            // unless it goes through the app handle. Both flags land below.
+            let Ok(runtime) = this.update(cx, |_, cx| Tokio::handle(cx)) else {
+                return;
+            };
+            let grok_signed_in = runtime
+                .spawn_blocking(zeron_grok_voice::signed_in)
+                .await
+                .unwrap_or(false);
             this.update(cx, |voice, cx| {
-                if ready.is_some() && ready != voice.codex_ready {
+                let mut changed = false;
+                if ready.is_some() && voice.codex_ready != ready {
                     voice.codex_ready = ready;
+                    changed = true;
+                }
+                if voice.grok_ready != Some(grok_signed_in) {
+                    voice.grok_ready = Some(grok_signed_in);
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             })
@@ -123,14 +273,16 @@ impl VoiceController {
         matches!(self.phase, VoicePhase::Checking) || self.phase.replaces_composer()
     }
 
-    /// Start an orchestrator in a new projectless Codex chat on `host_device_id`.
-    /// `config` is the chat's Codex configuration; its harness must be Codex.
+    /// Start `provider` on `host_device_id`. Codex keeps a projectless Codex
+    /// chat; Grok uses the prepared chat on this computer.
     pub fn start(
         &mut self,
         engine: EngineHandle,
         host_device_id: String,
         config: zeron_proto::ChatConfig,
         voice: Option<String>,
+        grok: GrokStyle,
+        provider: VoiceProvider,
         cx: &mut Context<Self>,
     ) {
         self.cancel(cx);
@@ -141,10 +293,12 @@ impl VoiceController {
         self.phase = VoicePhase::Checking;
         self.chat_id = None;
         self.reason = None;
+        self.provider = Some(provider);
         let epoch = self.epoch;
         let cancellation = self.cancellation.clone();
         let (controls, control_rx) = tokio::sync::mpsc::channel(8);
         self.controls = Some(controls);
+        self.sent_style = Some(grok.clone());
         let (events, mut event_rx) = tokio::sync::mpsc::channel(32);
         let query = Tokio::spawn(cx, async move {
             // Media belongs to this viewport, even when the chosen host is
@@ -154,6 +308,8 @@ impl VoiceController {
                 host_device_id,
                 config,
                 voice,
+                grok,
+                provider,
                 cancellation,
                 events,
                 control_rx,
@@ -215,6 +371,7 @@ impl VoiceController {
         self.microphone_level = 0;
         self.speaker_level = 0;
         self.controls = None;
+        self.sent_style = None;
         self.task = None;
         self.stage_open = false;
         self.active_since = None;
@@ -230,6 +387,8 @@ impl VoiceController {
         self.chat_id = None;
         self.reason = None;
         self.engine = None;
+        self.provider = None;
+        self.provider_menu = crate::popover::Popup::default();
         cx.notify();
     }
 
@@ -270,6 +429,29 @@ impl VoiceController {
                 self.cancel(cx);
                 self.reason = Some(VoiceRejection::Overflow);
             }
+        }
+    }
+
+    /// Push the saved Grok voice, personality, speed, and microphone into the
+    /// live call. Unrelated settings writes are ignored. A full control queue
+    /// does not end the call.
+    pub fn sync_grok_style(&mut self, cx: &mut Context<Self>) {
+        if self.provider != Some(VoiceProvider::Grok) {
+            return;
+        }
+        let Some(controls) = &self.controls else {
+            return;
+        };
+        let style = GrokStyle::from_settings(&crate::settings::current(cx));
+        if self.sent_style.as_ref() == Some(&style) {
+            return;
+        }
+        if controls
+            .try_send(VoiceControl::Retune(style.clone()))
+            .is_ok()
+        {
+            self.sent_style = Some(style);
+            cx.notify();
         }
     }
 
@@ -400,9 +582,12 @@ impl VoiceController {
                 "This Codex voice format has not been verified."
             }
             Some(VoiceRejection::ChatgptRequired) => "Sign in to Codex with ChatGPT to use voice.",
+            Some(VoiceRejection::GrokSignInRequired) => {
+                "Sign in to Grok Bot on this computer to use Grok voice."
+            }
             // Remote calls still play audio here, through this device's Codex helper.
             Some(VoiceRejection::NativeRuntimeUnavailable) => {
-                "Install or update Codex on this device with its official installer to use voice. npm installs lack the voice runtime."
+                "Install or update Codex on this device with its official installer to use voice. This copy of Codex has no voice runtime."
             }
             Some(VoiceRejection::DeviceUnavailable) => {
                 "Check microphone permission and your audio devices."
@@ -418,6 +603,13 @@ impl VoiceController {
             None => "",
         }
     }
+}
+
+/// What an idle footer press should do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderDecision {
+    Menu,
+    Start(VoiceProvider),
 }
 
 /// Call-timer text: `m:ss`, or `h:mm:ss` past the hour.
@@ -467,12 +659,107 @@ mod tests {
         assert!(voice.offered());
         voice.codex_ready = Some(false);
         assert!(!voice.offered());
+        voice.grok_ready = Some(true);
+        assert!(voice.offered(), "grok alone offers voice");
+        voice.grok_ready = Some(false);
+        assert!(!voice.offered());
+        voice.grok_ready = None;
+        assert!(!voice.offered(), "an unread grok check is not availability");
         // A failure explains itself before the trigger goes away.
         voice.reason = Some(VoiceRejection::NativeRuntimeUnavailable);
         assert!(voice.offered());
         voice.reason = None;
         voice.phase = VoicePhase::Checking;
         assert!(voice.offered(), "a call in progress keeps its trigger");
+    }
+
+    #[test]
+    fn resolving_a_provider_asks_only_when_both_can_run() {
+        let mut voice = VoiceController::default();
+        let ask = crate::settings::VoiceProviderChoice::Ask;
+        let codex = crate::settings::VoiceProviderChoice::Codex;
+        let grok = crate::settings::VoiceProviderChoice::Grok;
+        assert_eq!(
+            voice.resolve_provider(ask),
+            Some(ProviderDecision::Start(VoiceProvider::Codex)),
+            "an unread codex catalog starts codex"
+        );
+        assert_eq!(voice.idle_tooltip(ask), "Start voice · Codex orchestrator");
+
+        voice.codex_ready = Some(true);
+        voice.grok_ready = Some(true);
+        assert_eq!(voice.resolve_provider(ask), Some(ProviderDecision::Menu));
+        assert_eq!(voice.idle_tooltip(ask), "Choose Codex or Grok");
+        assert_eq!(
+            voice.resolve_provider(codex),
+            Some(ProviderDecision::Start(VoiceProvider::Codex))
+        );
+        assert_eq!(
+            voice.resolve_provider(grok),
+            Some(ProviderDecision::Start(VoiceProvider::Grok))
+        );
+        assert_eq!(voice.idle_tooltip(grok), "Start voice · Grok");
+        assert_eq!(
+            voice.idle_tooltip(codex),
+            "Start voice · Codex orchestrator"
+        );
+
+        voice.codex_ready = Some(false);
+        assert_eq!(
+            voice.resolve_provider(codex),
+            Some(ProviderDecision::Start(VoiceProvider::Grok)),
+            "a codex preference falls back when codex is missing"
+        );
+        assert_eq!(
+            voice.resolve_provider(ask),
+            Some(ProviderDecision::Start(VoiceProvider::Grok)),
+            "only grok starts grok"
+        );
+
+        voice.codex_ready = Some(true);
+        voice.grok_ready = None;
+        assert_eq!(
+            voice.resolve_provider(grok),
+            Some(ProviderDecision::Start(VoiceProvider::Codex)),
+            "a grok preference falls back while grok is unchecked"
+        );
+        voice.grok_ready = Some(false);
+        assert_eq!(
+            voice.resolve_provider(grok),
+            Some(ProviderDecision::Start(VoiceProvider::Codex))
+        );
+        assert_eq!(voice.idle_tooltip(ask), "Start voice · Codex orchestrator");
+
+        voice.codex_ready = Some(false);
+        voice.grok_ready = Some(false);
+        assert_eq!(voice.resolve_provider(ask), None);
+    }
+
+    #[test]
+    fn a_press_that_dismisses_the_provider_menu_does_not_reopen_it() {
+        let mut voice = VoiceController::default();
+        assert!(!voice.provider_menu_open());
+        voice.provider_menu.open(());
+        assert!(voice.provider_menu_open());
+        assert!(voice.provider_menu_mounted());
+        // Mouse-down on the trigger, then the card's outside press begins the
+        // close, then the click must leave it closed.
+        voice.note_provider_press();
+        assert!(voice.provider_menu.begin_close());
+        assert!(!voice.provider_menu_open());
+        assert!(voice.provider_menu_mounted());
+        assert!(voice.take_provider_press_was_open());
+        assert!(!voice.provider_menu_open());
+    }
+
+    #[test]
+    fn grok_sign_in_failure_names_grok() {
+        let mut voice = VoiceController::default();
+        voice.reason = Some(VoiceRejection::GrokSignInRequired);
+        assert_eq!(
+            voice.reason_text(),
+            "Sign in to Grok Bot on this computer to use Grok voice."
+        );
     }
 
     #[test]

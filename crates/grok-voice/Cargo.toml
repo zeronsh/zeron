@@ -1,0 +1,25 @@
+[package]
+name = "zeron-grok-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zeron-proto.workspace = true
+zeron-audio.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+base64 = "0.22"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+url = "2"

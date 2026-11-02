@@ -53,6 +53,7 @@
 //! handlers stay transport-agnostic. This includes the workspace file surface,
 //! whose checkout always lives on the routed target device.
 
+mod grok_voice;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2611,6 +2612,9 @@ impl RpcService for EngineRpc {
                 | methods::FORGET_AGENT_ACCOUNT
         ) {
             self.voice.retire();
+        }
+        if grok_voice::handles(method) {
+            return self.grok_voice(method, params).await;
         }
         if voice_remote::handles(method) {
             return self.voice_remote(method, params).await;

@@ -10,6 +10,7 @@ members = [
     "crates/term-link",
     "crates/theme",
     "crates/audio",
+    "crates/grok-voice",
     "crates/proto",
     "crates/preview",
     "crates/doc",
@@ -47,6 +48,7 @@ zeron-term = { path = "crates/term" }
 zeron-term-link = { path = "crates/term-link" }
 zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
+zeron-grok-voice = { path = "crates/grok-voice" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
 zeron-doc = { path = "crates/doc" }

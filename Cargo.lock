@@ -13700,6 +13700,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-grok-voice"
+version = "0.2.129"
+dependencies = [
+ "aes",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "cbc",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "zeron-audio",
+ "zeron-proto",
+]
+
+[[package]]
 name = "zeron-harness"
 version = "0.2.131"
 dependencies = [
@@ -14043,8 +14066,10 @@ dependencies = [
  "zatex",
  "zeron-doc",
  "zeron-engine",
+ "zeron-grok-voice",
  "zeron-harness",
  "zeron-markdown",
+ "zeron-mcp",
  "zeron-notify",
  "zeron-orb",
  "zeron-proto",

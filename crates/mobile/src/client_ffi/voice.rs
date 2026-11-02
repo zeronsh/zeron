@@ -110,6 +110,7 @@ impl From<VoiceRejection> for VoiceEndReason {
             | Unsupported
             | WrongHarness
             | NativeRuntimeUnavailable
+            | GrokSignInRequired
             | AudioFormatUnverified
             | DuplexUnverified => Self::HostIncompatible,
             InvalidLease | StaleGeneration | Overflow | Protocol => Self::ConnectionLost,

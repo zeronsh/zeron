@@ -1,9 +1,10 @@
-//! Each host keeps one voice orchestrator chat: every call on this device
-//! resumes it, so the orchestrator remembers earlier calls. Hosts never share
-//! it — another computer has its own. Once the synced transcript passes
-//! [`ROTATE_AFTER`] entries, the next call moves to a fresh chat that inherits
-//! the Codex thread: memory continues, the transcript starts small again. The
-//! old segment is removed only once its successor holds a message.
+//! Each host keeps one voice orchestrator chat per harness on this device:
+//! every call resumes that harness's chat, so the orchestrator remembers
+//! earlier calls. Hosts never share it — another computer has its own. Once
+//! the synced transcript passes [`ROTATE_AFTER`] entries, the next call moves
+//! to a fresh chat that inherits that harness's thread: memory continues, the
+//! transcript starts small again. The old segment is removed only once its
+//! successor holds a message.
 use super::*;
 use zeron_proto::voice::{ORCHESTRATOR_CHAT_PREFIX, ORCHESTRATOR_CHAT_TITLE, VoiceRejection};
 use zeron_proto::{Chat, SessionStatus};
@@ -11,12 +12,19 @@ use zeron_proto::{Chat, SessionStatus};
 /// Transcript entries after which the next call starts a new segment.
 pub(super) const ROTATE_AFTER: usize = 1000;
 
-/// This device's current orchestrator chat: its newest one, if any.
-fn current<'a>(chats: &'a [Chat], device: &str) -> Option<&'a Chat> {
+/// This device's current orchestrator chat for one harness: its newest one, if any.
+fn current<'a>(
+    chats: &'a [Chat],
+    device: &str,
+    harness: zeron_proto::HarnessId,
+) -> Option<&'a Chat> {
     chats
         .iter()
         .filter(|c| {
-            zeron_proto::voice::is_orchestrator_chat(&c.id) && c.device_id == device && !c.archived
+            zeron_proto::voice::is_orchestrator_chat(&c.id)
+                && c.device_id == device
+                && !c.archived
+                && c.config.as_ref().is_some_and(|cfg| cfg.harness == harness)
         })
         .max_by_key(|c| c.created_at)
 }
@@ -31,7 +39,7 @@ impl EngineRpc {
             .workspace
             .read_chats()
             .map_err(|_| VoiceRejection::Protocol)?;
-        let chat = current(&chats, &device).cloned();
+        let chat = current(&chats, &device, config.harness).cloned();
         let Some(chat) = chat else {
             return self.new_voice_chat(config, None);
         };
@@ -214,6 +222,30 @@ mod tests {
         assert_eq!(rpc.voice_chat(config("b")).await.unwrap(), retry);
         assert!(core.workspace.chat(&first).unwrap().is_none());
         assert!(core.workspace.chat(&foreign).unwrap().is_some());
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn grok_and_codex_keep_separate_orchestrator_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Codex,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let codex = config("a");
+        let grok: ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "grok", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+        let codex_id = rpc.voice_chat(codex.clone()).await.unwrap();
+        let grok_id = rpc.voice_chat(grok.clone()).await.unwrap();
+        assert_ne!(codex_id, grok_id);
+        assert_eq!(rpc.voice_chat(codex).await.unwrap(), codex_id);
+        assert_eq!(rpc.voice_chat(grok).await.unwrap(), grok_id);
         core.sessions.shutdown().await;
     }
 }

@@ -93,6 +93,7 @@ pub fn rejection(error: zeron_rpc::RpcError) -> VoiceRejection {
     for reason in [
         VoiceRejection::Disabled,
         VoiceRejection::NativeRuntimeUnavailable,
+        VoiceRejection::GrokSignInRequired,
         VoiceRejection::ChatgptRequired,
         VoiceRejection::Busy,
         VoiceRejection::InvalidLease,
