@@ -220,6 +220,8 @@ icon_assets![
     // plus/return ports) — outline for the favorite affordance, bold for the
     // favorited state and the picker's favorites rail tab.
     (STAR, "star"),
+    // Hand-drawn paw in the same Solar Linear style (Settings → Pets).
+    (PAW, "paw"),
     (STAR_BOLD, "star-bold"),
     (ZERON_LOGO, "zeron-logo"),
     // Harness brand marks (icons.tsx).
@@ -237,6 +239,8 @@ icon_assets![
     (GITHUB_MARK, "github-mark"),
     // Settings → Billing (drawn to the Solar linear set's 1.5 stroke).
     (WALLET, "wallet"),
+    // The sidebar's Usage button (three bars, Solar linear stroke).
+    (CHART_BARS, "chart-bars"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Muse Code's mark (Meta's infinity), tinted its brand blue at call sites.
     (MUSE_MARK, "muse-mark"),

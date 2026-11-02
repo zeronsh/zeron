@@ -203,6 +203,44 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## BetterGravity desktop pets
+
+`crates/ui/src/pets.rs` ports the desktop-pet behaviour (sprite-sheet layout,
+animation timings and status-to-mood mapping) from BetterGravity
+(https://github.com/YashjitPal/BetterGravity), revision `7229c6e20af812a7df26b38207275031323331a7`,
+`community/plugins/pets/`. `crates/ui/assets/pets/rocky.webp` is that
+project's bundled Rocky sprite sheet, copied unmodified.
+
+```text
+MIT License
+
+Copyright (c) 2026 BetterGravity Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+BetterGravity is an unofficial community project. It is not affiliated with,
+endorsed by, or sponsored by Google. "Antigravity" is a product of Google, and
+this project distributes none of its files.
+```
+
 ## Codex native voice protocol
 
 The bounded helper control protocol and native runtime environment in

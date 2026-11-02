@@ -72,6 +72,9 @@ const RELAY_PROBE_INTERVAL_MS: u64 = 30_000;
 const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Debounce window for local snapshot saves after a change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// Top-level chats a project keeps active: starting a new chat beyond this
+/// archives (never deletes) the project's least recently active ones.
+pub const AUTO_ARCHIVE_KEEP_ACTIVE: usize = 20;
 
 /// Initial-join retry backoff (base, cap). A first registry-room join that
 /// fails must not strand the device offline until an app restart — retry until
@@ -928,16 +931,41 @@ impl WorkspaceHost {
 
     /// Sidebar freshness on message persist: preview = first 120 chars of the last
     /// message's text. Claims the row first so a pre-workspace chat gains one.
+    ///
+    /// The chat's FIRST real message (no `lastMessageAt` yet) is also the
+    /// moment a new chat starts in its project: the auto-archive sweep runs in
+    /// the same registry critical section as the stamp (see
+    /// `archive_project_overflow`). An opened-but-unsent composer or a bare
+    /// `createChat` never reaches here, and later messages of an existing chat
+    /// skip the sweep.
     pub fn note_message(&self, chat_id: &str, text: &str) {
         // Annotation tokens carry their element as hex; previews read the label.
         let text = zeron_proto::annotation::annotation_display(text);
         let preview: String = text.chars().take(120).collect();
         let result = self.claim_chat(chat_id, None).and_then(|_| {
-            self.mutate(|doc| doc.set_chat_last_message(chat_id, &preview, Utc::now()))
-                .map_err(EngineError::from)
+            self.mutate(|doc| -> Result<Vec<String>, EngineError> {
+                let first_message = doc
+                    .chat(chat_id)?
+                    .is_some_and(|chat| chat.last_message_at.is_none());
+                doc.set_chat_last_message(chat_id, &preview, Utc::now())?;
+                if !first_message {
+                    return Ok(Vec::new());
+                }
+                archive_project_overflow(doc, chat_id, Utc::now())
+            })
         });
-        if let Err(err) = result {
-            tracing::warn!(chat = %chat_id, error = %err, "registry last-message write failed");
+        match result {
+            Ok(archived) if !archived.is_empty() => {
+                tracing::info!(
+                    chat = %chat_id,
+                    archived = ?archived,
+                    "auto-archived the project's oldest chats"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "registry last-message write failed");
+            }
         }
     }
 
@@ -1691,6 +1719,94 @@ pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
         return None;
     }
     Some(dot_git.parent()?.to_string_lossy().into_owned())
+}
+
+/// Auto-archive sweep for `trigger_chat_id`'s project: keep at most
+/// [`AUTO_ARCHIVE_KEEP_ACTIVE`] unarchived top-level chats, archiving the
+/// oldest by last activity (`lastMessageAt`, `createdAt` fallback — the
+/// sidebar's own order). Returns the archived ids, oldest first.
+///
+/// Runs under the registry lock in the same critical section that stamps the
+/// trigger's first message, so concurrent first sends serialize: each sees the
+/// previous one's archives and none over-archives.
+///
+/// Scope: the project is [`zeron_proto::view::project_key`] — every space
+/// (clone, worktree, any device) of one repository. Projectless chats (no or
+/// dangling space) and side chats never trigger, count, or get archived.
+/// Exempt (still counted, never archived): the trigger itself, pinned chats,
+/// and chats whose session is live (`Working`/`AwaitingInput`, staleness-gated
+/// like the sidebar dot — a crashed engine's eternal "Working" is not live).
+fn archive_project_overflow(
+    doc: &mut RegistryDoc,
+    trigger_chat_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<String>, EngineError> {
+    use zeron_proto::view::{Indicator, effective_indicator, project_key};
+
+    let Some(trigger) = doc.chat(trigger_chat_id)? else {
+        return Ok(Vec::new());
+    };
+    if !trigger.is_top_level() || trigger.archived {
+        return Ok(Vec::new());
+    }
+    let spaces = doc.read_spaces()?;
+    let project_of = |space_id: Option<&str>| -> Option<String> {
+        let space_id = space_id?;
+        spaces
+            .iter()
+            .find(|space| space.id == space_id)
+            .map(project_key)
+    };
+    let Some(project) = project_of(trigger.space_id.as_deref()) else {
+        return Ok(Vec::new()); // projectless
+    };
+
+    let mut active: Vec<Chat> = doc
+        .read_chats()?
+        .into_iter()
+        .filter(|chat| {
+            !chat.archived
+                && chat.is_top_level()
+                && project_of(chat.space_id.as_deref()).as_deref() == Some(project.as_str())
+        })
+        .collect();
+    if active.len() <= AUTO_ARCHIVE_KEEP_ACTIVE {
+        return Ok(Vec::new());
+    }
+
+    let pinned: std::collections::HashSet<String> = doc
+        .sidebar_preferences()
+        .map(|prefs| prefs.pinned_session_ids.into_iter().collect())
+        .unwrap_or_default();
+    let live: std::collections::HashSet<String> = doc
+        .read_sessions()?
+        .into_iter()
+        .filter(|session| {
+            matches!(
+                effective_indicator(Some(session), now),
+                Indicator::Working | Indicator::AwaitingInput
+            )
+        })
+        .map(|session| session.chat_id)
+        .collect();
+
+    // Newest first; the oldest are at the tail.
+    zeron_proto::view::sort_chats(&mut active);
+    let mut excess = active.len() - AUTO_ARCHIVE_KEEP_ACTIVE;
+    let mut archived = Vec::new();
+    for chat in active.iter().rev() {
+        if excess == 0 {
+            break;
+        }
+        if chat.id == trigger.id || pinned.contains(&chat.id) || live.contains(&chat.id) {
+            continue;
+        }
+        if doc.set_chat_archived(&chat.id, true)? {
+            archived.push(chat.id.clone());
+            excess -= 1;
+        }
+    }
+    Ok(archived)
 }
 
 /// Local live statuses win for this device's chats; every other device's rows come

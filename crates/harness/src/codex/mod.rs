@@ -156,6 +156,11 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
         (key("command"), mcp.command.clone().into()),
         (key("args"), json!(mcp.args)),
         (key("env"), json!(mcp.env)),
+        // Codex defaults (10 s startup, 60 s per call) are too tight for the
+        // bridge: it warms the computer-use driver before answering, and
+        // `wait_for_turn` / long computer actions run for minutes.
+        (key("startup_timeout_sec"), json!(30)),
+        (key("tool_timeout_sec"), json!(660)),
         // Our injected server's tools are Zeron's own: approve them in every
         // access mode, so Codex neither rejects a call under `never` nor
         // asks about one under the others.
@@ -3383,6 +3388,8 @@ mod mcp_injection_tests {
             codex_mcp_overrides(&mcp).into_iter().collect();
         assert_eq!(overrides["mcp_servers.zeron.command"], "/opt/zeron/zeron");
         assert_eq!(overrides["mcp_servers.zeron.args"], json!(["mcp"]));
+        assert_eq!(overrides["mcp_servers.zeron.startup_timeout_sec"], json!(30));
+        assert_eq!(overrides["mcp_servers.zeron.tool_timeout_sec"], json!(660));
         assert_eq!(
             overrides["mcp_servers.zeron.env"],
             json!({ "ZERON_CHAT_ID": "chat-1" })

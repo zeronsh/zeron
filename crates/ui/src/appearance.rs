@@ -104,6 +104,7 @@ pub fn init(
     });
     sync_ns_appearance(mode);
     let appearance = resolve(mode, system);
+    let surface = effective(surface, cx);
     Theme::install_selection(
         appearance,
         themes.variant_id(model_appearance(appearance)),
@@ -137,6 +138,20 @@ pub fn surface(cx: &App) -> SurfacePreference {
     cx.try_global::<AppearanceState>()
         .map(|state| state.surface)
         .unwrap_or_default()
+}
+
+/// The surface actually painted: energy saver paints opaque (no backdrop blur,
+/// no window vibrancy) without touching the stored preference.
+pub fn effective_surface(cx: &App) -> SurfacePreference {
+    effective(surface(cx), cx)
+}
+
+fn effective(surface: SurfacePreference, cx: &App) -> SurfacePreference {
+    if crate::energy::active(cx) {
+        SurfacePreference::Opaque
+    } else {
+        surface
+    }
 }
 
 /// Change the user's preference, repaint if that changed the palette, and write
@@ -255,6 +270,7 @@ pub fn apply(cx: &mut App) {
     let accent = state.accent;
     let surface = state.surface;
     let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
+    let surface = effective(surface, cx);
     let changed = !cx.try_global::<Theme>().is_some_and(|theme| {
         theme.appearance == wanted
             && theme.variant_id.as_ref() == variant_id
@@ -288,6 +304,7 @@ pub fn apply_registry_change(cx: &mut App) {
     let accent = state.accent;
     let surface = state.surface;
     let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
+    let surface = effective(surface, cx);
     Theme::reinstall_selection(wanted, &variant_id, accent, surface, cx);
     cx.refresh_windows();
     reapply_window_background(cx);
@@ -355,6 +372,10 @@ fn apply_window_background(cx: &mut App) {
         return;
     };
     for window in cx.windows() {
+        // The desktop pet stays transparent under every theme.
+        if window.downcast::<crate::pets::PetWindow>().is_some() {
+            continue;
+        }
         if let Err(error) = window.update(cx, |_, window, _| {
             window.set_background_appearance(wanted);
         }) {

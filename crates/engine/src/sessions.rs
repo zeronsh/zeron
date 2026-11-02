@@ -2242,7 +2242,7 @@ impl Inner {
     /// subagents, so all delegation goes through this server.
     fn zeron_mcp(&self, chat_id: &str, side_chats_only: bool) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
-        if port == 0 {
+        if port == 0 || !zeron_proto::mcp_settings::server_enabled(None) {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
@@ -2258,6 +2258,10 @@ impl Inner {
                 zeron_proto::McpServer::SIDE_CHATS_ONLY_ENV.to_owned(),
                 "1".to_owned(),
             );
+        }
+        // The bridge reads the computer-use toggle from the data dir.
+        if let Ok(dir) = std::env::var("ZERON_DATA_DIR") {
+            env.insert("ZERON_DATA_DIR".to_owned(), dir);
         }
         if let Some(path) = lock(&self.ipc_token_file)
             .as_ref()

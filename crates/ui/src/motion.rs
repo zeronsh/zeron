@@ -162,14 +162,18 @@ pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
 
 fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPulse {
     let subtle = cx.reduce_motion();
+    // Energy saver keeps the subtle pulse (a running agent must stay visible)
+    // on the slowed clock; explicit On and background pause still hold it.
     let animate = !subtle
         || cx.try_global::<MotionState>().is_some_and(|state| {
-            state.preference == ReduceMotion::System
-                && state.system
+            (state.energy_saver || (state.preference == ReduceMotion::System && state.system))
+                && state.preference != ReduceMotion::On
                 && !(state.pause_in_background && !state.active)
         });
     let phase = if animate {
-        schedule_pulse_every(view, if subtle { 2 } else { stride }, cx);
+        // The slowed energy saver clock already ticks at ~7.5 Hz.
+        let subtle_stride = if energy_saver(cx) { 1 } else { 2 };
+        schedule_pulse_every(view, if subtle { subtle_stride } else { stride }, cx);
         pulse_phase(if subtle { &ZERON_PULSE } else { &GRADIENT_SPIN }, cx)
     } else {
         0.0
@@ -241,7 +245,16 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
                 #[cfg(not(windows))]
                 let precise_tick = false;
                 if !precise_tick {
-                    cx.background_executor().timer(PULSE_TICK).await;
+                    // Energy saver: only the subtle activity pulse runs, so a
+                    // quarter of the wakeups is visually the same.
+                    let tick = cx.update(|cx| {
+                        if energy_saver(cx) {
+                            PULSE_TICK * ENERGY_SAVER_TICK_STRIDE
+                        } else {
+                            PULSE_TICK
+                        }
+                    });
+                    cx.background_executor().timer(tick).await;
                 }
                 let parked = cx.update(|cx| {
                     let clock = cx.default_global::<PulseClock>();
@@ -1184,6 +1197,54 @@ struct MotionState {
     pause_in_background: bool,
     system: bool,
     active: bool,
+    /// [`crate::energy`] is saving: interface motion rests like reduced motion.
+    energy_saver: bool,
+}
+
+/// Pulse clock period multiplier while energy saver is active (33 ms → 132 ms).
+const ENERGY_SAVER_TICK_STRIDE: u32 = 4;
+
+/// Energy saver is active (as last pushed by [`crate::energy`]).
+pub fn energy_saver(cx: &App) -> bool {
+    cx.try_global::<MotionState>()
+        .is_some_and(|state| state.energy_saver)
+}
+
+/// Whether a video wallpaper should hold its current frame: reduced motion,
+/// or energy saver while the main window is not focused (a wallpaper behind
+/// another app is not worth decoding on battery).
+pub fn video_held(cx: &App) -> bool {
+    reduced_motion_ignoring_energy(cx)
+        || cx
+            .try_global::<MotionState>()
+            .is_some_and(|state| state.energy_saver && !state.active)
+}
+
+/// Reduced motion the user or OS asked for, ignoring energy saver. Video
+/// wallpapers use this: energy saver slows them down rather than stopping them.
+pub fn reduced_motion_ignoring_energy(cx: &App) -> bool {
+    cx.try_global::<MotionState>().map_or_else(
+        || cx.reduce_motion(),
+        |state| {
+            resolve(
+                state.preference,
+                state.system,
+                state.pause_in_background,
+                state.active,
+            )
+        },
+    )
+}
+
+pub fn set_energy_saver(active: bool, cx: &mut App) {
+    let Some(state) = state_mut(cx) else {
+        return;
+    };
+    if state.energy_saver == active {
+        return;
+    }
+    state.energy_saver = active;
+    apply(cx);
 }
 
 impl Global for MotionState {}
@@ -1216,6 +1277,7 @@ pub fn init(preference: ReduceMotion, pause_in_background: bool, cx: &mut App) {
         pause_in_background,
         system: false,
         active: true,
+        energy_saver: crate::energy::active(cx),
     });
     refresh_system(cx);
     apply(cx);
@@ -1278,6 +1340,7 @@ pub fn window_activation_changed(active: bool, cx: &mut App) {
     }
     if active {
         refresh_system(cx);
+        crate::energy::refresh(cx);
     }
     set_window_active(active, cx);
 }
@@ -1286,8 +1349,14 @@ fn set_window_active(active: bool, cx: &mut App) {
     let Some(state) = state_mut(cx) else {
         return;
     };
+    let held_by_saver = state.energy_saver && state.active != active;
     state.active = active;
     apply(cx);
+    // Under energy saver the global flag does not flip on focus changes, so
+    // gpui would not repaint; a held or resumed video wallpaper needs one.
+    if held_by_saver {
+        cx.refresh_windows();
+    }
 }
 
 fn set_system(system: bool, cx: &mut App) {
@@ -1302,12 +1371,13 @@ fn apply(cx: &mut App) {
     let Some(state) = cx.try_global::<MotionState>() else {
         return;
     };
-    let reduced = resolve(
-        state.preference,
-        state.system,
-        state.pause_in_background,
-        state.active,
-    );
+    let reduced = state.energy_saver
+        || resolve(
+            state.preference,
+            state.system,
+            state.pause_in_background,
+            state.active,
+        );
     // gpui refreshes every window only when the flag actually flips.
     set_reduced_motion(cx, reduced);
 }
@@ -1431,6 +1501,7 @@ mod tests {
                     pause_in_background,
                     system,
                     active,
+                    energy_saver: false,
                 });
                 apply(cx);
                 let view = cx.new(|_| ());
@@ -1491,6 +1562,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                energy_saver: false,
             });
             apply(cx);
         });
@@ -1529,6 +1601,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                energy_saver: false,
             });
             apply(cx);
             assert!(reduced_motion(cx));
@@ -1907,6 +1980,26 @@ mod tests {
         assert!(mid_rise > 0.1 && mid_rise < 1.0, "eases up");
     }
 
+    #[gpui::test]
+    fn energy_saver_rests_ui_but_keeps_video_while_focused(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init(ReduceMotion::Off, false, cx);
+            assert!(!reduced_motion(cx));
+            set_energy_saver(true, cx);
+            assert!(reduced_motion(cx), "interface motion rests");
+            assert!(energy_saver(cx));
+            assert!(!video_held(cx), "the focused wallpaper keeps playing");
+            set_window_active(false, cx);
+            assert!(video_held(cx), "an unfocused wallpaper holds still");
+            set_window_active(true, cx);
+            assert!(!video_held(cx));
+            set_energy_saver(false, cx);
+            assert!(!reduced_motion(cx), "motion returns with the saver off");
+            set_preference(ReduceMotion::On, cx);
+            assert!(video_held(cx), "explicit reduced motion still stops video");
+        });
+    }
+
     #[test]
     fn reduce_motion_follows_system_unless_pinned() {
         use ReduceMotion::*;
@@ -1933,6 +2026,7 @@ mod tests {
                 pause_in_background: false,
                 system: true,
                 active: true,
+                energy_saver: false,
             });
             apply(cx);
             assert!(!reduced_motion(cx), "Off ignores the system");

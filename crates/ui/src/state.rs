@@ -3589,6 +3589,20 @@ impl AppState {
                 .is_some_and(|id| !self.pending_sends.contains_key(id))
     }
 
+    /// An agent on THIS device is mid-turn (a live, non-stale
+    /// `Working` session). Drives keep-awake: waiting on a person, or work
+    /// on another machine, is no reason to keep this Mac up.
+    pub(crate) fn local_work_running(&self, now: DateTime<Utc>) -> bool {
+        let Some(local) = self.local_device_id.as_deref() else {
+            return false;
+        };
+        self.sessions.iter().any(|session| {
+            session.device_id == local
+                && session.activity_status() == zeron_proto::SessionStatus::Working
+                && !zeron_proto::view::session_stale(session, now)
+        })
+    }
+
     /// A turn is streaming in this chat, or parked on a question it is still
     /// owed an answer to. Only the status row decides: a persistent session
     /// parked between turns reports idle.

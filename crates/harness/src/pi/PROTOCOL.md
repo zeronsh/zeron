@@ -3,6 +3,26 @@ Pi RPC compatibility contract
 The native driver targets Pi >= 0.85.1. Requests and events are JSONL, never
 JSON-RPC. Responses and lifecycle events must retain stdout order.
 
+Frame sizes are not bounded by Pi. One frame repeats what the driver already
+has or never reads, so stdout is filtered while it streams:
+
+- `agent_end` and `turn_end` are dropped unread by their leading `type`.
+  `tool_execution_update` is retained: extensions stream progress through it.
+- Any JSON string over 1 MiB is truncated in place to a valid JSON string with
+  a `[N bytes omitted by Zeron]` marker. The driver reads at most 64 KiB of a
+  diff and 16 KiB of tool output.
+- Any `data` string over 4 KiB becomes a marker the same way. Incoming image
+  bytes arrive only under `data`, and the driver never reads them: images reach
+  the UI by path, not by base64. This bounds a result carrying many
+  screenshots no matter how the images were encoded.
+- Any `details` value over 64 KiB becomes `null`. `details` is renderer state
+  the driver never reads, and extension tools can store whole child
+  transcripts there, screenshots included, so one result can carry hundreds
+  of MB.
+
+What remains over 32 MiB is a protocol failure naming the frame type. Pi's own
+session file keeps the untouched frames.
+
 `prompt` success acknowledges preflight. Normal runs finish at `agent_settled`,
 not `agent_end`; a final error message determines the terminal status after
 retries. Extension commands and input handlers may acknowledge without a run.

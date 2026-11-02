@@ -16,5 +16,6 @@ edge/public/
 .claude
 CLAUDE.md
 /scripts/**/__pycache__/
+/vendor/cua-driver/
 .dev.vars
 .dev.vars.*

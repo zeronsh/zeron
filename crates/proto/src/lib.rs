@@ -14,6 +14,7 @@ pub mod entities;
 pub mod annotation;
 pub mod file_mentions;
 pub mod invocation;
+pub mod mcp_settings;
 pub mod motion;
 pub mod plan_usage;
 pub mod preview;
