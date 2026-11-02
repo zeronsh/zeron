@@ -161,6 +161,8 @@ zip = { version = "7.2", default-features = false, features = ["deflate-flate2-z
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"
+# libghostty-vt, built from Ghostty's source with Zig 0.16 (on PATH, or ZIG=<path>).
+ghostty-vt = { version = "=0.7.0", default-features = false }
 pulldown-cmark = "0.12"
 unicode-segmentation = "1"
 unicode-width = "0.2"
