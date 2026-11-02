@@ -496,6 +496,12 @@ const SCAFFOLD_OBSERVATION_RETRIES: usize = 5;
 /// One-second polls for the attached host's row and presence.
 const SCAFFOLD_HOST_ONLINE_POLLS: usize = 180;
 
+/// A recovered command releases its entry only once observation settles it;
+/// an unknown outcome, or a reply for another command, keeps it.
+fn recovered_scaffold_command_settled(outcome: &crate::settings::crew::Outcome, command_id: &str) -> bool {
+    outcome.command_id == command_id && matches!(outcome.status.as_str(), "confirmed" | "rejected")
+}
+
 /// A prompt submitted into a Scaffold session whose sandbox is still starting.
 /// It is the only copy: the session's provisional echo shows the same text.
 struct ScaffoldLaunch {
@@ -9380,13 +9386,33 @@ impl Composer {
                 let status: crate::settings::crew::CrewStatus = serde_json::from_value(engine.client().call("crew.status", serde_json::json!({})).await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                 if status.role != "local_controller" { return Err("Scaffold provisioning requires your Crew controller.".to_string()); }
                 let recovery_key = serde_json::json!([status.principal_id, status.scope]).to_string();
+                // An entry left by an earlier composer or app run: observe it here
+                // instead of sending the user to Sandboxes. Observation never
+                // replays; only a settled outcome releases it, as Sandboxes does.
+                let recovered = this.update(cx, |composer, cx| {
+                    composer.scaffold_command.is_none()
+                        .then(|| crate::settings::current(cx).crew_recovery_commands.get(&recovery_key).cloned())
+                        .flatten()
+                }).map_err(|e| e.to_string())?;
+                if let Some(id) = recovered {
+                    let outcome = attachments::call_with_timeout(&engine, cx.background_executor(), "scaffold.reconcile",
+                        serde_json::json!({"commandId": id}), std::time::Duration::from_secs(120)).await
+                        .ok().and_then(|value| serde_json::from_value::<crate::settings::crew::Outcome>(value).ok());
+                    if outcome.is_some_and(|outcome| recovered_scaffold_command_settled(&outcome, &id)) {
+                        this.update(cx, |_, cx| crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                            if settings.crew_recovery_commands.get(&recovery_key) == Some(&id) {
+                                settings.crew_recovery_commands.remove(&recovery_key);
+                            }
+                        })).map_err(|e| e.to_string())?;
+                    }
+                }
                 let (mut command_id, mut control) = this.update(cx, |composer, cx| {
                     if let Some(command_id) = &composer.scaffold_command {
                         if composer.scaffold_recovery_key.as_ref() != Some(&recovery_key) { return Err("Crew account or deployment changed; reconcile the original command first.".to_string()); }
                         return Ok((command_id.clone(), None));
                     }
                     if crate::settings::current(cx).crew_recovery_commands.contains_key(&recovery_key) {
-                        return Err("A previous Crew operation needs reconciliation in Sandboxes. Your draft is preserved; no new sandbox was created.".to_string());
+                        return Err("A previous Crew operation is still unresolved. Open Settings → Sandboxes and choose Check status. Your draft is preserved; no new sandbox was created.".to_string());
                     }
                     let command_id = format!("{}:create", uuid::Uuid::new_v4());
                     let mut scope = status.scope.clone();
@@ -13727,6 +13753,17 @@ mod tests {
             chat_id: "session".into(), message_id: "provisional".into(), text: "keep my prompt".into(),
             attachments: vec![attachments::stage_png_bytes("draft.png".into(), Vec::new())], attachment_draft: None,
         }
+    }
+
+    #[test]
+    fn only_a_settled_recovered_scaffold_command_releases_its_entry() {
+        let outcome = |id: &str, status: &str| crate::settings::crew::Outcome {
+            command_id: id.into(), status: status.into(), result: None, error: None,
+        };
+        assert!(recovered_scaffold_command_settled(&outcome("one:create:attach", "rejected"), "one:create:attach"));
+        assert!(recovered_scaffold_command_settled(&outcome("one:create:attach", "confirmed"), "one:create:attach"));
+        assert!(!recovered_scaffold_command_settled(&outcome("one:create:attach", "unknown"), "one:create:attach"));
+        assert!(!recovered_scaffold_command_settled(&outcome("other:create", "rejected"), "one:create:attach"));
     }
 
     #[gpui::test]
