@@ -2333,6 +2333,8 @@ pub struct Shell {
     harness_update_geometry: [Option<WidthTween>; 2],
     harness_update_scroll: settings::widgets::PageScroll,
     user_menu: popover::Popup<()>,
+    /// Plan-usage cards above the footer row.
+    sidebar_usage: Entity<crate::sidebar_usage::SidebarUsage>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Repaints the update strip and dialog as the app-level update
@@ -2543,6 +2545,7 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let sidebar_usage = cx.new(|cx| crate::sidebar_usage::SidebarUsage::new(state.clone(), cx));
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -2868,6 +2871,7 @@ impl Shell {
             harness_update_geometry: [None; 2],
             harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
+            sidebar_usage,
             sidebar_notice: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx)
                 .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
@@ -10257,6 +10261,9 @@ impl Shell {
             // update strip — both above the user menu, below the lists.
             .when_some(github_star_banner, |el, banner| el.child(banner))
             .when_some(update_strip, |el, strip| el.child(strip))
+            .when(self.settings.sidebar_show_usage_cards, |sidebar| {
+                sidebar.child(self.sidebar_usage.clone())
+            })
             .child(
                 div()
                     .p(px(Theme::SPACE_SM))
