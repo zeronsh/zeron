@@ -1,0 +1,1 @@
+{"type":"control_response","response":{"subtype":"success","request_id":"probe","response":{"commands":[],"models":[{"value":"haiku","displayName":"Replay Haiku","description":"Deterministic replay"}],"account":null,"output_style":"default","available_output_styles":["default"]}}}

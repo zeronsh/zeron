@@ -1,0 +1,426 @@
+[
+  {
+    "contextUsage": null,
+    "historyPending": true,
+    "replayBaseline": {
+      "entries": {}
+    },
+    "reset": []
+  },
+  {
+    "contextUsage": null,
+    "replayBaseline": {
+      "entries": {}
+    },
+    "reset": []
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 1,
+    "remove": [],
+    "upsert": [
+      {
+        "after": null,
+        "entry": {
+          "createdAt": 1793408375393,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "16000000-0000-4000-8000-000000000003",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "test mock"
+            }
+          ],
+          "role": "user",
+          "status": "complete"
+        }
+      }
+    ]
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n"
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 136,
+        "part": "t0",
+        "text": "1. **Doc command** — the composer queues a durable `run` entry\n2. **Ho"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 208,
+        "part": "t0",
+        "text": "st executor** — the chat's host device marks it processed, then dispat"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 280,
+        "part": "t0",
+        "text": "ches\n3. **Fold** — events fold into parts and diff into the Loro doc e"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 292,
+        "part": "t0",
+        "text": "very 120ms\n\n"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": false
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "call": {
+                "command": "git log -5 --oneline --decorate && git merge-base HEAD origin/main",
+                "kind": "exec"
+              },
+              "id": "mock-tool-2",
+              "isError": false,
+              "kind": "tool",
+              "resolved": false
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "call": {
+                "command": "git log -5 --oneline --decorate && git merge-base HEAD origin/main",
+                "kind": "exec"
+              },
+              "id": "mock-tool-2",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "call": {
+                "command": "git log -5 --oneline --decorate && git merge-base HEAD origin/main",
+                "kind": "exec"
+              },
+              "id": "mock-tool-2",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "id": "t3",
+              "kind": "text",
+              "text": "The `SegmentWriter` appends into `LoroText` so the oplog stays RLE-mer"
+            }
+          ],
+          "role": "assistant",
+          "status": "streaming"
+        }
+      }
+    ]
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 140,
+        "part": "t3",
+        "text": "ged:\n\n```rust\nfolded = fold_event_into_parts(&folded, &event);\nwriter."
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 210,
+        "part": "t3",
+        "text": "sync(&folded)?; // 120ms coalesced commits\n```\n\nSynced to every device"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [
+      {
+        "entry": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+        "len": 265,
+        "part": "t3",
+        "text": " through the session room. *Mock harness reporting in.*"
+      }
+    ],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": []
+  },
+  {
+    "append": [],
+    "contextUsage": null,
+    "count": 2,
+    "remove": [],
+    "upsert": [
+      {
+        "after": "16000000-0000-4000-8000-000000000003",
+        "entry": {
+          "createdAt": 1793408375397,
+          "deviceId": "01c322ac-39fc-4c3a-9f2b-0cde4686e5d7",
+          "durationMs": 2116,
+          "id": "0e5e4585-06e1-4810-992b-6d2e9793c0b6",
+          "parts": [
+            {
+              "id": "t0",
+              "kind": "text",
+              "text": "## Streaming pipeline\n\nEvery turn flows through the same path:\n\n1. **Doc command** — the composer queues a durable `run` entry\n2. **Host executor** — the chat's host device marks it processed, then dispatches\n3. **Fold** — events fold into parts and diff into the Loro doc every 120ms\n\n"
+            },
+            {
+              "call": {
+                "command": "cargo test --workspace",
+                "kind": "exec"
+              },
+              "id": "mock-tool-1",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "call": {
+                "command": "git log -5 --oneline --decorate && git merge-base HEAD origin/main",
+                "kind": "exec"
+              },
+              "id": "mock-tool-2",
+              "isError": false,
+              "kind": "tool",
+              "resolved": true
+            },
+            {
+              "id": "t3",
+              "kind": "text",
+              "text": "The `SegmentWriter` appends into `LoroText` so the oplog stays RLE-merged:\n\n```rust\nfolded = fold_event_into_parts(&folded, &event);\nwriter.sync(&folded)?; // 120ms coalesced commits\n```\n\nSynced to every device through the session room. *Mock harness reporting in.*"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete"
+        }
+      }
+    ]
+  }
+]

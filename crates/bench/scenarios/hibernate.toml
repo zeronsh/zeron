@@ -1,0 +1,22 @@
+# S-hibernate: parked ballast sessions, then the idle reaper or HibernateIdle (bench.md 3.4).
+# mode=real (seeded Claude JSONL, zero tokens) is specified and not wired. Acceptance is ballast.
+# Quick does not shrink N: the idle window is the point of the scenario.
+[defaults]
+mode = "ballast"
+chats = 6              # target chats that are allowed to hibernate or be reaped
+warm_chats = 2         # kept awake with a short turn; the t_warm control
+ballast_mib = 300      # zb-replay resident ballast per session
+children = "2:250"     # n:MiB ballast children per session (the MCP fleet stand-in)
+idle_ms = 20000        # ZERON_SESSION_IDLE_MS, set the same on both revisions
+warm_every_ms = 10000  # warm-chat keepalive; must stay under idle_ms
+grace_ms = 8000        # extra wait after idle_ms for the reaper to tear the child down
+startup_ms = 0         # ZB_REPLAY_STARTUP_MS (no calibration file)
+resume_ms_per_mb = 0   # ZB_REPLAY_RESUME_MS_PER_MB
+ballast_wait_ms = 45000
+resume_wait_ms = 60000
+
+[tier.quick]
+
+[tier.standard]
+
+[tier.full]

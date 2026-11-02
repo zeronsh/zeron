@@ -1,0 +1,589 @@
+//! `zeron-bench` — isolated engine launcher.
+//!
+//! `launch` builds a trial under `ZB_ROOT` (or `--zb-root`) and starts the
+//! engine with [`zeron_bench::engine_env`], which does not inherit this
+//! process's environment. `doctor` reports whether a user scope, smaps, perf,
+//! and RAPL are usable, and whether a live engine was detected (read-only).
+//!
+//! `exec-counted` is the argv shape the scope uses to start the engine. It
+//! forks, counts user-space instructions and cycles (and task-clock) for the
+//! command, forwards signals, and writes `perf.json` when the trial path or
+//! `ZB_PERF_JSON` says where. The command's environment is left unchanged.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "zeron-bench",
+    about = "Isolated launcher and A/B harness for the Zeron engine"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start an engine in an isolated trial, hold it, then stop it.
+    Launch {
+        /// Engine executable (`zeron-engine`).
+        #[arg(long)]
+        engine: PathBuf,
+        /// Seconds to leave the engine running after it is ready. Zero is allowed.
+        #[arg(long)]
+        hold: u64,
+        /// Bench root. Defaults to `ZB_ROOT` or `~/Documents/dev/tmp/zeron-perf`.
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+    },
+    /// Create a credential-free synthetic Claude MCP fixture.
+    McpSetup,
+    /// Generate fixtures.
+    Fixture {
+        #[command(subcommand)]
+        command: FixtureCommand,
+    },
+    /// Report scope, smaps, perf, RAPL, and the live engine.
+    Doctor,
+    /// Run `command` under user-space perf counters. Does not change its environment.
+    ExecCounted {
+        /// Command and arguments. A leading `--` is ignored.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        command: Vec<OsString>,
+    },
+    /// Build `zeron-engine` for a git revision into `bins/<sha12>/`, reusing a matching sha256.
+    Build {
+        /// Git revision (`upstream/main`, a branch, or a commit).
+        rev: String,
+        /// Bench root. Defaults to `ZB_ROOT` or `~/Documents/dev/tmp/zeron-perf`.
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        /// Git worktree used to resolve the revision. Defaults to the current checkout.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Compare two revisions on a scenario (S-stream, S-boot, S-idle, S-switch, S-hibernate, S-mcp; `S-stream:K=2,watch=one` sets options).
+    Ab {
+        /// Baseline revision.
+        a: String,
+        /// Candidate revision.
+        b: String,
+        /// `stream`, `boot`, `idle`, `switch`, `hibernate` or `mcp` (or `S-stream`...), with optional `:key=value,...`. `S-build` is refused. `--inject` replays fake trials instead.
+        #[arg(long)]
+        scenario: String,
+        /// `quick` (2 pairs), `standard` (5), or `full` (7).
+        #[arg(long)]
+        tier: String,
+        /// Bench root. Defaults to `ZB_ROOT` or `~/Documents/dev/tmp/zeron-perf`.
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        /// Git worktree used to build revisions.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Base seed for trial seeds.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// JSON file of injected per-side trials.
+        #[arg(long)]
+        inject: Option<PathBuf>,
+        /// Do not build. The revisions are labels only.
+        #[arg(long)]
+        no_build: bool,
+        /// Sample host CPU for 5s and record it. Off by default for injected runs.
+        #[arg(long)]
+        preflight: bool,
+    },
+    /// Self-pair control: two copies of one revision, stored as the noise floor.
+    Control {
+        /// Revision to run against itself.
+        rev: String,
+        /// Scenario name, or `all` (the default) for S-stream, S-boot, S-idle, S-switch and S-hibernate. `S-build` is refused.
+        #[arg(long, default_value = "all")]
+        scenario: String,
+        /// `quick`, `standard`, or `full`.
+        #[arg(long)]
+        tier: String,
+        #[arg(long)]
+        zb_root: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long)]
+        inject: Option<PathBuf>,
+        #[arg(long)]
+        no_build: bool,
+        #[arg(long)]
+        preflight: bool,
+    },
+    /// Rewrite `summary.json` and `report.md` for an existing run directory.
+    Report {
+        /// `runs/<id>` directory.
+        run: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum FixtureCommand {
+    #[command(hide = true)]
+    SnapshotWorker { source: PathBuf, output: PathBuf },
+    Gen {
+        name: String,
+        #[arg(long)]
+        engine: Option<PathBuf>,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        from_real_profile: bool,
+        /// Source revision of the supplied engine, when known.
+        #[arg(long)]
+        fixture_revision: Option<String>,
+        /// Replay cadence for T fixtures (default: opus).
+        #[arg(long)]
+        cadence: Option<String>,
+    },
+    VerifyReal {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
+    },
+    Verify {
+        path: PathBuf,
+        #[arg(long)]
+        engine: PathBuf,
+    },
+    Convert {
+        input: PathBuf,
+        #[arg(long, default_value = "opus")]
+        cadence: String,
+    },
+}
+
+fn main() -> ExitCode {
+    #[cfg(not(unix))]
+    {
+        eprintln!("zeron-bench only runs on unix");
+        return ExitCode::from(1);
+    }
+    #[cfg(unix)]
+    {
+        let cli = Cli::parse();
+        match maybe_reexec_native_mcp(&cli.command) {
+            Ok(Some(code)) => return code,
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("zeron-bench: {err:#}");
+                return ExitCode::from(1);
+            }
+        }
+        // `exec-counted` forks, so it runs before a runtime exists.
+        match cli.command {
+            Command::ExecCounted { command } => exec_counted(command),
+            Command::Build { rev, zb_root, repo } => match build_rev(&rev, zb_root, repo) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("zeron-bench: {err:#}");
+                    ExitCode::from(1)
+                }
+            },
+            // The scenarios start their own runtime per trial.
+            Command::Ab {
+                a,
+                b,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+            } => exit_of(ab_command(
+                a, b, scenario, tier, zb_root, repo, seed, inject, no_build, preflight, false,
+            )),
+            Command::Control {
+                rev,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+            } => exit_of(ab_command(
+                rev.clone(),
+                rev,
+                scenario,
+                tier,
+                zb_root,
+                repo,
+                seed,
+                inject,
+                no_build,
+                preflight,
+                true,
+            )),
+            other => match run(other) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("zeron-bench: {err:#}");
+                    ExitCode::from(1)
+                }
+            },
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run(command: Command) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("start the bench runtime")?;
+    runtime.block_on(async_main(command))
+}
+
+#[cfg(unix)]
+async fn async_main(command: Command) -> Result<()> {
+    match command {
+        Command::Launch {
+            engine,
+            hold,
+            zb_root,
+        } => launch_hold(engine, hold, zb_root).await,
+        Command::McpSetup => {
+            let root = zeron_bench::fixture::safe_root()?;
+            let path = zeron_bench::fixture::claude_home::setup(&root)?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        Command::Fixture { command } => match command {
+            FixtureCommand::SnapshotWorker { source, output } => {
+                zeron_bench::fixture::real::copy_mounted(&source, &output)
+            }
+            FixtureCommand::Gen {
+                name,
+                engine,
+                seed,
+                from_real_profile,
+                fixture_revision,
+                cadence,
+            } => {
+                let path = if name == "P-real" && from_real_profile {
+                    zeron_bench::fixture::real::snapshot()?
+                } else {
+                    anyhow::ensure!(!from_real_profile, "--from-real-profile requires P-real");
+                    let engine = engine.context("--engine is required for synthetic profiles")?;
+                    zeron_bench::fixture::profile::generate(
+                        &name,
+                        &engine,
+                        seed,
+                        fixture_revision.as_deref(),
+                        cadence.as_deref(),
+                    )
+                    .await?
+                };
+                println!("{}", path.display());
+                Ok(())
+            }
+            FixtureCommand::VerifyReal { path, engine } => {
+                let count = zeron_bench::fixture::real::verify(&path, &engine).await?;
+                println!("{count} chats");
+                Ok(())
+            }
+            FixtureCommand::Verify { path, engine } => {
+                zeron_bench::fixture::multi::verify(&path, &engine).await?;
+                println!("200 chats, 20 aborted");
+                Ok(())
+            }
+            FixtureCommand::Convert { input, cadence } => {
+                let source = std::fs::read_to_string(&input)?;
+                let script = zeron_bench::fixture::scripts::convert(&source, &cadence)?;
+                let root = zeron_bench::fixture::safe_root()?;
+                let dir = zeron_bench::fixture::fixture_dir(&root, &["fixtures", "private"])?;
+                use std::io::Write;
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+                let path = dir.join(format!("converted-{}.zbr.jsonl", zeron_bench::mono_now()));
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                file.write_all(script.as_bytes())?;
+                println!("{}", path.display());
+                Ok(())
+            }
+        },
+        Command::Doctor => {
+            print!("{}", zeron_bench::doctor());
+            Ok(())
+        }
+        Command::ExecCounted { .. } | Command::Build { .. } => {
+            unreachable!("handled before the runtime")
+        }
+        Command::Ab { .. } | Command::Control { .. } => {
+            unreachable!("handled before the runtime")
+        }
+        Command::Report { run } => {
+            let report = zeron_bench::ab::regenerate_report(&run)?;
+            print!("{report}");
+            Ok(())
+        }
+    }
+}
+
+/// Build outside the namespace, then re-exec the complete native MCP run in
+/// private network and mount namespaces. All external model routes are absent,
+/// and Claude's hard-coded /tmp socket path resolves into scratch.
+#[cfg(unix)]
+fn maybe_reexec_native_mcp(command: &Command) -> Result<Option<ExitCode>> {
+    use anyhow::ensure;
+    use std::os::unix::fs::MetadataExt;
+    let (revs, scenario, root, repo, inject, no_build): (
+        Vec<&str>,
+        &str,
+        &Option<PathBuf>,
+        &Option<PathBuf>,
+        bool,
+        bool,
+    ) = match command {
+        Command::Ab {
+            a,
+            b,
+            scenario,
+            zb_root,
+            repo,
+            inject,
+            no_build,
+            ..
+        } => (
+            vec![a, b],
+            scenario,
+            zb_root,
+            repo,
+            inject.is_some(),
+            *no_build,
+        ),
+        Command::Control {
+            rev,
+            scenario,
+            zb_root,
+            repo,
+            inject,
+            no_build,
+            ..
+        } => (
+            vec![rev],
+            scenario,
+            zb_root,
+            repo,
+            inject.is_some(),
+            *no_build,
+        ),
+        _ => return Ok(None),
+    };
+    if inject || zeron_bench::scenario::ScenarioArg::parse(scenario)?.name != "mcp" {
+        return Ok(None);
+    }
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("S-mcp requires Linux namespaces");
+    #[cfg(target_os = "linux")]
+    {
+        let scratch = std::fs::canonicalize(
+            std::env::var_os("TMPDIR").context("S-mcp requires a scratch TMPDIR")?,
+        )?;
+        let root_path = std::fs::canonicalize(resolve_root(root.clone())?)?;
+        ensure!(
+            scratch.starts_with(&root_path) && scratch != root_path,
+            "TMPDIR must be inside the benchmark root"
+        );
+        let mapped = std::fs::metadata("/tmp")?;
+        let target = std::fs::metadata(&scratch)?;
+        let interfaces = std::fs::read_to_string("/proc/net/dev")?;
+        let names: Vec<_> = interfaces
+            .lines()
+            .skip(2)
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+            .collect();
+        if names == ["lo"] && (mapped.dev(), mapped.ino()) == (target.dev(), target.ino()) {
+            return Ok(None);
+        }
+        if !no_build {
+            for rev in revs {
+                build_rev(rev, root.clone(), repo.clone())?;
+            }
+        }
+        let claude = zeron_bench::scenario::mcp::cli_executable()?;
+        let status = std::process::Command::new("/usr/bin/unshare")
+            .env("ZB_REAL_CLAUDE", claude)
+            .args(["-Urnm", "--", "/bin/sh", "-c", "mount --make-rprivate / && mount --bind \"$TMPDIR\" /tmp && ip link set lo up && exec \"$@\"", "zeron-bench"])
+            .arg(std::env::current_exe()?).args(std::env::args_os().skip(1))
+            .status().context("start isolated S-mcp namespace")?;
+        Ok(Some(ExitCode::from(
+            status.code().unwrap_or(1).clamp(0, 255) as u8,
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn exit_of(result: Result<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("zeron-bench: {err:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn build_rev(rev: &str, zb_root: Option<PathBuf>, repo: Option<PathBuf>) -> Result<()> {
+    let zb_root = resolve_root(zb_root)?;
+    let repo = resolve_repo(repo)?;
+    zeron_bench::ab::cli_build(rev, zb_root, repo)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ab_command(
+    a: String,
+    b: String,
+    scenario: String,
+    tier: String,
+    zb_root: Option<PathBuf>,
+    repo: Option<PathBuf>,
+    seed: u64,
+    inject: Option<PathBuf>,
+    no_build: bool,
+    preflight: bool,
+    control: bool,
+) -> Result<()> {
+    let tier = zeron_bench::ab::Tier::parse(&tier)?;
+    let zb_root = resolve_root(zb_root)?;
+    let repo = resolve_repo(repo)?;
+    let names: Vec<String> = if scenario.eq_ignore_ascii_case("all") {
+        zeron_bench::scenario::SCENARIOS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![scenario]
+    };
+    for name in names {
+        let result = zeron_bench::ab::run_ab(&zeron_bench::ab::AbOptions {
+            a: a.clone(),
+            b: b.clone(),
+            scenario: name,
+            tier,
+            zb_root: zb_root.clone(),
+            repo: repo.clone(),
+            seed,
+            inject: inject.clone(),
+            no_build,
+            control,
+            preflight,
+            run_id: None,
+            fingerprint: None,
+            now_unix: None,
+        })?;
+        println!("run={}", result.run_dir.display());
+        print!("{}", result.report);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn resolve_root(zb_root: Option<PathBuf>) -> Result<PathBuf> {
+    let root = match zb_root {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => std::env::current_dir()?.join(path),
+        None => zeron_bench::default_zb_root(),
+    };
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create bench root {}", root.display()))?;
+    Ok(root)
+}
+
+#[cfg(unix)]
+fn resolve_repo(repo: Option<PathBuf>) -> Result<PathBuf> {
+    match repo {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Ok(std::env::current_dir()?.join(path)),
+        None => std::env::current_dir().context("current directory"),
+    }
+}
+
+#[cfg(unix)]
+async fn launch_hold(engine: PathBuf, hold: u64, zb_root: Option<PathBuf>) -> Result<()> {
+    let zb_root = match zb_root {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => std::env::current_dir()
+            .context("current directory")?
+            .join(path),
+        None => zeron_bench::default_zb_root(),
+    };
+    std::fs::create_dir_all(&zb_root)
+        .with_context(|| format!("create bench root {}", zb_root.display()))?;
+    let mut trial = zeron_bench::Trial::create(&zb_root, "launch")?;
+    trial.bench_bin = std::env::current_exe().context("resolve zeron-bench")?;
+    trial.allocate_port()?;
+    let port = trial.port;
+    let launched = zeron_bench::launch(&engine, &trial).await?;
+    let scope = launched.scope.clone().unwrap_or_else(|| "-".into());
+    println!(
+        "event=spawn pid={} scope={scope} port={port} containment={} t_spawn={} t_listen={} t_ready={}",
+        launched.pid,
+        launched.containment(),
+        launched.t_spawn,
+        launched.t_listen,
+        launched.t_ready,
+    );
+    if hold > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(hold)).await;
+    }
+    let report = launched.stop().await?;
+    println!(
+        "event=stop containment={} shutdown_ms={} stop_engine_answered={} how={:?}",
+        report.containment,
+        report.shutdown.as_millis(),
+        report.stop_engine_answered,
+        report.how,
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn exec_counted(mut command: Vec<OsString>) -> ExitCode {
+    use std::os::unix::process::ExitStatusExt;
+    if command.first().is_some_and(|arg| arg == "--") {
+        command.remove(0);
+    }
+    if command.is_empty() {
+        eprintln!("zeron-bench: exec-counted needs a command");
+        return ExitCode::from(127);
+    }
+    let status = match zeron_bench::run_counted(&command) {
+        Ok(status) => status,
+        Err(err) => {
+            eprintln!("zeron-bench: {err:#}");
+            return ExitCode::from(127);
+        }
+    };
+    if let Some(sig) = status.signal() {
+        // SAFETY: the default action reports the same signal the command died
+        // from. The perf report is already written.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+        return ExitCode::from(128u8.saturating_add(sig as u8));
+    }
+    ExitCode::from(status.code().unwrap_or(1) as u8)
+}

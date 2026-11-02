@@ -1,0 +1,16 @@
+# S-boot: start the engine on the P200 profile (bench.md 3.4).
+[defaults]
+max_wait_s = 120       # give up waiting for t_settle after this
+hold_s = 30            # keep sampling after settle to catch late sweeps
+ui = false             # true: open the UI set and one chat right after the engine is ready
+
+[tier.quick]
+hold_s = 10
+max_wait_s = 90
+
+[tier.standard]
+hold_s = 30
+
+[tier.full]
+hold_s = 30
+max_wait_s = 180

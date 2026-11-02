@@ -1,0 +1,1 @@
+[{"type":"command_lifecycle","command_uuid":"cmd-1","state":"queued"},{"type":"command_lifecycle","command_uuid":"cmd-1","state":"started"},{"type":"command_lifecycle","command_uuid":"cmd-1","state":"completed"}]
