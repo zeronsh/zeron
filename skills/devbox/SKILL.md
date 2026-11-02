@@ -7,7 +7,7 @@ description: Set up an owner-named Boat devbox, or Namespace on request, with Cr
 
 Use for a personal persistent Linux amd64 Crew machine. **Default new machines to Boat `xlarge` (16 CPUs / 32 GB)**; keep an explicitly selected or recovered Namespace machine on its supported `l` shape. Verify the provider's current shape and actual `nproc` and `/proc/meminfo`. Reuse an owner-matched machine for the selected provider unless a new one was requested. A setup request authorizes one billable machine, not an account plan purchase, broader sharing, or replacement after an uncertain response.
 
-Default to Crew production; use staging when requested or when testing against the owner's staging controller. Never replace or restart the Mac client hosting the active agent turn. Controller and host must both run a verified release with neutral devbox bindings before claiming wake support.
+Default to Crew production; use staging when requested or when testing against the owner's staging controller. Never replace or restart the Mac client hosting the active agent turn. Controller and host must both run Crew with neutral devbox bindings before claiming wake support.
 Native WakeDevice in this port is restricted to an authenticated local synced **staging** controller in project/deployment `ashler-staging`; this is not a production wake rollout. Do not claim native Namespace wake or active-turn behavior is verified in either channel without the actual end-to-end evidence. Preserve existing Namespace production release/tmux setup independently.
 
 ## Provider and identity
@@ -21,28 +21,31 @@ Read only the selected provisioning variant:
 
 Preserve interactive provider sign-in, approval and MFA. Never manufacture authorization URLs, answer provider safety gates automatically, transfer broad local credentials, change account permissions, or enable public hosting to bypass setup failures. Read the target checkout's guidance and preserve existing worktrees.
 
-## Verified Crew and OMP
+## Crew from source and OMP
 
-Select one immutable released version from the requested channel's authorized private feed. Default channel remains production; a staging request selects only the staging feed, never production aliases. Resolve the channel's `scaffold-manifest.json`, then read `releases/<version>/scaffold-manifest.json` and verify the immutable manifest matches the selection. Require schema 2, release surface `scaffold`, expected version and runtime contract, source repository/40-hex commit/workflow-run provenance, and the exact Linux architecture's archive SHA-256 in `files`. Confirm successful release verification for that source run. Never treat an unpublished checkout or a source build as an installed release.
-For this native bootstrap require runtime contract `scaffold.comet-runtime.v2` and the actual native CLI/source guard contract. A staging feed may still point to an older v1 release while a native release exists only at an immutable candidate path. An explicitly requested, successfully verified immutable staging candidate can be selected directly; do not assume `latest` is native, advance aliases, or relax compatibility to get an installation through. An older valid Namespace release must instead use its own selected source workflow.
-
-Use the verified manifest's `source.repository` and immutable `source.commit` to fetch the workflow **before choosing its scripts**. For example, after saving the verified immutable manifest as `manifest.json`:
+Devboxes run Crew built on the host from one commit of `Ashler-AI/comet` `main`, not a release archive. Pin `main` to its 40-hex commit once, then take that commit's workflow, provider reference, scripts and source together; never mix commits:
 
 ```bash
-REPOSITORY="$(jq -er '.source.repository' manifest.json)"
-SOURCE_COMMIT="$(jq -er '.source.commit' manifest.json)"
-[[ "$REPOSITORY" == Ashler-AI/comet && "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+COMMIT="$(gh api repos/Ashler-AI/comet/commits/main --jq .sha)"
+[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
 gh api -H 'Accept: application/vnd.github.raw+json' \
-  "repos/$REPOSITORY/contents/skills/devbox/SKILL.md?ref=$SOURCE_COMMIT" > selected-devbox-skill.md
+  "repos/Ashler-AI/comet/contents/skills/devbox/SKILL.md?ref=$COMMIT" > selected-devbox-skill.md
+gh api "repos/Ashler-AI/comet/tarball/$COMMIT" > "comet-$COMMIT.tar.gz"
+shasum -a 256 "comet-$COMMIT.tar.gz"
 ```
 
-Read that selected workflow and its provider reference. Fetch `install.sh`, the selected reference and its complete shared script set through the same authenticated `gh api ...?ref=$SOURCE_COMMIT` route. This native workflow requires `skills/devbox/scripts/{configure-host.sh,configure-host.py,autostart.sh,keepalive.py}` together. Do not fetch any file from moving main/latest, substitute a local guard, or maintain a second implementation in Platform. If the chosen release predates a required script, stop or select an authorized compatible release; do not splice source generations.
+Read the selected workflow and its provider reference, and fetch `skills/devbox/scripts/{build-crew.sh,configure-host.sh,configure-host.py,autostart.sh,keepalive.py}` through the same `?ref=$COMMIT` route. Copy the scripts into one private directory on the host and the tarball into `~/.cache/crew-build/`, then build with the provider environment `configure-host.sh` uses:
 
-Download the archive named in `manifest.json.files` from that **same immutable version directory** using authorized GCS access. Verify its SHA-256 locally, after transfer, and before extraction. Inspect archive paths/types first; reject traversal, unexpected links and layout. Extract into a new owner-private `~/.local/lib/crew/<version>-<archive-sha256>/` directory; retain the previous release. Validate the extracted `comet` against that release's `COMET_SHA256SUMS` and preserve its raw SHA-256 as `CREW_BINARY_SHA256`. Do not run the root installer's normal moving-latest/service path: it can select a different archive and install a production service.
+```bash
+COMET_DEVBOX_PROVIDER="$PROVIDER" COMET_DEVBOX_ID="$DEVBOX_ID" \
+  bash build-crew.sh "$HOME/.cache/crew-build/comet-$COMMIT.tar.gz" "$TARBALL_SHA256" "$COMMIT"
+```
 
-**Existing released setups remain supported:** follow the workflow and actual CLI shipped at the verified manifest's source commit, retaining the selected provider. A maintained older Namespace or Boat production release may use the original three-script workflow and its original native profile/ports. Do not force this native bootstrap or an offline profile migration onto it, and do not claim new native wake/forwarding features are verified merely because its existing released setup works. New native staging setup uses the coordinates below; this assignment publishes no production release.
+`build-crew.sh` rechecks the tarball digest, installs the release workflow's Linux build dependencies, and builds the production-identity `comet` and `zeron-engine` with the stable toolchain under a renewable lease. It installs them into `~/.local/lib/crew/<version>-src-<commit12>-<sha256>/` and prints `CREW_BINARY` and `CREW_BINARY_SHA256` for `configure-host.sh`. Source, Cargo downloads and build output stay in `~/.cache/crew-build`, which Boat snapshots skip (see Disk budget). Run it with `systemd-run --user` so a snapshot can't freeze a build started from SSH.
 
-Run the pinned installer with `--install-omp` on the host and confirm `omp --version`. Never copy model-provider OAuth tokens or install a moving OMP version. Crew-owned turns use Crew Agent Auth; do not run OMP `/login` or set up a separate broker.
+To update a configured host, build the newer commit, then stop the idle service, move its env and unit aside, rerun `configure-host.sh` with `CREW_EXISTING_DEVICE_ID`, and start it again; the device ID is kept. Keep the previous build until the new one has served a real turn. Hosts installed from a release archive keep working until their next update.
+
+Run the source's `install.sh --install-omp` on the host and confirm `omp --version`. Never copy model-provider OAuth tokens or install a moving OMP version. Crew-owned turns use Crew Agent Auth; do not run OMP `/login` or set up a separate broker.
 
 ## Configure the host
 
@@ -66,7 +69,7 @@ Boat's configured ID must match the native `BOAT_ID`. A copied template binding 
 If Chromium cannot reach its CDN, use the exact pinned installer URL on an authorized local machine, compare SHA-256 before and after transfer, and extract into the reported cache directory. Do not substitute mirrors or change network/security policy. Prove a rendered page, not just `--version`.
 
 Keep staging and production data directories separate. Do not copy `session.json`, device IDs, or credentials across environments. On a reused machine, inspect active turns before any restart; stop only the selected owned engine after work is idle. Never run competing channels or supervisors against one data directory.
-This native runtime uses production `~/.crew` / IPC `27958`, or staging `~/.crew-staging` / IPC `27957`; callbacks remain `27654` / `27656`. The shared Linux archive has a production build identity; staging supplies explicit CLI/runtime coordinates, not a private Canary build. Owner labeling uses the actual native `ZERON_DEVICE_NAME`; callback configuration uses `ZERON_CALLBACK_PORT`. Staging Edge/control plane/project/deployment are `comet-staging.internal.ashler.com`, `scaffold-staging.internal.ashler.com`, `ashler-staging`, `ashler-staging`. Production retains its ordinary project and omits deployment unless supplied by its validated release contract.
+This native runtime uses production `~/.crew` / IPC `27958`, or staging `~/.crew-staging` / IPC `27957`; callbacks remain `27654` / `27656`. The Linux build has a production identity; staging supplies explicit CLI/runtime coordinates, not a private Canary build. Owner labeling uses the actual native `ZERON_DEVICE_NAME`; callback configuration uses `ZERON_CALLBACK_PORT`. Staging Edge/control plane/project/deployment are `comet-staging.internal.ashler.com`, `scaffold-staging.internal.ashler.com`, `ashler-staging`, `ashler-staging`. Production retains its ordinary project and omits deployment unless supplied by its validated release contract.
 
 The guard requires a physical, owner-owned, non-shared-writable executable outside either profile's moving `app` tree and refuses different existing configuration or helper files. Existing native profiles require explicit `CREW_EXISTING_DEVICE_ID` adoption with matching saved coordinates; no credentials or identities are copied. Legacy profiles are retained, never adopted by renaming their directory. Add the actual checkout path through Crew's project picker; there is no invented native default-folder flag.
 
@@ -115,6 +118,15 @@ Run on the devbox, without tracing or printing the credential:
 
 Verify `gh api --hostname github.com user` and an authenticated `git ls-remote` for the requested repository, and confirm any file-backed `gh` credential is owner-only (`0600`). Keep the owner's Git author identity. Re-run this setup after central token rotation; do not bake authenticated profiles into templates or add a second credential service. This uses existing Infisical/GitHub CLIs and does not replace the pinned Crew runtime.
 
+## Disk budget
+
+Every Boat resume restores the whole disk except `~/.cache`. `xlarge`, the largest type, holds 251.5 GiB, and a box whose data outgrows it can never resume: one devbox stopped at 259.1 GiB is unrecoverable. Restore time follows file count as much as bytes. A 180 GiB, two-million-file devbox answered a Crew wake in 144 seconds but took about 30 minutes to finish restoring. Trimmed to 87 GiB, three cold cycles answered in 111–223 seconds and finished restoring in 10–31 minutes, mostly in the Docker-volume phase; pauses took 1 to 22 minutes.
+
+- Keep build output and package caches in `~/.cache`. `build-crew.sh` builds there; also run `npm config set cache ~/.cache/npm`, and point `CARGO_HOME` and `CARGO_TARGET_DIR` there for any other Rust work. One leftover Crew `target` directory in the home was 83 GiB.
+- Check `df -h /` before long work and keep the box under about 150 GiB. The local cluster's unpacked images are most of a restore's files; prune images and volumes nothing uses.
+- Boat deletes a stopped box's data 14 days after it stops. Resume it, or save a named snapshot, before then.
+- While `boat info` still shows `hydration`, don't walk the whole disk (`du`, `find`): it forces every file to restore at once.
+
 ## Work and sleep
 
 Crew protects executing turns and releases protection on completion, cancellation, failed starts and shutdown. Parked harnesses and idle Tilt processes do not keep a host running.
@@ -146,4 +158,4 @@ State authentication, release, UI or runtime proof gaps explicitly. Installation
 
 ## Maintainer regression commands
 
-After integration, run `python3 -m unittest discover -s skills/devbox/scripts -p 'test_*.py'` on Linux, plus `bash -n skills/devbox/scripts/{configure-host.sh,autostart.sh}`. The native OS regression checks relocated executable images, same-size wrong digests and PID-owned listener sockets. Follow with an explicitly authorized isolated staging host smoke; no test or installation alone satisfies the completion evidence above.
+After integration, run `python3 -m unittest discover -s skills/devbox/scripts -p 'test_*.py'` on Linux, plus `bash -n skills/devbox/scripts/{build-crew.sh,configure-host.sh,autostart.sh}`. The native OS regression checks relocated executable images, same-size wrong digests and PID-owned listener sockets. Follow with an explicitly authorized isolated staging host smoke; no test or installation alone satisfies the completion evidence above.
