@@ -40,8 +40,11 @@ import androidx.compose.foundation.background
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.inProject
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
@@ -78,6 +81,8 @@ fun NewSessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Focus the prompt at once (a large screen's page at launch waits: the keyboard would cover the column). */
     focusOnAppear: Boolean = true,
+    /** The history drawer's "New session" while this page is open, with its project filter if any. */
+    projectPicks: Flow<String?> = emptyFlow(),
 ) {
     val workspace by model.workspace.collectAsState()
     val client by model.client.collectAsState()
@@ -105,6 +110,13 @@ fun NewSessionScreen(
     }
     var newProject by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
+    // "New session" from the drawer: its project, then straight back to typing.
+    LaunchedEffect(projectPicks) {
+        projectPicks.collect { id ->
+            if (id != null) draft = draft.inProject(id, workspace?.projects)
+            runCatching { focus.requestFocus() }
+        }
+    }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 

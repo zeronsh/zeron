@@ -741,3 +741,8 @@ data class NewSessionDraft(
     /** Run on its own Cloud machine (a project whose repository Cloud reaches). */
     val cloud: Boolean = false,
 )
+
+/** Moved to project [id] as picking it on New session does: its own host and branch, Cloud if it only runs there. */
+fun NewSessionDraft.inProject(id: String, projects: List<ProjectView>?): NewSessionDraft =
+    if (id == projectId) this
+    else copy(projectId = id, hostId = null, branch = null, cloud = projects?.firstOrNull { it.id == id }?.isCloud == true)

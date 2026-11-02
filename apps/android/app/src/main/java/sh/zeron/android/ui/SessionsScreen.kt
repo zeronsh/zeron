@@ -148,7 +148,7 @@ private fun SessionsSearchBar(
     }
 }
 
-private enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
+internal enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
 
 /** "2 working · 1 needs you" — the live summary beside New session. */
 fun liveSummary(ws: WorkspaceSnapshot): String? {
@@ -160,7 +160,7 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     return parts.joinToString(" · ").ifEmpty { null }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
+internal fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
     val seen = HashSet<String>()
     return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
 }
