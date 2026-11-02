@@ -1465,6 +1465,13 @@ pub enum AgentLoginStatus {
     Error,
 }
 
+/// Labels of Cursor's usage windows. The composer's plan ring picks between
+/// them by the selected model, so the engine (which writes them) and the UI
+/// (which reads them) share these.
+pub const CURSOR_USAGE_CURSOR: &str = "Cursor";
+pub const CURSOR_USAGE_GROK: &str = "Grok";
+pub const CURSOR_USAGE_OTHER: &str = "Other";
+
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

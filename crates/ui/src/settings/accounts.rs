@@ -1339,7 +1339,6 @@ impl AccountsPage {
                     account
                         .usage_windows
                         .iter()
-                        .take(2)
                         .map(|window| render_usage_meter(window, theme)),
                 )
                 .into_any_element()
