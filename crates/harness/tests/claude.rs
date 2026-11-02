@@ -1090,6 +1090,57 @@ async fn commands_come_from_the_initialize_control_request() {
 
 /// Live smoke against the real CLI: `cargo test -p zeron-harness --test
 /// claude -- --ignored live_commands`. No model turn, no API cost.
+/// A real background shell is listed with its command, its output file is
+/// read while it runs, and a host stop ends it through `stop_task`.
+#[tokio::test]
+#[ignore = "spawns the real claude CLI; needs install + auth + network"]
+async fn live_background_shell_is_listed_read_and_stopped() {
+    use zeron_harness::TurnControl;
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "Use the Bash tool with run_in_background set to true to run exactly: \
+         for i in $(seq 1 120); do echo tick $i; sleep 1; done \
+         Then reply STARTED and nothing else.",
+    );
+    req.model = Some("haiku".into());
+    req.cwd = dir.path().display().to_string();
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = ClaudeHarness::new()
+        .run(req, controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+    let listed = processes.borrow_and_update().clone();
+    eprintln!("listed: {listed:?}");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].command.contains("echo tick"), "{listed:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let output = turn.background_output(&listed[0].id).expect("listed");
+    eprintln!("output: {output:?}");
+    assert!(output.text.contains("tick"), "{output:?}");
+
+    assert!(turn.stop_background_process(&listed[0].id));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the stopped shell leaves the list");
+}
+
 #[tokio::test]
 #[ignore]
 async fn live_commands_discovery() {
@@ -2018,6 +2069,53 @@ async fn an_unreplayed_steer_releases_the_turn_end() {
 // ---------------------------------------------------------------------------
 // Stopping a turn in place
 // ---------------------------------------------------------------------------
+
+/// A background shell is listed with its command and output once the CLI
+/// reports it, outlives its turn, and a host stop becomes the CLI's
+/// `stop_task` — after which the roster drops it.
+#[tokio::test]
+async fn background_shells_are_listed_read_and_stopped() {
+    use zeron_harness::TurnControl;
+    let (mut controls, _steer, _token) = controls("A");
+    let turn = TurnControl::default();
+    controls.turn = turn.clone();
+    let mut processes = turn.watch_background_processes();
+    let mut stream = harness()
+        .run(request("scenario:background-shell"), controls)
+        .await
+        .expect("run starts");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event.expect("event"), AgentEvent::Done { .. }) {
+                return;
+            }
+        }
+        panic!("stream ended without Done");
+    })
+    .await
+    .expect("turn ends");
+
+    let listed = processes.borrow_and_update().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].id, "bgsh");
+    assert_eq!(listed[0].command, "npm run dev");
+    assert_eq!(
+        listed[0].description.as_deref(),
+        Some("Start the dev server")
+    );
+    let output = turn.background_output("bgsh").expect("listed");
+    assert_eq!(output.text, "listening on :5173\nready in 412 ms");
+
+    assert!(turn.stop_background_process("bgsh"));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !processes.borrow_and_update().is_empty() {
+            processes.changed().await.expect("runtime alive");
+        }
+    })
+    .await
+    .expect("the stopped shell leaves the list");
+    assert!(turn.background_output("bgsh").is_none());
+}
 
 #[tokio::test]
 async fn a_stopped_turn_keeps_the_process_and_its_background_work() {

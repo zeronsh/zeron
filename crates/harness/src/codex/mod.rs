@@ -964,13 +964,10 @@ const STARTUP_RETRY_DELAYS: [Duration; 3] = [
 ];
 
 /// High-volume notifications nothing here consumes: the turn's running diff
-/// and every command's / patch's output stream. Opting out at `initialize`
-/// spares the wire (and the reader) from parsing them only to drop them.
-const OPTED_OUT_NOTIFICATIONS: &[&str] = &[
-    "turn/diff/updated",
-    "item/commandExecution/outputDelta",
-    "item/fileChange/outputDelta",
-];
+/// and every patch's output stream. Opting out at `initialize` spares the
+/// wire (and the reader) from parsing them only to drop them. Command output
+/// is kept: a command that outlives its turn shows its tail.
+const OPTED_OUT_NOTIFICATIONS: &[&str] = &["turn/diff/updated", "item/fileChange/outputDelta"];
 
 /// The oldest Codex CLI whose app-server speaks the wire this driver maps:
 /// nested `error` notifications, `turn/steer`, child-thread routing (the
@@ -1792,11 +1789,14 @@ async fn run_session(session: Session) {
     // watcher): its `item/completed` arrives when the process exits, turns
     // later (live, 0.159.3). The host's idle reaper must not retire the
     // app-server — and the process with it — while it runs.
-    let mut open_commands: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut open_commands: HashMap<String, OpenCommand> = HashMap::new();
     // An interrupted turn's foreground command is killed WITHOUT an
     // `item/completed`: once its process has had a moment to go, drop the
     // turn's commands whose process is gone (background ones live on).
     let mut prune_at: Option<(tokio::time::Instant, String)> = None;
+    // The turn being pruned: its commands are not listed as background
+    // processes until the prune says which of them still run.
+    let mut pruning: Option<String> = None;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1867,6 +1867,18 @@ async fn run_session(session: Session) {
                         }
                     }
 
+                    // Kept for commands still open: one that outlives its
+                    // turn shows its tail (`TurnControl::background_output`).
+                    "item/commandExecution/outputDelta" => {
+                        if let (Some(id), Some(delta)) = (
+                            params.get("itemId").and_then(Value::as_str),
+                            params.get("delta").and_then(Value::as_str),
+                        ) && open_commands.contains_key(id)
+                        {
+                            turn.append_background_output(id, delta);
+                        }
+                    }
+
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
                         if let Some(text) = delta_text(&params)
@@ -1897,13 +1909,22 @@ async fn run_session(session: Session) {
                         if matches!(item_type(item), "commandExecution" | "command_execution") {
                             let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
                             let changed = if phase == Phase::Started {
-                                let pid = item.get("processId").and_then(Value::as_str).map(str::to_owned);
-                                open_commands.insert(id.to_owned(), (pid, router.active.clone())).is_none()
+                                let command = OpenCommand {
+                                    process: item.get("processId").and_then(Value::as_str).map(str::to_owned),
+                                    turn: router.active.clone(),
+                                    command: shown_command(
+                                        item.get("command").and_then(Value::as_str).unwrap_or_default(),
+                                    ),
+                                    since: chrono::Utc::now(),
+                                };
+                                open_commands.insert(id.to_owned(), command).is_none()
                             } else {
+                                turn.clear_background_output(id);
                                 open_commands.remove(id).is_some()
                             };
                             if changed {
                                 turn.set_background(open_commands.len());
+                                publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                             }
                         }
                         if matches!(item_type(item), "userMessage" | "user_message")
@@ -2023,6 +2044,14 @@ async fn run_session(session: Session) {
                         }
                         router.note_completed(&id);
                         stop_when_announced = false;
+                        // Its commands still open are background work now.
+                        let interrupted_turn = interrupted
+                            || stopping
+                            || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted");
+                        if interrupted_turn {
+                            pruning = Some(id.clone());
+                        }
+                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                         // Accepted steers whose item never surfaced still
                         // joined this turn: confirm them before its end.
                         while accepted_steers.pop_front().is_some() {
@@ -2174,6 +2203,8 @@ async fn run_session(session: Session) {
                         held_error = None;
                         done_current = true;
                         prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
+                        pruning = Some(id.clone());
+                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                         if std::mem::take(&mut stopping) && !interrupted {
                             if !send(&event_tx, AgentEvent::Done {
                                 status: DoneStatus::Interrupted,
@@ -2351,6 +2382,31 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // The person stopped one background command: Codex terminates
+            // its exec session, and the command's `item/completed` (or the
+            // prune, if none comes) takes it off the list.
+            item = turn.background_stop_requested(), if !interrupted => {
+                if let Some(open) = open_commands.get(&item) {
+                    let Some(process) = open.process.clone() else {
+                        tracing::debug!(target: "zeron_harness::codex", item = %item, "no process id to terminate");
+                        continue 'main;
+                    };
+                    let client = client.clone();
+                    let thread = thread_id.clone();
+                    tokio::spawn(async move {
+                        let params = json!({ "threadId": thread, "processId": process });
+                        if let Err(e) = client.request("thread/backgroundTerminals/terminate", params).await {
+                            tracing::debug!(target: "zeron_harness::codex", "terminate failed: {e}");
+                        }
+                    });
+                    if prune_at.is_none() && prune_query.is_none()
+                        && let Some(started_in) = open.turn.clone()
+                    {
+                        prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, started_in));
+                    }
+                }
+            },
+
             _ = interrupt.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
                 interrupted = true;
@@ -2408,17 +2464,25 @@ async fn run_session(session: Session) {
             answer = async { prune_query.as_mut().expect("guarded by if").await }, if prune_query.is_some() => {
                 prune_query = None;
                 if let Ok((stopped, live)) = answer {
-                    open_commands.retain(|item, (pid, started_in)| {
-                        started_in.as_deref() != Some(stopped.as_str())
+                    open_commands.retain(|item, open| {
+                        let keep = open.turn.as_deref() != Some(stopped.as_str())
                             || match &live {
                                 Some(live) => {
                                     live.contains(item.as_str())
-                                        || pid.as_deref().is_some_and(|pid| live.contains(pid))
+                                        || open.process.as_deref().is_some_and(|pid| live.contains(pid))
                                 }
-                                None => pid.as_deref().is_some_and(process_alive),
-                            }
+                                None => open.process.as_deref().is_some_and(process_alive),
+                            };
+                        if !keep {
+                            turn.clear_background_output(item);
+                        }
+                        keep
                     });
                     turn.set_background(open_commands.len());
+                    if pruning.as_deref() == Some(stopped.as_str()) {
+                        pruning = None;
+                    }
+                    publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
                 }
             },
 
@@ -2470,6 +2534,73 @@ async fn run_session(session: Session) {
 /// How long an interrupted turn's commands get to exit before a process
 /// still running counts as background work.
 const COMMAND_EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// A command the parent thread started that has not reported finished.
+struct OpenCommand {
+    /// Codex's exec-session id (`processId`): what
+    /// `thread/backgroundTerminals/*` address. Not an OS pid.
+    process: Option<String>,
+    /// The turn that started it.
+    turn: Option<String>,
+    command: String,
+    since: chrono::DateTime<chrono::Utc>,
+}
+
+/// Publish the open commands whose turn is over — the background processes —
+/// oldest first. `pruning`: an interrupted turn whose killed commands have
+/// not been told apart from the ones still running yet.
+fn publish_background(
+    turn: &crate::TurnControl,
+    open: &HashMap<String, OpenCommand>,
+    active: Option<&str>,
+    pruning: Option<&str>,
+) {
+    let mut listed: Vec<_> = open
+        .iter()
+        .filter(|(_, c)| {
+            c.turn
+                .as_deref()
+                .is_none_or(|t| Some(t) != active && Some(t) != pruning)
+        })
+        .map(|(id, c)| zeron_proto::BackgroundTask {
+            id: id.clone(),
+            command: c.command.clone(),
+            description: None,
+            started_at: c.since,
+        })
+        .collect();
+    listed.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    turn.set_background_processes(listed);
+}
+
+/// A command as the person would have typed it: Codex runs each one through
+/// the login shell (`/usr/bin/zsh -lc '…'`), which says nothing.
+fn shown_command(command: &str) -> String {
+    let command = command.trim();
+    let Some((shell, rest)) = command
+        .split_once(" -lc ")
+        .or_else(|| command.split_once(" -c "))
+    else {
+        return command.to_owned();
+    };
+    let shell = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+    if !matches!(shell, "bash" | "zsh" | "sh" | "fish" | "dash") {
+        return command.to_owned();
+    }
+    let rest = rest.trim();
+    match rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        Some(inner) => inner.replace("'\\''", "'"),
+        None => rest
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(rest)
+            .to_owned(),
+    }
+}
 
 /// Server→client requests answered from their own task at once. A flood
 /// beyond this (a misbehaving MCP server) is refused instead of growing
@@ -2898,6 +3029,24 @@ use crate::{Signal, send_signal, shutdown_child};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shown_commands_drop_the_login_shell() {
+        assert_eq!(
+            shown_command("/usr/bin/zsh -lc 'npm run dev'"),
+            "npm run dev"
+        );
+        assert_eq!(
+            shown_command("/bin/bash -lc 'echo '\\''hi'\\'' && sleep 5'"),
+            "echo 'hi' && sleep 5"
+        );
+        assert_eq!(shown_command("bash -c \"cargo watch\""), "cargo watch");
+        assert_eq!(shown_command("echo beta"), "echo beta");
+        assert_eq!(
+            shown_command("python -c 'print(1)'"),
+            "python -c 'print(1)'"
+        );
+    }
     use serde_json::json;
 
     #[test]

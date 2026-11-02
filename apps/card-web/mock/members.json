@@ -1,0 +1,263 @@
+{
+  "about": "Fictional members for the static build, each exactly what the edge serves at /cards/:username (edge/src/user-directory.ts PublicCard: username, displayName, userNumber, joinedOn, badges[{id, name, icon}], scene, holo, sky). One badge exists today, Cloud Tester. Scenes 0 to 19 index the manifest by number; scenes 11 to 20 are being regenerated.",
+  "members": [
+    {
+      "username": "graham",
+      "displayName": "Graham",
+      "userNumber": 4182,
+      "joinedOn": "2023-10-04",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 0,
+      "holo": "aurora",
+      "sky": 1934583471
+    },
+    {
+      "username": "ada",
+      "displayName": "Ada",
+      "userNumber": 117,
+      "joinedOn": "2024-01-12",
+      "badges": [],
+      "scene": 1,
+      "holo": "secret",
+      "sky": 2795611532
+    },
+    {
+      "username": "lin",
+      "displayName": "Lin",
+      "userNumber": 51,
+      "joinedOn": "2024-03-03",
+      "badges": [],
+      "scene": 4,
+      "holo": "starlight",
+      "sky": 1182007729
+    },
+    {
+      "username": "mara",
+      "displayName": "Mara",
+      "userNumber": 2,
+      "joinedOn": "2023-06-01",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 2,
+      "holo": "glyph",
+      "sky": 3389156178
+    },
+    {
+      "username": "mia",
+      "displayName": "Mia",
+      "userNumber": 990,
+      "joinedOn": "2024-08-19",
+      "badges": [],
+      "scene": 3,
+      "holo": "reverse",
+      "sky": 866241207
+    },
+    {
+      "username": "theo",
+      "displayName": "Theo",
+      "userNumber": 233,
+      "joinedOn": "2024-02-02",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 5,
+      "holo": "aurora",
+      "sky": 4021770918
+    },
+    {
+      "username": "noor",
+      "displayName": "Noor",
+      "userNumber": 1408,
+      "joinedOn": "2024-04-09",
+      "badges": [],
+      "scene": 6,
+      "holo": "glyph",
+      "sky": 2510947125
+    },
+    {
+      "username": "kai",
+      "displayName": "Kai",
+      "userNumber": 77,
+      "joinedOn": "2023-11-20",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 7,
+      "holo": "starlight",
+      "sky": 1427035286
+    },
+    {
+      "username": "iris",
+      "displayName": "Iris",
+      "userNumber": 3021,
+      "joinedOn": "2024-07-07",
+      "badges": [],
+      "scene": 8,
+      "holo": "secret",
+      "sky": 3760118423
+    },
+    {
+      "username": "juno",
+      "displayName": "Juno",
+      "userNumber": 512,
+      "joinedOn": "2023-12-01",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 9,
+      "holo": "reverse",
+      "sky": 591263054
+    },
+    {
+      "username": "sage",
+      "displayName": "Sage",
+      "userNumber": 811,
+      "joinedOn": "2026-10-30",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 10,
+      "holo": "glyph",
+      "sky": 2214756817
+    },
+    {
+      "username": "luca",
+      "displayName": "Luca",
+      "userNumber": 884,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 11,
+      "holo": "secret",
+      "sky": 157720934
+    },
+    {
+      "username": "ari",
+      "displayName": "Ari",
+      "userNumber": 957,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 12,
+      "holo": "reverse",
+      "sky": 3309834621
+    },
+    {
+      "username": "ember",
+      "displayName": "Ember",
+      "userNumber": 1030,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 13,
+      "holo": "aurora",
+      "sky": 1740202389
+    },
+    {
+      "username": "rose",
+      "displayName": "Rose",
+      "userNumber": 1103,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 14,
+      "holo": "starlight",
+      "sky": 4106738170
+    },
+    {
+      "username": "ren",
+      "displayName": "Ren",
+      "userNumber": 1176,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 15,
+      "holo": "glyph",
+      "sky": 672559803
+    },
+    {
+      "username": "vera",
+      "displayName": "Vera",
+      "userNumber": 1249,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 16,
+      "holo": "secret",
+      "sky": 2093318446
+    },
+    {
+      "username": "cove",
+      "displayName": "Cove",
+      "userNumber": 1322,
+      "joinedOn": "2026-10-30",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 17,
+      "holo": "reverse",
+      "sky": 3618292510
+    },
+    {
+      "username": "sol",
+      "displayName": "Sol",
+      "userNumber": 1395,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 18,
+      "holo": "aurora",
+      "sky": 982371645
+    },
+    {
+      "username": "nova",
+      "displayName": "Nova",
+      "userNumber": 1468,
+      "joinedOn": "2026-10-30",
+      "badges": [],
+      "scene": 19,
+      "holo": "starlight",
+      "sky": 2741083952
+    },
+    {
+      "username": "noname",
+      "displayName": null,
+      "userNumber": 1378,
+      "joinedOn": "2026-10-30",
+      "badges": [
+        {
+          "id": "cloud-tester",
+          "name": "Cloud Tester",
+          "icon": null
+        }
+      ],
+      "scene": 2,
+      "holo": "glyph",
+      "sky": 3389156178
+    }
+  ]
+}

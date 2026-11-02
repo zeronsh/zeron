@@ -1,7 +1,15 @@
 name: Windows CI setup
 description: >-
   Prepare a Windows runner for the Windows test jobs: toolchain, shader
-  compiler, a cheaper release profile for the CI builds, and the Rust cache.
+  compiler, a cheaper release profile for the CI builds, cargo-nextest and the
+  Rust cache.
+
+inputs:
+  save-rust-cache:
+    description: >-
+      Whether this job saves the shared Windows Rust cache when it runs on main.
+      Give it to exactly one job. Pull requests never save.
+    default: 'false'
 
 runs:
   using: composite
@@ -43,12 +51,26 @@ runs:
         $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
         Add-Content -LiteralPath (Join-Path $cargoHome 'config.toml') -Value $config
         Write-Host "opt-level 0 for $($members.Count) workspace crates: $($members -join ', ')"
+    - name: Install cargo-nextest
+      shell: pwsh
+      # Pinned release, verified against a checksum (as scripts/ci/install-nextest.sh on Linux).
+      run: |
+        $version = '0.9.146'
+        $sha256 = '0fa689815c8157e4633225b6b173184b3d546eb6ffb754c3d0e6ea5973284a20'
+        $zip = Join-Path $env:RUNNER_TEMP 'nextest.zip'
+        Invoke-WebRequest -Uri "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version/cargo-nextest-$version-x86_64-pc-windows-msvc.zip" -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 5
+        if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $sha256) { throw 'cargo-nextest checksum mismatch' }
+        $bin = Join-Path $env:RUNNER_TEMP 'nextest-bin'
+        Expand-Archive -LiteralPath $zip -DestinationPath $bin -Force
+        $bin >> $env:GITHUB_PATH
+    # One cache for every Windows job (they build the same dependency graph with
+    # the same profile); the job given save-rust-cache writes it, on main only.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
-        # Only main writes the cache; PRs restore it.
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        shared-key: windows
+        add-job-id-key: false
+        save-if: ${{ inputs.save-rust-cache == 'true' && github.ref == 'refs/heads/main' }}
         cache-on-failure: true
         # Workspace crates are rebuilt on every change anyway and are cheap at
-        # opt-level 0, so keep them out of the cache. Each job gets its own
-        # cache (rust-cache keys on the job id by default).
+        # opt-level 0, so keep them out of the cache.
         cache-workspace-crates: false

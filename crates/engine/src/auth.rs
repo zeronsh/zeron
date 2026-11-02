@@ -660,6 +660,8 @@ impl Auth {
     }
 
     /// Create an org (the edge makes us its first admin member) and scope to it.
+    /// Each user creates one: if we already did (a double-submit, a retry, or an
+    /// earlier session), the edge answers 409 with that org and we continue in it.
     pub async fn create_org(&self, name: &str) -> Result<(), EngineError> {
         if self.inner.workos.is_none() {
             return Ok(());
@@ -667,16 +669,35 @@ impl Auth {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Created {
-            organization_id: String,
+            organization_id: Option<String>,
         }
-        let created: Created = self
-            .authed_json(
+        let res = self
+            .authed_send(
                 reqwest::Method::POST,
                 "/auth/orgs",
                 Some(serde_json::json!({ "name": name })),
             )
             .await?;
-        self.select_org(&created.organization_id).await
+        let conflict = res.status() == reqwest::StatusCode::CONFLICT;
+        if !conflict && !res.status().is_success() {
+            return Err(EngineError::Other(format!(
+                "workspace request failed ({})",
+                res.status().as_u16()
+            )));
+        }
+        let created: Created = res.json().await.map_err(|e| {
+            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
+        })?;
+        match created.organization_id {
+            Some(organization_id) => self.select_org(&organization_id).await,
+            // Our other request is still creating it.
+            None if conflict => Err(EngineError::Other(
+                "your workspace is still being created — try again in a moment".into(),
+            )),
+            None => Err(EngineError::Other(
+                "malformed response: missing organizationId".into(),
+            )),
+        }
     }
 
     /// Scope the session to an org: one refresh with `organizationId`; the state follows
@@ -1225,6 +1246,24 @@ impl Auth {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, EngineError> {
+        let res = self.authed_send(method, path, body).await?;
+        if !res.status().is_success() {
+            return Err(EngineError::Other(format!(
+                "workspace request failed ({})",
+                res.status().as_u16()
+            )));
+        }
+        res.json::<T>().await.map_err(|e| {
+            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
+        })
+    }
+
+    async fn authed_send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Response, EngineError> {
         let token = self.access_token().await?;
         let url = format!(
             "{}{}",
@@ -1235,20 +1274,11 @@ impl Auth {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let res = req.send().await.map_err(|e| {
+        req.send().await.map_err(|e| {
             EngineError::Other(format!(
                 "the edge is unreachable: {}",
                 describe_http_error(e)
             ))
-        })?;
-        if !res.status().is_success() {
-            return Err(EngineError::Other(format!(
-                "workspace request failed ({})",
-                res.status().as_u16()
-            )));
-        }
-        res.json::<T>().await.map_err(|e| {
-            EngineError::Other(format!("malformed response: {}", describe_http_error(e)))
         })
     }
 

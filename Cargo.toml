@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.128"
+version = "0.2.132"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -69,7 +69,7 @@ zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
 
 # CRDT
-loro = "1.13"
+loro = "1.17"
 # Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
 # `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
 # frames, cross-checked by its js_snapshots tests).

@@ -9,18 +9,19 @@ use crate::process::{Child as ProcessChild, Command};
 /// own Claude believe it is nested in that session — it reports to its
 /// socket, IDE port and session id, and takes its effort level. The user's
 /// own configuration (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`,
-/// `CLAUDE_CODE_GIT_BASH_PATH`, `ANTHROPIC_*`) is kept.
+/// `CLAUDE_CODE_GIT_BASH_PATH`, `ANTHROPIC_*`) is kept. Every Claude Zeron
+/// starts, directly or through an adapter, reports Zeron as its entrypoint.
 pub(crate) fn configure(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     for key in INHERITED_SESSION_MARKERS {
         command.env_remove(key);
     }
+    command.env("CLAUDE_CODE_ENTRYPOINT", "zeron");
 }
 
-const INHERITED_SESSION_MARKERS: [&str; 12] = [
+const INHERITED_SESSION_MARKERS: [&str; 11] = [
     "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ATTENDED",
@@ -156,7 +157,6 @@ mod tests {
                 "CLAUDECODE",
                 "CLAUDE_AGENT_SDK_VERSION",
                 "CLAUDE_CODE_CHILD_SESSION",
-                "CLAUDE_CODE_ENTRYPOINT",
                 "CLAUDE_CODE_EXECPATH",
                 "CLAUDE_CODE_MESSAGING_SOCKET",
                 "CLAUDE_CODE_MESSAGING_TOKEN",
@@ -166,6 +166,14 @@ mod tests {
                 "CLAUDE_EFFORT",
                 "CLAUDE_PID",
             ]
+        );
+        assert_eq!(
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_ENTRYPOINT")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("zeron"))
         );
         // The user's own configuration is never touched.
         for kept in [

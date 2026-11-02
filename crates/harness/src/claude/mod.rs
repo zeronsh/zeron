@@ -50,6 +50,7 @@
 //! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
 //!   the interrupt control request, then SIGTERM and SIGKILL.
 
+mod background;
 pub mod catalog;
 mod discovery;
 mod fork_tail;
@@ -1295,6 +1296,10 @@ async fn run_session(session: Session) {
     // The typed fork whose transcript is read off disk (see [`fork_tail`]).
     let claude_root = config_root(&launched.env);
     let mut tail: Option<ForkTail> = None;
+    // The session's background shells, for the host's list (see
+    // [`background`]), and the stops asked of them.
+    let mut shells = background::BackgroundShells::default();
+    let mut task_stops_sent = 0u64;
 
     'main: loop {
         if std::mem::take(&mut relaunch) {
@@ -1307,6 +1312,8 @@ async fn run_session(session: Session) {
             }
             stdin.close_for_teardown();
             child.shutdown(kill_grace).await;
+            shells = background::BackgroundShells::default();
+            turn.set_background_processes(Vec::new());
             let mut fresh = launched.clone();
             fresh.resume = None;
             match ClaudeHarness::launch(&exe, &fresh, title_only) {
@@ -1406,6 +1413,17 @@ async fn run_session(session: Session) {
                             );
                         }
                         continue;
+                    }
+                    // Every frame: a shell's command, start and output file
+                    // arrive on different ones.
+                    let listed = shells.observe(&frame);
+                    if listed {
+                        turn.set_background_processes(shells.tasks());
+                    }
+                    if listed || matches!(frame, Frame::User(_)) {
+                        for (id, path) in shells.output_files() {
+                            turn.set_background_output(&id, crate::OutputSource::File(path));
+                        }
                     }
                     if let Frame::System(system) = &frame {
                         if let Some(mode) = &system.permission_mode {
@@ -1670,6 +1688,16 @@ async fn run_session(session: Session) {
                         *status = DoneStatus::Interrupted;
                     }
                     stopped_end = Some(done);
+                }
+            },
+
+            // The person stopped one background shell: the CLI's own task
+            // stop, which kills it and reports the roster without it.
+            task = turn.background_stop_requested(), if !interrupted => {
+                task_stops_sent += 1;
+                let id = format!("zeron_stop_task_{task_stops_sent}");
+                if !stdin.line(wire::stop_task_request_line(&id, &task)) {
+                    break 'main;
                 }
             },
 

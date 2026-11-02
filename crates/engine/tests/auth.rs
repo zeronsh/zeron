@@ -69,6 +69,8 @@ struct StubState {
     token_ttl: AtomicUsize,
     /// org_id claim for exchange-minted tokens ("" = none).
     exchange_org: Mutex<String>,
+    /// POST /auth/orgs answers 409 with this body ("" = creates `org_new`).
+    create_org_conflict: Mutex<String>,
 }
 
 struct StubEdge {
@@ -238,7 +240,12 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
             .await;
         }
         ("POST", "/auth/orgs") => {
-            respond(&mut stream, "200 OK", r#"{"organizationId":"org_new"}"#).await;
+            let conflict = state.create_org_conflict.lock().expect("lock").clone();
+            if conflict.is_empty() {
+                respond(&mut stream, "200 OK", r#"{"organizationId":"org_new"}"#).await;
+            } else {
+                respond(&mut stream, "409 Conflict", &conflict).await;
+            }
         }
         _ => respond(&mut stream, "404 Not Found", r#"{"error":"not_found"}"#).await,
     }
@@ -395,6 +402,39 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     auth.sign_out();
     assert_eq!(auth.state(), AuthState::SignedOut);
     assert!(!session_file.exists());
+}
+
+#[tokio::test]
+async fn creating_a_second_org_continues_in_the_first() {
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let url = auth.start_headless_sign_in();
+    let state = query_param(&url, "state").expect("state");
+    auth.complete_sign_in(&format!("{state}.codeX"))
+        .await
+        .expect("sign in");
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }));
+
+    // Another request of ours is still creating it: say so, stay at the gate.
+    *edge.state.create_org_conflict.lock().expect("lock") =
+        r#"{"error":"org_exists","organizationId":null}"#.into();
+    let pending = auth.create_org("Acme").await.expect_err("in flight");
+    assert!(
+        pending.to_string().contains("still being created"),
+        "{pending}"
+    );
+    assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }));
+
+    // We already created one: continue in it.
+    *edge.state.create_org_conflict.lock().expect("lock") =
+        r#"{"error":"org_exists","organizationId":"org_mine"}"#.into();
+    auth.create_org("Acme again")
+        .await
+        .expect("lands in the existing org");
+    assert!(
+        matches!(auth.state(), AuthState::SignedIn { org_id: Some(org), .. } if org == "org_mine")
+    );
 }
 
 #[tokio::test]

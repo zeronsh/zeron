@@ -81,6 +81,7 @@ impl SteerMessage {
 pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    processes: std::sync::Arc<background::BackgroundWork>,
 }
 
 impl TurnControl {
@@ -104,6 +105,52 @@ impl TurnControl {
     /// would kill work nobody asked to stop.
     pub fn background_live(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    /// Driver: the background processes the runtime runs now, oldest first —
+    /// its whole set, not a delta. (Background agents are subagents, shown as
+    /// such; they count in [`Self::set_background`] only.)
+    pub fn set_background_processes(&self, processes: Vec<zeron_proto::BackgroundTask>) {
+        self.processes.set(processes);
+    }
+
+    /// Driver: where a listed process's output can be read.
+    pub fn set_background_output(&self, id: &str, source: OutputSource) {
+        self.processes.set_output(id, source);
+    }
+
+    /// Driver: output the wire delivered for a process, kept as its tail.
+    pub fn append_background_output(&self, id: &str, chunk: &str) {
+        self.processes.append_output(id, chunk);
+    }
+
+    /// Driver: drop the output kept for a process that ended unlisted.
+    pub fn clear_background_output(&self, id: &str) {
+        self.processes.clear_output(id);
+    }
+
+    /// Driver: resolves with each process the host asked to stop.
+    pub async fn background_stop_requested(&self) -> String {
+        self.processes.stop_requested().await
+    }
+
+    /// Host: the runtime's background processes as they change.
+    pub fn watch_background_processes(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Vec<zeron_proto::BackgroundTask>> {
+        self.processes.watch()
+    }
+
+    /// Host: ask the driver to stop one process. False when the runtime does
+    /// not list it (it ended meanwhile).
+    pub fn stop_background_process(&self, id: &str) -> bool {
+        self.processes.request_stop(id)
+    }
+
+    /// Host: the tail of a listed process's output; `None` when it is not
+    /// listed. May read a file: call it off the async runtime.
+    pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
+        self.processes.output(id)
     }
 }
 
@@ -306,6 +353,8 @@ pub mod acp;
 pub(crate) mod adapter_install;
 pub mod approval;
 pub mod archive_install;
+mod background;
+pub use background::OutputSource;
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;

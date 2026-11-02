@@ -925,6 +925,22 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Fx,
+            name: "fx".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
+            supports_plan: false,
+        },
+        Box::new(|| zeron_harness::AcpHarness::fx().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::fx()) as Arc<dyn Harness>)),
+    );
     // Native Pi RPC. Thinking levels are discovered per model.
     registry.register_lazy(
         HarnessDescriptor {
@@ -1108,6 +1124,7 @@ mod tests {
                 HarnessId::Devin,
                 HarnessId::Grok,
                 HarnessId::Hermes,
+                HarnessId::Fx,
                 HarnessId::Pi,
                 HarnessId::Opencode,
                 HarnessId::Antigravity,
@@ -1792,6 +1809,7 @@ mod gate_tests {
             HarnessId::Devin,
             HarnessId::Grok,
             HarnessId::Hermes,
+            HarnessId::Fx,
             HarnessId::Pi,
             HarnessId::Opencode,
             HarnessId::Antigravity,

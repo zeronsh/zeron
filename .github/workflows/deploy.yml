@@ -109,7 +109,7 @@ jobs:
             || [ -z "$before" ] || ! git cat-file -e "$before" 2>/dev/null; then
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(edge/|\.github/workflows/deploy\.yml)"; then
+          if git diff --name-only "$before" "$GITHUB_SHA" | grep -qE "^(edge/|apps/card-web/|\.github/workflows/deploy\.yml)"; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -132,6 +132,12 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         working-directory: edge
         run: npm test
+      # The member card pages' static files (apps/card-web/site, its art)
+      # into edge/public, which wrangler uploads as the worker's assets.
+      - name: card assets
+        if: steps.changed.outputs.changed == 'true'
+        working-directory: edge
+        run: npm run card-assets
       - name: deploy
         if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         working-directory: edge

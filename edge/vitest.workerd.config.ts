@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { createBoatFake } from "./test/workerd/boat-fake.ts";
 import { createStripeFake } from "./test/workerd/stripe-fake.ts";
+import { createWorkOsFake } from "./test/workerd/workos-fake.ts";
 
 // Runtime-real test tier: runs inside actual workerd via
 // @cloudflare/vitest-pool-workers, against a real SQLite-backed Durable
@@ -24,12 +25,15 @@ import { createStripeFake } from "./test/workerd/stripe-fake.ts";
 // throwaway ES256 pair so runner JWTs are real.
 const runnerKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
 
-/** Boat and Stripe fakes behind Miniflare's one outbound service. */
+/** Boat, Stripe and WorkOS fakes behind Miniflare's one outbound service. */
 const outbound = () => {
   const boat = createBoatFake();
   const stripe = createStripeFake();
-  return (request: Parameters<typeof boat>[0]) =>
-    new URL(request.url).hostname === "stripe.test" ? stripe(request) : boat(request);
+  const workos = createWorkOsFake();
+  return (request: Parameters<typeof boat>[0]) => {
+    const host = new URL(request.url).hostname;
+    return host === "stripe.test" ? stripe(request) : host === "api.workos.com" ? workos(request) : boat(request);
+  };
 };
 
 export default defineConfig({
@@ -38,7 +42,9 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
-        r2Buckets: ["BLOBS", "RELEASES"],
+        compatibilityFlags: ["nodejs_compat"],
+        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
+        ratelimits: { CARD_READS: { namespace_id: "1", simple: { limit: 60, period: 60 } } },
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
@@ -46,7 +52,8 @@ export default defineConfig({
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
           REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true },
           CLOUD_ACCOUNTS: { className: "CloudAccount", useSQLite: true },
-          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true }
+          CLOUD_INDEX: { className: "CloudIndex", useSQLite: true },
+          USER_DIRECTORY: { className: "UserDirectory", useSQLite: true }
         },
         workflows: {
           CLOUD_PROVISION: { name: "test-cloud-provision", className: "ProvisionWorkflow" },
@@ -57,7 +64,7 @@ export default defineConfig({
         serviceBindings: {
           VAULT: { name: kCurrentWorker, entrypoint: "VaultStub" }
         },
-        r2Buckets: ["BLOBS", "RELEASES"],
+        r2Buckets: ["BLOBS", "RELEASES", "CARD_IMAGES"],
         bindings: {
           AUTH_MODE: "dev",
           WORKOS_CLIENT_ID: "test-only",
@@ -76,6 +83,7 @@ export default defineConfig({
           STRIPE_API_URL: "https://stripe.test",
           CLOUD_MAX_AWAKE: "2",
           ADMIN_TOKEN: "test-admin-token",
+          WORKOS_WEBHOOK_SECRET: "workos_whsec_test",
           RUNNER_JWT_PRIVATE_KEY: JSON.stringify(runnerKeys.privateKey.export({ format: "jwk" })),
           RUNNER_JWT_PUBLIC_KEY: JSON.stringify(runnerKeys.publicKey.export({ format: "jwk" }))
         },

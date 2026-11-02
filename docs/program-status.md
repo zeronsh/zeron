@@ -76,7 +76,7 @@ terminal control strings. Only one bounded summary per chat is replicated.
 
 ## Verification
 
-`cargo test -p zeron-engine --test osc7501` exercises a real Unix PTY through the
+`cargo test -p zeron-engine --test misc` exercises a real Unix PTY through the
 engine, registry, shared sidebar derivation, and MCP. It also runs a capability
 probe without a terminal emulator. Parser unit tests cover fragmentation,
 malformed/oversized reports, hierarchical records, replacement, and lifecycle

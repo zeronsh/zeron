@@ -303,12 +303,38 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         last_turn_outcome: None,
         terminal_activity: None,
         running_subagents: 0,
+        background_tasks: Vec::new(),
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
         started_at: Some(ts(3_000)),
         updated_at: ts(3_500),
     }
+}
+
+#[test]
+fn background_processes_replicate_and_clear() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut row = session("chat", "host", SessionStatus::Idle);
+    row.background_tasks = vec![zeron_proto::BackgroundTask {
+        id: "bgsh".into(),
+        command: "npm run dev".into(),
+        description: Some("Start the dev server".into()),
+        started_at: ts(3_100),
+    }];
+    host.upsert_session(&row).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+
+    // Every process ended: an empty list replaces the old one.
+    row.background_tasks.clear();
+    row.updated_at = ts(3_600);
+    host.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
 }
 
 #[test]

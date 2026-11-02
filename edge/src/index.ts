@@ -47,11 +47,27 @@
  *   POST /admin/cloud/machine           — ADMIN_TOKEN (a user's machine size)
  *   POST /admin/cloud/limits            — ADMIN_TOKEN (a user's awake/chat caps)
  *   POST /stripe/webhook | GET /billing/done — pre-bearer billing (Stripe-signed / static page)
+ *
+ * User directory (user-directory.ts):
+ *   POST /workos/webhook                — pre-bearer, WorkOS-signed user, org and membership events
+ *   GET  /admin/users[?format=csv]      — ADMIN_TOKEN (every user's profile + join date)
+ *   GET  /admin/organizations[?format=csv] — ADMIN_TOKEN (every org with its members)
+ *   GET|POST /admin/badges              — ADMIN_TOKEN (list / define badges)
+ *   POST /admin/badges/{grant|revoke}   — ADMIN_TOKEN (give or take a badge from users)
+ *   POST /admin/usernames/{set|clear|face} — ADMIN_TOKEN (give or take a username; pick a card's scene and foil)
+ *
+ * Member cards (card-routes.ts):
+ *   GET  /cards/:username               — pre-bearer, a card as JSON
+ *   GET  /c/:username, /@:username      — pre-bearer, a card's page (also routed from zeron.sh)
+ *     (every public card route goes through publicCardGate: per-IP limit, one plain 503)
+ *   GET|POST /username, GET /username/check — user bearer (claim, availability)
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
+import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
+import { publicCardGate } from "./card-gate";
 import type { Env } from "./env";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
@@ -75,9 +91,10 @@ import { FakeProvider } from "./cloud/providers/fake";
 import { runnerChatGate, runnerDeviceGate } from "./runner-access";
 import { runnerRefusal } from "./runner-policy";
 import { handleVaultRoute } from "./vault-routes";
+import { handleUserDirectoryRoute, UserDirectory } from "./user-directory";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, CloudAccount, CloudIndex, UserDirectory };
 export { ProvisionWorkflow, WakeWorkflow, SleepWorkflow, DeleteWorkflow };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -137,6 +154,10 @@ export default {
     if (billingRouted) return billingRouted;
     const runnerRouted = await handleRunnerPublicRoute(request, env, url);
     if (runnerRouted) return runnerRouted;
+    const usersRouted = await handleUserDirectoryRoute(request, env, url);
+    if (usersRouted) return usersRouted;
+    const cardRouted = await publicCardGate(request, env, url, () => handlePublicCardRoute(request, env, ctx, url));
+    if (cardRouted) return cardRouted;
 
     const auth = await authenticate(env, request);
     if (!auth) return json({ error: "unauthenticated" }, 401);
@@ -156,6 +177,9 @@ export default {
       const fake = env.AUTH_MODE === "dev" ? sandboxProvider(env, "fake") : undefined;
       return fake instanceof FakeProvider ? json({ sandboxes: fake.snapshot() }) : json({ error: "not_found" }, 404);
     }
+
+    const usernameRouted = await handleUsernameRoute(request, env, auth, url);
+    if (usernameRouted) return usernameRouted;
 
     const cloudRouted = await handleCloudRoute(request, env, auth, url);
     if (cloudRouted) return cloudRouted;

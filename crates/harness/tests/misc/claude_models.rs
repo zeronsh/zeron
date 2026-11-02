@@ -7,7 +7,7 @@ use zeron_proto::ReasoningLevel;
 fn fixture(response: serde_json::Value) -> (tempfile::TempDir, ClaudeHarness) {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("claude");
-    std::fs::write(&script, include_str!("fixtures/fake-claude-models.py")).unwrap();
+    std::fs::write(&script, include_str!("../fixtures/fake-claude-models.py")).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(dir.path().join("response.json"), response.to_string()).unwrap();
     (dir, ClaudeHarness::new().with_executable(script))

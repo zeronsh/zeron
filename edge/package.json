@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 27640 --var AUTH_MODE:dev",
-    "deploy": "wrangler deploy",
-    "build": "wrangler deploy --dry-run --outdir dist",
+    "dev": "npm run card-assets && wrangler dev --port 27640 --var AUTH_MODE:dev",
+    "card-assets": "node scripts/card-assets.mjs",
+    "deploy": "npm run card-assets && wrangler deploy",
+    "build": "npm run card-assets && wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:workerd",
     "test:unit": "vitest run",
@@ -14,14 +15,16 @@
     "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
+    "@cloudflare/puppeteer": "^1.4.0",
     "jose": "^6.0.11",
-    "loro-crdt": "^1.13.7",
+    "loro-crdt": "^1.17.1",
     "loro-protocol": "^0.3.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.2",
     "@cloudflare/workers-types": "^5.20260714.1",
     "loro-adaptors": "^0.6.1",
+    "loro-crdt-legacy": "npm:loro-crdt@1.13.7",
     "loro-websocket": "^0.6.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",

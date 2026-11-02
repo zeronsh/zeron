@@ -217,7 +217,13 @@ async fn stress_100_interrupted_sessions_recover_without_losing_history_or_repla
     );
     assert_eq!(frame(&mut lines).await["status"], "finished");
     finish(&mut child, stdin).await;
-    for round in 0..100 {
+    // Pull request CI runs two cycles of the seven failure modes
+    // (ZERON_STRESS_ROUNDS=14); the nightly run and local runs do 100.
+    let rounds: usize = std::env::var("ZERON_STRESS_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    for round in 0..rounds {
         let mode = round % 7;
         let prompt = match mode {
             3 => "send-error",
@@ -266,11 +272,11 @@ async fn stress_100_interrupted_sessions_recover_without_losing_history_or_repla
             .unwrap()
             .lines()
             .count(),
-        201,
+        2 * rounds + 1,
         "recovery must not send any unrequested prompts"
     );
     println!(
-        "stress: 100 crashed/disconnected/cancelled/errored sessions, 100 successful same-session recoveries, zero history loss"
+        "stress: {rounds} crashed/disconnected/cancelled/errored sessions, {rounds} successful same-session recoveries, zero history loss"
     );
 }
 

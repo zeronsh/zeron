@@ -135,6 +135,16 @@ export const usageCsv = (data: UsageExport): string => {
   return `${lines.join("\n")}\n`;
 };
 
+/** Whether the request carries the operator's `ADMIN_TOKEN` bearer. */
+export const adminAuthorized = async (request: Request, adminToken: string): Promise<boolean> => {
+  // Header only (never `?token=`: query strings end up in logs).
+  const header = request.headers.get("authorization") ?? "";
+  const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
+  // Compare digests so neither the content nor the length leaks via timing.
+  const [given, expected] = await Promise.all([sha256B64url(token), sha256B64url(adminToken)]);
+  return token !== "" && constantTimeEqual(given, expected);
+};
+
 /** `/admin/cloud/usage`, `/admin/cloud/credits`, `/admin/cloud/machine` and
  * `/admin/cloud/limits` — undefined when not one of them. */
 export const handleAdminRoute = async (
@@ -144,12 +154,7 @@ export const handleAdminRoute = async (
 ): Promise<Response | undefined> => {
   if (!ADMIN_PATHS.has(url.pathname)) return undefined;
   if (!env.ADMIN_TOKEN) return json({ error: "not_found" }, 404);
-  // Header only (never `?token=`: query strings end up in logs).
-  const header = request.headers.get("authorization") ?? "";
-  const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
-  // Compare digests so neither the content nor the length leaks via timing.
-  const [given, expected] = await Promise.all([sha256B64url(token), sha256B64url(env.ADMIN_TOKEN)]);
-  if (!token || !constantTimeEqual(given, expected)) {
+  if (!(await adminAuthorized(request, env.ADMIN_TOKEN))) {
     return jsonError(401, "unauthenticated", "Admin token required.");
   }
   if (url.pathname === "/admin/cloud/credits") return grantCredits(request, env);
