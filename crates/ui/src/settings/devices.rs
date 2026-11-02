@@ -99,7 +99,7 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 
 /// The new chat draft behind Add devbox. Crew's devbox workflow owns setup;
 /// the agent follows it on this computer while the user signs in and approves.
-pub const DEVBOX_SETUP_REQUEST: &str = "Set up a new personal devbox for me on Boat, following Crew's devbox workflow: skills/devbox in Ashler-AI/comet, read at the main commit you build Crew from. Use an xlarge machine, a name that doesn't clash with my existing devboxes, and the same Crew channel as this computer. Leave sign-ins and approvals to me, and ask before any billing change. It's done when the new machine shows as a Devbox in Settings › Devices.";
+pub const DEVBOX_SETUP_REQUEST: &str = "Set up a new personal devbox for me on Boat, following the devbox workflow: skills/devbox in Ashler-AI/ashler-platform, read from its master branch. Use an xlarge machine, a name that doesn't clash with my existing devboxes, and the same Crew channel as this computer. Leave sign-ins and approvals to me, and ask before any billing change. It's done when the new machine shows as a Devbox in Settings › Devices.";
 
 /// What the page asks the shell to do.
 pub enum DevicesEvent {
