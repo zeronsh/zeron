@@ -162,9 +162,7 @@ impl PiHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let scratch = mcp
-            .map(|config| self::mcp::configure(&mut cmd, config))
-            .transpose()?;
+        let scratch = self::mcp::configure(&mut cmd, mcp)?;
         let child = cmd.spawn().map_err(|e| {
             crate::executable::spawn_error(e, Some(cwd), || crate::executable::binary_hint(&exe))
         })?;
@@ -195,7 +193,7 @@ impl PiHarness {
 }
 struct Process {
     child: Child,
-    _scratch: Option<crate::scratch::ScratchDir>,
+    _scratch: crate::scratch::ScratchDir,
     transport: rpc::Transport,
     tail: crate::StderrTail,
     stderr_task: tokio::task::JoinHandle<()>,

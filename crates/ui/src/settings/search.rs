@@ -81,6 +81,10 @@ settings_index! {
         "folder directory path checkout branches"),
     (CommitCredit, General, Some("Git"), "Credit Zeron in commits",
         "co-author coauthor attribution bot commit message"),
+    (ZeronMcpTools, General, Some("Agent integration"), "Zeron MCP tools and instructions",
+        "mcp tools chats delegate visuals prompt agents integration"),
+    (KeepAwake, General, Some("Power"), "Keep Mac awake",
+        "sleep lid closed clamshell caffeinate insomnia awake power battery"),
     (ColorScheme, Appearance, None, "Color scheme",
         "system light dark mode"),
     (LightTheme, Appearance, None, "Light theme",
@@ -99,12 +103,26 @@ settings_index! {
         "random shuffle images directory"),
     (BackgroundEffect, Appearance, Some("Material and background"), "Background effect",
         "blur dim image"),
+    (BackgroundRotation, Appearance, Some("Material and background"), "Background rotation",
+        "rotate turn wallpaper image video orientation"),
+    (BackgroundBlur, Appearance, Some("Material and background"), "Background blur",
+        "soften wallpaper artwork image video"),
+    (VideoSpeed, Appearance, Some("Material and background"), "Video speed",
+        "playback rate wallpaper video background"),
+    (VideoLength, Appearance, Some("Material and background"), "Video length",
+        "trim loop start end wallpaper video background"),
     (ReduceMotion, Appearance, Some("Motion"), "Reduce motion",
         "animations accessibility"),
     (PauseAnimations, Appearance, Some("Motion"), "Pause animations in background",
         "focus unfocused inactive window battery"),
     (SmoothScrolling, Appearance, Some("Motion"), "Smooth scrolling",
         "mouse wheel glide ease"),
+    (EnergySaver, Appearance, Some("Motion"), "Energy saver",
+        "battery power low calm opaque wallpapers"),
+    (SidebarTheme, Appearance, Some("Sidebar"), "Sidebar theme",
+        "decoration aquarium fish night sky stars sakura pixel scene custom json"),
+    (SidebarProjectHighlight, Appearance, Some("Sidebar"), "Highlight open project",
+        "selected active current project group header accent tint"),
     (ThemeLibrary, Appearance, None, "Theme library",
         "import add custom themes"),
     (InterfaceFont, Appearance, Some("Fonts and layout"), "Interface font",
@@ -188,7 +206,11 @@ impl SettingId {
     /// only once its parent is on (or, for a background effect, set).
     pub fn parent(self) -> Option<SettingId> {
         match self {
-            SettingId::BackgroundEffect => Some(SettingId::NewThreadBackground),
+            SettingId::BackgroundEffect
+            | SettingId::BackgroundRotation
+            | SettingId::BackgroundBlur
+            | SettingId::VideoSpeed
+            | SettingId::VideoLength => Some(SettingId::NewThreadBackground),
             SettingId::Microphone | SettingId::SpeechModel => Some(SettingId::Dictation),
             SettingId::AutosaveDelay => Some(SettingId::Autosave),
             _ => None,
@@ -376,6 +398,10 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::Billing => "plan credits subscription payment stripe",
         SettingsSection::Files => "editor autosave wrap hidden",
         SettingsSection::Appshots => "screenshots capture permissions",
+        SettingsSection::ComputerUse => {
+            "computer use cua driver desktop control accessibility screen recording permissions"
+        }
+        SettingsSection::Pets => "pets pet companion desktop mascot animation",
         SettingsSection::Archived => "archive unarchive restore delete sessions threads",
     }
 }

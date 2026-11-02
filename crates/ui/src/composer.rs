@@ -2335,6 +2335,12 @@ impl ComposerInput {
             self.blink_task = None;
             return false;
         }
+        // Energy saver: a solid caret needs no half-period repaints of the
+        // whole composer.
+        if motion::energy_saver(cx) {
+            self.blink_task = None;
+            return true;
+        }
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
                 loop {

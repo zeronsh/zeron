@@ -6,5 +6,7 @@
          their own name, identity, version and runtime environment. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Zeron uses your microphone for on-device dictation and for voice sessions you start. Voice sessions stream your audio to OpenAI through your ChatGPT-authenticated Codex account.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Zeron uses Apple Events when an agent controls apps and browsers on your Mac.</string>
 </dict>
 </plist>

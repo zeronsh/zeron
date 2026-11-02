@@ -104,6 +104,36 @@ async fn terminal_contract_handles_normal_errors_retries_compaction_and_consumed
 }
 
 #[tokio::test]
+async fn a_subagent_result_over_32_mib_keeps_its_output_and_finishes_the_run() {
+    let events = collect("huge-tool-result").await;
+    let output: String = events
+        .iter()
+        .filter_map(|e| {
+            if let AgentEvent::ToolResult {
+                output, is_error, ..
+            } = e
+            {
+                assert!(!is_error);
+                output.clone()
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(output, "child answer", "{events:?}");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn nested_agent_environment_is_not_inherited() {
     if std::env::var_os("CLAUDECODE").is_none() {
         // Re-run in a private environment; never mutate this process's env.

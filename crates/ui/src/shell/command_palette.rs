@@ -773,33 +773,37 @@ impl Shell {
             .iter()
             .filter(|chat| chat.is_top_level())
             .filter_map(|chat| {
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
-                    })
-                    .unwrap_or_default();
-                let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state
-                        .space_for_chat(chat)
-                        .map(|s| s.display_name())
-                        .unwrap_or(""),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces)
-                        .unwrap_or(""),
-                    device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
-                    archived: chat.archived,
-                };
-                let score = thread_search::score_thread(&fields, &terms)?;
+                let score = Self::thread_match_score(chat, state, &terms)?;
                 let active = chat.last_message_at.unwrap_or(chat.created_at);
                 Some((chat.id.clone(), score, active.timestamp_millis()))
             })
             .collect();
         thread_search::rank(scored, limit)
+    }
+
+    /// One shared matcher for the global palette and project-scoped sidebar.
+    pub(super) fn thread_match_score(
+        chat: &zeron_proto::Chat,
+        state: &AppState,
+        terms: &[String],
+    ) -> Option<u32> {
+        let pull_request = state
+            .change_request_for_chat(chat)
+            .map(|pr| format!("#{} {} {} {}", pr.number, pr.title, pr.head_ref, pr.base_ref))
+            .unwrap_or_default();
+        let project = state.space_for_chat(chat);
+        let fields = thread_search::ThreadFields {
+            title: chat.title.as_deref().unwrap_or("New session"),
+            project: project.map(|s| s.display_name()).unwrap_or(""),
+            project_path: chat.cwd.as_deref().or_else(|| project.map(|s| s.path.as_str())).unwrap_or(""),
+            preview: chat.last_message_preview.as_deref().unwrap_or(""),
+            id: &chat.id,
+            branch: crate::change_requests::conversation_branch(chat, &state.spaces).unwrap_or(""),
+            device: state.device_name(&chat.device_id).unwrap_or(""),
+            pull_request: &pull_request,
+            archived: chat.archived,
+        };
+        thread_search::score_thread(&fields, terms)
     }
 
     /// Pointer motion moves the highlight, so hover and keyboard never light
@@ -1668,6 +1672,22 @@ mod tests {
                 assert_eq!(search_chats(shell, "deploy staging", cx), ["older"]);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn history_finds_reordered_words_typos_preview_and_chat_id(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window.update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                let mut chat = titled("unique-4729", "Поиск ёмкого кэша", true, 3);
+                chat.last_message_preview = Some("Investigate sidebar rendering".into());
+                state.apply_chats(vec![chat]);
+            });
+            shell.toggle_command_palette(window, cx);
+            for query in ["кэша поиск", "емкого", "поискк", "sidebar rendering", "unique-4729"] {
+                assert_eq!(search_chats(shell, query, cx), ["unique-4729"], "{query}");
+            }
+        }).unwrap();
     }
 
     #[gpui::test]

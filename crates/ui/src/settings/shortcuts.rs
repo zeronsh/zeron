@@ -101,6 +101,7 @@ pub struct ShortcutsPage {
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
+    mcp: Entity<super::mcp::McpSettingsCard>,
     _state: Entity<AppState>,
 }
 
@@ -146,6 +147,7 @@ impl ShortcutsPage {
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
+            mcp: cx.new(super::mcp::McpSettingsCard::new),
             _state: state,
         }
     }
@@ -208,6 +210,71 @@ impl ShortcutsPage {
     fn commit(&mut self, cx: &mut Context<Self>) {
         cx.emit(ShortcutsEvent::KeymapChanged(self.keymap.clone()));
         cx.notify();
+    }
+
+    /// Settings → General → Power → Keep Mac awake.
+    fn render_keep_awake_row(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let enabled = crate::settings::keep_awake(cx);
+        let busy = crate::keep_awake::busy();
+        let note: SharedString = match (busy, crate::keep_awake::last_error()) {
+            (true, _) => "Applying…".into(),
+            (false, Some(error)) => error.into(),
+            (false, None) if crate::keep_awake::holding() => {
+                "An agent is working: your Mac stays awake, even with the lid closed.".into()
+            }
+            (false, None) => "While an agent is working, your Mac won't sleep, even with the lid closed. When the work is done, it sleeps as usual.".into(),
+        };
+        widgets::card_row(theme, true)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(160.0))
+                    .child(widgets::row_title(theme, "Keep Mac awake"))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div().child(note).into_any_element()],
+                    )),
+            )
+            .child(
+                widgets::toggle_switch(theme, enabled, "keep-awake")
+                    .id("keep-awake-toggle")
+                    .tab_index(0)
+                    .role(gpui::Role::Switch)
+                    .aria_label("Keep Mac awake")
+                    .aria_toggled(if enabled {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::set_keep_awake(!enabled, cx);
+                        // The switch runs off-thread (it may show the admin
+                        // prompt); repaint once it lands. A refused prompt
+                        // turns the setting back off.
+                        cx.spawn(async move |page, cx| {
+                            while crate::keep_awake::busy() {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(150))
+                                    .await;
+                            }
+                            let failed = crate::keep_awake::last_error().is_some();
+                            let _ = page.update(cx, |_, cx| {
+                                if failed && !enabled {
+                                    crate::settings::update(SavePolicy::Immediate, cx, |s| {
+                                        s.keep_awake = false;
+                                    });
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                        cx.notify();
+                    })),
+            )
+            .search_anchor(SettingId::KeepAwake)
+            .into_any_element()
     }
 
     fn set_escape_stops_active_agent(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -953,6 +1020,7 @@ impl Render for ShortcutsPage {
                 )
                 .child(pull_request_destination_control)
                 .search_anchor(SettingId::PullRequestDestination);
+            let keep_awake_row = self.render_keep_awake_row(&theme, cx);
             let scrollbar = self.render_scrollbar(&theme, cx);
             return div()
                 .id("general-settings-page-host")
@@ -986,6 +1054,14 @@ impl Render for ShortcutsPage {
                                             .mt_0()
                                             .child(pull_request_destination_row),
                                     ))
+                                    .child(widgets::section(
+                                        &theme,
+                                        "Power",
+                                        widgets::section_card(&theme)
+                                            .mt_0()
+                                            .child(keep_awake_row),
+                                    ))
+                                    .child(self.mcp.clone())
                                     .child(self.thread_naming.clone())
                                     .child(self.worktrees.clone()),
                             ),

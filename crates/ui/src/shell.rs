@@ -640,12 +640,16 @@ pub enum SettingsSection {
     #[default]
     General,
     Appshots,
+    /// Agent desktop control (cua-driver) and its macOS permissions.
+    ComputerUse,
+    /// The desktop pet companion.
+    Pets,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 14] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -657,6 +661,8 @@ impl SettingsSection {
         SettingsSection::Billing,
         SettingsSection::Files,
         SettingsSection::Appshots,
+        SettingsSection::ComputerUse,
+        SettingsSection::Pets,
         SettingsSection::Archived,
     ];
 
@@ -671,7 +677,10 @@ impl SettingsSection {
     }
 
     fn visible_in_nav(self) -> bool {
-        self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
+        self != Self::Agents
+            && (self != Self::Appshots || crate::appshots::is_desktop())
+            && (self != Self::ComputerUse || cfg!(target_os = "macos"))
+            && (self != Self::Pets || crate::pets::supported())
     }
 
     /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
@@ -712,6 +721,8 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "shortcuts",
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
+            SettingsSection::ComputerUse => "computer-use",
+            SettingsSection::Pets => "pets",
             SettingsSection::Archived => "archived",
         }
     }
@@ -731,6 +742,8 @@ impl SettingsSection {
             "shortcuts" => SettingsSection::Shortcuts,
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
+            "computer-use" => SettingsSection::ComputerUse,
+            "pets" => SettingsSection::Pets,
             "archived" => SettingsSection::Archived,
             _ => return None,
         })
@@ -758,6 +771,8 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
+            SettingsSection::ComputerUse => "Computer use",
+            SettingsSection::Pets => "Pets",
             SettingsSection::Archived => "Archived sessions",
         }
     }
@@ -777,6 +792,8 @@ impl SettingsSection {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
+            SettingsSection::ComputerUse => icons::MAGIC_STICK_3,
+            SettingsSection::Pets => icons::PAW,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         }
     }
@@ -2131,8 +2148,15 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
+    /// The sidebar's chat search box: while it holds text only sessions whose
+    /// title matches are listed.
+    pub(super) sidebar_search: Entity<ComposerInput>,
+    _sidebar_search_events: Subscription,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Group keys whose "Show more" was clicked: they draw every chat instead
+    /// of the first [`spaces::SIDEBAR_GROUP_ROWS`]. Session-transient.
+    pub(super) sidebar_expanded_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2227,6 +2251,8 @@ pub struct Shell {
     cloud_page: Option<Entity<CloudPage>>,
     billing_page: Option<Entity<BillingPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    computer_use_page: Option<Entity<crate::settings::computer_use::ComputerUsePage>>,
+    pets_page: Option<Entity<crate::settings::pets::PetsPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2525,6 +2551,9 @@ pub struct Shell {
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
+    /// The footer's Usage button and its plan-limits card.
+    sidebar_usage: Entity<crate::sidebar_usage::SidebarUsage>,
+    _sidebar_usage_events: Subscription,
     _transcript_invalidation: Subscription,
 }
 
@@ -2532,6 +2561,9 @@ impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.on_state_changed(&state, cx);
+            // Keep-awake follows whether an agent here is working.
+            let working = state.read(cx).local_work_running(chrono::Utc::now());
+            crate::keep_awake::sync(working, cx);
             cx.notify();
         });
         // A reopened window reuses AppState, so the engine may already be
@@ -2638,6 +2670,10 @@ impl Shell {
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
+        let sidebar_usage =
+            cx.new(|cx| crate::sidebar_usage::SidebarUsage::new(state.clone(), cx));
+        let sidebar_usage_events =
+            cx.subscribe(&sidebar_usage, |_: &mut Shell, _, event, _| match *event {});
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| {
@@ -2714,6 +2750,17 @@ impl Shell {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
         let shell = cx.entity();
+        // "PaletteSearch" context keeps ↑↓/⏎ unbound in the box so they bubble
+        // to the sidebar's own key handling.
+        let sidebar_search = cx.new(|cx| {
+            ComposerInput::with_context("Search chats…", "PaletteSearch", cx)
+                .with_accessibility_role(gpui::Role::SearchInput)
+        });
+        let sidebar_search_events = cx.observe(&sidebar_search, |shell, _, cx| {
+            // A previous long list may be scrolled past the new matches.
+            shell.sidebar_scroll.set_offset(gpui::Point::default());
+            cx.notify();
+        });
         let sidebar_pane = cx.new(|cx| SidebarPane {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
@@ -2745,7 +2792,10 @@ impl Shell {
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
+            sidebar_search,
+            _sidebar_search_events: sidebar_search_events,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_expanded_groups: std::collections::HashSet::new(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -2800,6 +2850,8 @@ impl Shell {
             cloud_page: None,
             billing_page: None,
             archived_page: None,
+            computer_use_page: None,
+            pets_page: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -2958,6 +3010,8 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            sidebar_usage,
+            _sidebar_usage_events: sidebar_usage_events,
             _transcript_invalidation: transcript_invalidation,
         }
     }
@@ -6188,6 +6242,20 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
+            SettingsSection::ComputerUse => {
+                let page = self
+                    .computer_use_page
+                    .get_or_insert_with(|| {
+                        cx.new(crate::settings::computer_use::ComputerUsePage::new)
+                    })
+                    .clone();
+                page.into_any_element()
+            }
+            SettingsSection::Pets => self
+                .pets_page
+                .get_or_insert_with(|| cx.new(crate::settings::pets::PetsPage::new))
+                .clone()
+                .into_any_element(),
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
@@ -9828,6 +9896,7 @@ impl Shell {
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
         // promotions glide; cleared rows just go).
+        let searching = !thread_search::search_terms(&self.sidebar_search_query(cx)).is_empty();
         let session_rows = self.render_active_rows(theme, cx);
         let moving_row = session_rows
             .moving_row
@@ -9837,7 +9906,7 @@ impl Shell {
         let regular_start = pinned_count + custom_count;
         let mut keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
-        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        let ungrouped = !searching && self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
@@ -10038,12 +10107,28 @@ impl Shell {
             .collect();
 
         // t3code's archived accordion, below the active list.
-        let archived_section = self.render_archived_section(theme, cx);
+        let archived_section = if searching { None } else { self.render_archived_section(theme, cx) };
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
-        let active_list = if !list_items.is_empty() {
+        let search_row = self.render_sidebar_chat_search(theme, cx);
+        let active_list = if searching {
+            div()
+                .id("sidebar-search-results")
+                .flex()
+                .flex_col()
+                .gap(px(SIDEBAR_LIST_GAP))
+                .pb(px(Theme::SPACE_SM))
+                .when(list_items.is_empty(), |el| {
+                    el.px(px(Theme::SPACE_SM))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_faint)
+                        .child("No matching chats")
+                })
+                .children(list_items)
+                .into_any_element()
+        } else if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
             let regular_items = custom_items.split_off(custom_count);
@@ -10246,6 +10331,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
+            .child(search_row)
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -10694,9 +10780,16 @@ impl Shell {
     ) -> AnyElement {
         // Pull requests sits just left of Settings, in the same action group.
         let pull_requests = self.render_pull_requests_button(theme, cx);
+        let usage = self.sidebar_usage.clone().into_any_element();
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        // Without a signed-in account the pill would only say
+        // "Local"; it shrinks to an icon button (same menu) instead.
+        let compact = !matches!(
+            self.state.read(cx).auth.as_ref(),
+            Some(AuthState::SignedIn { .. })
+        ) && user_line.as_ref() == "Local";
         // The profile pill hugs avatar + name (shrinking so long names fade
         // out); the gap between it and the settings button is not interactive.
         let initial: SharedString = user_line
@@ -10716,15 +10809,25 @@ impl Shell {
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .relative()
             .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-            .min_w_0()
-            .flex_shrink_1()
-            .w_full()
+            .when(compact, |el| {
+                el.w(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                    .flex_none()
+                    .justify_center()
+                    .when(!open, |el| {
+                        el.tooltip(crate::settings::widgets::text_tooltip("Account · Local"))
+                    })
+            })
+            .when(!compact, |el| {
+                el.min_w_0()
+                    .flex_shrink_1()
+                    .w_full()
+                    .px(px(Theme::SPACE_SM))
+                    .gap(px(Theme::SPACE_SM))
+            })
             .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(Theme::SPACE_SM))
             .text_size(crate::typography::ui_rems(13.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(if open {
@@ -10760,7 +10863,14 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(
+            .when(compact, |el| {
+                el.child(icon(icons::GLOBAL).size(px(15.0)).text_color(if open {
+                    theme.text
+                } else {
+                    motion::hover_blend("user-menu-trigger", theme.text_muted, theme.text)
+                }))
+            })
+            .when(!compact, |el| el.child(
                 // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
                 div()
                     .size(px(SIDEBAR_FOOTER_AVATAR_SIZE))
@@ -10781,7 +10891,7 @@ impl Shell {
                 "user-menu-label".into(),
                 false,
                 div().line_height(px(17.0)).child(user_line),
-            ));
+            )));
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
 
@@ -10914,6 +11024,7 @@ impl Shell {
                     .items_center()
                     .gap(px(2.0))
                     .children(voice_trigger)
+                    .child(usage)
                     .child(pull_requests)
                     .child(
                         div()
@@ -11638,16 +11749,37 @@ impl Shell {
                     cx,
                 )
             });
-        let artwork_frame = self.new_thread_artwork_ready.frame(
-            artwork,
-            new_thread_background_setting
-                .as_ref()
-                .map(|background| std::path::Path::new(&background.path)),
-            new_thread_background_adjustment,
-            new_thread_background_setting.is_some(),
-            self.reduced_motion,
-            frame_time,
-        );
+        let video_background = new_thread_background_setting
+            .as_ref()
+            .is_some_and(|background| {
+                crate::new_thread_background_video::is_video(std::path::Path::new(&background.path))
+            });
+        let artwork_frame = if video_background {
+            // Live video frames replace each other in place; the
+            // still-image crossfade would restart on every frame.
+            crate::new_thread_background_video::release_retired(window);
+            crate::new_thread_background_effects::ArtworkFrame {
+                current: artwork,
+                previous: None,
+                current_adjustment: new_thread_background_adjustment.normalized(),
+                previous_adjustment: new_thread_background_adjustment.normalized(),
+                mix: 1.0,
+                active: false,
+            }
+        } else {
+            crate::new_thread_background_video::stop(cx);
+            crate::new_thread_background_video::release_retired(window);
+            self.new_thread_artwork_ready.frame(
+                artwork,
+                new_thread_background_setting
+                    .as_ref()
+                    .map(|background| std::path::Path::new(&background.path)),
+                new_thread_background_adjustment,
+                new_thread_background_setting.is_some(),
+                self.reduced_motion,
+                frame_time,
+            )
+        };
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -11690,7 +11822,9 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+        // The wallpaper stays behind open conversations as well, instead
+        // of dissolving when the composer docks into a chat.
+        let new_thread_background_layer = {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
@@ -11706,7 +11840,7 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds.clone(),
-                    dock_frame.dissolve(),
+                    0.0,
                     (1.0 - artwork_frame.mix) * opacity,
                 ))
                 .child(new_thread_background(
@@ -11715,11 +11849,11 @@ impl Shell {
                     self.viewport_height,
                     width,
                     bounds,
-                    dock_frame.dissolve(),
+                    0.0,
                     artwork_frame.mix * opacity,
                 ))
                 .into_any_element()
-        });
+        };
 
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
@@ -11849,7 +11983,7 @@ impl Shell {
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
-            .children(new_thread_background_layer)
+            .child(new_thread_background_layer)
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -14439,7 +14573,21 @@ impl Render for Shell {
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
                 let sidebar_now = self.sidebar_now();
-                let sidebar_tone = Self::sidebar_tone(sidebar_now, border_color, window);
+                // The sidebar theme's scene sits in the tone, under the
+                // cached sidebar pane, clear of the right hairline.
+                let decor = crate::sidebar_decor::render(Theme::of(cx).appearance.is_dark(), cx)
+                    .map(|scene| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .right(px(1.0))
+                            .overflow_hidden()
+                            .child(scene)
+                    });
+                let sidebar_tone =
+                    Self::sidebar_tone(sidebar_now, border_color, window).children(decor);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -16802,7 +16950,8 @@ mod exit_regressions {
         let shell = host.read_with(cx, |host, _| host.0.clone());
         for expect_open in [true, false] {
             cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds("user-menu-label").is_some());
+            // A local-only account shows the compact icon trigger.
+            assert!(cx.debug_bounds("user-menu").is_some());
             let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
             cx.simulate_click(trigger, gpui::Modifiers::default());
             shell.read_with(cx, |shell, _| {

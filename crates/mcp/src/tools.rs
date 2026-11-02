@@ -39,6 +39,9 @@ pub struct ToolDef {
 
 pub struct Tools {
     zeron: Arc<Zeron>,
+    zeron_enabled: bool,
+    /// Zeron computer use: `cua-driver` tools proxied as `computer_*`.
+    computer: Option<Arc<crate::computer::Computer>>,
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
@@ -732,8 +735,31 @@ impl Tools {
     pub fn new(zeron: Arc<Zeron>) -> Self {
         Self {
             zeron,
+            zeron_enabled: true,
+            computer: None,
             pending_turns: Default::default(),
         }
+    }
+
+    /// Chat/visual tools and their instructions, independent of the driver.
+    pub fn with_zeron_enabled(mut self, enabled: bool) -> Self {
+        self.zeron_enabled = enabled;
+        self
+    }
+
+    pub fn zeron_enabled(&self) -> bool {
+        self.zeron_enabled
+    }
+
+    /// Attach the computer-use proxy (started in the background).
+    pub fn with_computer(mut self, computer: Arc<crate::computer::Computer>) -> Self {
+        computer.warm();
+        self.computer = Some(computer);
+        self
+    }
+
+    pub fn computer(&self) -> Option<&Arc<crate::computer::Computer>> {
+        self.computer.as_ref()
     }
 
     /// Whether the host launched this server's agent without its own
@@ -743,6 +769,9 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
+        if !self.zeron_enabled {
+            return Vec::new();
+        }
         let in_chat = self.zeron.origin().chat_id.is_some();
         catalog()
             .into_iter()
@@ -757,6 +786,9 @@ impl Tools {
     /// `Ok` is the tool's structured result; `Err` is a message the model
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+        if !self.zeron_enabled {
+            return Err("Zeron chat and visual tools are disabled in Settings > General.".into());
+        }
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
@@ -2376,6 +2408,22 @@ mod tests {
             assert_eq!(dispatched.len(), 2);
             assert_ne!(dispatched[0].1["chatId"], dispatched[1].1["chatId"]);
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_zeron_catalog_and_instructions_are_empty() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default()).with_zeron_enabled(false);
+        assert!(tools.list().is_empty());
+        assert!(!tools.has("whoami"));
+        let init = crate::jsonrpc::handle_request(&tools, json!(1), "initialize", json!({})).await;
+        assert_eq!(init["result"]["instructions"], "");
+        let list = crate::jsonrpc::handle_request(&tools, json!(2), "tools/list", json!({})).await;
+        assert_eq!(list["result"]["tools"], json!([]));
+        let call = crate::jsonrpc::handle_request(&tools, json!(3), "tools/call", json!({"name":"whoami"})).await;
+        assert!(call["error"].is_object());
+        assert!(tools.call("whoami", json!({})).await.is_err());
+        assert!(world.writes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

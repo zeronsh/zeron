@@ -279,6 +279,7 @@ mod tests {
                 focal_x: 0.0,
                 focal_y: 0.0,
                 zoom: 2.0,
+                rotation: 0,
             },
         );
         assert_eq!(start.bounds.left(), viewport.left());
@@ -291,6 +292,7 @@ mod tests {
                 focal_x: 1.0,
                 focal_y: 1.0,
                 zoom: 2.0,
+                rotation: 0,
             },
         );
         assert_near(end.bounds.right(), viewport.right());
@@ -324,6 +326,7 @@ mod tests {
             focal_x: 0.23,
             focal_y: 0.71,
             zoom: 2.2,
+            rotation: 0,
         };
         for viewport in [hero(420.0, 300.0), hero(960.0, 420.0), hero(1200.0, 760.0)] {
             let crop = fitted((1600.0, 900.0), viewport, adjustment);
@@ -348,6 +351,7 @@ mod tests {
                                     focal_x,
                                     focal_y,
                                     zoom,
+                                    rotation: 0,
                                 },
                             );
                             assert!(crop.bounds.left() <= viewport.left());
@@ -369,6 +373,7 @@ mod tests {
             focal_x: 0.17,
             focal_y: 0.82,
             zoom: 1.7,
+            rotation: 0,
         };
         let main = fitted((1600.0, 900.0), viewport, adjustment);
         let reveal = fitted((1600.0, 900.0), viewport, adjustment);

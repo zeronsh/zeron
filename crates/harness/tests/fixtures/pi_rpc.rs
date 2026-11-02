@@ -210,6 +210,27 @@ fn main() {
                                 json!({"type":"compaction_end","result":{"estimatedTokensAfter":9}}),
                             );
                         }
+                        // A subagent-shaped result: 40 MiB of child transcript,
+                        // screenshots included, in `details`.
+                        if text == "huge-tool-result" {
+                            emit(
+                                json!({"type":"tool_execution_start","toolCallId":"huge","toolName":"subagent","args":{}}),
+                            );
+                            let image = json!({"type":"image","data":"A".repeat(4 * 1024 * 1024),"mimeType":"image/png"});
+                            let messages: Vec<_> = (0..10)
+                                .map(|_| json!({"role":"toolResult","content":[image.clone()]}))
+                                .collect();
+                            emit(json!({
+                                "type":"tool_execution_end",
+                                "toolCallId":"huge",
+                                "toolName":"subagent",
+                                "result":{
+                                    "content":[{"type":"text","text":"child answer"}],
+                                    "details":{"results":[{"messages":messages}]},
+                                },
+                                "isError":false,
+                            }));
+                        }
                         if text == "ext-error" {
                             emit(
                                 json!({"type":"extension_error","extensionPath":"/x.ts","event":"tool_call","error":"handler threw"}),
@@ -236,7 +257,12 @@ fn main() {
                             emit(
                                 json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"reply:"}}),
                             );
-                            message(&format!("reply:{text}"), "stop");
+                            let reply = if text == "huge-tool-result" {
+                                "reply:done".to_owned()
+                            } else {
+                                format!("reply:{text}")
+                            };
+                            message(&reply, "stop");
                         }
                         emit(json!({"type":"agent_end"}));
                         let mut queued = queue.lock().unwrap();

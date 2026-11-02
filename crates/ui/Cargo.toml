@@ -120,6 +120,7 @@ similar.workspace = true
 zeron-doc.workspace = true
 zeron-engine.workspace = true
 zeron-harness.workspace = true
+zeron-mcp.workspace = true
 zeron-rpc.workspace = true
 zeron-update.workspace = true
 zeron-notify.workspace = true
@@ -171,12 +172,17 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSHapticFeedback", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = "0.3.2"
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGEvent", "CGEventTypes"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGDirectDisplay", "CGEvent", "CGEventTypes", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan", "highsierra", "link"] }
 foreign-types = "0.5"
 block = "0.1"
+# Video wallpapers decode through AVFoundation (AVAssetReader).
+objc2-av-foundation = { version = "=0.3.2", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "AVAsynchronousKeyValueLoading", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMBase", "objc2-core-video"] }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNumber", "CFString", "CFBase"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
