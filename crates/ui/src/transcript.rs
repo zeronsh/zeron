@@ -1313,8 +1313,7 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
 }
 
 /// Clipboard payload for an assistant/system entry: authored text parts in
-/// document order, preserving Markdown while excluding tool traces and other
-/// structured parts.
+/// document order, including proposals but excluding tool traces.
 fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
     let text = entry
         .parts
@@ -1323,7 +1322,11 @@ fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
             // Inspect the trimmed view only to reject empty parts. Copy the
             // original bytes so indentation-based code blocks and Markdown
             // hard-break whitespace survive the clipboard round trip.
-            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            MessagePart::Text { text, .. } if !text.trim().is_empty() => {
+                Some(std::borrow::Cow::Borrowed(text.as_str()))
+            }
+            MessagePart::Tool { call, .. } => zeron_proto::agent_plans::proposed_plan(call)
+                .map(|plan| std::borrow::Cow::Owned(plan.markdown())),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1362,6 +1365,53 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
+fn markdown_rows(
+    entry_id: &str,
+    part_id: &str,
+    text: &str,
+    streaming: bool,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Vec<Row> {
+    if text.trim().is_empty() {
+        return vec![];
+    }
+    let key = format!("{entry_id}#{part_id}");
+    let tree = parse(&key, text);
+    let entry_id: SharedString = entry_id.to_owned().into();
+    // Stable block ids and content versions keep live→complete handoffs and
+    // unchanged proposal rows from invalidating their layout caches.
+    (0..tree.blocks.len())
+        .map(|block_ix| {
+            let range = &tree.blocks[block_ix].range;
+            let end = range.end.min(text.len());
+            let bytes = text
+                .as_bytes()
+                .get(range.start.min(end)..end)
+                .unwrap_or_default();
+            Row {
+                id: format!("{key}.{block_ix}").into(),
+                version: (fnv1a(bytes) << 1) | streaming as u64,
+                turn_start: false,
+                entry_id: entry_id.clone(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+                kind: if streaming {
+                    RowKind::LiveMarkdown {
+                        tree: tree.clone(),
+                        block_ix,
+                    }
+                } else {
+                    RowKind::Markdown {
+                        tree: tree.clone(),
+                        block_ix,
+                    }
+                },
+            }
+        })
+        .collect()
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -1370,7 +1420,8 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// `compact` is the transcript's compact mode: every working step of the
 /// turn — tool calls, thoughts, and the narration text between them — folds
 /// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
-/// trailing run of text parts) stays a visible row.
+/// trailing run of text parts) stays a visible row. User-facing plan proposals
+/// remain outside that fold, like blocking questions.
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
@@ -1544,6 +1595,24 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                if let Some(plan) = zeron_proto::agent_plans::proposed_plan(call) {
+                    if !compact {
+                        flush_group(
+                            &mut rows,
+                            &mut pending_group,
+                            &mut group_ix,
+                            group_last_part_ix,
+                        );
+                    }
+                    rows.extend(markdown_rows(
+                        &entry.id,
+                        &format!("{}.plan", part.id()),
+                        &plan.markdown(),
+                        false,
+                        parse,
+                    ));
+                    continue;
+                }
                 // A message to another chat reads as one line naming the
                 // recipient, one per recipient, out of the tool fold (compact
                 // mode folds it with the rest of the work).
@@ -1673,47 +1742,7 @@ pub fn rows_for_entry(
                 }
                 match other {
                     MessagePart::Text { id: part_id, text } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let key = format!("{}#{}", entry.id, part_id);
-                        let tree = parse(&key, text);
-                        // Live and completed parts split identically — one row
-                        // per top-level block, same ids, so the live→complete
-                        // handoff never changes row identity. The version is a
-                        // content hash of the block's bytes (LSB = streaming),
-                        // so a commit only splices rows whose bytes actually
-                        // changed — the settled prefix of a live reply is
-                        // untouched (and its render caches stay valid).
-                        for block_ix in 0..tree.blocks.len() {
-                            let range = &tree.blocks[block_ix].range;
-                            let end = range.end.min(text.len());
-                            let bytes = text
-                                .as_bytes()
-                                .get(range.start.min(end)..end)
-                                .unwrap_or_default();
-                            let version = (fnv1a(bytes) << 1) | streaming as u64;
-                            rows.push(Row {
-                                id: format!("{key}.{block_ix}").into(),
-                                version,
-                                turn_start: false,
-                                entry_id: entry_id.clone(),
-                                timestamp: None,
-                                copy_text: None,
-                                compact_fold: None,
-                                kind: if streaming {
-                                    RowKind::LiveMarkdown {
-                                        tree: tree.clone(),
-                                        block_ix,
-                                    }
-                                } else {
-                                    RowKind::Markdown {
-                                        tree: tree.clone(),
-                                        block_ix,
-                                    }
-                                },
-                            });
-                        }
+                        rows.extend(markdown_rows(&entry.id, part_id, text, streaming, parse));
                     }
                     MessagePart::Image {
                         id: part_id,
@@ -1951,7 +1980,7 @@ pub fn rows_for_entry(
 
 fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize>) -> bool {
     match part {
-        MessagePart::Tool { .. } => true,
+        MessagePart::Tool { call, .. } => zeron_proto::agent_plans::proposed_plan(call).is_none(),
         MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
         MessagePart::Text { text, .. } => {
             !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start)
@@ -11187,6 +11216,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
         if let MessagePart::Tool {
+            call,
             is_error,
             resolved,
             subagent_ref,
@@ -11195,6 +11225,12 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
             ..
         } = part
         {
+            if let Some(plan) = zeron_proto::agent_plans::proposed_plan(call) {
+                let title = plan.title.unwrap_or("");
+                acc.extend_from_slice(&(title.len() as u64).to_le_bytes());
+                acc.extend_from_slice(title.as_bytes());
+                acc.extend_from_slice(plan.body.as_bytes());
+            }
             acc.push(*is_error as u8 | (*resolved as u8) << 1);
             // Subagent lifecycle mutates a COMPLETED entry in place (eager-
             // done: the spawn resolves while the subagent runs on) and
@@ -13771,6 +13807,102 @@ mod tests {
             this.doc_override = Some("reply-doc".into());
             assert!(this.reply_chat(cx).is_none());
         });
+    }
+
+    #[test]
+    fn plan_proposals_are_complete_markdown_outside_both_work_folds() {
+        let body = format!(
+            "1. Inspect\n\n```rust\n  work();\n```\n\n{}",
+            "A full paragraph.\n\n".repeat(40)
+        );
+        for status in [
+            MessageStatus::Streaming,
+            MessageStatus::Complete,
+            MessageStatus::Aborted,
+        ] {
+            for compact in [false, true] {
+                let mut proposal = tool_part("proposal", "");
+                if let MessagePart::Tool { call, .. } = &mut proposal {
+                    *call = zeron_doc::sanitize_tool_call(&ToolCall::Unknown {
+                        name: "ExitSpecMode".into(),
+                        input: Some(serde_json::json!({"title":"A proposal", "plan":body})),
+                    });
+                }
+                let input = question_entry(status != MessageStatus::Streaming, None)
+                    .parts
+                    .remove(0);
+                let entry = assistant(
+                    "a",
+                    status,
+                    vec![
+                        tool_part("before", "ls"),
+                        proposal,
+                        input,
+                        tool_part("after", "pwd"),
+                    ],
+                );
+                let mut proposals = Vec::new();
+                let rows = rows_for_entry(&entry, false, compact, &mut |key, text| {
+                    if key.ends_with(".plan") {
+                        proposals.push(text.to_owned());
+                    }
+                    parse(key, text)
+                });
+                assert_eq!(proposals, [format!("## A proposal\n\n{body}")]);
+                let plan_rows: Vec<_> = rows
+                    .iter()
+                    .filter(|row| row.id.starts_with("a#proposal.plan."))
+                    .collect();
+                assert!(plan_rows.len() > OUTPUT_DETAIL_MAX_LINES);
+                assert!(plan_rows.iter().all(|row| row.compact_fold.is_none()
+                    && matches!(row.kind, RowKind::Markdown { .. })));
+                let last_plan = rows
+                    .iter()
+                    .rposition(|row| row.id.starts_with("a#proposal.plan."))
+                    .unwrap();
+                let input = rows
+                    .iter()
+                    .position(|row| matches!(row.kind, RowKind::InputChip { .. }))
+                    .unwrap();
+                assert!(last_plan < input);
+                for row in &rows {
+                    if let RowKind::ToolGroup { tools, .. } = &row.kind {
+                        assert!(tools.iter().all(|tool| tool.part_id != "proposal"));
+                    }
+                }
+                assert_eq!(
+                    assistant_copy_text(&entry).unwrap().as_ref(),
+                    format!("## A proposal\n\n{body}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_proposal_same_length_edits_invalidate_cached_rows_without_new_ids() {
+        let entry = |body: &str| {
+            let mut part = tool_part("proposal", "");
+            if let MessagePart::Tool { call, .. } = &mut part {
+                *call = ToolCall::Unknown {
+                    name: "ExitSpecMode".into(),
+                    input: Some(serde_json::json!({"plan":body})),
+                };
+            }
+            assistant("a", MessageStatus::Complete, vec![part])
+        };
+        let before = entry("alpha");
+        let after = entry("omega");
+        assert_eq!(before.parts[0].byte_len(), after.parts[0].byte_len());
+        assert_ne!(
+            entry_fingerprint(&before, false),
+            entry_fingerprint(&after, false)
+        );
+        let old = rows_for_entry(&before, false, true, &mut parse);
+        let new = rows_for_entry(&after, false, true, &mut parse);
+        assert_eq!(old[0].id, new[0].id);
+        assert_ne!(old[0].version, new[0].version);
+        assert_eq!(old.len(), 1);
+        assert_eq!(new.len(), 1);
     }
 
     #[test]

@@ -8983,7 +8983,9 @@ impl Composer {
                     .wizard
                     .as_ref()
                     .is_some_and(|w| w.request_id == request_id);
-                if !same {
+                // An opening/sync frame can carry the request before its
+                // questions. Never latch an empty panel for that request id.
+                if !same && !questions.is_empty() {
                     self.input.update(cx, |input, _| input.cancel_dictation());
                     if self.wizard.is_none() {
                         self.drafts.insert(
@@ -10399,6 +10401,7 @@ impl Composer {
             let picked = wizard.is_picked(ix) && typed_empty;
             div()
                 .id(("wizard-option", ix))
+                .debug_selector(move || format!("wizard-option-{ix}"))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -10469,6 +10472,7 @@ impl Composer {
         // show through unblurred.
         let panel = div()
             .id("question-panel")
+            .debug_selector(|| "question-panel".into())
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
@@ -10583,6 +10587,7 @@ impl Composer {
                     .child(
                         crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                             .id("wizard-submit")
+                            .debug_selector(|| "wizard-submit".into())
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),

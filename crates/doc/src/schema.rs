@@ -2141,6 +2141,95 @@ mod tests {
     }
 
     #[test]
+    fn plan_proposal_survives_sanitization_resolution_and_snapshot_reload_once() {
+        let doc = SessionDoc::init("plan-chat").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "host", 5).unwrap();
+        let call = crate::sanitize_tool_call(&ToolCall::Unknown {
+            name: "ExitSpecMode".into(),
+            input: Some(
+                serde_json::json!({"title":"Proposal", "plan":"1. Inspect\n2. Test", "private":"do not persist"}),
+            ),
+        });
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: "plan".into(),
+                    call: call.clone(),
+                },
+            );
+            writer.sync(&parts).unwrap();
+        }
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::InputRequested {
+                request_id: "approval".into(),
+                questions: vec![zeron_proto::UserInputQuestion {
+                    id: "q".into(),
+                    header: "Approve plan".into(),
+                    question: "Implement the plan above?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                }],
+            },
+        );
+        writer.sync(&parts).unwrap();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::InputResolved {
+                request_id: "approval".into(),
+                answers: Some(vec![zeron_proto::UserInputAnswer {
+                    question_id: "q".into(),
+                    labels: vec!["No".into()],
+                }]),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "plan".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        );
+        writer.finish(&parts, MessageStatus::Complete).unwrap();
+        let reopened = SessionDoc::init("plan-chat").unwrap();
+        reopened
+            .doc()
+            .import(&doc.doc().export(ExportMode::Snapshot).unwrap())
+            .unwrap();
+        let entries = reopened.read_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].parts.len(), 2);
+        let MessagePart::Tool { call, resolved, .. } = &entries[0].parts[0] else {
+            panic!("proposal")
+        };
+        assert!(*resolved);
+        let plan = zeron_proto::agent_plans::proposed_plan(call).unwrap();
+        assert_eq!(plan.body, "1. Inspect\n2. Test");
+        assert_eq!(plan.title, Some("Proposal"));
+        let MessagePart::Input {
+            resolved,
+            answers: Some(answers),
+            ..
+        } = &entries[0].parts[1]
+        else {
+            panic!("approval")
+        };
+        assert!(*resolved);
+        assert_eq!(answers[0].labels, ["No"]);
+        assert!(
+            !serde_json::to_string(&entries)
+                .unwrap()
+                .contains("do not persist")
+        );
+    }
+
+    #[test]
     fn segment_writer_streams_text_incrementally() {
         let doc = SessionDoc::init("chat-1").unwrap();
         let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();

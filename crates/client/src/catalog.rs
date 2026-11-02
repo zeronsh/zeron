@@ -163,6 +163,7 @@ pub fn harness_label(id: &str) -> String {
         "grok" => "Grok",
         "hermes" => "Hermes",
         "pi" => "Pi",
+        "droid" => "Factory Droid",
         "cursor" => "Cursor",
         "opencode" => "OpenCode",
         "antigravity" => "Antigravity",
@@ -666,7 +667,10 @@ mod tests {
         assert_eq!(model_label("claude-code", "claude-opus-5[1m]"), "Opus 5");
         assert_eq!(model_label("codex", "gpt-5.6-terra"), "GPT-5.6-Terra");
         assert_eq!(model_label("codex", "some-new-model"), "some-new-model");
-        assert_eq!(harness_label("opencode"), "OpenCode");
+        for (id, label, _) in zeron_proto::providers::PROVIDERS {
+            assert_eq!(harness_label(id.as_str()), label);
+        }
+        assert_eq!(harness_label("unknown-provider"), "unknown-provider");
     }
 
     #[test]

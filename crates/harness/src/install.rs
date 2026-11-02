@@ -58,6 +58,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
+        Droid => vec![Npm("droid", false)],
         Muse if windows => vec![PowerShell("irm https://dev.meta.ai/install.ps1 | iex")],
         Muse => vec![Shell("curl -fsSL https://dev.meta.ai/install.sh | sh", "sh")],
         ClaudeCode if windows => vec![PowerShell("irm https://claude.ai/install.ps1 | iex")],
@@ -161,6 +162,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Cursor => "curl https://cursor.com/install -fsS | bash",
         Opencode => "npm install -g @opencode/cli",
         Pi => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+        Droid => "npm install -g droid",
         Grok => "npm install -g @xai-official/grok",
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
@@ -178,6 +180,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Cursor => ("cursor-agent", "~/.local/bin or ~/.cursor/bin"),
         Opencode => ("opencode", "~/.opencode/bin or the npm global bin"),
         Pi => ("pi", "the npm global bin"),
+        Droid => ("droid", "the npm global bin"),
         Grok => ("grok", "~/.grok/bin or the npm global bin"),
         Hermes => ("hermes", "~/.local/bin or ~/.hermes/bin"),
         Devin => ("devin", "~/.local/bin"),
@@ -197,6 +200,7 @@ pub fn installed(id: HarnessId) -> bool {
         Cursor => crate::CursorHarness::new().installed(),
         Opencode => crate::OpencodeHarness::new().installed(),
         Pi => crate::PiHarness::new().installed(),
+        Droid => crate::DroidHarness::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),
         Hermes => crate::AcpHarness::hermes().installed(),
         Devin => crate::AcpHarness::devin().installed(),
@@ -572,5 +576,14 @@ mod tests {
                 .to_string()
                 .contains("open a new terminal")
         );
+    }
+
+    #[test]
+    fn droid_installs_through_its_npm_package_on_every_platform() {
+        for platform in [Platform::Unix, Platform::Mac, Platform::Windows] {
+            assert_eq!(methods(HarnessId::Droid, platform), vec![Method::Npm("droid", false)]);
+        }
+        assert_eq!(manual_command(HarnessId::Droid), Some("npm install -g droid"));
+        assert_eq!(cli_and_dir(HarnessId::Droid), ("droid", "the npm global bin"));
     }
 }

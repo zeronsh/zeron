@@ -8,6 +8,7 @@
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
 //! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
 //! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
+//! Factory Droid uses native stream-jsonrpc ([`DroidHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -365,6 +366,7 @@ pub mod claude;
 pub mod codex;
 pub mod agent_ports;
 pub mod cursor;
+pub mod droid;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod jsonl_tail;
@@ -658,6 +660,7 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
+pub use droid::DroidHarness;
 pub use opencode::OpencodeHarness;
 pub use muse::MuseHarness;
 pub use pi::PiHarness;

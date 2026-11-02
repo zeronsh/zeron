@@ -3,7 +3,7 @@
 //! the Codex app-server harness and the ACP harness — both protocols are
 //! newline-framed JSON-RPC 2.0 over stdio.
 //!
-//! - Responses are matched to callers by numeric id (a shared pending map the
+//! - Responses are matched by internal numeric id (a shared pending map the
 //!   reader task resolves directly, so requests can be awaited from anywhere —
 //!   including inside the session loop — without starving notifications).
 //! - Notifications and server→client requests (approvals) are pumped into an
@@ -70,8 +70,15 @@ struct VoiceRouter {
     abort_media: Box<dyn Fn() + Send + Sync>,
 }
 
+#[derive(Clone, Copy)]
+enum Envelope {
+    Plain,
+    Factory,
+}
+
 #[derive(Clone)]
 pub(crate) struct RpcClient {
+    envelope: Envelope,
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,
@@ -91,10 +98,23 @@ impl RpcClient {
         Self::with_stdout_observer(stdin, stdout, None)
     }
 
+    pub fn factory(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::with_envelope(stdin, stdout, None, Envelope::Factory)
+    }
+
     pub(crate) fn with_stdout_observer(
         stdin: ChildStdin,
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::with_envelope(stdin, stdout, observer, Envelope::Plain)
+    }
+
+    fn with_envelope(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        observer: Option<StdoutObserver>,
+        envelope: Envelope,
     ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
@@ -119,6 +139,7 @@ impl RpcClient {
         ));
         (
             Self {
+                envelope,
                 next_id: Arc::new(AtomicI64::new(0)),
                 pending,
                 writer: writer_tx,
@@ -173,9 +194,21 @@ impl RpcClient {
     }
 
     /// Close the child's stdin once the lines already queued are written.
-    #[cfg(any(windows, test))]
-    fn close_stdin(&self) {
+    pub(crate) fn close_stdin(&self) {
         self.close_stdin.notify_one();
+    }
+
+    fn frame(&self, kind: &str, mut value: Value) -> String {
+        if matches!(self.envelope, Envelope::Factory) {
+            value["type"] = kind.into();
+            value["factoryApiVersion"] = "1.0.0".into();
+            if let Some(id) = value.get_mut("id")
+                && !id.is_string()
+            {
+                *id = id.to_string().into();
+            }
+        }
+        value.to_string()
     }
 
     /// Send a request and await its response (resolved by the reader task).
@@ -191,35 +224,57 @@ impl RpcClient {
         method: &str,
         params: Value,
     ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
+        self.request_with_id(method, params).1
+    }
+
+    /// Queue a request and retain its wire id for notification receipts.
+    pub fn request_with_id(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> (
+        String,
+        futures::future::BoxFuture<'static, Result<Value, HarnessError>>,
+    ) {
         let method = method.to_owned();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let wire_id = id.to_string();
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("pending lock");
             // Check under the same lock as EOF cleanup: a request racing the
             // reader exit must either be rejected here or cleared by it.
             if self.is_closed() {
-                return Box::pin(async move {
-                    Err(HarnessError::Protocol(format!("{method}: {EXITED}")))
-                });
+                return (
+                    wire_id,
+                    Box::pin(
+                        async move { Err(HarnessError::Protocol(format!("{method}: {EXITED}"))) },
+                    ),
+                );
             }
             pending.insert(id, tx);
         }
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        if self.writer.send(line.to_string()).is_err() {
+        if self.writer.send(self.frame("request", line)).is_err() {
             self.pending.lock().expect("pending lock").remove(&id);
-            return Box::pin(async move {
-                Err(HarnessError::Protocol(format!("{method}: {STDIN_CLOSED}")))
-            });
+            return (
+                wire_id,
+                Box::pin(async move {
+                    Err(HarnessError::Protocol(format!("{method}: {STDIN_CLOSED}")))
+                }),
+            );
         }
-        Box::pin(async move {
-            match rx.await {
-                Ok(Ok(result)) => Ok(result),
-                Ok(Err(message)) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
-                // Sender dropped: the reader hit EOF and failed all pending.
-                Err(_) => Err(HarnessError::Protocol(format!("{method}: {EXITED}"))),
-            }
-        })
+        (
+            wire_id,
+            Box::pin(async move {
+                match rx.await {
+                    Ok(Ok(result)) => Ok(result),
+                    Ok(Err(message)) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
+                    // Sender dropped: the reader hit EOF and failed all pending.
+                    Err(_) => Err(HarnessError::Protocol(format!("{method}: {EXITED}"))),
+                }
+            }),
+        )
     }
 
     /// Fire a notification (no id, no response).
@@ -228,13 +283,13 @@ impl RpcClient {
             Some(params) => json!({ "jsonrpc": "2.0", "method": method, "params": params }),
             None => json!({ "jsonrpc": "2.0", "method": method }),
         };
-        let _ = self.writer.send(line.to_string());
+        let _ = self.writer.send(self.frame("notification", line));
     }
 
     /// Answer a server→client request.
     pub fn respond(&self, id: &Value, result: Value) {
         let line = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        let _ = self.writer.send(line.to_string());
+        let _ = self.writer.send(self.frame("response", line));
     }
 
     /// Reject a server→client request (e.g. unknown method).
@@ -244,7 +299,7 @@ impl RpcClient {
             "id": id,
             "error": { "code": code, "message": message },
         });
-        let _ = self.writer.send(line.to_string());
+        let _ = self.writer.send(self.frame("response", line));
     }
 }
 
@@ -291,8 +346,8 @@ fn fail_pending(pending: &Pending, closed: &AtomicBool, reason: &str) {
     }
 }
 
-/// The id of a response, tolerantly. zeron always sends numeric ids, but
-/// JSON-RPC lets a server echo them re-encoded — a string `"5"` or float
+/// The id of a response, tolerantly. Factory uses string ids; plain
+/// JSON-RPC peers may echo numeric ids re-encoded — a string `"5"` or float
 /// `5.0` still names request 5. Dropping such a response would strand its
 /// caller forever (the session would spin Working with no per-turn timeout).
 fn response_id(id: &Value) -> Option<i64> {
@@ -456,10 +511,74 @@ async fn read_loop(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn factory_envelope_covers_every_write() {
+        let (writer, mut receiver) = mpsc::unbounded_channel();
+        let client = RpcClient {
+            envelope: Envelope::Factory,
+            next_id: Arc::new(AtomicI64::new(0)),
+            pending: Arc::default(),
+            writer,
+            closed: Arc::new(AtomicBool::new(false)),
+            voice_router: Arc::default(),
+            close_stdin: Arc::default(),
+        };
+        let reply = client.request_now("droid.list_models", json!({}));
+        client.notify("cancel", None);
+        client.respond(&json!("server-id"), json!({}));
+        client.respond_error(&json!(7), -32601, "Unknown method");
+        for (kind, id) in [
+            ("request", Some("1")),
+            ("notification", None),
+            ("response", Some("server-id")),
+            ("response", Some("7")),
+        ] {
+            let frame: Value = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+            assert_eq!(frame["jsonrpc"], "2.0");
+            assert_eq!(frame["factoryApiVersion"], "1.0.0");
+            assert_eq!(frame["type"], kind);
+            assert_eq!(frame.get("id").and_then(Value::as_str), id);
+            assert_eq!(frame.get("id").is_some(), id.is_some());
+        }
+        let id = response_id(&json!("1")).unwrap();
+        client
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .unwrap()
+            .send(Ok(json!({})))
+            .unwrap();
+        assert_eq!(reply.await.unwrap(), json!({}));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn factory_string_id_response_resolves_over_stdio() {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", r#"read line; echo '{"jsonrpc":"2.0","type":"response","factoryApiVersion":"1.0.0","id":"1","result":{"ok":true}}'"#])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn().unwrap();
+        let (client, _incoming) =
+            RpcClient::factory(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.request("droid.list_models", json!({})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply, json!({"ok":true}));
+        child.wait().await.unwrap();
+    }
+
     #[test]
     fn cancel_notification_wire_has_no_id() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer,
@@ -480,6 +599,7 @@ mod tests {
     #[test]
     fn stale_voice_unsubscribe_keeps_the_newer_subscription() {
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer: mpsc::unbounded_channel().0,
@@ -499,6 +619,7 @@ mod tests {
     async fn requests_after_eof_fail_without_entering_pending_map() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
         let client = RpcClient {
+            envelope: Envelope::Plain,
             next_id: Arc::new(AtomicI64::new(0)),
             pending: Arc::default(),
             writer,
