@@ -50,6 +50,12 @@ The terminal output is replayable, so output produced before the desktop subscri
 
 The main title-bar segment remembers the last successfully started Action for that project in viewport-local UI settings. If it no longer exists, Zeron chooses the first non-setup Action and then the first Action as a final fallback.
 
+## npm scripts
+
+When the selected session's checkout contains a `package.json` with non-empty string scripts, the session card's Actions section shows **npm scripts**. Click it to expand the script dropdown, then select `npm run <name>` to open a fresh terminal in that session's checkout. Hovering a script shows its command. The dropdown scrolls for longer script lists.
+
+Discovery uses the exact session checkout, including linked worktrees, and runs on the device that owns the session. Zeron refreshes discovery when opening the dropdown or session card, switching sessions, and periodically when the card renders. Missing packages or packages without runnable scripts hide the button. Scripts are read again when selected; they are never saved as Actions or run automatically. A malformed package cannot start a script.
+
 ## Worktree setup
 
 Only creation of a new worktree can start the setup Action. Reusing an existing worktree and using the main checkout do not run setup again.

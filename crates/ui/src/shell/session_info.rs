@@ -364,6 +364,9 @@ impl Shell {
             .session_info_pressed_open
             .take()
             .unwrap_or(self.session_info_shown);
+        if show {
+            self.ensure_package_scripts(true, cx);
+        }
         if self.session_info_fits(cx) {
             self.settings.session_info_hidden = !show;
             self.schedule_save(cx);
@@ -375,6 +378,7 @@ impl Shell {
 
     /// Show the card: beside the transcript when it fits there, else over it.
     pub(super) fn show_session_info(&mut self, cx: &mut Context<Self>) {
+        self.ensure_package_scripts(true, cx);
         if !self.session_info_fits(cx) {
             self.session_info_overlay = true;
         } else if self.settings.session_info_hidden {
@@ -891,6 +895,77 @@ impl Shell {
                     )
                     .into_any_element(),
             );
+        }
+        let scripts = &self.project_actions.package_scripts;
+        if !scripts.scripts.is_empty() {
+            let expanded = scripts.expanded;
+            let loading = scripts.loading;
+            let error = scripts.error.clone();
+            let available = scripts.scripts.clone();
+            rows.push(
+                popover::picker_row(theme, false, false, "session-info-npm-scripts")
+                    .id("session-info-npm-scripts")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.project_actions.package_scripts.expanded =
+                            !this.project_actions.package_scripts.expanded;
+                        if this.project_actions.package_scripts.expanded {
+                            this.ensure_package_scripts(true, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .child(popover::picker_icon_slot(row_glyph(
+                        icons::ACTION_PLAY,
+                        theme,
+                    )))
+                    .child(div().flex_1().child("npm scripts"))
+                    .child(row_glyph(
+                        if expanded {
+                            icons::ALT_ARROW_UP
+                        } else {
+                            icons::ALT_ARROW_DOWN
+                        },
+                        theme,
+                    ))
+                    .into_any_element(),
+            );
+            if expanded {
+                if loading {
+                    rows.push(note("Loading scripts…".into(), theme.text_muted));
+                } else if let Some(error) = error {
+                    rows.push(note(error.into(), theme.text_muted));
+                } else {
+                    let mut menu = div()
+                        .id("session-info-npm-script-list")
+                        .max_h(px(240.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col();
+                    for script in available {
+                        let key = key.clone();
+                        let name = script.name.clone();
+                        let id =
+                            SharedString::from(format!("session-info-npm-script-{}", script.name));
+                        menu = menu.child(
+                            popover::picker_row(theme, false, false, id.clone())
+                                .id(id)
+                                .tooltip(crate::settings::widgets::text_tooltip(script.command))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_session_info_overlay(cx);
+                                    this.run_package_script(&key, name.clone(), cx);
+                                }))
+                                .child(popover::picker_icon_slot(row_glyph(icons::TERMINAL, theme)))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(format!("npm run {}", script.name)),
+                                ),
+                        );
+                    }
+                    rows.push(menu.into_any_element());
+                }
+            }
         }
         for draft in snapshot.importable_actions.clone() {
             let row_id = SharedString::from(format!("session-info-import-{}", draft.name));

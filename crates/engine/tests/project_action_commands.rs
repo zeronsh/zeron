@@ -113,3 +113,109 @@ async fn actions_mark_what_they_start_with_their_terminal() {
         Some("chat")
     );
 }
+
+/// Discovery and runs use the host's chat checkout; every click gets a new PTY.
+#[tokio::test]
+async fn package_scripts_validate_the_chat_and_open_fresh_terminals() {
+    use std::sync::Arc;
+    use zeron_engine::{EngineCore, HarnessRegistry};
+    use zeron_proto::{PackageScript, ProjectActionRun};
+    use zeron_rpc::methods;
+
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project with spaces");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"scripts":{"dev":"echo package-script-test"}}"#,
+    )
+    .unwrap();
+    let core = EngineCore::assemble(
+        &root.path().join("engine"),
+        Arc::new(HarnessRegistry::new()),
+        zeron_proto::HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_space(
+            "space",
+            &core.device_id,
+            project.to_str().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_space(
+            "other-space",
+            &core.device_id,
+            project.to_str().unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+    core.workspace
+        .create_chat("chat", Some("space"), None, None, None)
+        .unwrap();
+    core.workspace
+        .create_chat_hosted(
+            "foreign",
+            Some("space"),
+            None,
+            Some("another-device"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"spaceId":"space", "chatId":"chat", "scriptName":"dev", "cols":80, "rows":24});
+    let scripts: Vec<PackageScript> = client
+        .call_as(methods::LIST_PACKAGE_SCRIPTS, params.clone())
+        .await
+        .unwrap();
+    assert_eq!(scripts.len(), 1);
+    assert_eq!(scripts[0].name, "dev");
+    for invalid in [
+        serde_json::json!({"spaceId":"space", "chatId":"foreign", "scriptName":"dev", "cols":80, "rows":24}),
+        serde_json::json!({"spaceId":"other-space", "chatId":"chat", "scriptName":"dev", "cols":80, "rows":24}),
+    ] {
+        for method in [methods::LIST_PACKAGE_SCRIPTS, methods::RUN_PACKAGE_SCRIPT] {
+            assert!(
+                client.call(method, invalid.clone()).await.is_err(),
+                "{method} must reject {invalid}"
+            );
+        }
+    }
+    let first: ProjectActionRun = client
+        .call_as(methods::RUN_PACKAGE_SCRIPT, params.clone())
+        .await
+        .unwrap();
+    let second: ProjectActionRun = client
+        .call_as(methods::RUN_PACKAGE_SCRIPT, params.clone())
+        .await
+        .unwrap();
+    assert_ne!(first.terminal.id, second.terminal.id);
+    assert_eq!(
+        std::path::Path::new(&first.terminal.cwd),
+        std::fs::canonicalize(&project).unwrap()
+    );
+    assert_eq!(
+        core.terminals
+            .chats()
+            .get(&first.terminal.id)
+            .map(String::as_str),
+        Some("chat")
+    );
+    for run in [first, second] {
+        core.terminals.close(&run.terminal.id).unwrap();
+    }
+    std::fs::write(project.join("package.json"), "{}").unwrap();
+    assert!(
+        client
+            .call(methods::RUN_PACKAGE_SCRIPT, params)
+            .await
+            .is_err()
+    );
+}

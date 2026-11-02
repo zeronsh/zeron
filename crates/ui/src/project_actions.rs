@@ -62,7 +62,19 @@ pub struct ProjectActionEditor {
     pub _command_events: Subscription,
 }
 
+#[derive(Default)]
+pub struct PackageScriptsState {
+    pub context: Option<(ProjectActionsKey, String, Option<String>)>,
+    pub scripts: Vec<zeron_proto::PackageScript>,
+    pub expanded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub requested_at: Option<std::time::Instant>,
+    pub task: Option<Task<()>>,
+}
+
 pub struct ProjectActionsController {
+    pub package_scripts: PackageScriptsState,
     pub active: Option<ProjectActionsKey>,
     pub generation: u64,
     mutation_generation: u64,
@@ -77,6 +89,7 @@ pub struct ProjectActionsController {
 impl Default for ProjectActionsController {
     fn default() -> Self {
         Self {
+            package_scripts: PackageScriptsState::default(),
             active: None,
             generation: 0,
             mutation_generation: 0,
