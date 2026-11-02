@@ -1696,6 +1696,11 @@ fn message_enter_bindings(
     }
 }
 
+/// The shared input's placeholder as the message composer, and while a
+/// question borrows it for a typed answer.
+const MESSAGE_PLACEHOLDER: &str = "Do anything…";
+const QUESTION_PLACEHOLDER: &str = "Type your own answer, or pick an option above";
+
 fn message_input_context(wizard_active: bool) -> &'static str {
     if wizard_active {
         GENERIC_COMPOSER_CONTEXT
@@ -6554,7 +6559,7 @@ impl Composer {
         .detach();
         let input = cx.new(|cx| {
             let mut input =
-                ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
+                ComposerInput::with_context(MESSAGE_PLACEHOLDER, MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
             input.copies_transcript_selection = true;
             input
@@ -8934,7 +8939,10 @@ impl Composer {
             // failures render only under their own chat (see `failure_key`),
             // so switching away and back must not erase the one visible
             // trace of a failed send.
-            self.wizard = None;
+            //
+            // A question stays with its session: leaving one mid-question
+            // must not carry its placeholder into the next.
+            self.close_wizard(cx);
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
             self.preview = None;
@@ -9002,7 +9010,7 @@ impl Composer {
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Type your own answer, or pick an option above", cx)
+                        input.set_placeholder(QUESTION_PLACEHOLDER, cx)
                     });
                 }
             }
@@ -9022,17 +9030,13 @@ impl Composer {
                         || (!transcript.is_empty()
                             && !self.answered_requests.contains(&wizard.request_id));
                     if released {
-                        self.wizard = None;
-                        self.advance_task = None;
+                        self.close_wizard(cx);
                         let draft = self
                             .drafts
                             .get(&self.current_key)
                             .cloned()
                             .unwrap_or_default();
-                        self.input.update(cx, |input, cx| {
-                            input.set_text(draft, cx);
-                            input.set_placeholder("Do anything…", cx);
-                        });
+                        self.input.update(cx, |input, cx| input.set_text(draft, cx));
                     }
                 }
             }
@@ -10179,7 +10183,7 @@ impl Composer {
                 if has_pick {
                     "Type your own answer, or leave this blank to use the selected option"
                 } else {
-                    "Type your own answer, or pick an option above"
+                    QUESTION_PLACEHOLDER
                 },
                 cx,
             )
@@ -10229,6 +10233,20 @@ impl Composer {
         }
     }
 
+    /// Retire the question panel, however it closes (answered, declined,
+    /// resolved elsewhere, or left for another session). The panel borrowed
+    /// the composer input; hand back its identity and drop a pending
+    /// auto-advance with it.
+    fn close_wizard(&mut self, cx: &mut Context<Self>) -> Option<Wizard> {
+        let wizard = self.wizard.take()?;
+        self.advance_task = None;
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(MESSAGE_PLACEHOLDER, cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+        });
+        Some(wizard)
+    }
+
     /// Close the questions without answering: the same RespondInput as an
     /// answer, with none — the run reads its own decline, the chip records
     /// the questions closed, and the composer comes back.
@@ -10238,22 +10256,16 @@ impl Composer {
 
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
-        let Some(wizard) = self.wizard.take() else {
+        let Some(wizard) = self.close_wizard(cx) else {
             return;
         };
-        self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
         let draft = self
             .drafts
             .get(&self.current_key)
             .cloned()
             .unwrap_or_default();
-        self.input.update(cx, |input, cx| {
-            input.set_text(draft, cx);
-            // The panel borrowed the composer input; hand back its identity.
-            input.set_placeholder("Do anything…", cx);
-            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
-        });
+        self.input.update(cx, |input, cx| input.set_text(draft, cx));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -16949,6 +16961,101 @@ mod tests {
             c.on_state_changed(cx);
             assert!(c.wizard.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn leaving_a_session_mid_question_hands_the_composer_back(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let open_question = || {
+            vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "r1".into(),
+                    questions: vec![question("q", &["a", "b"], false)],
+                    resolved: false,
+                    answers: None,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }]
+        };
+        // A sidebar click, then the frames that lay the input out. The column
+        // is narrow enough that the question's placeholder would wrap in the
+        // compact composer, under its one-line viewport's overflow fade.
+        let open =
+            |chat: &str, transcript: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+                handle
+                    .update(cx, |composer, window, cx| {
+                        window.resize(size(px(440.0), px(800.0)));
+                        composer.set_available_width(440.0, cx);
+                        composer.state.update(cx, |state, _| {
+                            state.selected_chat = Some(chat.into());
+                            state.transcript = transcript;
+                        });
+                        composer.on_state_changed(cx);
+                    })
+                    .unwrap();
+                for _ in 0..3 {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+                }
+            };
+        open("asks", open_question(), cx);
+        handle
+            .read_with(cx, |composer, cx| {
+                assert!(composer.wizard.is_some());
+                assert_eq!(
+                    composer.input.read(cx).placeholder.as_ref(),
+                    QUESTION_PLACEHOLDER
+                );
+            })
+            .unwrap();
+        // Sessions that ask nothing get the message composer back, on one
+        // line with nothing hidden under the fade, however many follow.
+        for chat in ["working", "another"] {
+            open(chat, Vec::new(), cx);
+            handle
+                .read_with(cx, |composer, cx| {
+                    let input = composer.input.read(cx);
+                    assert!(composer.wizard.is_none(), "{chat}");
+                    assert_eq!(input.placeholder.as_ref(), MESSAGE_PLACEHOLDER, "{chat}");
+                    assert_eq!(input.key_context, MESSAGE_COMPOSER_CONTEXT, "{chat}");
+                    assert!(!composer.expanded_mode, "{chat}");
+                    let settled = input.settled_viewport_height.unwrap();
+                    let visible = f32::from(input.last_bounds.unwrap().size.height);
+                    assert_eq!(
+                        input_overflow_edges(
+                            input.content_height,
+                            settled,
+                            visible,
+                            input.scroll_top
+                        ),
+                        (false, false),
+                        "{chat}: content {} in a {settled} viewport",
+                        input.content_height
+                    );
+                })
+                .unwrap();
+        }
+        // The question still waits in its own session.
+        open("asks", open_question(), cx);
+        handle
+            .read_with(cx, |composer, cx| {
+                assert!(composer.wizard.is_some());
+                assert_eq!(
+                    composer.input.read(cx).placeholder.as_ref(),
+                    QUESTION_PLACEHOLDER
+                );
+            })
+            .unwrap();
     }
 
     #[test]
