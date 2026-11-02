@@ -16,5 +16,6 @@
 
 pub(crate) mod dock;
 pub mod panel;
+pub mod sprite;
 pub mod view;
 pub use zeron_term::{emulator, predict};
