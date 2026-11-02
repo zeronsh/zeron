@@ -75,6 +75,17 @@ fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> boo
     harness != HarnessId::Mock && !installed && can_install
 }
 
+fn login_hint(harness: HarnessId, installed: bool) -> Option<&'static str> {
+    if !installed {
+        return None;
+    }
+    match harness {
+        HarnessId::Droid => Some("Sign in by running droid."),
+        HarnessId::Fx => Some("Configure your model provider with fx login or fx setup."),
+        _ => None,
+    }
+}
+
 fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
     if harness == HarnessId::Antigravity {
         return if can_install {
@@ -1173,11 +1184,11 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                if installed && harness == HarnessId::Fx {
+                if let Some(hint) = login_hint(harness, installed) {
                     meta.push(
                         div()
                             .text_color(theme.text_muted)
-                            .child("Configure your model provider with fx login or fx setup.")
+                            .child(hint)
                             .into_any_element(),
                     );
                 }
@@ -1847,6 +1858,22 @@ mod tests {
             })
             .unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn droid_login_guidance_only_shows_when_installed() {
+    assert_eq!(
+        login_hint(HarnessId::Droid, true),
+        Some("Sign in by running droid.")
+    );
+    assert_eq!(login_hint(HarnessId::Droid, false), None);
+    assert_eq!(login_hint(HarnessId::Codex, true), None);
+    assert_eq!(
+        login_hint(HarnessId::Fx, true),
+        Some("Configure your model provider with fx login or fx setup.")
+    );
+    assert_eq!(login_hint(HarnessId::Fx, false), None);
 }
 
 #[cfg(test)]
