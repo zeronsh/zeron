@@ -346,6 +346,17 @@ final class CoreSessionSource: SessionSource {
         return .device(id: hostDevice, name: app.deviceName(hostDevice), harness: harness, label: row.harnessLabel ?? HarnessNames.label(harness))
     }
 
+    /// Asks the chat's host; its session row brings the card's new state.
+    func setAutoResume(_ enabled: Bool) async -> Bool {
+        do {
+            try await client.setChatAutoResume(chatId: chatId, enabled: enabled)
+            return true
+        } catch {
+            NSLog("auto-resume toggle failed: \(error)")
+            return false
+        }
+    }
+
     /// The model a chat without one runs: the host's default for its
     /// provider. The built-in list answers at once; the host's (or Cloud's)
     /// own list replaces it when it arrives.

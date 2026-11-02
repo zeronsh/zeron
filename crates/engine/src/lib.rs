@@ -23,6 +23,7 @@ pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
+pub mod auto_resume;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
@@ -159,6 +160,8 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    /// Resumes turns the usage limit stopped once it resets.
+    pub auto_resume: auto_resume::AutoResumer,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
     /// Which app windows are focused (desktop banners hold back while one is).
@@ -361,6 +364,14 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let auto_resume = auto_resume::AutoResumer::open(
+            data_dir,
+            profile.store_root(),
+            sessions.clone(),
+            workspace.clone(),
+            agent_accounts.clone(),
+        );
+        auto_resume.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -377,6 +388,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            auto_resume,
             harness_updates,
             device_id,
             local_import,
@@ -522,7 +534,8 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
-        .with_viewport_focus(self.viewport_focus.clone());
+        .with_viewport_focus(self.viewport_focus.clone())
+        .with_auto_resume(self.auto_resume.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -586,6 +599,8 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        // No continuation may start while the engine goes down.
+        self.auto_resume.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally

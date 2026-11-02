@@ -186,6 +186,24 @@ fun SessionScreen(
             openSubagent = { doc, title, running -> onOpenSubagent(chatId, doc, title, running) },
             // An error card's "Log in": that agent's sign-in, started at once.
             act = { action -> if (action == "sign-in") signInTarget(model, chatId)?.let { onOpenAccounts(it, true) } },
+            // A limit stop's "Auto-resume" switch: the chat's host flips it,
+            // and its session row brings the card's new state.
+            setSwitch = { action, on, revert ->
+                if (action != "auto-resume") {
+                    revert()
+                } else {
+                    scope.launch {
+                        try {
+                            core.setChatAutoResume(chatId, on)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            revert()
+                            model.toast("Couldn't change auto-resume. Try again.")
+                        }
+                    }
+                }
+            },
         )
     }
     // The composer's draft outlives the panel that replaces it while the agent asks.

@@ -26,6 +26,17 @@ fn assistant_error_text(code: &str) -> String {
     }
 }
 
+/// What an assistant frame's `error` tells the person: its own text when a
+/// refusal sharing `rate_limit` says which one it is (the account's usage
+/// limit and when it resets, a server throttle that is "not your usage
+/// limit", a model under load), else the code's wording.
+fn assistant_error_message(code: &str, frame: &MessageFrame) -> String {
+    match frame.text() {
+        Some(text) if code == "rate_limit" => text,
+        _ => assistant_error_text(code),
+    }
+}
+
 /// Which claude.ai usage window a `rate_limit_event` refers to.
 fn rate_window_label(kind: &str) -> &'static str {
     match kind {
@@ -293,7 +304,7 @@ fn subagent_message(parent: &str, f: &MessageFrame) -> Vec<AgentEvent> {
         out.push(tag(
             parent,
             AgentEvent::Error {
-                message: assistant_error_text(code),
+                message: assistant_error_message(code, f),
             },
         ));
     }
@@ -1091,8 +1102,13 @@ impl Normalizer {
                 // and no `result` error — so surface it visibly.
                 if let Some(code) = &f.error {
                     self.turn_error_shown = true;
+                    if f.usage_limit_reached() && f.limit_resets_itself() {
+                        out.push(AgentEvent::LimitReached {
+                            resets_at: f.limit_resets_at(),
+                        });
+                    }
                     out.push(AgentEvent::Error {
-                        message: assistant_error_text(code),
+                        message: assistant_error_message(code, &f),
                     });
                 }
                 // The enclosing assistant frame closes the streamed message
@@ -1170,11 +1186,18 @@ impl Normalizer {
                 let window =
                     rate_window_label(f.rate_limit_info.rate_limit_type.as_deref().unwrap_or(""));
                 self.turn_error_shown = true;
-                vec![AgentEvent::Error {
-                    message: format!(
-                        "Claude {window} limit reached — the turn was blocked. Try again after it resets."
-                    ),
-                }]
+                let resets_at = f
+                    .rate_limit_info
+                    .resets_at
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs as i64, 0));
+                vec![
+                    AgentEvent::LimitReached { resets_at },
+                    AgentEvent::Error {
+                        message: format!(
+                            "Claude {window} limit reached — the turn was blocked. Try again after it resets."
+                        ),
+                    },
+                ]
             }
 
             Frame::Result(f) => {
@@ -1232,6 +1255,17 @@ impl Normalizer {
                 let failure = (f.subtype == "success" && !interrupted && !aborted(&f))
                     .then(|| api_failure(&f))
                     .flatten();
+                // The account's usage limit refused the turn (never a server
+                // throttle or another 429): when it resets, if the CLI's text
+                // says ("resets 3pm (Europe/Berlin)"). The refusing message's
+                // own frame, earlier in the turn, gave the exact time.
+                let limited = (failure.is_some()
+                    && f.api_error.as_deref() == Some("usage_limit_reached"))
+                .then(|| AgentEvent::LimitReached {
+                    resets_at: f.result.as_deref().and_then(|text| {
+                        zeron_proto::auto_resume::reset_time_in(text, chrono::Utc::now())
+                    }),
+                });
                 let done = if let Some(error) = failure {
                     AgentEvent::Done {
                         status: DoneStatus::Errored,
@@ -1312,6 +1346,7 @@ impl Normalizer {
                     });
                 }
                 out.push(usage);
+                out.extend(limited);
                 if let AgentEvent::Done { status, .. } = &done {
                     out.extend(self.settle_typed_fork(*status));
                 }
@@ -1403,9 +1438,13 @@ mod tests {
     #[test]
     fn a_rejected_window_carried_by_overage_is_not_an_error() {
         let blocked = normalize_one(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected","resetsAt":1793620800}}"#,
         );
-        assert!(matches!(blocked.as_slice(), [AgentEvent::Error { .. }]));
+        assert!(matches!(
+            blocked.as_slice(),
+            [AgentEvent::LimitReached { resets_at: Some(at) }, AgentEvent::Error { .. }]
+                if at.timestamp() == 1_793_620_800
+        ));
         for overage in [
             r#""overageStatus":"allowed""#,
             r#""overageStatus":"allowed_warning""#,
@@ -1416,6 +1455,55 @@ mod tests {
             );
             assert!(normalize_one(&raw).is_empty(), "{overage}");
         }
+    }
+
+    #[test]
+    fn only_the_accounts_own_usage_limit_is_a_limit_stop() {
+        let quota = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 3pm (Europe/Berlin)"}]},"parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"api_error_status":429,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","resetsAt":1793620800,"rateLimitType":"five_hour"}}}"#,
+        );
+        assert!(
+            quota.iter().any(|e| matches!(e, AgentEvent::LimitReached { resets_at: Some(at) } if at.timestamp() == 1_793_620_800)),
+            "{quota:?}"
+        );
+        assert!(quota.contains(&AgentEvent::Error {
+            message: "You've hit your 5-hour limit · resets 3pm (Europe/Berlin)".into()
+        }));
+        // The same code and status for a server throttle: shown in its own
+        // words, never a limit stop.
+        let throttle = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue."}]},"parent_tool_use_id":null,"error":"rate_limit","is_api_error_message":true,"api_error_status":429}"#,
+        );
+        assert!(
+            !throttle
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LimitReached { .. })),
+            "{throttle:?}"
+        );
+        assert!(throttle.iter().any(
+            |e| matches!(e, AgentEvent::Error { message } if message.contains("not your usage limit"))
+        ));
+        let throttled_result = normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: Server is temporarily limiting requests (not your usage limit)","api_error_status":429}"#,
+        );
+        assert!(
+            !throttled_result
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LimitReached { .. }))
+        );
+    }
+
+    #[test]
+    fn spent_credits_an_admin_must_raise_are_no_limit_stop() {
+        let events = normalize_one(
+            r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You're out of usage credits"}]},"parent_tool_use_id":null,"error":"rate_limit","api_error_status":429,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","rateLimitType":"overage","overageDisabledReason":"member_zero_credit_limit"}}}"#,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LimitReached { .. })),
+            "{events:?}"
+        );
     }
 
     fn result_done(raw: &str) -> AgentEvent {
@@ -2586,6 +2674,15 @@ mod tests {
         let error = error.unwrap();
         assert!(error.starts_with("Claude rate limit reached"), "{error}");
         assert!(error.contains("resets 3pm"), "{error}");
+        let limited = normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"You've hit your 5-hour limit · resets 3pm","api_error_status":429,"api_error":"usage_limit_reached","terminal_reason":"api_error"}"#,
+        );
+        assert!(
+            limited
+                .iter()
+                .any(|e| matches!(e, AgentEvent::LimitReached { resets_at: Some(_) })),
+            "{limited:?}"
+        );
 
         let (_, error) = done_of(&normalize_one(
             r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529","api_error_status":529}"#,

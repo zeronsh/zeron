@@ -509,6 +509,9 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// 2 = chat2; 1 = legacy (not dialable).
     pub room_gen: u32,
+    /// Its usage limit stopped it and its host (online) resumes it once the
+    /// limit resets: the list reads "Paused" unless it runs or asks again.
+    pub paused: bool,
 }
 
 impl From<&zc::SessionRow> for SessionRow {
@@ -549,6 +552,7 @@ impl From<&zc::SessionRow> for SessionRow {
             send_state: r.send_state.map(Into::into),
             parent_chat_id: r.parent_chat_id.clone(),
             room_gen: r.room_gen,
+            paused: r.device_online && r.auto_resume.as_ref().is_some_and(zeron_proto::AutoResume::pending),
         }
     }
 }

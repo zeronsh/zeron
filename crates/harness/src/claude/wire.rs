@@ -173,6 +173,63 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
+    /// Which refusal an `error` is: `usage_limit_reached` is the account's
+    /// own usage limit (a plan window or a spend cap), which no other
+    /// refusal sharing `rate_limit` (a server throttle, an API key's 429,
+    /// a model under load) carries.
+    #[serde(default)]
+    pub api_error: Option<String>,
+    /// `{rate_limit_info: {resetsAt, …}}` for `usage_limit_reached`.
+    #[serde(default)]
+    pub api_error_params: Option<Value>,
+}
+
+impl MessageFrame {
+    /// The account's usage limit refused this message (see `api_error`).
+    pub fn usage_limit_reached(&self) -> bool {
+        self.api_error.as_deref() == Some("usage_limit_reached")
+    }
+
+    /// Whether the usage limit that refused this message clears by itself:
+    /// not when what ran out is the account's usage credits and the seat,
+    /// member or group may not spend more (an admin has to act).
+    pub fn limit_resets_itself(&self) -> bool {
+        let info = self
+            .api_error_params
+            .as_ref()
+            .and_then(|params| params.get("rate_limit_info"));
+        let field = |key: &str| info.and_then(|i| i.get(key)).and_then(Value::as_str);
+        let reason = field("overageDisabledReason").unwrap_or("");
+        !(field("rateLimitType") == Some("overage")
+            && (reason.starts_with("seat_")
+                || reason.starts_with("member_")
+                || reason.starts_with("group_")
+                || reason == "out_of_credits"))
+    }
+
+    /// When the usage limit that refused this message resets.
+    pub fn limit_resets_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let secs = self
+            .api_error_params
+            .as_ref()?
+            .pointer("/rate_limit_info/resetsAt")?
+            .as_f64()?;
+        chrono::DateTime::from_timestamp(secs as i64, 0)
+    }
+
+    /// The message's own text (a synthetic error frame says what happened:
+    /// "You've hit your 5-hour limit · resets 3pm (Europe/Berlin)").
+    pub fn text(&self) -> Option<String> {
+        let text: String = self
+            .message
+            .blocks()
+            .filter(|block| block.kind == "text")
+            .map(|block| block.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_owned())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -238,6 +295,9 @@ pub(crate) struct RateLimitInfo {
     pub is_using_overage: bool,
     #[serde(rename = "overageInUse", default)]
     pub overage_in_use: bool,
+    /// When the window resets (Unix seconds).
+    #[serde(rename = "resetsAt", default)]
+    pub resets_at: Option<f64>,
 }
 
 impl RateLimitInfo {
@@ -264,6 +324,10 @@ pub(crate) struct ResultFrame {
     pub result: Option<String>,
     #[serde(default)]
     pub errors: Vec<Value>,
+    /// As on [`MessageFrame::api_error`], copied from the turn's last
+    /// API-error message.
+    #[serde(default)]
+    pub api_error: Option<String>,
     #[serde(default)]
     pub usage: UsageBody,
     #[serde(default)]

@@ -817,6 +817,8 @@ pub(crate) struct RawSession {
     running_subagents: u32,
     #[serde(default)]
     background_tasks: Vec<zeron_proto::BackgroundTask>,
+    #[serde(default)]
+    auto_resume: Option<zeron_proto::AutoResume>,
 }
 
 impl From<RawSession> for Session {
@@ -832,6 +834,7 @@ impl From<RawSession> for Session {
             terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
+            auto_resume: raw.auto_resume,
         }
     }
 }
@@ -947,6 +950,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
         }
     }
 

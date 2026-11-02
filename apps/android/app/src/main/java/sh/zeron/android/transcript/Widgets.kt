@@ -136,6 +136,20 @@ private fun Widget(state: TranscriptState, model: RowModel, w: Widget, palette: 
             actions.openSubagent(doc, kind.title, kind.running)
         }
         is WidgetKind.Action -> ActionButton(kind.label, palette) { actions.act(kind.action) }
+        is WidgetKind.Toggle -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            // Flips at once; a failure flips it back, else the next frame
+            // brings the host's state.
+            var shown by remember(kind.on) { mutableStateOf(kind.on) }
+            androidx.compose.material3.Switch(
+                checked = shown,
+                onCheckedChange = { on ->
+                    haptics.performHapticFeedback(if (on) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+                    shown = on
+                    actions.setSwitch(kind.action, on) { shown = !on }
+                },
+                modifier = Modifier.semantics { contentDescription = kind.label },
+            )
+        }
     }
 }
 
@@ -264,6 +278,8 @@ private fun AssetIcon(name: String, tint: Color) {
         // A sender caption's chat whose provider isn't known.
         "bubble.left" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
         "arrow.triangle.branch" -> return ZIcon(ZIcons.Branch, null, Modifier.fillMaxSize(), tint = tint)
+        // A limit stop's auto-resume line.
+        "clock" -> return ZIcon(ZIcons.Queue, null, Modifier.fillMaxSize(), tint = tint)
         "exclamationmark.triangle" -> return ZIcon(ZIcons.Warning, null, Modifier.fillMaxSize(), tint = tint)
         "questionmark.bubble" -> return ZIcon(ZIcons.Chat, null, Modifier.fillMaxSize(), tint = tint)
         // Prompt chips: image attachments, skills, slash commands.

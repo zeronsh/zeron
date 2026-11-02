@@ -56,82 +56,21 @@ impl WorktreeSettingsCard {
     }
 
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        use crate::icons::{self, icon};
-        let (mut devices, local_id) = {
-            let s = self.state.read(cx);
-            (s.devices.clone(), s.local_device_id.clone())
-        };
-        devices.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let effective = self.target.clone().or_else(|| local_id.clone());
-        let platform_glyph = |platform: &str| match platform {
-            "macos" | "darwin" => icons::LAPTOP,
-            "ios" | "android" => icons::SMARTPHONE,
-            _ => icons::MONITOR,
-        };
-        // Local device = no passthrough (calls stay direct).
-        let mut targets: Vec<Option<String>> = Vec::new();
-        let mut options = Vec::new();
-        for device in &devices {
-            let is_local = local_id.as_deref() == Some(device.id.as_str());
-            let glyph = platform_glyph(&device.platform);
-            let muted = theme.text_muted;
-            let option = widgets::SelectOption::new(device.name.clone()).leading(move || {
-                icon(glyph)
-                    .size(px(16.0))
-                    .flex_none()
-                    .text_color(muted)
-                    .into_any_element()
-            });
-            options.push(if is_local {
-                option.detail("You")
-            } else {
-                option
-            });
-            targets.push((!is_local).then(|| device.id.clone()));
-        }
-        let selected = match devices
-            .iter()
-            .position(|d| Some(d.id.as_str()) == effective.as_deref())
-        {
-            Some(ix) => ix,
-            // Not registered (yet): keep the current target reachable.
-            None => {
-                let muted = theme.text_muted;
-                options.push(widgets::SelectOption::new("This device").leading(move || {
-                    icon(icons::LAPTOP)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(muted)
-                        .into_any_element()
-                }));
-                targets.push(self.target.clone());
-                options.len() - 1
-            }
-        };
-        widgets::select(
+        let state = self.state.clone();
+        device_switcher(
             "worktrees-device-switcher",
-            "Device",
-            theme,
-            |page: &mut Self| &mut page.device_select,
-        )
-        .options(options, selected)
-        .menu_width(260.0)
-        .heading("Devices")
-        .open_rightward()
-        .on_select(move |page, ix, _, cx| {
-            if let Some(target) = targets.get(ix) {
-                widgets::close_select(page, |card: &mut Self| &mut card.device_select, cx);
-                if page.target != *target {
-                    page.load(target.clone(), cx);
+            &state,
+            self.target.clone(),
+            &self.device_select,
+            |card: &mut Self| &mut card.device_select,
+            |card, target, cx| {
+                if card.target != target {
+                    card.load(target, cx);
                 }
-            }
-        })
-        .render(&self.device_select, cx)
-        .into_any_element()
+            },
+            theme,
+            cx,
+        )
     }
 
     fn load(&mut self, target: Option<String>, cx: &mut Context<Self>) {
@@ -739,6 +678,89 @@ impl Render for WorktreeSettingsCard {
             .child(self.render_credit_row(&theme, cx));
         widgets::section(&theme, "Git", card).into_any_element()
     }
+}
+
+/// The device a device-addressed settings row reads and changes: every
+/// registered device ("You" on this one), oldest first. `pick` gets the
+/// chosen target (`None` = this device, so calls stay direct).
+pub(super) fn device_switcher<V: 'static>(
+    id: &'static str,
+    state: &Entity<AppState>,
+    target: Option<String>,
+    select: &widgets::SelectState,
+    reach: fn(&mut V) -> &mut widgets::SelectState,
+    pick: fn(&mut V, Option<String>, &mut Context<V>),
+    theme: &Theme,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    use crate::icons::{self, icon};
+    let (mut devices, local_id) = {
+        let s = state.read(cx);
+        (s.devices.clone(), s.local_device_id.clone())
+    };
+    devices.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let effective = target.clone().or_else(|| local_id.clone());
+    let platform_glyph = |platform: &str| match platform {
+        "macos" | "darwin" => icons::LAPTOP,
+        "ios" | "android" => icons::SMARTPHONE,
+        _ => icons::MONITOR,
+    };
+    let mut targets: Vec<Option<String>> = Vec::new();
+    let mut options = Vec::new();
+    for device in &devices {
+        let is_local = local_id.as_deref() == Some(device.id.as_str());
+        let glyph = platform_glyph(&device.platform);
+        let muted = theme.text_muted;
+        let option = widgets::SelectOption::new(device.name.clone()).leading(move || {
+            icon(glyph)
+                .size(px(16.0))
+                .flex_none()
+                .text_color(muted)
+                .into_any_element()
+        });
+        options.push(if is_local {
+            option.detail("You")
+        } else {
+            option
+        });
+        targets.push((!is_local).then(|| device.id.clone()));
+    }
+    let selected = match devices
+        .iter()
+        .position(|d| Some(d.id.as_str()) == effective.as_deref())
+    {
+        Some(ix) => ix,
+        // Not registered (yet): keep the current target reachable.
+        None => {
+            let muted = theme.text_muted;
+            options.push(widgets::SelectOption::new("This device").leading(move || {
+                icon(icons::LAPTOP)
+                    .size(px(16.0))
+                    .flex_none()
+                    .text_color(muted)
+                    .into_any_element()
+            }));
+            targets.push(target);
+            options.len() - 1
+        }
+    };
+    widgets::select(id, "Device", theme, reach)
+        .options(options, selected)
+        .menu_width(260.0)
+        .heading("Devices")
+        .open_rightward()
+        .on_select(move |view, ix, _, cx| {
+            if let Some(target) = targets.get(ix) {
+                widgets::close_select(view, reach, cx);
+                pick(view, target.clone(), cx);
+            }
+        })
+        .render(select, cx)
+        .into_any_element()
 }
 
 fn description(theme: &Theme, text: &str) -> gpui::Div {

@@ -56,6 +56,14 @@ pub struct TranscriptInput {
     /// The chats this workspace lists, for an agent message's sender: its
     /// live title and provider, and whether it opens.
     pub workspace: Option<Arc<zeron_client::workspace::WorkspaceSnapshot>>,
+    /// The chat's usage limit stop (off its session row) and whether its
+    /// host is offline: the layout words the stop's card from these at each
+    /// pass ([`Self::resume`]), and again when its words change by time.
+    pub auto_resume: Option<zeron_proto::AutoResume>,
+    pub host_offline: bool,
+    /// Usage limit stops' cards, by error part (derived from
+    /// [`Self::auto_resume`] when that is set).
+    pub resume: Vec<ResumeInput>,
 }
 
 /// The link an agent message's sender caption opens: that chat.
@@ -100,7 +108,31 @@ pub(crate) struct Chip {
 pub(crate) struct Notice {
     pub text: PText,
     pub action: Option<(&'static str, &'static str)>,
+    /// A usage limit stop's auto-resume line under the text.
+    pub resume: Option<NoticeResume>,
 }
+
+/// "Auto-resumes at 3:40 PM" under a limit stop's text, with its switch
+/// trailing when it can still change anything.
+pub(crate) struct NoticeResume {
+    pub status: PText,
+    pub switch: Option<bool>,
+}
+
+/// A limit stop's auto-resume as the host reports it: which error part it
+/// belongs to, its status line (already in the viewer's local time) and the
+/// switch's state (`None` once there is nothing left to switch: resumed).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResumeInput {
+    /// `{entry id}#{part id}` of the error part.
+    pub part: String,
+    pub status: String,
+    pub switch: Option<bool>,
+}
+
+/// What an error card's auto-resume switch names itself: the app sends
+/// `auto-resume:on` / `auto-resume:off` as the switch flips.
+pub(crate) const AUTO_RESUME_ACTION: &str = "auto-resume";
 
 // Cores are built once and shared behind Arc; boxing variants only adds a hop.
 #[allow(clippy::large_enum_variant)]
@@ -170,6 +202,11 @@ pub(crate) mod geom {
     pub const NOTICE_PAD: f32 = 12.0;
     pub const NOTICE_BUTTON: f32 = 32.0;
     pub const NOTICE_BUTTON_W: f32 = 80.0;
+    /// A limit stop's auto-resume line: its gap under the message, and the
+    /// switch trailing it (a platform switch's footprint).
+    pub const NOTICE_RESUME_GAP: f32 = 8.0;
+    pub const NOTICE_SWITCH: f32 = 32.0;
+    pub const NOTICE_SWITCH_W: f32 = 52.0;
     pub const IMAGE: f32 = 260.0;
     pub const WORKING: f32 = 36.0;
     pub const VISUAL_LOADING: f32 = 18.0;
@@ -241,7 +278,19 @@ impl RowBuilder {
         for entry in &input.entries {
             live_entries.insert(entry.id.as_str());
             let first = out.is_empty();
-            let sig = self.entry_sig(entry, first, prev_role, input.workspace.as_deref());
+            let resume: Vec<&ResumeInput> = input
+                .resume
+                .iter()
+                .filter(|r| r.part.strip_prefix(entry.id.as_str()).is_some_and(|rest| rest.starts_with('#')))
+                .collect();
+            let mut sig = self.entry_sig(entry, first, prev_role, input.workspace.as_deref());
+            if !resume.is_empty() {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                sig.hash(&mut h);
+                resume.hash(&mut h);
+                sig = h.finish();
+            }
             let reuse = self
                 .entries
                 .get(&entry.id)
@@ -257,7 +306,7 @@ impl RowBuilder {
                     rows
                 }
                 None => {
-                    let rows = self.entry_rows(ctx, entry, first, prev_role, input.workspace.as_deref(), &mut live_parts);
+                    let rows = self.entry_rows(ctx, entry, first, prev_role, input.workspace.as_deref(), &resume, &mut live_parts);
                     self.entries.insert(
                         entry.id.clone(),
                         EntryState {
@@ -371,6 +420,7 @@ impl RowBuilder {
         first: bool,
         prev: Option<MessageRole>,
         workspace: Option<&WorkspaceSnapshot>,
+        resume: &[&ResumeInput],
         live_parts: &mut HashSet<String>,
     ) -> Vec<Placed> {
         let mut rows: Vec<Placed> = Vec::new();
@@ -514,7 +564,9 @@ impl RowBuilder {
                         }
                         MessagePart::Error { id, message } => {
                             let gap = gap_for(&rows, false);
-                            rows.push(Placed { core: Arc::new(notice_row(ctx, &entry.id, id, message)), gap });
+                            let key = format!("{}#{}", entry.id, id);
+                            let resume = resume.iter().find(|r| r.part == key).copied();
+                            rows.push(Placed { core: Arc::new(notice_row(ctx, &entry.id, id, message, resume)), gap });
                         }
                         MessagePart::Fork { id, source_title, .. } => {
                             let gap = gap_for(&rows, false);
@@ -842,11 +894,18 @@ fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, co
     }
 }
 
-fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str) -> RowCore {
+fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str, resume: Option<&ResumeInput>) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);
     let action = zeron_proto::run_errors::provider_problem(message).map(|problem| ("sign-in", problem.action_label()));
+    let resume = resume.map(|r| {
+        let style = ctx.typo.style(Family::Sans, Weight::Regular, false, size);
+        NoticeResume {
+            status: prepare_plain(ctx, &r.status, style, lh, ColorRole::DangerSoft, WhiteSpace::Normal),
+            switch: r.switch,
+        }
+    });
     RowCore {
         key: row_key(&format!("{entry_id}#{part_id}")),
         version: next_version(),
@@ -855,6 +914,7 @@ fn notice_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, message: &str) -> Ro
         content: Content::Notice(Notice {
             text: prepare_plain(ctx, message, style, lh, ColorRole::DangerSoft, WhiteSpace::Normal),
             action,
+            resume,
         }),
         copy_text: message.to_owned(),
     }
@@ -1062,7 +1122,18 @@ pub(crate) fn place_row(
             // Measure first (no output), then paint the card under the text.
             let th = place_text(&n.text, text_x, top + pad, text_w, None);
             let body = button.map_or(th, |(_, bh)| th.max(bh));
-            let h = body + pad * 2.0;
+            // A limit stop's auto-resume line: its status beside the clock
+            // glyph, the switch trailing; both centered on each other.
+            let resume = n.resume.as_ref().map(|r| {
+                let switch = r.switch.map(|on| (on, px.v(NOTICE_SWITCH_W), px.v(NOTICE_SWITCH)));
+                let trailing = switch.map_or(0.0, |(_, w, _)| w + gap);
+                let status_w = (cw - (text_x - x) - pad - trailing).max(px.v(40.0));
+                let sh = place_text(&r.status, text_x, 0.0, status_w, None);
+                let line = switch.map_or(sh, |(_, _, h)| sh.max(h));
+                (r, switch, status_w, sh, line)
+            });
+            let resume_h = resume.as_ref().map_or(0.0, |(.., line)| px.v(NOTICE_RESUME_GAP) + line);
+            let h = body + resume_h + pad * 2.0;
             let text_y = top + pad + (body - th) / 2.0;
             if let Some(out) = out.as_deref_mut() {
                 out.fill(x, top, cw, h, px.v(14.0), ColorRole::DangerWash);
@@ -1073,12 +1144,32 @@ pub(crate) fn place_row(
                 );
             }
             place_text(&n.text, text_x, text_y, text_w, out.as_deref_mut());
-            if let (Some((action, label)), Some((bw, bh)), Some(out)) = (n.action, button, out) {
+            if let (Some((action, label)), Some((bw, bh)), Some(out)) = (n.action, button, out.as_deref_mut()) {
                 out.widget(
                     WidgetKind::Action { action: action.into(), label: label.into() },
                     (x + cw - pad - bw, top + pad + (body - bh) / 2.0, bw, bh),
                     None,
                 );
+            }
+            if let Some((r, switch, status_w, sh, line)) = resume {
+                let line_top = top + pad + body + px.v(NOTICE_RESUME_GAP);
+                let status_y = line_top + (line - sh) / 2.0;
+                let clock = px.v(14.0);
+                if let Some(out) = out.as_deref_mut() {
+                    out.widget(
+                        WidgetKind::Icon { name: "clock".into(), color: ColorRole::DangerSoft },
+                        (x + pad + (icon - clock) / 2.0, status_y + (r.status.lh - clock) / 2.0, clock, clock),
+                        None,
+                    );
+                }
+                place_text(&r.status, text_x, status_y, status_w, out.as_deref_mut());
+                if let (Some((on, sw, swh)), Some(out)) = (switch, out) {
+                    out.widget(
+                        WidgetKind::Toggle { action: AUTO_RESUME_ACTION.into(), label: "Auto-resume".into(), on },
+                        (x + cw - pad - sw, line_top + (line - swh) / 2.0, sw, swh),
+                        None,
+                    );
+                }
             }
             h
         }
@@ -1255,7 +1346,7 @@ pub(crate) fn content_heap_bytes(content: &Content) -> usize {
         Content::Tools(t) => super::tools::heap_bytes(t),
         Content::Chip(c) => c.text.p.heap_bytes(),
         Content::Caption { text, .. } => text.p.heap_bytes(),
-        Content::Notice(n) => n.text.p.heap_bytes(),
+        Content::Notice(n) => n.text.p.heap_bytes() + n.resume.as_ref().map_or(0, |r| r.status.p.heap_bytes()),
         Content::Image { reference } => reference.len(),
         Content::Working { .. } | Content::Visual(_) => 0,
     }

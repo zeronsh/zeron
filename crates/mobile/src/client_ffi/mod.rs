@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod auto_resume;
 mod cloud;
 pub(crate) mod companions;
 mod providers;

@@ -587,6 +587,17 @@ impl Zeron {
                     SessionStatus::AwaitingInput if advanced || saw_working => {
                         return Ok((TurnOutcome::AwaitingInput, Some(session)));
                     }
+                    // The usage limit stopped the turn and its host resumes it
+                    // once the limit resets: not over yet. Waiting through it
+                    // hands the caller the turn's eventual reply.
+                    SessionStatus::Errored
+                        if session.auto_resume.as_ref().is_some_and(|r| r.pending()) =>
+                    {
+                        // A row unmoved since the send is no evidence of a
+                        // turn: only one that advanced counts as one.
+                        saw_working |= advanced;
+                        last = Some(session);
+                    }
                     SessionStatus::Errored if advanced || saw_working => {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }

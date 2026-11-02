@@ -3571,8 +3571,29 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
+    /// The error card's auto-resume switch, per chat, ahead of the host's
+    /// session row while the change is in flight and briefly after.
+    resume_toggles: HashMap<String, ResumeToggle>,
+    /// The chat's limit stop as last painted (see [`Self::sync_auto_resume`]).
+    auto_resume_seen: Option<zeron_proto::AutoResume>,
+    /// Repaints the card when its words change by themselves.
+    auto_resume_timer: Option<Task<()>>,
     _observe: Subscription,
     _text_changes: Subscription,
+}
+
+/// How long a confirmed switch flip outranks the session row it is
+/// waiting on (one sync round trip, with room to spare).
+const RESUME_TOGGLE_HOLD: Duration = Duration::from_secs(5);
+
+/// A flipped auto-resume switch the host's session row has yet to reflect.
+struct ResumeToggle {
+    entry_id: String,
+    enabled: bool,
+    /// `None` while the request is in flight; then how long the switch keeps
+    /// reading `enabled` while the session row catches up.
+    until: Option<Instant>,
+    _task: Task<()>,
 }
 
 /// One sidecar blob fetch's lifecycle.
@@ -3744,6 +3765,7 @@ impl Transcript {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             this.sync(cx);
             this.sync_loader(cx);
+            this.sync_auto_resume(cx);
         });
         cx.on_release(|this: &mut Self, cx| {
             this.close_diagram_zoom(cx);
@@ -3879,6 +3901,9 @@ impl Transcript {
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
+            resume_toggles: HashMap::new(),
+            auto_resume_seen: None,
+            auto_resume_timer: None,
             _observe: observe,
             _text_changes: text_changes,
         };
@@ -7982,6 +8007,173 @@ impl Transcript {
         )
     }
 
+    /// Repaint when the chat's limit stop changes on its session row: the
+    /// error card reads it at render, and no transcript change comes with it.
+    fn sync_auto_resume(&mut self, cx: &mut Context<Self>) {
+        let stop = self.chat_id.as_deref().and_then(|chat_id| {
+            self.state
+                .read(cx)
+                .session_for(chat_id)
+                .and_then(|session| session.auto_resume.clone())
+        });
+        if stop != self.auto_resume_seen {
+            // Its words change by themselves at the reset time ("Checking
+            // limit…"): repaint then too.
+            let now = chrono::Utc::now();
+            self.auto_resume_timer = stop
+                .as_ref()
+                .and_then(|stop| crate::auto_resume::next_change(stop, now))
+                .and_then(|at| (at - now).to_std().ok())
+                .map(|wait| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    })
+                });
+            self.auto_resume_seen = stop;
+            cx.notify();
+        }
+    }
+
+    /// The auto-resume footer for an error card: the chat's limit stop (off
+    /// its session row) on the stopped entry's last error card, in the
+    /// chat's own transcript only.
+    fn resume_footer(&self, row: &Row, cx: &mut Context<Self>) -> Option<ResumeFooter> {
+        if self.doc_override.is_some() {
+            return None;
+        }
+        let chat_id = self.chat_id.as_deref()?;
+        let now = chrono::Utc::now();
+        let (stop, host_online) = {
+            let state = self.state.read(cx);
+            let session = state.session_for(chat_id)?;
+            (
+                session.auto_resume.clone()?,
+                state.device_online(&session.device_id, now),
+            )
+        };
+        if row.entry_id.as_ref() != stop.entry_id {
+            return None;
+        }
+        let last_card = self
+            .rows
+            .iter()
+            .rev()
+            .find(|r| r.entry_id == row.entry_id && matches!(r.kind, RowKind::ErrorChip { .. }));
+        if last_card.is_none_or(|card| card.id != row.id) {
+            return None;
+        }
+        let toggle = self.resume_toggles.get(chat_id).filter(|toggle| {
+            toggle.entry_id == stop.entry_id
+                && toggle.until.is_none_or(|until| Instant::now() < until)
+        });
+        // The switch reads the flip ahead of the row; while it is in
+        // flight it takes no other.
+        let switch = crate::auto_resume::switch(&stop).map(|mut switch| {
+            if let Some(toggle) = toggle {
+                switch.on = toggle.enabled;
+                switch.interactive &= toggle.until.is_some();
+            }
+            switch
+        });
+        let on_toggle = switch.filter(|switch| switch.interactive).map(|switch| {
+            let enabled = !switch.on;
+            Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.set_auto_resume(enabled, cx)
+            })) as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>
+        });
+        let mut stop = stop;
+        if let Some(toggle) = toggle {
+            stop.enabled = toggle.enabled;
+        }
+        Some(ResumeFooter {
+            status: crate::auto_resume::status(&stop, host_online, now),
+            switch: switch.map(|switch| switch.on),
+            on_toggle,
+        })
+    }
+
+    /// The error card's switch: resume this chat's limit stop by itself, or
+    /// not (`SetChatAutoResume` on the chat's host).
+    fn set_auto_resume(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        // The session row's device is the host that owns the stop.
+        let (engine, host, entry_id) = {
+            let state = self.state.read(cx);
+            let Some((host, entry_id)) = state.session_for(&chat_id).and_then(|session| {
+                let stop = session.auto_resume.as_ref()?;
+                Some((session.device_id.clone(), stop.entry_id.clone()))
+            }) else {
+                return;
+            };
+            (state.engine().cloned(), host, entry_id)
+        };
+        let Some(engine) = engine else {
+            crate::toast::error(cx, "Device is not connected");
+            return;
+        };
+        let params = serde_json::json!({
+            "chatId": chat_id,
+            "enabled": enabled,
+            "targetDeviceId": host,
+        });
+        let key = chat_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(zeron_rpc::methods::SET_CHAT_AUTO_RESUME, params)
+                .await;
+            let held = this.update(cx, |this, cx| {
+                let mut held = false;
+                match result {
+                    // No stop any more (the chat moved on): nothing to hold;
+                    // its card goes with the row.
+                    Ok(serde_json::Value::Null) => {
+                        this.resume_toggles.remove(&key);
+                    }
+                    Ok(_) => {
+                        if let Some(toggle) = this.resume_toggles.get_mut(&key) {
+                            toggle.until = Some(Instant::now() + RESUME_TOGGLE_HOLD);
+                            held = true;
+                        }
+                    }
+                    Err(error) => {
+                        this.resume_toggles.remove(&key);
+                        crate::toast::error(
+                            cx,
+                            match error {
+                                zeron_rpc::RpcError::UnknownMethod(_) => {
+                                    "Update Zeron on this chat's device to change auto-resume."
+                                        .to_string()
+                                }
+                                error => format!("Couldn't change auto-resume: {error}"),
+                            },
+                        );
+                    }
+                }
+                cx.notify();
+                held
+            });
+            // When the hold lapses the switch reads the row again.
+            if held.unwrap_or(false) {
+                cx.background_executor().timer(RESUME_TOGGLE_HOLD).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
+        });
+        self.resume_toggles.insert(
+            chat_id,
+            ResumeToggle {
+                entry_id,
+                enabled,
+                until: None,
+                _task: task,
+            },
+        );
+        cx.notify();
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
@@ -8313,7 +8505,8 @@ impl Transcript {
                             });
                         })
                     });
-                error_chip(message.clone(), problem, sign_in, &theme)
+                let resume = self.resume_footer(&row, cx);
+                error_chip(message.clone(), problem, sign_in, resume, &theme)
             }
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             RowKind::SwitchMarker {
@@ -9946,11 +10139,14 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
 /// zeronsh/comet#95 undiagnosable from the screenshot.
 ///
 /// A refusal that signing in fixes (signed out, out of usage) says so in the
-/// label and carries a "Log in" button for that chat's provider.
+/// label and carries a "Log in" button for that chat's provider. A usage
+/// limit stop also says when the engine picks the chat back up, beside the
+/// switch that turns that off for this stop.
 fn error_chip(
     message: SharedString,
     problem: Option<zeron_proto::run_errors::ProviderProblem>,
     sign_in: Option<impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static>,
+    resume: Option<ResumeFooter>,
     theme: &Theme,
 ) -> AnyElement {
     use zeron_proto::run_errors::ProviderProblem;
@@ -9980,22 +10176,111 @@ fn error_chip(
             .on_click(on_click)
             .child(problem.map_or("Log in", ProviderProblem::action_label))
     });
+    let action = match resume {
+        Some(resume) => Some(resume.render(button.map(IntoElement::into_any_element), theme)),
+        None => button.map(IntoElement::into_any_element),
+    };
     div()
         .py(px(4.0))
         .w_full()
         .child(
-            notice_chip_with_action(
-                theme,
-                false,
-                label,
-                message,
-                Tile,
-                button.map(IntoElement::into_any_element),
-            )
+            notice_chip_with_action(theme, false, label, message, Tile, action)
             .overflow_hidden()
             .w_full(),
         )
         .into_any_element()
+}
+
+/// A limit stop's auto-resume, under the error card's message: the status
+/// line ("Auto-resumes at 3:40 PM"), then the card's "Log in" (when any) and,
+/// trailing, the "Auto-resume" switch for this stop.
+struct ResumeFooter {
+    status: String,
+    /// The switch, reading on or off; `None`: no switch.
+    switch: Option<bool>,
+    /// Flips this stop's auto-resume; `None` when the switch can't change
+    /// anything now (in flight, or the host already resuming).
+    on_toggle: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>,
+}
+
+impl ResumeFooter {
+    fn render(self, sign_in: Option<AnyElement>, theme: &Theme) -> AnyElement {
+        let muted = theme.danger_muted;
+        let status = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .text_color(muted.opacity(0.8))
+            .child(
+                crate::icons::icon(crate::icons::CLOCK_CIRCLE)
+                    .flex_none()
+                    .size(px(12.0))
+                    .text_color(muted.opacity(0.8)),
+            )
+            .child(
+                div()
+                    .id("error-auto-resume-status")
+                    .debug_selector(|| "error-auto-resume-status".into())
+                    .min_w_0()
+                    .child(SharedString::from(self.status)),
+            );
+        let switch = self.switch.map(|enabled| {
+            let interactive = self.on_toggle.is_some();
+            div()
+                .id("error-auto-resume")
+                .debug_selector(|| "error-auto-resume-toggle".into())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .role(gpui::Role::Switch)
+                .aria_label("Auto-resume")
+                .aria_toggled(if enabled {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .child(
+                    div()
+                        .text_color(muted.opacity(0.8))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child("Auto-resume"),
+                )
+                .child(crate::settings::widgets::toggle_switch(
+                    theme,
+                    enabled,
+                    "error-auto-resume",
+                ))
+                .when_some(self.on_toggle, |el, on_toggle| {
+                    el.cursor_pointer()
+                        .tab_index(0)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(on_toggle)
+                })
+                .when(!interactive, |el| el.opacity(0.5))
+        });
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(status)
+            .when(sign_in.is_some() || switch.is_some(), |footer| {
+                footer.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.0))
+                        .children(sign_in)
+                        .child(div().flex_1())
+                        .children(switch),
+                )
+            })
+            .into_any_element()
+    }
 }
 
 /// A quiet fork seam. The source gets its own constrained line so long
@@ -11653,6 +11938,109 @@ mod tests {
             (landed - 60.0).abs() <= 1.0,
             "a 3-line notch scrolls 60px, as it does without smoothing: {landed}"
         );
+    }
+
+    #[gpui::test]
+    fn a_limit_stop_card_shows_its_auto_resume_and_switch(cx: &mut gpui::TestAppContext) {
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut stop = crate::auto_resume::stop(true, zeron_proto::AutoResumePhase::Waiting);
+        stop.resume_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let session = |stop: Option<zeron_proto::AutoResume>| zeron_proto::Session {
+            last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            auto_resume: stop,
+            chat_id: "chat".into(),
+            device_id: "host".into(),
+            status: zeron_proto::SessionStatus::Errored,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+        };
+        let (state, transcript) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant(
+                    "a1",
+                    MessageStatus::Complete,
+                    vec![
+                        text_part("text", "Working on it."),
+                        MessagePart::Error {
+                            id: "e".into(),
+                            message: "Claude usage limit reached — try again after the limit resets."
+                                .into(),
+                        },
+                    ],
+                )];
+                state.transcript_revision += 1;
+                state.sessions = vec![session(Some(stop.clone()))];
+            });
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            (state, transcript)
+        });
+        transcript.update(cx, |this, cx| {
+            this.rail_enabled = false;
+            this.sync(cx);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear());
+        };
+        draw(cx);
+        assert!(cx.debug_bounds("error-auto-resume-status").is_some());
+        let toggle = cx
+            .debug_bounds("error-auto-resume-toggle")
+            .expect("a waiting stop has its switch");
+        let card = transcript.update(cx, |this, cx| {
+            let row = this.rows.iter().find(|r| matches!(r.kind, RowKind::ErrorChip { .. })).cloned();
+            this.resume_footer(&row.unwrap(), cx).expect("the stopped entry's card")
+        });
+        assert!(card.on_toggle.is_some() && card.switch == Some(true));
+        assert!(card.status.starts_with("Auto-resumes "), "{}", card.status);
+        // With no engine the switch can't reach the host, and says so.
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                crate::toast::messages(cx),
+                vec![SharedString::from("Device is not connected")]
+            );
+        });
+
+        // Resuming: the switch stays, but can't be flipped.
+        stop.phase = zeron_proto::AutoResumePhase::Resuming;
+        cx.update(|_, cx| state.update(cx, |state, _| state.sessions = vec![session(Some(stop.clone()))]));
+        let card = transcript.update(cx, |this, cx| {
+            let row = this.rows.iter().find(|r| matches!(r.kind, RowKind::ErrorChip { .. })).cloned();
+            this.resume_footer(&row.unwrap(), cx).unwrap()
+        });
+        assert!(card.on_toggle.is_none());
+
+        // A stop recorded for another entry, or none at all: a plain card.
+        stop.entry_id = "elsewhere".into();
+        cx.update(|_, cx| state.update(cx, |state, cx| {
+            state.sessions = vec![session(Some(stop.clone()))];
+            cx.notify();
+        }));
+        draw(cx);
+        assert!(cx.debug_bounds("error-auto-resume-status").is_none());
+        cx.update(|_, cx| state.update(cx, |state, cx| {
+            state.sessions = vec![session(None)];
+            cx.notify();
+        }));
+        draw(cx);
+        assert!(cx.debug_bounds("error-auto-resume-toggle").is_none());
     }
 
     #[gpui::test]
@@ -15542,6 +15930,7 @@ mod tests {
                             terminal_activity: None,
                             running_subagents: 0,
                             background_tasks: Vec::new(),
+                            auto_resume: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,

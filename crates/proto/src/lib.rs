@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod agent_messages;
 pub mod attachment_mentions;
+pub mod auto_resume;
 pub mod chat_mentions;
 pub mod change_request_assessment;
 pub mod cloud;
@@ -27,6 +28,7 @@ pub mod voice;
 pub mod workspace;
 
 pub use agent::*;
+pub use auto_resume::{AutoResume, AutoResumePhase, AutoResumeSettings};
 pub use cloud::*;
 pub use entities::*;
 pub use preview::*;

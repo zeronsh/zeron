@@ -869,6 +869,7 @@ mod tests {
                 terminal_activity: None,
                 running_subagents: 0,
                 background_tasks: tasks,
+                auto_resume: None,
             }];
             state.selected_chat = Some(chat_id.into());
         });

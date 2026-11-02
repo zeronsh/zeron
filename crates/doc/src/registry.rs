@@ -1552,6 +1552,7 @@ impl RegistryDoc {
                 "backgroundTasks",
                 serde_json::to_value(&session.background_tasks)?,
             ),
+            ("autoResume", serde_json::to_value(&session.auto_resume)?),
         ]);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())

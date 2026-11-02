@@ -76,6 +76,11 @@ class TranscriptActions(
     val openSubagent: (docId: String, title: String, running: Boolean) -> Unit = { _, _, _ -> },
     /** An in-transcript button (`sign-in` on an error card). */
     val act: (String) -> Unit = {},
+    /**
+     * An in-transcript switch (`auto-resume` on a limit stop's card) now
+     * shows `on`; `revert` puts it back when the change fails.
+     */
+    val setSwitch: (action: String, on: Boolean, revert: () -> Unit) -> Unit = { _, _, revert -> revert() },
 )
 
 private const val OVERSCAN = 700f

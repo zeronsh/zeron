@@ -77,6 +77,8 @@ settings_index! {
         "pr pull request badges board browser github"),
     (ThreadNaming, General, None, "Thread naming",
         "titles rename sessions model"),
+    (AutoResume, General, Some("Usage limits"), "Auto-resume when limits reset",
+        "continue rate limit quota usage subagents workers paused stopped"),
     (WorktreeLocation, General, Some("Git"), "Custom worktree location",
         "folder directory path checkout branches"),
     (CommitCredit, General, Some("Git"), "Credit Zeron in commits",

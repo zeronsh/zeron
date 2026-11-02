@@ -168,6 +168,9 @@ pub(super) struct ChildChatRow {
     pub device_id: String,
     pub title: SharedString,
     pub status: ChatIndicator,
+    /// Its usage limit stopped it and its host resumes it once the limit
+    /// resets: reads "Paused" in place of the time.
+    pub paused: bool,
     pub time_ago: SharedString,
     /// The chat's linked pull request, drawn as the sidebar's badge.
     pub change_request: Option<zeron_proto::ChangeRequestSummary>,
@@ -189,11 +192,13 @@ pub(super) fn child_chat_rows(
         .filter(|chat| !chat.archived && chat.parent_chat_id.as_deref() == Some(chat_id))
         .map(|chat| {
             let activity = chat.last_message_at.unwrap_or(chat.created_at);
+            let status = state.display_status_for(chat, now);
             ChildChatRow {
                 chat_id: chat.id.clone(),
                 device_id: chat.device_id.clone(),
                 title: child_chat_title(chat).into(),
-                status: state.display_status_for(chat, now),
+                status,
+                paused: super::paused_overlay(status, state.waiting_to_resume(&chat.id, now)),
                 time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
                 change_request: state.change_request_for_chat(chat).cloned(),
                 harness: chat.config.as_ref().map(|config| config.harness),
@@ -538,7 +543,15 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let key = format!("session-lanes-chat-{}", row.chat_id);
-        let mark = status_mark(key.clone(), row.status, view, theme, cx);
+        let mark = if row.paused {
+            div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(theme.warning)
+                .into_any_element()
+        } else {
+            status_mark(key.clone(), row.status, view, theme, cx)
+        };
         let rename_input = self.rename_input_for(&row.chat_id, ChatRenameSurface::SessionCard);
         let revealing = rename_input.is_some() && self.chat_rename_revealing();
         let title = match rename_input {
@@ -600,7 +613,11 @@ impl Shell {
                     theme,
                 )
             }))
-            .child(time_label(row.time_ago.clone(), theme))
+            .child(if row.paused {
+                time_label("Paused".into(), theme).text_color(theme.warning)
+            } else {
+                time_label(row.time_ago.clone(), theme)
+            })
     }
 
     fn render_subagent_row(
@@ -897,6 +914,26 @@ mod tests {
         assert_eq!(rows[0].title.as_ref(), "New side chat");
         assert_eq!(rows[1].title.as_ref(), "Investigate caching");
         assert_eq!(rows[0].status, ChatIndicator::Idle);
+        assert!(!rows[0].paused);
+
+        // A side chat its usage limit stopped, waiting to resume.
+        let mut stop = crate::auto_resume::stop(true, zeron_proto::AutoResumePhase::Waiting);
+        stop.entry_id = "e".into();
+        state.sessions = vec![zeron_proto::Session {
+            last_completed_turn: None,
+            last_turn_outcome: None,
+            terminal_activity: None,
+            running_subagents: 0,
+            background_tasks: Vec::new(),
+            auto_resume: Some(stop),
+            chat_id: "a".into(),
+            device_id: "host".into(),
+            status: zeron_proto::SessionStatus::Errored,
+            started_at: None,
+            updated_at: Utc::now(),
+        }];
+        let rows = child_chat_rows(&state, "main", Utc::now());
+        assert!(rows[0].paused && !rows[1].paused);
     }
 
     #[test]

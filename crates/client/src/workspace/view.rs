@@ -103,6 +103,9 @@ pub struct SessionRow {
     pub parent_chat_id: Option<String>,
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
+    /// The latest turn the usage limit stopped and its auto-resume state
+    /// (from the host's session row); see [`zeron_proto::AutoResume`].
+    pub auto_resume: Option<zeron_proto::AutoResume>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -427,6 +430,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.archived.hash(&mut h);
     row.pinned.hash(&mut h);
     row.section_id.hash(&mut h);
+    row.auto_resume.hash(&mut h);
     if let Some(pr) = &row.pull_request {
         pr.number.hash(&mut h);
         pr.url.hash(&mut h);
@@ -537,6 +541,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
+        auto_resume: session.and_then(|s| s.auto_resume.clone()),
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).

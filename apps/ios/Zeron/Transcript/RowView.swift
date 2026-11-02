@@ -40,6 +40,9 @@ protocol RowViewDelegate: AnyObject {
     func rowView(_ view: RowView, visualFor id: String) -> UIView?
     /// A row's button (`sign-in` on an error card).
     func rowView(_ view: RowView, perform action: String)
+    /// A row's switch (`auto-resume` on a limit stop's card) now shows `on`;
+    /// `revert` puts it back when the change fails.
+    func rowView(_ view: RowView, setSwitch action: String, on: Bool, revert: @escaping () -> Void)
     /// A subagent card was tapped: its transcript doc, title, and whether it
     /// still runs.
     func rowView(_ view: RowView, openSubagent docId: String, title: String, running: Bool)
@@ -320,6 +323,24 @@ final class RowView: UIView {
                 })
                 b.accessibilityIdentifier = "transcript-action-\(action)"
                 view = b
+            case let .toggle(action, label, on):
+                // A platform switch, centred in its slot below. Flipping it
+                // sends `action` with the state it now shows; a failure puts
+                // it back, else the next frame brings the host's state.
+                let s = UISwitch()
+                s.isOn = on
+                s.onTintColor = Palette.accent
+                s.accessibilityLabel = label
+                s.accessibilityIdentifier = "transcript-switch-\(action)"
+                s.addAction(UIAction { [weak self, weak s] _ in
+                    guard let self, let s else { return }
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    let wanted = s.isOn
+                    self.delegate?.rowView(self, setSwitch: action, on: wanted) { [weak s] in
+                        s?.setOn(!wanted, animated: true)
+                    }
+                }, for: .valueChanged)
+                view = s
             case let .subagent(docId, title, running, failed):
                 let card = SubagentCardControl()
                 card.accessibilityTraits = .button
@@ -341,7 +362,13 @@ final class RowView: UIView {
                 view = delegate?.rowView(self, visualFor: id) ?? UIView()
                 (view as? VisualView)?.active = !isHidden
             }
-            view.frame = rect
+            if view is UISwitch {
+                // A switch keeps its own size: centre it in the slot.
+                view.sizeToFit()
+                view.center = CGPoint(x: rect.midX, y: rect.midY)
+            } else {
+                view.frame = rect
+            }
             host.addSubview(view)
             widgetViews.append(view)
         }

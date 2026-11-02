@@ -164,7 +164,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Wait for completed, awaitingInput, interrupted, errored, or timedOut. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion. Returns assistant replies when available.",
+            description: "Wait for completed, awaitingInput, interrupted, errored, or timedOut. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion. A turn the provider's usage limit stopped that will resume by itself once the limit resets keeps the wait going; on timeout, autoResume says it is waiting and when it resumes. Returns assistant replies when available.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -1692,6 +1692,17 @@ impl Tools {
             "statusStale": stale,
             "terminalActivity": session.as_ref().and_then(|s| s.terminal_activity.as_ref()),
             "timedOut": outcome == TurnOutcome::TimedOut,
+            // The usage limit stopped the chat's turn and its host resumes it
+            // once the limit resets (`resumeAt`, when known): wait again.
+            "autoResume": session
+                .as_ref()
+                .and_then(|s| s.auto_resume.as_ref())
+                .filter(|r| r.pending())
+                .map(|r| json!({
+                    "waiting": true,
+                    "resumeAt": r.resume_at,
+                    "stoppedAt": r.stopped_at,
+                })),
             "pendingInput": if stale { None } else { last_pending_input(&rendered) },
             "replies": replies,
         }))
@@ -2193,6 +2204,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
         };
         // No mid-turn capability is required for a live mailbox delivery.
         let sent = tools
