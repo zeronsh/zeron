@@ -1094,6 +1094,11 @@ pub struct UiSettings {
     pub sidebar_show_project_filter: bool,
     /// The Archived accordion below the active session list.
     pub sidebar_show_archived: bool,
+    /// By project only: sessions nest under the worktree they ran in.
+    pub sidebar_show_worktrees: bool,
+    /// Collapsed worktree groups, by checkout id.
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub sidebar_collapsed_worktrees: std::collections::BTreeSet<String>,
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
@@ -1304,6 +1309,8 @@ impl Default for UiSettings {
             sidebar_show_pull_request: true,
             sidebar_show_project_filter: true,
             sidebar_show_archived: true,
+            sidebar_show_worktrees: false,
+            sidebar_collapsed_worktrees: std::collections::BTreeSet::new(),
             github_star_banner_dismissed: false,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -2150,6 +2157,8 @@ impl UiSettings {
             sidebar_show_pull_request,
             sidebar_show_project_filter,
             sidebar_show_archived,
+            sidebar_show_worktrees,
+            sidebar_collapsed_worktrees,
             github_star_banner_dismissed,
             last_space_id,
             last_project_action_by_space_id,
@@ -3318,6 +3327,10 @@ mod tests {
             sidebar_show_pull_request: false,
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
+            sidebar_show_worktrees: true,
+            sidebar_collapsed_worktrees: std::collections::BTreeSet::from([
+                "checkout-a".to_string()
+            ]),
             github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -3714,12 +3727,14 @@ mod tests {
         assert!(settings.sidebar_show_project_label);
         assert!(settings.sidebar_show_project_filter);
         assert!(settings.sidebar_show_archived);
+        assert!(!settings.sidebar_show_worktrees);
         let customized = UiSettings {
             sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
+            sidebar_show_worktrees: true,
             sidebar_organization: SidebarOrganization::ByProject,
             ..settings
         };

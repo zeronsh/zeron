@@ -216,7 +216,7 @@ pub(super) fn child_chat_title(chat: &Chat) -> String {
 
 /// A status mark in a row's icon slot: Working spins, Completed wears the
 /// check, the rest a dot in the status color.
-fn status_mark(
+pub(super) fn status_mark(
     key: String,
     status: ChatIndicator,
     view: gpui::EntityId,

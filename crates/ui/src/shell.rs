@@ -2261,6 +2261,10 @@ pub struct Shell {
     section_header_hover: Option<String>,
     section_menu_focus: FocusHandle,
     section_menu_active: Option<usize>,
+    /// A project header's `+` menu: new chat in the current checkout or in a new worktree.
+    sidebar_new_chat_menu: Option<(String, Point<Pixels>)>,
+    sidebar_new_chat_menu_focus: FocusHandle,
+    sidebar_new_chat_menu_active: Option<usize>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
     /// The add-space palette (device tabs + folder search), `Some`
@@ -2826,6 +2830,9 @@ impl Shell {
             section_header_hover: None,
             section_menu_focus: cx.focus_handle(),
             section_menu_active: None,
+            sidebar_new_chat_menu: None,
+            sidebar_new_chat_menu_focus: cx.focus_handle(),
+            sidebar_new_chat_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
@@ -6641,6 +6648,7 @@ impl Shell {
             || self.voice.read(cx).stage_open
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
+            || self.sidebar_new_chat_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
@@ -8846,6 +8854,8 @@ impl Shell {
         // Whether the row wears its project icon. Rows inside a project
         // group leave it to the group header.
         project_icon: bool,
+        // Rows under a worktree header leave their location to it.
+        nested: bool,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -8876,7 +8886,8 @@ impl Shell {
         } else {
             crate::change_requests::ChangeRequestBadgeSurface::SessionRow
         };
-        let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
+        let show_label =
+            search_query.is_some() || (self.settings.sidebar_show_project_label && !nested);
         let host = self
             .state
             .read(cx)
@@ -9476,7 +9487,7 @@ impl Shell {
                         )
                         .into_any_element(),
                     })
-                    .when(!compact && !show_label && remote, |el| {
+                    .when(!compact && !show_label && remote && !nested, |el| {
                         el.child(
                             icon(remote_glyph)
                                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
@@ -11349,6 +11360,7 @@ impl Shell {
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         overlays.extend(self.render_section_overlays(viewport, window, cx));
+        overlays.extend(self.render_sidebar_new_chat_menu(cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }

@@ -124,6 +124,14 @@ pub enum CheckoutKind {
     Cloud,
 }
 
+/// Where a new session from a sidebar `+` runs, set before the canvas opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckoutPreset {
+    MainCheckout,
+    NewWorktree,
+    Worktree { branch: String, path: String },
+}
+
 /// The resolved on-send checkout action (composer consumes this — see
 /// [`Pickers::checkout_plan`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -945,6 +953,10 @@ pub struct Pickers {
     /// The checkout kind each project's canvas was left with, put back when
     /// the canvas returns to that project (see the state observer).
     checkout_by_space: HashMap<String, CheckoutKind>,
+    /// A sidebar preset waiting for the canvas to land on its project.
+    pending_preset: Option<(String, CheckoutPreset)>,
+    /// The preset worktree's (branch, path), used until the refs confirm it.
+    preset_worktree: Option<(String, String)>,
     /// The device whose harness/model catalogs are loaded (see
     /// [`Self::catalog_device`]).
     catalog_owner: Option<String>,
@@ -1195,6 +1207,12 @@ impl Pickers {
                 }
                 this.refs = Loadable::Idle;
                 this.refs_space = None;
+                this.preset_worktree = None;
+            }
+            if let Some((preset_space, preset)) = this.pending_preset.take()
+                && this.space_owner.as_deref() == Some(preset_space.as_str())
+            {
+                this.apply_checkout_preset(preset, cx);
             }
             // Catalogs are per-DEVICE (fetched from the host that runs the
             // agents), so a project switch on the same device keeps them. A
@@ -1273,6 +1291,8 @@ impl Pickers {
             space_owner,
             device_owner,
             checkout_by_space: HashMap::new(),
+            pending_preset: None,
+            preset_worktree: None,
             catalog_owner,
             target_generation: 0,
             menu_geometry: HashMap::new(),
@@ -2320,6 +2340,7 @@ impl Pickers {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                pickers.settle_preset_worktree();
                 // Rows landed under an open, un-searched popover: re-home the
                 // nav highlight to the selected row.
                 if pickers.open_kind() == Some(PickerKind::Branch)
@@ -2980,11 +3001,78 @@ impl Pickers {
     fn display_ref_is_worktree(&self) -> bool {
         self.display_ref()
             .is_some_and(|row| row.worktree_path.is_some())
+            || self.preset_worktree_path().is_some()
     }
 
     /// The existing worktree the picked ref is materialized in, if any.
     fn selected_ref_worktree(&self) -> Option<String> {
-        self.selected_ref().and_then(|r| r.worktree_path.clone())
+        self.selected_ref()
+            .and_then(|r| r.worktree_path.clone())
+            .or_else(|| self.preset_worktree_path().map(str::to_owned))
+    }
+
+    fn preset_worktree_path(&self) -> Option<&str> {
+        let (branch, path) = self.preset_worktree.as_ref()?;
+        (self.config.branch.as_ref() == Some(branch)).then_some(path.as_str())
+    }
+
+    /// Start the next new session where a sidebar `+` asked: applied now when
+    /// the canvas is already on `space_id`, else once it lands there.
+    pub fn preset_checkout(
+        &mut self,
+        space_id: String,
+        preset: CheckoutPreset,
+        cx: &mut Context<Self>,
+    ) {
+        if self.space_owner.as_deref() == Some(space_id.as_str()) {
+            self.pending_preset = None;
+            self.apply_checkout_preset(preset, cx);
+            cx.notify();
+        } else {
+            self.pending_preset = Some((space_id, preset));
+        }
+    }
+
+    fn apply_checkout_preset(&mut self, preset: CheckoutPreset, cx: &mut Context<Self>) {
+        self.switch_cloud(CheckoutKind::Local, cx);
+        self.preset_worktree = None;
+        match preset {
+            CheckoutPreset::MainCheckout => {
+                self.config.checkout = CheckoutKind::Local;
+                self.config.branch = None;
+            }
+            CheckoutPreset::NewWorktree => {
+                self.config.checkout = CheckoutKind::NewWorktree;
+                self.config.branch = None;
+            }
+            CheckoutPreset::Worktree { branch, path } => {
+                self.config.checkout = CheckoutKind::Local;
+                self.config.branch = Some(branch.clone());
+                self.preset_worktree = Some((branch, path));
+                // The rows on hand may predate the worktree's removal.
+                self.ensure_refs(true, cx);
+            }
+        }
+    }
+
+    /// Once the refs land they decide: a branch no longer checked out in a
+    /// worktree gets a new worktree from it, a branch that is gone falls back
+    /// to the main checkout.
+    fn settle_preset_worktree(&mut self) {
+        let Some((branch, _)) = &self.preset_worktree else {
+            return;
+        };
+        if self.config.branch.as_ref() == Some(branch) {
+            let Some(refs) = self.refs.ready() else {
+                return;
+            };
+            match refs.iter().find(|row| &row.name == branch) {
+                Some(row) if row.worktree_path.is_some() || row.current => {}
+                Some(_) => self.config.checkout = CheckoutKind::NewWorktree,
+                None => self.config.branch = None,
+            }
+        }
+        self.preset_worktree = None;
     }
 
     /// The Cloud repository of the selected project, when a session there
@@ -8723,6 +8811,124 @@ mod tests {
             assert_eq!(pickers.checkout_label(), "New worktree");
             // a's refs reload on the way back; the ref pick starts over.
             assert_eq!(pickers.config.branch, None);
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_worktree_preset_waits_for_its_project_then_checks_the_refs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local"), git_space("b", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let worktree = CheckoutPreset::Worktree {
+            branch: "feature".into(),
+            path: "/wt/feature".into(),
+        };
+        pickers.update(cx, |pickers, cx| {
+            pickers.preset_checkout("b".into(), worktree.clone(), cx);
+            assert_eq!(pickers.config.branch, None);
+        });
+        state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, _| {
+            // Before b's refs load, the session already targets the worktree.
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::ReuseWorktree {
+                    path: "/wt/feature".into(),
+                    branch: "feature".into(),
+                }
+            );
+            assert_eq!(pickers.checkout_label(), "Current worktree");
+            // The worktree is gone but its branch is not: a new one from it.
+            pickers.refs = Loadable::Ready(vec![
+                repo_ref("main", true, None),
+                repo_ref("feature", false, None),
+            ]);
+            pickers.settle_preset_worktree();
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("feature".into())
+                }
+            );
+        });
+        // A preset for a project the canvas never reaches is dropped.
+        pickers.update(cx, |pickers, cx| {
+            pickers.preset_checkout("a".into(), CheckoutPreset::NewWorktree, cx)
+        });
+        state.update(cx, |state, cx| state.select_space(None, cx));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.select_space(Some("a".into()), cx));
+        cx.run_until_parked();
+        pickers.read_with(cx, |pickers, _| {
+            assert_eq!(pickers.config.checkout, CheckoutKind::Local);
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_preset_on_the_open_project_applies_at_once(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![git_space("a", "local")]);
+            state.selected_space = Some("a".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.refs = Loadable::Ready(vec![repo_ref("main", true, None)]);
+            pickers.refs_space = Some("a".into());
+            pickers.preset_checkout("a".into(), CheckoutPreset::NewWorktree, cx);
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("main".into())
+                }
+            );
+            pickers.preset_checkout("a".into(), CheckoutPreset::MainCheckout, cx);
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::CurrentCheckout {
+                    branch: Some("main".into())
+                }
+            );
+            // The refs on hand predate the worktree: they don't decide.
+            pickers.preset_checkout(
+                "a".into(),
+                CheckoutPreset::Worktree {
+                    branch: "deleted".into(),
+                    path: "/wt/deleted".into(),
+                },
+                cx,
+            );
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::ReuseWorktree {
+                    path: "/wt/deleted".into(),
+                    branch: "deleted".into(),
+                }
+            );
+            // Fresh refs without the branch fall back to the main checkout.
+            pickers.settle_preset_worktree();
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::CurrentCheckout {
+                    branch: Some("main".into())
+                }
+            );
+            // A preset leaves Cloud, with the agent catalogs Cloud loaded.
+            pickers.config.checkout = CheckoutKind::Cloud;
+            let catalog_rev = pickers.catalog_rev;
+            pickers.preset_checkout("a".into(), CheckoutPreset::NewWorktree, cx);
+            assert_eq!(pickers.config.checkout, CheckoutKind::NewWorktree);
+            assert_ne!(pickers.catalog_rev, catalog_rev);
         });
     }
 

@@ -408,11 +408,7 @@ pub fn change_request_for_chat<'a>(
     }
     let source = chat.source_context.as_ref()?;
     let cwd = source.repo_root.as_str();
-    let checkout_id = chat
-        .source_context
-        .as_ref()
-        .map(|source| source.checkout_id.as_str())
-        .or(chat.checkout_id.as_deref());
+    let checkout_id = conversation_checkout_id(chat);
 
     snapshots
         .into_iter()
@@ -435,6 +431,15 @@ pub(crate) fn conversation_branch<'a>(chat: &'a Chat, _spaces: &'a [Space]) -> O
         .as_ref()
         .map(|source| source.branch.as_str())
         .filter(|branch| !branch.trim().is_empty())
+}
+
+/// The checkout a conversation ran in. Rows from before source context fall
+/// back to the checkout stamped on the chat.
+pub(crate) fn conversation_checkout_id(chat: &Chat) -> Option<&str> {
+    chat.source_context
+        .as_ref()
+        .map(|source| source.checkout_id.as_str())
+        .or(chat.checkout_id.as_deref())
 }
 
 #[cfg(test)]

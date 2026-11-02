@@ -16,10 +16,13 @@ use crate::pickers::{
 };
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
+use worktrees::sidebar_worktree_slot;
 use zeron_proto::{
     ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
+
+mod worktrees;
 
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
@@ -213,11 +216,11 @@ mod pinned_session_tests {
     };
     use std::collections::HashSet;
 
-    fn ids(values: &[&str]) -> Vec<String> {
+    pub(super) fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
-    fn pin_test_shell(
+    pub(super) fn pin_test_shell(
         cx: &mut gpui::TestAppContext,
         path: &std::path::Path,
     ) -> gpui::WindowHandle<super::Shell> {
@@ -266,7 +269,7 @@ mod pinned_session_tests {
         state.sidebar_preferences.initialized = initialized;
     }
 
-    fn pin_test_chat(id: &str) -> zeron_proto::Chat {
+    pub(super) fn pin_test_chat(id: &str) -> zeron_proto::Chat {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": false,
             "createdAt": chrono::Utc::now(),
@@ -2199,6 +2202,9 @@ struct ActiveChatRow {
     branch: Option<String>,
     change_request: Option<zeron_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
+    /// Sits under a worktree header, which carries its location, branch and
+    /// pull request.
+    nested: bool,
 }
 
 pub(super) fn compare_sidebar_chats(
@@ -2279,6 +2285,7 @@ enum SidebarViewRow {
     ShowHarness,
     ShowProjectFilter,
     ShowArchived,
+    ShowWorktrees,
 }
 
 impl SidebarViewRow {
@@ -2293,14 +2300,15 @@ impl SidebarViewRow {
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..12)];
+    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..13)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 13] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
+    SidebarViewRow::ShowWorktrees,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
@@ -2360,6 +2368,72 @@ fn sidebar_project_group(state: &AppState, chat: &zeron_proto::Chat) -> (String,
             None => (format!("home:{}", chat.device_id), "No project".to_string()),
         },
     }
+}
+
+fn active_row_height(settings: &crate::settings::UiSettings, row: &ActiveChatRow) -> f32 {
+    sidebar_row_height(
+        settings.sidebar_compact,
+        settings.sidebar_show_project_label && !row.nested,
+        row.branch.is_some(),
+        row.change_request.is_some(),
+    )
+}
+
+/// Sidebar rows stacked at list spacing, plus any drag preview gap below.
+fn sidebar_row_list(rows: Vec<(String, f32, AnyElement)>, extra_gap: f32) -> (AnyElement, f32) {
+    let height = extra_gap
+        + rows.iter().map(|(_, height, _)| *height).sum::<f32>()
+        + SIDEBAR_LIST_GAP * rows.len().saturating_sub(1) as f32;
+    let list = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(SIDEBAR_LIST_GAP))
+        .children(rows.into_iter().map(|(_, _, row)| row))
+        .when(extra_gap > 0.0, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .h(px((extra_gap - SIDEBAR_LIST_GAP).max(0.0)))
+                    .mb(px((extra_gap - SIDEBAR_LIST_GAP).min(0.0))),
+            )
+        })
+        .into_any_element();
+    (list, height)
+}
+
+/// A header's `+`, shown while the pointer is over `group`.
+fn sidebar_new_chat_button(
+    id: String,
+    label: SharedString,
+    group: SharedString,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let selector = id.clone();
+    div()
+        .id(SharedString::from(id))
+        .debug_selector(move || selector)
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .opacity(0.0)
+        .group_hover(group, |style| style.opacity(1.0))
+        .hover(|el| el.bg(theme.glass_hover()))
+        .on_click(on_click)
+        .tooltip(crate::settings::widgets::text_tooltip_above(label))
+        .child(
+            icon(icons::PLUS)
+                .size(px(14.0))
+                .text_color(sidebar_header_glyph(theme)),
+        )
+        .into_any_element()
 }
 
 /// Shared quiet rule for sidebar groups and palette sections.
@@ -4258,6 +4332,9 @@ impl Shell {
             SidebarViewRow::ShowArchived => {
                 self.settings.sidebar_show_archived = !self.settings.sidebar_show_archived
             }
+            SidebarViewRow::ShowWorktrees => {
+                self.settings.sidebar_show_worktrees = !self.settings.sidebar_show_worktrees
+            }
             SidebarViewRow::ShowProjectFilter => {
                 self.settings.sidebar_show_project_filter =
                     !self.settings.sidebar_show_project_filter;
@@ -4430,6 +4507,7 @@ impl Shell {
             "None",
             "Last updated",
             "Created",
+            "Worktrees",
             "Branch",
             "Pull request",
             "Harness",
@@ -4444,6 +4522,7 @@ impl Shell {
             icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
+            icons::WORKTREE,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
             icons::BOT,
@@ -4459,6 +4538,7 @@ impl Shell {
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
+            self.settings.sidebar_show_worktrees,
             show_branch,
             show_pr,
             show_harness,
@@ -5261,6 +5341,11 @@ impl Shell {
             if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
                 promote_local_device_group(&mut groups, state.local_device_id.as_deref());
             }
+            if self.sidebar_worktrees_shown() {
+                for (_, rows) in &mut groups {
+                    worktrees::order_chats_by_worktree(state, rows);
+                }
+            }
             groups
                 .into_iter()
                 .flat_map(|(_, rows)| rows)
@@ -5309,11 +5394,12 @@ impl Shell {
                 .iter()
                 .find(|chat| chat.id == chat_id)
                 .is_some_and(|chat| {
-                    self.sidebar_group_key(state, chat).is_none_or(|group| {
-                        !self
-                            .sidebar_collapsed_groups
-                            .contains(&self.sidebar_group_collapse_key(&group))
-                    })
+                    self.sidebar_collapsed_worktree(state, chat).is_none()
+                        && self.sidebar_group_key(state, chat).is_none_or(|group| {
+                            !self
+                                .sidebar_collapsed_groups
+                                .contains(&self.sidebar_group_collapse_key(&group))
+                        })
                 });
         }
         self.archived_open
@@ -5396,6 +5482,11 @@ impl Shell {
                 let collapse_key = self.sidebar_group_collapse_key(&group);
                 if self.sidebar_collapsed_groups.remove(&collapse_key) {
                     self.queue_sidebar_reveal(&format!("group:{collapse_key}"));
+                }
+                if let Some(worktree) = self.sidebar_collapsed_worktree(self.state.read(cx), chat) {
+                    self.settings.sidebar_collapsed_worktrees.remove(&worktree);
+                    self.queue_sidebar_reveal(&format!("worktree:{worktree}"));
+                    self.schedule_save(cx);
                 }
             } else if !self.sessions_open {
                 self.sessions_open = true;
@@ -5497,6 +5588,7 @@ impl Shell {
             branch,
             change_request,
             group,
+            nested: false,
         }
     }
 
@@ -5556,14 +5648,7 @@ impl Shell {
         let pinned_rows = rows;
         self.sidebar_pinned_heights = pinned_rows
             .iter()
-            .map(|row| {
-                sidebar_row_height(
-                    self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
-                    row.branch.is_some(),
-                    row.change_request.is_some(),
-                )
-            })
+            .map(|row| active_row_height(&self.settings, row))
             .collect();
         let visible_pinned_ids = std::sync::Arc::new(
             pinned_rows
@@ -5623,6 +5708,11 @@ impl Shell {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
         }
+        let mut worktree_blocks = if self.sidebar_worktrees_shown() {
+            worktrees::split_groups_by_worktree(self.state.read(cx), &mut regular_groups)
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
             sections.push((None, pinned_rows));
@@ -5648,20 +5738,18 @@ impl Shell {
                 else {
                     continue;
                 };
-                drag.source_group = if section_index == 0 && pinned_count > 0 {
-                    "pinned".into()
+                let (source_group, source_index) = if section_index == 0 && pinned_count > 0 {
+                    ("pinned".into(), index)
                 } else {
-                    group
+                    let regular = group
                         .as_ref()
-                        .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"))
+                        .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"));
+                    let blocks = group.as_ref().and_then(|(key, _)| worktree_blocks.get(key));
+                    sidebar_worktree_slot(&regular, blocks, index)
                 };
-                drag.source_index = index;
-                drag.row_height = sidebar_row_height(
-                    self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
-                    rows[index].branch.is_some(),
-                    rows[index].change_request.is_some(),
-                );
+                drag.source_group = source_group;
+                drag.source_index = source_index;
+                drag.row_height = active_row_height(&self.settings, &rows[index]);
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
                 let collapse = !returning
@@ -5769,8 +5857,14 @@ impl Shell {
                 .first()
                 .filter(|row| project_group && row.chat.space_id.is_none())
                 .map(|row| row.chat.device_id.clone());
+            let blocks = group
+                .as_ref()
+                .and_then(|(key, _)| worktree_blocks.remove(key));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for (group_index, row) in rows.into_iter().enumerate() {
+                let height = active_row_height(&self.settings, &row);
+                let (row_group, row_index) =
+                    sidebar_worktree_slot(&drag_group, blocks.as_ref(), group_index);
                 let ActiveChatRow {
                     status,
                     chat,
@@ -5778,6 +5872,7 @@ impl Shell {
                     branch,
                     change_request,
                     group: _,
+                    nested,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -5787,12 +5882,6 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                let height = sidebar_row_height(
-                    self.settings.sidebar_compact,
-                    self.settings.sidebar_show_project_label,
-                    branch.is_some(),
-                    change_request.is_some(),
-                );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -5854,6 +5943,7 @@ impl Shell {
                     if is_moving { None } else { drag },
                     jump_label,
                     self.settings.sidebar_show_project_icon && !project_group,
+                    nested,
                     None,
                     theme,
                     cx,
@@ -5871,11 +5961,11 @@ impl Shell {
                         })
                         .into_any_element()
                 } else {
-                    self.render_sidebar_gap_row(element, &chat.id, &drag_group, group_index)
+                    self.render_sidebar_gap_row(element, &chat.id, &row_group, row_index)
                 };
                 // The hit region stays at the natural slot while its content slides;
                 // preview movement must not move its own insertion thresholds.
-                let target_group = drag_group.clone();
+                let target_group = row_group;
                 let element = div()
                     .id(SharedString::from(format!("session-slot-{}", chat.id)))
                     .debug_selector({
@@ -5899,7 +5989,7 @@ impl Shell {
                                 return;
                             };
                             let after = event.event.position.y >= event.bounds.center().y;
-                            let index = group_index + usize::from(after);
+                            let index = row_index + usize::from(after);
                             let mut top = f32::from(
                                 if after {
                                     event.bounds.bottom() + px(SIDEBAR_LIST_GAP)
@@ -5967,30 +6057,20 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
-            let extra_gap = self.sidebar_transfer_extra_gap(&drag_group);
-            let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-                + extra_gap
-                + rendered_rows
-                    .iter()
-                    .map(|(_, height, _)| *height)
-                    .sum::<f32>()
-                + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
+            let (content, content_height) = match blocks {
+                Some(blocks) => {
+                    self.render_sidebar_worktrees(&drag_group, blocks, rendered_rows, theme, cx)
+                }
+                None => {
+                    sidebar_row_list(rendered_rows, self.sidebar_transfer_extra_gap(&drag_group))
+                }
+            };
+            let body_height = SIDEBAR_DISCLOSURE_BODY_INSET + content_height;
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
             let body = div()
                 .w_full()
-                .flex()
-                .flex_col()
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
-                .gap(px(SIDEBAR_LIST_GAP))
-                .children(rendered_rows.into_iter().map(|(_, _, row)| row))
-                .when(extra_gap > 0.0, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .h(px((extra_gap - SIDEBAR_LIST_GAP).max(0.0)))
-                            .mb(px((extra_gap - SIDEBAR_LIST_GAP).min(0.0))),
-                    )
-                });
+                .child(content);
             let visible_label: SharedString = label.into();
             let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
             let toggle_key = collapse_key.clone();
@@ -6039,37 +6119,37 @@ impl Shell {
                     )
                     .into(),
                 };
-                div()
-                    .id(SharedString::from(format!(
-                        "sidebar-group-new-chat-{collapse_key}"
-                    )))
-                    .debug_selector({
-                        let key = collapse_key.clone();
-                        move || format!("sidebar-group-new-chat-{key}")
-                    })
-                    .size(px(20.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .role(gpui::Role::Button)
-                    .aria_label(label.clone())
-                    .opacity(0.0)
-                    .group_hover(group_name.clone(), |style| style.opacity(1.0))
-                    .hover(|el| el.bg(theme.glass_hover()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                // With worktrees shown, a git project's `+` asks where to work.
+                let menu_space = match &target {
+                    NewSessionTarget::Project(space_id) if self.sidebar_worktrees_shown() => self
+                        .state
+                        .read(cx)
+                        .space_row(space_id)
+                        .filter(|space| {
+                            space.git_detected
+                                && !zeron_proto::is_cloud_device(&space.device_id, "")
+                        })
+                        .map(|space| space.id.clone()),
+                    _ => None,
+                };
+                sidebar_new_chat_button(
+                    format!("sidebar-group-new-chat-{collapse_key}"),
+                    label,
+                    group_name.clone(),
+                    theme,
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         cx.stop_propagation();
-                        this.open_new_session(Some(target.clone()), cx);
-                    }))
-                    .tooltip(crate::settings::widgets::text_tooltip_above(label))
-                    .child(
-                        icon(icons::PLUS)
-                            .size(px(14.0))
-                            .text_color(sidebar_header_glyph(theme)),
-                    )
-                    .into_any_element()
+                        match &menu_space {
+                            Some(space_id) => this.open_sidebar_new_chat_menu(
+                                space_id.clone(),
+                                event.position(),
+                                window,
+                                cx,
+                            ),
+                            None => this.open_new_session(Some(target.clone()), cx),
+                        }
+                    }),
+                )
             });
             let header =
                 sidebar_disclosure_header(
@@ -6336,14 +6416,7 @@ impl Shell {
             + rows
                 .iter()
                 .take(shown)
-                .map(|row| {
-                    sidebar_row_height(
-                        self.settings.sidebar_compact,
-                        self.settings.sidebar_show_project_label,
-                        row.branch.is_some(),
-                        row.change_request.is_some(),
-                    )
-                })
+                .map(|row| active_row_height(&self.settings, row))
                 .sum::<f32>()
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
             + if has_more {
@@ -6412,6 +6485,7 @@ impl Shell {
                         None,
                         None,
                         self.settings.sidebar_show_project_icon,
+                        false,
                         None,
                         theme,
                         cx,
