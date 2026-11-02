@@ -304,6 +304,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         terminal_activity: None,
         running_subagents: 0,
         background_tasks: Vec::new(),
+        auto_resume: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,

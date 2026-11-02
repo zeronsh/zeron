@@ -1760,6 +1760,8 @@ async fn run_session(session: Session) {
     // The turn's last final `error` notification, reported by its end (see
     // [`settle_turn_error`]): never as an error part AND the Done's error.
     let mut held_error: Option<String> = None;
+    // Whether that error was a usage or rate limit, and when it resets.
+    let mut held_limit: Option<AgentEvent> = None;
     // The account's rate-limit windows (`account/rateLimits/updated`), for
     // a limit error's reset time.
     let mut rate_limits: Option<Value> = None;
@@ -2071,6 +2073,10 @@ async fn run_session(session: Session) {
                         {
                             break 'main;
                         }
+                        let limit = params
+                            .pointer("/turn/error")
+                            .and_then(|e| normalize::limit_reached(e, rate_limits.as_ref()))
+                            .or(held_limit.take());
                         let (error, notice) =
                             settle_turn_error(&params, held_error.take(), rate_limits.as_ref());
                         let status = if interrupted || stopping {
@@ -2091,6 +2097,11 @@ async fn run_session(session: Session) {
                         }
                         if let Some(message) = notice.filter(|_| status == DoneStatus::Completed)
                             && !send(&event_tx, AgentEvent::Error { message }).await
+                        {
+                            break 'main;
+                        }
+                        if let Some(limit) = limit.filter(|_| status == DoneStatus::Errored)
+                            && !send(&event_tx, limit).await
                         {
                             break 'main;
                         }
@@ -2149,6 +2160,10 @@ async fn run_session(session: Session) {
                         stop_when_announced = false;
                         accepted_steers.clear();
                         let held = held_error.take();
+                        let limit = params
+                            .pointer("/turn/error")
+                            .and_then(|e| normalize::limit_reached(e, rate_limits.as_ref()))
+                            .or(held_limit.take());
                         if let Some(usage) = pending_usage.take()
                             && !send(&event_tx, usage).await
                         {
@@ -2169,6 +2184,8 @@ async fn run_session(session: Session) {
                         }
                         if interrupted {
                             done_after_interrupt = true;
+                        } else if let Some(limit) = limit {
+                            let _ = send(&event_tx, limit).await;
                         }
                         let _ = send(
                             &event_tx,
@@ -2201,6 +2218,7 @@ async fn run_session(session: Session) {
                         stop_when_announced = false;
                         accepted_steers.clear();
                         held_error = None;
+                        held_limit = None;
                         done_current = true;
                         prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
                         pruning = Some(id.clone());
@@ -2246,6 +2264,9 @@ async fn run_session(session: Session) {
                             // The turn's end reports it (turn/completed
                             // usually repeats it as `turn.error`).
                             held_error = Some(notice.message);
+                            held_limit = params
+                                .get("error")
+                                .and_then(|e| normalize::limit_reached(e, rate_limits.as_ref()));
                         } else if !send(&event_tx, AgentEvent::Error { message: notice.message }).await {
                             break 'main;
                         }

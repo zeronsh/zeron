@@ -806,6 +806,7 @@ pub struct EngineRpc {
     credentials: Option<crate::credentials::CredentialBroker>,
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
+    auto_resume: Option<crate::auto_resume::AutoResumer>,
     engine_info: EngineInfo,
 }
 
@@ -865,8 +866,14 @@ impl EngineRpc {
             local_import: None,
             credentials: None,
             viewport_focus: Default::default(),
+            auto_resume: None,
             engine_info,
         }
+    }
+
+    pub fn with_auto_resume(mut self, auto_resume: crate::auto_resume::AutoResumer) -> Self {
+        self.auto_resume = Some(auto_resume);
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -2159,6 +2166,10 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
+            | methods::GET_AUTO_RESUME
+            | methods::SET_AUTO_RESUME
+            // A limit stop lives on its chat's host.
+            | methods::SET_CHAT_AUTO_RESUME
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
             | methods::SET_HARNESS_ENABLED
@@ -2671,6 +2682,39 @@ impl RpcService for EngineRpc {
                     .set(p.enabled)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&status)
+            }
+            methods::GET_AUTO_RESUME => match &self.auto_resume {
+                Some(auto_resume) => RpcReply::value(&auto_resume.settings()),
+                None => Err(RpcError::Failed(
+                    "Auto-resume isn't available on this engine.".into(),
+                )),
+            },
+            methods::SET_AUTO_RESUME => {
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    enabled: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let auto_resume = self.auto_resume.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Auto-resume isn't available on this engine.".into())
+                })?;
+                let settings = auto_resume
+                    .set_enabled(p.enabled)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&settings)
+            }
+            methods::SET_CHAT_AUTO_RESUME => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    enabled: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let auto_resume = self.auto_resume.as_ref().ok_or_else(|| {
+                    RpcError::Failed("Auto-resume isn't available on this engine.".into())
+                })?;
+                RpcReply::value(&auto_resume.set_chat(&p.chat_id, p.enabled))
             }
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;

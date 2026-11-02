@@ -8913,34 +8913,24 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
-        let (queued, undelivered) = {
+        let (queued, undelivered, paused) = {
             let now = Utc::now();
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
                 state.send_undelivered(&id, now),
+                state.waiting_to_resume(&id, now),
             )
         };
+        let paused = paused_overlay(status, paused);
         let status_color = if undelivered {
             theme.danger
-        } else if queued {
+        } else if queued || paused {
             theme.warning
         } else {
             spaces::status_dot_color(status, theme)
         };
-        let status_label: Option<&'static str> = if undelivered {
-            Some("Failed")
-        } else if queued {
-            Some("Queued")
-        } else {
-            match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-                zeron_proto::ChatIndicator::Errored => Some("Failed"),
-                zeron_proto::ChatIndicator::Completed => Some("Done"),
-                zeron_proto::ChatIndicator::Idle => None,
-            }
-        };
+        let status_label = chat_status_label(status, queued, undelivered, paused);
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
@@ -8968,7 +8958,7 @@ impl Shell {
                     cx,
                 )
                 .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
+            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered && !paused {
                 icon(icons::CHECK)
                     .size(px(11.0))
                     .text_color(status_color)
@@ -9064,7 +9054,7 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed && !paused {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -14572,8 +14562,59 @@ impl Render for Shell {
     }
 }
 
+/// A chat its usage limit stopped, which its host picks back up once the
+/// limit resets, reads as Paused rather than Failed — unless it is running
+/// or asking again.
+pub(crate) fn paused_overlay(status: zeron_proto::ChatIndicator, waiting_to_resume: bool) -> bool {
+    waiting_to_resume
+        && !matches!(
+            status,
+            zeron_proto::ChatIndicator::Working | zeron_proto::ChatIndicator::AwaitingInput
+        )
+}
+
+/// A session row's status word: a send's truth first, then Paused, then the
+/// chat's own state; `None` shows the time instead.
+fn chat_status_label(
+    status: zeron_proto::ChatIndicator,
+    queued: bool,
+    undelivered: bool,
+    paused: bool,
+) -> Option<&'static str> {
+    if undelivered {
+        Some("Failed")
+    } else if queued {
+        Some("Queued")
+    } else if paused {
+        Some("Paused")
+    } else {
+        match status {
+            zeron_proto::ChatIndicator::Working => Some("Working"),
+            zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
+            zeron_proto::ChatIndicator::Errored => Some("Failed"),
+            zeron_proto::ChatIndicator::Completed => Some("Done"),
+            zeron_proto::ChatIndicator::Idle => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_chat_waiting_on_its_limit_reads_paused() {
+        use zeron_proto::ChatIndicator::*;
+        let paused = |status| chat_status_label(status, false, false, paused_overlay(status, true));
+        assert_eq!(paused(Errored), Some("Paused"));
+        assert_eq!(paused(Idle), Some("Paused"));
+        assert_eq!(paused(Completed), Some("Paused"));
+        // Running or asking again outranks it.
+        assert_eq!(paused(Working), Some("Working"));
+        assert_eq!(paused(AwaitingInput), Some("Input"));
+        // A failed send still says so.
+        assert_eq!(chat_status_label(Errored, false, true, true), Some("Failed"));
+        assert_eq!(chat_status_label(Errored, false, false, false), Some("Failed"));
+    }
+
     use super::*;
 
     pub(super) fn chat_with_path(
@@ -14931,6 +14972,7 @@ mod tests {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
         }
     }
 

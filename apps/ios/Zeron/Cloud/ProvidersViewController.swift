@@ -17,6 +17,12 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
     private var accounts: [String: [DeviceAccountInfo]] = [:]
     private var failed: [String: String] = [:]
     private var toggling: Set<String> = []
+    /// Each computer's "Auto-resume when limits reset" (absent until read),
+    /// or why it couldn't be read.
+    private var autoResume: [String: Bool] = [:]
+    private var autoResumeError: [String: String] = [:]
+    private static let autoResumeRow = "auto-resume"
+    private static let limitsSection = "Usage limits"
     private let signIn = ProviderSignIn()
     private var signingIn: String?
     /// Where it's looking and the agents found there (`nil` while looking),
@@ -143,7 +149,12 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
                 toggle.isEnabled = row.toggleEnabled
                 toggle.onTintColor = Palette.accent
                 toggle.accessibilityIdentifier = "toggle-\(row.id)"
+                toggle.accessibilityLabel = row.title
                 toggle.addAction(UIAction { [weak self, weak toggle] _ in
+                    if row.id == Self.autoResumeRow {
+                        self?.setAutoResume(toggle?.isOn ?? true, toggle)
+                        return
+                    }
                     guard let harness = row.harness else { return }
                     self?.setEnabled(harness, toggle?.isOn ?? false)
                 }, for: .valueChanged)
@@ -163,7 +174,9 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
             guard let self else { return }
             var c = UIListContentConfiguration.groupedFooter()
             let id = self.dataSource.snapshot().sectionIdentifiers[path.section]
-            c.text = id == "Agents" ? self.footerText : nil
+            c.text = id == "Agents" ? self.footerText
+                : id == Self.limitsSection ? "Each stopped chat's card can turn it off for that chat alone."
+                : nil
             view.contentConfiguration = c
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, path, row in
@@ -210,6 +223,14 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
             guard let client = self.app.client else { return }
             let list = await client.listHarnesses(deviceId: device)
             self.harnesses[device] = list
+            self.reload()
+            do {
+                self.autoResume[device] = try await client.autoResumeEnabled(deviceId: device)
+                self.autoResumeError[device] = nil
+            } catch {
+                // An older Zeron there, or offline: the row says so.
+                self.autoResumeError[device] = CloudStore.message(error)
+            }
             self.reload()
             self.loadAccounts()
             self.collectionView.refreshControl?.endRefreshing()
@@ -271,6 +292,10 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
         s.appendItems([Row(id: "device", title: "Device", subtitle: nil, symbol: onCloud ? "cloud" : "laptopcomputer", value: target)])
         s.appendSections(["Agents"])
         s.appendItems(onCloud ? cloudRows() : computerRows())
+        if !onCloud {
+            s.appendSections([Self.limitsSection])
+            s.appendItems([autoResumeRow()])
+        }
         dataSource.apply(s, animatingDifferences: false)
         if onCloud, !cloudOffered {
             onSummary?("a computer", false, [])
@@ -342,6 +367,28 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
         }
     }
 
+    /// "Auto-resume when limits reset" on the computer shown: on until it
+    /// says otherwise (the default).
+    private func autoResumeRow() -> Row {
+        let on = autoResume[target]
+        let subtitle: String
+        if on != nil {
+            subtitle = "Chats on \(targetName), and their subagents, continue once a usage limit resets, including chats already waiting."
+        } else if !targetOnline {
+            subtitle = "\(targetName) is offline."
+        } else {
+            subtitle = autoResumeError[target] ?? "Loading…"
+        }
+        return Row(
+            id: Self.autoResumeRow,
+            title: "Auto-resume when limits reset",
+            subtitle: subtitle,
+            symbol: "clock.arrow.circlepath",
+            toggle: on ?? true,
+            toggleEnabled: targetOnline && on != nil
+        )
+    }
+
     static func accountTitle(_ a: DeviceAccountInfo) -> String {
         a.email ?? a.displayName ?? (a.apiKey ? "API key" : "Account")
     }
@@ -376,6 +423,24 @@ final class ProvidersViewController: UIViewController, UICollectionViewDelegate 
                 a.addAction(UIAlertAction(title: "OK", style: .default))
                 self.present(a, animated: true)
             }
+        }
+    }
+
+    /// Flips at once; a failure flips it back with a toast.
+    private func setAutoResume(_ on: Bool, _ toggle: UISwitch?) {
+        let device = target
+        autoResume[device] = on
+        Task { @MainActor in
+            guard let client = self.app.client else { return }
+            do {
+                self.autoResume[device] = try await client.setAutoResumeEnabled(deviceId: device, enabled: on)
+                UISelectionFeedbackGenerator().selectionChanged()
+            } catch {
+                self.autoResume[device] = !on
+                toggle?.setOn(!on, animated: true)
+                Toast.show("Couldn't change auto-resume: \(CloudStore.message(error))", in: self.view.window)
+            }
+            self.reload()
         }
     }
 

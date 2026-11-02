@@ -100,6 +100,9 @@ pub struct SessionSnapshot {
     pub working: bool,
     /// Run start of the live turn, when the host reported one.
     pub working_since_ms: Option<i64>,
+    /// The chat's latest limit stop and its auto-resume state (from the
+    /// host's session row): the error card of entry `entry_id` shows it.
+    pub auto_resume: Option<zeron_proto::AutoResume>,
     /// This device's unadopted sends, oldest first. Their echo entries are
     /// `entries[transcript_len..]` (same order, same ids).
     pub pending: Vec<PendingSend>,

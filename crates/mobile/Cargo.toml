@@ -34,6 +34,7 @@ zeron-visual.workspace = true
 zeron-visual-gpu.workspace = true
 zeron-doc.workspace = true
 zeron-proto.workspace = true
+chrono.workspace = true
 zeron-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true

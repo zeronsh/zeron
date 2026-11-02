@@ -85,6 +85,7 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
             terminal_activity: None,
             running_subagents: 0,
             background_tasks: Vec::new(),
+            auto_resume: None,
             chat_id: "chat-live".into(),
             device_id: "dev-live-a".into(),
             status: SessionStatus::Working,
@@ -206,6 +207,7 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
                 terminal_activity: None,
                 running_subagents: 0,
                 background_tasks: Vec::new(),
+                auto_resume: None,
                 chat_id: "chat-churn".into(),
                 device_id: "dev-churn".into(),
                 status: if i % 2 == 0 {

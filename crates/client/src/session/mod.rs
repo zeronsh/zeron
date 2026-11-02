@@ -442,6 +442,9 @@ impl SessionCore {
                     row.working_since_ms,
                 )
             });
+        let auto_resume = workspace
+            .session(&self.chat_id)
+            .and_then(|row| row.auto_resume.clone());
         // A Cloud chat whose machine isn't up yet: it is being started (or
         // woken) for the latest message.
         let cloud_booting = workspace.session(&self.chat_id).is_some_and(|row| {
@@ -477,10 +480,12 @@ impl SessionCore {
                 working: indicator_working || streaming,
                 working_since_ms,
                 cloud_booting,
+                auto_resume,
             };
             let placeholder_changed = refresh_setup_placeholder(&mut st, cloud_booting);
             let live_changed = previous.working != live.working
                 || previous.working_since_ms != live.working_since_ms
+                || previous.auto_resume != live.auto_resume
                 || previous.hydrated != st.hydrated
                 || placeholder_changed;
             if change.is_some()
@@ -843,10 +848,11 @@ fn derive_pending(st: &mut CoreState, device_id: &str, degraded: bool, now: i64)
     changed
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LiveFlags {
     working: bool,
     working_since_ms: Option<i64>,
+    auto_resume: Option<zeron_proto::AutoResume>,
     /// The chat's Cloud machine isn't up (see [`refresh_setup_placeholder`]).
     #[allow(dead_code)]
     cloud_booting: bool,
@@ -957,6 +963,7 @@ fn build_snapshot(
         streaming,
         working: live.working,
         working_since_ms: live.working_since_ms,
+        auto_resume: live.auto_resume,
         pending: st.pending.clone(),
         context_usage: st.context_usage,
         hydrated: st.hydrated,

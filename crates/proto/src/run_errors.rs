@@ -59,13 +59,21 @@ const LIMIT_REACHED: &[&str] = &[
     "status 429",
     "(429)",
     "too many requests",
+    "out of usage credits",
 ];
 
 /// The problem `message` reports, if signing in can fix it.
 pub fn provider_problem(message: &str) -> Option<ProviderProblem> {
-    let text = message.to_ascii_lowercase();
-    // Cloud credits are Zeron's, not the provider's: not a sign-in.
-    if text.contains("out of credits") || text.contains("cloud credits") {
+    // Providers write "You’ve hit your limit" with a typographic apostrophe.
+    let text = message
+        .to_ascii_lowercase()
+        .replace(['\u{2019}', '\u{2018}'], "'");
+    // Cloud credits are Zeron's, not the provider's: not a sign-in. A server
+    // throttle says it is "not your usage limit": another account won't help.
+    if text.contains("out of credits")
+        || text.contains("cloud credits")
+        || text.contains("not your usage limit")
+    {
         return None;
     }
     if SIGNED_OUT.iter().any(|needle| text.contains(needle)) {
@@ -102,6 +110,8 @@ mod tests {
             "Claude 5-hour limit reached — the turn was blocked. Try again after it resets.",
             "You've hit your usage limit. Upgrade to Pro or try again later.",
             "429 Too Many Requests",
+            "You’ve hit your 5-hour limit · resets 3pm (Europe/Berlin)",
+            "You're out of usage credits · resets Nov 3, 10am (UTC)",
         ] {
             assert_eq!(
                 provider_problem(limited),
@@ -113,6 +123,7 @@ mod tests {
             "Claude is overloaded right now — try again shortly.",
             "The selected model isn't available.",
             "You're out of Cloud credits. Add credits to keep going.",
+            "API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue.",
             "Harness exited with status 1",
             "Listening on port 4012",
         ] {

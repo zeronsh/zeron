@@ -17,6 +17,7 @@ pub mod app_menus;
 pub mod app_update;
 pub mod appearance;
 pub mod appshots;
+mod auto_resume;
 mod asset_http;
 pub mod attachments;
 pub mod badges;

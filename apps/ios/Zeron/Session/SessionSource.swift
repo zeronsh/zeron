@@ -81,6 +81,9 @@ protocol SessionSource: AnyObject {
     func modelPicker() -> UIViewController?
     /// Where this chat's provider signs in (an error card's "Log in").
     func signInTarget() -> AgentAccountsViewController.Target?
+    /// A usage limit stop's "Auto-resume" switch: resume it by itself once
+    /// the limit resets, or not. False when the change didn't go through.
+    func setAutoResume(_ enabled: Bool) async -> Bool
     func loadImage(_ reference: String, into view: UIImageView)
     /// An attachment's picture, for opening it full size (an image chip).
     func image(_ reference: String) async -> UIImage?
@@ -244,4 +247,5 @@ extension SessionSource {
     var isUnused: Bool { false }
     func modelPicker() -> UIViewController? { nil }
     func signInTarget() -> AgentAccountsViewController.Target? { nil }
+    func setAutoResume(_ enabled: Bool) async -> Bool { false }
 }

@@ -270,6 +270,10 @@ pub enum WidgetKind {
     /// A button the app acts on: `action` names what (`sign-in`), `label`
     /// is its title (an error card's "Log in").
     Action { action: String, label: String },
+    /// An on/off switch the app acts on: `action` names it (`auto-resume`),
+    /// and flipping it sends `{action}:on` or `{action}:off` for the state it
+    /// now shows; a failure puts it back. `label` names it for accessibility.
+    Toggle { action: String, label: String, on: bool },
     /// A subagent spawn's card: opens the child's transcript (`doc_id`;
     /// `None` while the host hasn't bound one yet).
     Subagent { doc_id: Option<String>, title: String, running: bool, failed: bool },

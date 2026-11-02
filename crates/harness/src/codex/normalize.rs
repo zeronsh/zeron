@@ -179,6 +179,52 @@ pub(crate) fn codex_error_text(error: &Value, limits: Option<&Value>) -> String 
     }
 }
 
+/// A Codex `TurnError` (`turn.error`, or an `error` notification's `error`)
+/// that is the account's usage limit, as [`AgentEvent::LimitReached`] with
+/// when the exhausted window of `limits` resets. Only `usageLimitExceeded`
+/// is one: `rateLimitExceeded` and a 429 without it are throttles. And not
+/// every `usageLimitExceeded` resets by itself — a workspace out of credits
+/// or at its usage cap (`rateLimitReachedType: workspace_*`), "Quota
+/// exceeded" (billing), a plan without Codex ("upgrade to Plus") or a spend
+/// cap wait for someone to act, so they stay plain errors.
+pub(crate) fn limit_reached(error: &Value, limits: Option<&Value>) -> Option<AgentEvent> {
+    let info = error.get("codexErrorInfo")?;
+    let code = match info {
+        Value::String(code) => code.as_str(),
+        Value::Object(variant) => variant.keys().next()?.as_str(),
+        _ => return None,
+    };
+    if code != "usageLimitExceeded" {
+        return None;
+    }
+    let reached = limits
+        .and_then(|limits| limits.get("rateLimitReachedType"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let message = str_field(error, &["message"]).to_lowercase();
+    if reached.starts_with("workspace_")
+        || [
+            "quota exceeded",
+            "upgrade to plus",
+            "out of credits",
+            "spend cap",
+        ]
+        .iter()
+        .any(|cap| message.contains(cap))
+    {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    let resets_at = limits
+        .and_then(|limits| limit_reset_in(limits, now.timestamp()))
+        // A window whose reset already passed says nothing about when.
+        .filter(|wait| *wait > 0)
+        .and_then(|wait| chrono::DateTime::from_timestamp(now.timestamp() + wait, 0))
+        // Codex's own text: "… or try again at 3:40 PM."
+        .or_else(|| zeron_proto::auto_resume::reset_time_in(&message, now));
+    Some(AgentEvent::LimitReached { resets_at })
+}
+
 /// Seconds until an exhausted rate-limit window of `limits` (a
 /// `RateLimitSnapshot`) resets: the latest one, since usage resumes only
 /// when every exhausted window has. `None` when no window is exhausted —
@@ -1397,6 +1443,37 @@ mod tests {
         assert_eq!(describe_wait(0), "under a minute");
         assert_eq!(describe_wait(3600), "1h");
         assert_eq!(describe_wait(3 * 86400 + 5 * 3600), "3d 5h");
+    }
+
+    #[test]
+    fn only_a_self_clearing_usage_limit_is_a_limit_stop() {
+        let now = chrono::Utc::now().timestamp();
+        let limits = json!({"primary": {"usedPercent": 100, "resetsAt": now + 3600},
+            "secondary": {"usedPercent": 40, "resetsAt": now + 86_400}});
+        let usage = json!({"message": "You’ve hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"});
+        match limit_reached(&usage, Some(&limits)) {
+            Some(AgentEvent::LimitReached {
+                resets_at: Some(at),
+            }) => {
+                assert!((at.timestamp() - (now + 3600)).abs() <= 1)
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            limit_reached(&usage, None),
+            Some(AgentEvent::LimitReached { resets_at: None })
+        ));
+        // Throttles, and limits no reset clears.
+        for error in [
+            json!({"message": "Rate limit reached", "codexErrorInfo": "rateLimitExceeded"}),
+            json!({"message": "x", "codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}}}),
+            json!({"message": "Quota exceeded. Check your plan and billing details.", "codexErrorInfo": "usageLimitExceeded"}),
+            json!({"message": "To use Codex with your ChatGPT plan, upgrade to Plus", "codexErrorInfo": "usageLimitExceeded"}),
+        ] {
+            assert_eq!(limit_reached(&error, Some(&limits)), None, "{error}");
+        }
+        let workspace = json!({"rateLimitReachedType": "workspace_owner_credits_depleted"});
+        assert_eq!(limit_reached(&usage, Some(&workspace)), None);
     }
 
     #[test]

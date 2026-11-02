@@ -55,6 +55,14 @@ pub mod methods {
     /// (`{enabled, cloud}`; set with `{enabled}`).
     pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";
     pub const SET_COMMIT_CREDIT: &str = "SetCommitCredit";
+    /// Whether turns the usage limit stops on this device resume by
+    /// themselves once it resets (`AutoResumeSettings {enabled}`; set with
+    /// `{enabled}`, which also applies to the stops waiting now).
+    pub const GET_AUTO_RESUME: &str = "GetAutoResume";
+    pub const SET_AUTO_RESUME: &str = "SetAutoResume";
+    /// One limit stop's auto-resume toggle, on the chat's host:
+    /// `{chatId, enabled}` → the chat's `AutoResume` (null when it has none).
+    pub const SET_CHAT_AUTO_RESUME: &str = "SetChatAutoResume";
     /// Which providers on this device run without their own subagents
     /// (`{switchable, off}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
