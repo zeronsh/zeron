@@ -6752,6 +6752,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
         HarnessId::Fx => (crate::icons::FX_MARK, None),
         HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Omp => (crate::icons::OMP_MARK, None),
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
@@ -7277,10 +7278,13 @@ mod tests {
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("mac".into());
-            state.chats.push(serde_json::from_value(serde_json::json!({
-                "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
-                "createdAt":"2026-09-01T00:00:00Z",
-            })).unwrap());
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
+                    "createdAt":"2026-09-01T00:00:00Z",
+                }))
+                .unwrap(),
+            );
             state
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -7298,7 +7302,9 @@ mod tests {
             assert_eq!(pickers.catalog_owner.as_deref(), Some("cloud-machine"));
         });
         assert_eq!(
-            state.read_with(cx, |state, _| state.effective_device_id()).as_deref(),
+            state
+                .read_with(cx, |state, _| state.effective_device_id())
+                .as_deref(),
             Some("mac")
         );
         // Back on the new-chat canvas, the Mac's catalogs again.
@@ -7460,7 +7466,10 @@ mod tests {
         });
         cx.run_until_parked();
         let sent = requests.try_recv().expect("a refs request went out");
-        assert!(sent.contains("ListCloudBranches") && sent.contains("acme/app"), "{sent}");
+        assert!(
+            sent.contains("ListCloudBranches") && sent.contains("acme/app"),
+            "{sent}"
+        );
         cx.update(|cx| {
             let pickers = pickers.read(cx);
             assert_eq!(
@@ -7665,19 +7674,38 @@ mod tests {
                 pickers.pick_harness(HarnessId::Codex, cx);
                 let resolved = pickers.resolved(cx);
                 assert_eq!(resolved.harness, Some(HarnessId::Codex));
-                assert_eq!(resolved.model, None, "the old provider's model must not linger");
+                assert_eq!(
+                    resolved.model, None,
+                    "the old provider's model must not linger"
+                );
                 assert!(resolved.model_options.is_empty());
-                assert!(pickers.mutate_task.is_some(), "a saved chat persists the switch");
+                assert!(
+                    pickers.mutate_task.is_some(),
+                    "a saved chat persists the switch"
+                );
             });
             (state, pickers)
         });
         cx.run_until_parked();
         let sent = requests.try_recv().expect("setChatConfig went out");
-        assert!(sent.contains("setChatConfig") && sent.contains("\"codex\""), "{sent}");
+        assert!(
+            sent.contains("setChatConfig") && sent.contains("\"codex\""),
+            "{sent}"
+        );
         cx.update(|cx| {
-            let row = state.read(cx).selected_chat_row().unwrap().config.clone().unwrap();
+            let row = state
+                .read(cx)
+                .selected_chat_row()
+                .unwrap()
+                .config
+                .clone()
+                .unwrap();
             assert_eq!(row.harness, HarnessId::Codex);
-            assert_eq!(row.sandbox, zeron_proto::SandboxLevel::ReadOnly, "sandbox is kept");
+            assert_eq!(
+                row.sandbox,
+                zeron_proto::SandboxLevel::ReadOnly,
+                "sandbox is kept"
+            );
 
             // A turn starts: the switch is refused until it ends.
             state.update(cx, |state, _| {
@@ -7689,7 +7717,10 @@ mod tests {
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
             });
             state.update(cx, |state, _| state.apply_sessions(Vec::new()));
-            assert!(!pickers.read(cx).harness_locked(cx), "unlocks when the turn ends");
+            assert!(
+                !pickers.read(cx).harness_locked(cx),
+                "unlocks when the turn ends"
+            );
         });
     }
 
@@ -7720,7 +7751,11 @@ mod tests {
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
                 assert_eq!(pickers.model_rail, ModelRail::Harness);
-                assert_eq!(providers(pickers, cx), vec![HarnessId::Codex], "locked mid-turn");
+                assert_eq!(
+                    providers(pickers, cx),
+                    vec![HarnessId::Codex],
+                    "locked mid-turn"
+                );
                 pickers.pick_compact_provider(HarnessId::ClaudeCode, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
             });

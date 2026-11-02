@@ -958,6 +958,21 @@ fn full_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::PiHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
     );
+    // Native Oh My Pi RPC. Thinking levels are discovered per model.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Omp,
+            name: "Oh My Pi".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::OmpHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::OmpHarness::new()) as Arc<dyn Harness>)),
+    );
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -1126,6 +1141,7 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Fx,
                 HarnessId::Pi,
+                HarnessId::Omp,
                 HarnessId::Opencode,
                 HarnessId::Antigravity,
                 HarnessId::Muse
@@ -1191,6 +1207,11 @@ mod tests {
         assert_eq!(pi.display_name(), "Pi");
         assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
         assert!(pi.reasoning_levels().is_empty());
+        let omp = registry.resolve(HarnessId::Omp).unwrap();
+        assert_eq!(omp.id(), HarnessId::Omp);
+        assert_eq!(omp.display_name(), "Oh My Pi");
+        assert_eq!(omp.steering_mode(), SteeringMode::StepBoundary);
+        assert!(omp.reasoning_levels().is_empty());
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
