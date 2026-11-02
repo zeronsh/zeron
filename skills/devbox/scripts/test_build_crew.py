@@ -50,7 +50,9 @@ class BuildCrewChecks(unittest.TestCase):
         return hashlib.sha256(data.getvalue()).hexdigest()
 
     def run_script(self, *args):
-        return subprocess.run(["bash", str(SCRIPT), *args], env=self.env, capture_output=True, text=True)
+        # Boat login shells run with umask 002, as the build does when started from one.
+        return subprocess.run(["bash", str(SCRIPT), *args], env=self.env, capture_output=True, text=True,
+                              preexec_fn=lambda: os.umask(0o002))
 
     def test_builds_in_the_cache_and_installs_by_commit_and_digest(self):
         archive = self.cache / f"comet-{COMMIT}.tar.gz"
@@ -69,6 +71,9 @@ class BuildCrewChecks(unittest.TestCase):
         self.assertEqual(hashlib.sha256(installed.read_bytes()).hexdigest(), digest)
         self.assertEqual(installed.parent.stat().st_mode & 0o777, 0o755)
         self.assertTrue((installed.parent / "zeron-engine").is_file())
+        # configure-host.sh refuses a group- or world-writable directory anywhere on the path.
+        for directory in (self.home / ".local", self.home / ".local/lib", installed.parent.parent):
+            self.assertEqual(directory.stat().st_mode & 0o022, 0, directory)
 
     def test_refuses_a_source_archive_outside_the_cache(self):
         archive = self.home / f"comet-{COMMIT}.tar.gz"

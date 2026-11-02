@@ -5,6 +5,8 @@
 # finished executables are installed, into a directory named for the commit and digest.
 # Usage: build-crew.sh ARCHIVE ARCHIVE_SHA256 COMMIT
 set -euo pipefail
+# Boat login shells use umask 002, and configure-host.sh refuses group-writable install paths.
+umask 022
 die() { echo "build-crew: $*" >&2; exit 1; }
 [[ $# == 3 ]] || die "usage: build-crew.sh ARCHIVE ARCHIVE_SHA256 COMMIT"
 archive="$1"; expected="$2"; commit="$3"
