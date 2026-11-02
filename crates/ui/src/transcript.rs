@@ -7715,7 +7715,10 @@ impl Transcript {
                     // waiting on connectivity — say so instead of faking
                     // progress. (The overlay holds while degraded, so this line
                     // owns the surface until the ack or the failed state.)
-                    let queued = sending && state.chat_delivery_degraded(&chat_id);
+                    // A provisioning sandbox host is offline by definition.
+                    let queued = sending
+                        && !state.is_provisioning(&chat_id)
+                        && state.chat_delivery_degraded(&chat_id);
                     let elapsed = turn_started
                         .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                         .unwrap_or(0);
@@ -7755,7 +7758,15 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
-        let word = if queued {
+        let provisioning = self
+            .doc_override
+            .is_none()
+            .then(|| self.chat_id.as_deref())
+            .flatten()
+            .and_then(|chat_id| self.state.read(cx).provisioning_phase(chat_id));
+        let word = if let Some(phase) = provisioning {
+            phase.word()
+        } else if queued {
             "Queued — will send automatically"
         } else if preparing {
             "Preparing workspace"

@@ -807,6 +807,44 @@ struct PendingSend {
     delivery: Option<zeron_doc::CommandDeliveryStatus>,
 }
 
+/// The visible stage of a Scaffold session that is still acquiring its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisioningPhase {
+    Creating,
+    Starting,
+    Connecting,
+}
+
+impl ProvisioningPhase {
+    /// The transcript's rolling word (it appends its own ellipsis).
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Creating => "Creating sandbox",
+            Self::Starting => "Starting sandbox",
+            Self::Connecting => "Connecting to sandbox",
+        }
+    }
+
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Creating => "Creating sandbox…",
+            Self::Starting => "Starting sandbox…",
+            Self::Connecting => "Connecting to sandbox…",
+        }
+    }
+}
+
+/// A Scaffold session opened before its sandbox host publishes the registry
+/// row. The client-only row keeps the session selectable; no doc, watch or
+/// command may target it until [`AppState::finish_provisioning_chat`].
+#[derive(Debug, Clone)]
+struct ProvisioningChat {
+    chat: Chat,
+    phase: ProvisioningPhase,
+    /// The host's real row has arrived (it replaces the placeholder).
+    adopted: bool,
+}
+
 /// How long an unadopted send reads as Working/Sending (or Queued when the
 /// path is degraded) before flipping to the EXPLICIT failed state with a
 /// retry affordance. The old 30s overlay silently expired back to Idle with
@@ -920,6 +958,7 @@ pub struct AppState {
     pub chats: Vec<Chat>,
     /// Fork RPC may arrive ahead of its registry row on a remote device.
     pending_side_chat: Option<Chat>,
+    provisioning_chat: Option<ProvisioningChat>,
     /// `pending_side_chat` was started by hand and nothing has minted it:
     /// no registry row, no doc, until its first send.
     unsaved_side_chat: bool,
@@ -1099,6 +1138,7 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             pending_side_chat: None,
+            provisioning_chat: None,
             unsaved_side_chat: false,
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
@@ -1330,6 +1370,14 @@ impl AppState {
                 changed = true;
             } else {
                 chats.push(pending.clone());
+            }
+        }
+        if let Some(provisioning) = &mut self.provisioning_chat {
+            if chats.iter().any(|chat| chat.id == provisioning.chat.id) {
+                changed |= !provisioning.adopted;
+                provisioning.adopted = true;
+            } else {
+                chats.push(provisioning.chat.clone());
             }
         }
         sort_chats(&mut chats);
@@ -1578,7 +1626,10 @@ impl AppState {
     /// A send is queued: in flight AND its delivery path is degraded — the
     /// honest badge is "Queued", not a Working spinner.
     pub fn send_queued(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
+        // A provisioning sandbox host is offline by definition, not degraded.
+        self.send_pending(chat_id, now)
+            && !self.is_provisioning(chat_id)
+            && self.chat_delivery_degraded(chat_id)
     }
 
     pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
@@ -2003,6 +2054,9 @@ impl AppState {
     }
 
     pub fn send_preparing(&self, chat_id: &str) -> bool {
+        if self.is_provisioning(chat_id) && self.pending_sends.contains_key(chat_id) {
+            return true;
+        }
         self.pending_sends.get(chat_id).is_some_and(|pending| {
             matches!(
                 pending.delivery,
@@ -2669,6 +2723,7 @@ impl AppState {
         self.spaces.clear();
         self.chats.clear();
         self.pending_side_chat = None;
+        self.provisioning_chat = None;
         self.unsaved_side_chat = false;
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
@@ -2727,6 +2782,68 @@ impl AppState {
         state.select_chat(Some(chat.id), cx);
         state.watch_clock_transitions(cx);
         state
+    }
+
+    /// Open a Scaffold session before its host exists. The placeholder stays
+    /// in `chats` (so selection survives chat frames) until the host's row
+    /// replaces it; selecting it opens no doc.
+    pub(crate) fn begin_provisioning_chat(&mut self, chat: Chat, phase: ProvisioningPhase) {
+        let adopted = self.chats.iter().any(|row| row.id == chat.id);
+        if !adopted {
+            self.chats.push(chat.clone());
+            sort_chats(&mut self.chats);
+        }
+        self.provisioning_chat = Some(ProvisioningChat { chat, phase, adopted });
+    }
+
+    pub(crate) fn set_provisioning_phase(&mut self, chat_id: &str, phase: ProvisioningPhase) -> bool {
+        match self.provisioning_chat.as_mut().filter(|p| p.chat.id == chat_id) {
+            Some(provisioning) if provisioning.phase != phase => {
+                provisioning.phase = phase;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn provisioning_phase(&self, chat_id: &str) -> Option<ProvisioningPhase> {
+        self.provisioning_chat
+            .as_ref()
+            .filter(|p| p.chat.id == chat_id)
+            .map(|p| p.phase)
+    }
+
+    pub(crate) fn is_provisioning(&self, chat_id: &str) -> bool {
+        self.provisioning_phase(chat_id).is_some()
+    }
+
+    /// The host is online: watch its real row like any other chat.
+    pub(crate) fn finish_provisioning_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(provisioning) = self.take_provisioning_chat(chat_id) else { return };
+        if provisioning.adopted && self.selected_chat.as_deref() == Some(chat_id) {
+            self.focus_chat_sync(chat_id, cx);
+            self.start_chat_watches(chat_id.to_owned(), cx);
+        }
+    }
+
+    /// Provisioning failed: drop the placeholder. A session whose host already
+    /// published its row stays listed but is no longer held open.
+    pub(crate) fn abandon_provisioning_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(provisioning) = self.take_provisioning_chat(chat_id) else { return };
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            self.select_chat(None, cx);
+        }
+        if !provisioning.adopted {
+            self.chats.retain(|chat| chat.id != chat_id);
+            self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
+        }
+    }
+
+    fn take_provisioning_chat(&mut self, chat_id: &str) -> Option<ProvisioningChat> {
+        if self.provisioning_chat.as_ref()?.chat.id != chat_id {
+            return None;
+        }
+        self.provisioning_chat.take()
     }
 
     /// This is a side chat's state whose chat its first send has yet to mint.
@@ -3208,6 +3325,7 @@ impl AppState {
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
         if let Some(id) = &chat_id
             && !self.is_unsaved_side_chat(id)
+            && !self.is_provisioning(id)
         {
             self.focus_chat_sync(id, cx);
         }
@@ -3356,7 +3474,7 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         if let Some(chat_id) = chat_id {
-            if self.is_unsaved_side_chat(&chat_id) {
+            if self.is_unsaved_side_chat(&chat_id) || self.is_provisioning(&chat_id) {
                 // Nothing to watch yet, and opening its doc would start one.
                 self.transcript_replayed = true;
             } else {
@@ -6629,6 +6747,62 @@ mod tests {
             state.selected_chat_row().unwrap().parent_chat_id.as_deref(),
             Some("main")
         );
+    }
+
+    #[gpui::test]
+    fn provisioning_session_stays_open_without_a_doc_until_its_host_row_arrives(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let now = Utc::now();
+            state.connectivity.state = zeron_proto::ConnectivityState::Offline;
+            state.begin_provisioning_chat(chat("sandbox", 0, None), ProvisioningPhase::Creating);
+            state.select_chat(Some("sandbox".into()), cx);
+            state.begin_pending_send("sandbox", "prompt", now);
+            assert!(state.transcript_task.is_none(), "a placeholder opens no doc");
+            // Chat frames without the host's row keep the session selectable.
+            state.apply_chats(vec![chat("other", 1, None)]);
+            assert_eq!(state.selected_chat.as_deref(), Some("sandbox"));
+            assert!(state.chats.iter().any(|chat| chat.id == "sandbox"));
+            // Its prompt waits on the sandbox: never Queued or Not delivered.
+            let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+            assert!(state.send_preparing("sandbox"));
+            assert!(!state.send_queued("sandbox", later));
+            assert!(!state.send_undelivered("sandbox", later));
+            assert_eq!(state.indicator_for("sandbox", later), Indicator::Working);
+            assert!(state.set_provisioning_phase("sandbox", ProvisioningPhase::Starting));
+            assert!(!state.set_provisioning_phase("sandbox", ProvisioningPhase::Starting));
+            assert_eq!(state.provisioning_phase("sandbox"), Some(ProvisioningPhase::Starting));
+            // The host's row replaces the placeholder; the session still waits.
+            let mut hosted = chat("sandbox", 0, None);
+            hosted.device_id = "sandbox-host".into();
+            hosted.cwd = Some("/workspace".into());
+            assert!(state.apply_chats(vec![hosted, chat("other", 1, None)]));
+            assert!(state.transcript_task.is_none());
+            state.end_pending_send("sandbox", "prompt");
+            state.finish_provisioning_chat("sandbox", cx);
+            assert!(!state.is_provisioning("sandbox"));
+            assert_eq!(state.selected_chat_row().unwrap().device_id, "sandbox-host");
+            // A later frame without it is a real deletion, not a placeholder.
+            state.apply_chats(vec![chat("other", 1, None)]);
+            assert_eq!(state.selected_chat, None);
+        });
+    }
+
+    #[gpui::test]
+    fn abandoned_provisioning_session_returns_to_the_canvas(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.begin_provisioning_chat(chat("sandbox", 0, None), ProvisioningPhase::Creating);
+            state.select_chat(Some("sandbox".into()), cx);
+            state.abandon_provisioning_chat("sandbox", cx);
+            assert_eq!(state.selected_chat, None);
+            assert!(!state.chats.iter().any(|chat| chat.id == "sandbox"));
+            assert!(!state.is_provisioning("sandbox"));
+            state.apply_chats(vec![]);
+            assert!(state.chats.is_empty(), "the placeholder never returns");
+        });
     }
 
     #[test]

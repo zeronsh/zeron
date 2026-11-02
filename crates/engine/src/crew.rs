@@ -300,9 +300,7 @@ impl CrewServices {
         if let ScaffoldError::RepositoryImport { diagnostic, .. } = &error {
             persist_repository_diagnostic(&self.store, id, diagnostic)?;
         }
-        // No retry for ambiguous mutation delivery (including cancellation or malformed replies).
-        if matches!(&error, ScaffoldError::AttachRejected(_))
-            || matches!(&error, ScaffoldError::Api(api) if (400..500).contains(&api.0.status) && api.0.status != 408 && api.0.status != 429) {
+        if terminal_control_error(&error) {
             self.finish(id, None, Some(error.to_string()))
         } else { Ok(unknown(id, &error.to_string())) }
     }
@@ -873,9 +871,24 @@ fn denied(message:impl ToString)->RpcError{RpcError::Capability(message.to_strin
 fn failed(message:impl ToString)->RpcError{RpcError::Failed(message.to_string())}
 fn bad(message:impl ToString)->RpcError{RpcError::BadParams(message.to_string())}
 
+/// Errors observation can never turn into success. Everything else, including
+/// cancellation and malformed replies, stays unknown and is never replayed.
+fn terminal_control_error(error: &ScaffoldError) -> bool {
+    matches!(error, ScaffoldError::AttachRejected(_) | ScaffoldError::RuntimeContractMismatch)
+        || matches!(error, ScaffoldError::Api(api) if (400..500).contains(&api.0.status) && api.0.status != 408 && api.0.status != 429)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_contract_mismatch_is_terminal_but_malformed_launch_stays_unknown() {
+        assert!(terminal_control_error(&ScaffoldError::RuntimeContractMismatch));
+        assert!(!terminal_control_error(&ScaffoldError::InvalidResponse(
+            "sandbox exec returned no supervised native runId".into(),
+        )));
+        assert!(!terminal_control_error(&ScaffoldError::Cancelled));
+    }
     #[test]
     fn repository_diagnostic_survives_reopen_without_completing_transfer() {
         let temp = tempfile::tempdir().unwrap();

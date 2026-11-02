@@ -8471,13 +8471,15 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
-        let (queued, undelivered, preparing) = {
+        let (queued, undelivered, preparing, provisioning) = {
             let now = Utc::now();
             let state = self.state.read(cx);
+            let provisioning = state.provisioning_phase(&id);
             (
                 state.send_queued(&id, now),
                 state.send_undelivered(&id, now),
                 state.send_preparing(&id),
+                provisioning,
             )
         };
         let status_color = if undelivered {
@@ -8489,6 +8491,8 @@ impl Shell {
         };
         let status_label: Option<&'static str> = if undelivered {
             Some("Failed")
+        } else if let Some(phase) = provisioning {
+            Some(phase.status())
         } else if queued {
             Some("Queued")
         } else if preparing {

@@ -232,6 +232,11 @@ pub enum ScaffoldError {
     DeviceJoinGrantUnavailable,
     #[error("comet_not_installed_in_sandbox")]
     CometNotInstalled,
+    /// The sandbox accepted the launch as an ordinary exec instead of routing it
+    /// to native supervision: its runtime does not serve this build's contract.
+    /// Deterministic for the deployment, so observation can never confirm it.
+    #[error("scaffold_runtime_contract_mismatch: this Scaffold deployment ran the Crew host launch as a generic exec instead of supervising Crew runtime {SCAFFOLD_COMET_RUNTIME_VERSION}; update the deployment's sandbox runtime or use a matching Crew build")]
+    RuntimeContractMismatch,
     #[error("omp_session_handoff_failed")]
     OmpSessionHandoffFailed,
     #[error("omp_session_handoff_failed:{0}")]
@@ -3564,7 +3569,9 @@ impl ScaffoldRuntime {
                 "--edge-url".to_string(),
                 self.inner.edge_origin.clone(),
                 "--scaffold-url".to_string(),
-                self.inner.client.origin.as_str().to_owned(),
+                // The supervisor pins SCAFFOLD_CONTROL_PLANE_URL exactly; a parsed
+                // origin's implicit "/" path would fail its server-pinned scope check.
+                self.inner.client.origin.as_str().trim_end_matches('/').to_owned(),
                 "--project-scope".to_string(),
                 scope.project_id.clone(),
                 "--deployment-id".to_string(),
@@ -3587,7 +3594,12 @@ impl ScaffoldRuntime {
                     started.error.unwrap_or_else(|| "sandbox exec rejected".into()),
                 ));
             }
-            let Some(run_id) = started.run_id.filter(|id| started.supervised && !id.trim().is_empty()) else {
+            // A current supervisor marks every native launch it admits. An
+            // unmarked success is the generic exec path, never a pending host.
+            if !started.supervised {
+                return Err(ScaffoldError::RuntimeContractMismatch);
+            }
+            let Some(run_id) = started.run_id.filter(|id| !id.trim().is_empty()) else {
                 return Err(ScaffoldError::InvalidResponse("sandbox exec returned no supervised native runId".into()));
             };
             // Bootstrap can reuse an existing supervised host. Its newly minted
@@ -5400,7 +5412,7 @@ mod tests {
         assert_eq!(launch, serde_json::json!({
             "argv": [".scaffold/crew/bin/comet", "--data-dir", ".scaffold/crew-data", "--ipc-port", "39400",
                 "headless", "--device-bootstrap-file", bootstrap_path, "--edge-url", "https://comet-edge.example",
-                "--scaffold-url", format!("{origin}/"), "--project-scope", "project-a", "--deployment-id", "deployment-a"],
+                "--scaffold-url", origin.as_str(), "--project-scope", "project-a", "--deployment-id", "deployment-a"],
             "mode": "background", "timeoutMs": 0
         }));
         let bootstrap_request = requests
@@ -5601,7 +5613,11 @@ mod tests {
             let result = runtime.control(ScaffoldEnvironmentControl::Attach {
                 sandbox_id: "sandbox-a".into(), scope: scope(),
             }, &CancellationToken::new()).await;
-            assert!(matches!(result, Err(ScaffoldError::InvalidResponse(_))));
+            if receipt["supervised"] == true {
+                assert!(matches!(result, Err(ScaffoldError::InvalidResponse(_))));
+            } else {
+                assert!(matches!(result, Err(ScaffoldError::RuntimeContractMismatch)));
+            }
             let requests = captured.await.unwrap();
             assert_eq!(requests.iter().filter(|request| request.contains(r#""mode":"background""#)).count(), 1);
             assert_eq!(requests.iter().filter(|request| request.contains("/auth/device-grants ")).count(), 1);
