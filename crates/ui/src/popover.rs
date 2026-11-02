@@ -2625,7 +2625,7 @@ fn valid_highlight_ranges(
         .collect()
 }
 
-fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let folded = text.to_lowercase();
     let mut original = Vec::with_capacity(folded.len());
     for (start, ch) in text.char_indices() {

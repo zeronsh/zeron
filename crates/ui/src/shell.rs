@@ -141,7 +141,8 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        FindInThread
     ]
 );
 
@@ -508,6 +509,14 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
             AddSpacePalette,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.find_in_thread,
+                ShortcutId::FindInThread.default_combo(),
+            ),
+            FindInThread,
             None,
         ),
         // Fixed: ⌘K summons the command palette.
@@ -11833,6 +11842,7 @@ impl Shell {
                 - 24.0,
             cx,
         );
+        let find_field = self.render_find_field(window, cx);
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -11897,6 +11907,7 @@ impl Shell {
                 },
             )
             .children(session_card)
+            .children(find_field)
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -14136,6 +14147,12 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindInThread, window, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    this.transcript
+                        .update(cx, |transcript, cx| transcript.open_find(window, cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
