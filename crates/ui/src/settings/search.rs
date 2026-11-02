@@ -368,7 +368,7 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::Voice => "speech dictation microphone codex",
         SettingsSection::Shortcuts => "keyboard keybindings hotkeys keys",
         SettingsSection::Harnesses | SettingsSection::Agents => {
-            "harnesses agents cli claude code codex cursor devin grok hermes pi opencode \
+            "harnesses agents cli claude code codex cursor devin grok hermes droid pi opencode \
              antigravity muse install enable disable update policy accounts sign in login"
         }
         SettingsSection::Devices => "machines computers remote this device other devices rename",

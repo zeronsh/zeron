@@ -18,6 +18,7 @@ pinned Antigravity archive.
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
 | [Muse Code](https://dev.meta.ai/docs/muse-code/) | `curl -fsSL https://dev.meta.ai/install.sh \| sh` | `irm https://dev.meta.ai/install.ps1 \| iex` |
 | [fx](https://fx.sh/docs) | `curl -fsSL https://fx.sh/setup.sh \| bash` | Manual setup (no native Windows installer) |
+| [Droid](https://docs.factory.ai/droid-cli/quickstart) | `curl -fsSL https://app.factory.ai/cli \| sh` | `irm https://app.factory.ai/cli/windows \| iex` |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
 Unix shell commands run through `sh -c`, with PATH augmented from the user's login
@@ -28,9 +29,9 @@ Windows npm commands use the resolved npm launcher (normally `npm.cmd`).
 If shell prerequisites are absent, these documented npm alternatives are used
 when npm resolves: `npm install -g @openai/codex`,
 `npm install -g @opencode/cli`,
-`npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, and
-`npm install -g @xai-official/grok`. Codex also falls back to npm on Windows when
-PowerShell is unavailable. Grok's npm route is documented in its
+`npm install -g --ignore-scripts @earendil-works/pi-coding-agent`,
+`npm install -g @xai-official/grok`, and `npm install -g droid`. Codex and Droid
+also fall back to npm on Windows when PowerShell is unavailable. Grok's npm route is documented in its
 [enterprise guide](https://docs.x.ai/build/enterprise); its
 [published package metadata](https://registry.npmjs.org/@xai-official/grok/latest)
 includes Windows binaries. No action is offered when none of the documented
@@ -105,3 +106,29 @@ decides permissions: Supervised presents requests to the user; Full access
 approves them. Streaming, tool calls, cancellation and session loading use the
 shared ACP driver. Login and updates remain CLI-managed; native Windows has no
 one-click installer.
+
+## Droid
+
+Droid uses its native ACP server, `droid exec --output-format acp`. Install with
+`curl -fsSL https://app.factory.ai/cli | sh`, `irm https://app.factory.ai/cli/windows | iex`
+or `npm install -g droid`. Zeron detects PATH, `~/bin/droid` (the Windows
+installer's location), `~/.local/bin/droid` and the Homebrew prefixes;
+`DROID_EXECUTABLE` overrides the executable. Standalone installs update themselves
+in place with `droid update`; npm builds are pinned and update through npm.
+
+Sign-in belongs to Factory: run `droid` once and approve the browser pairing, or set
+`FACTORY_API_KEY`. There is no `droid login` command, so Droid has no Accounts
+section. A signed-out run reports that Droid is not signed in.
+
+Models and reasoning levels come from ACP. Droid reports reasoning options for the
+current model only, so every row shares that ladder and an effort the chosen model
+does not offer leaves the agent's default. Model ids must match exactly: an id the
+session does not advertise fails the run instead of running another model. Custom
+models from `~/.factory/settings.json` are advertised like any other.
+
+Access modes map onto Droid's autonomy level before every prompt, including
+resumed sessions: Supervised and Auto-accept edits run in `normal`, where Zeron
+decides each permission request; Full access runs in `auto-high`. Droid's `spec`
+mode and Missions are not exposed. Denying a request ends the turn, as Droid's own
+"No, cancel" does. Resuming uses `session/resume`, which keeps the conversation
+without replaying it. Skills come from `.factory/skills` and `.agents/skills`.

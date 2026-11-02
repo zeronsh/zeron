@@ -305,7 +305,7 @@ final class CoreSessionSource: SessionSource {
         #if DEBUG
         // Screenshots: `-all-providers` offers every agent there is.
         if ProcessInfo.processInfo.arguments.contains("-all-providers") {
-            tabs = [tabs[0]] + ["claude-code", "codex", "opencode", "cursor", "devin", "grok", "hermes", "fx", "pi", "antigravity", "muse"]
+            tabs = [tabs[0]] + ["claude-code", "codex", "opencode", "cursor", "devin", "grok", "hermes", "fx", "droid", "pi", "antigravity", "muse"]
                 .filter { $0 != harness }
                 .map { id in ModelPickerTab(harness: id, label: HarnessNames.label(id)) { await rows(id) } }
         }

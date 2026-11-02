@@ -230,6 +230,7 @@ icon_assets![
     (GROK_MARK, "grok-mark"),
     (HERMES_MARK, "hermes-mark"),
     (FX_MARK, "fx-mark"),
+    (DROID_MARK, "droid-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     // GitHub's mark (Octicons `mark-github`, MIT) for the Cloud page's
