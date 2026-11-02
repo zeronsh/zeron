@@ -170,11 +170,14 @@ fn watch_folder(hub: &Arc<FsWatchHub>, entry: &SpaceEntry) -> FsWatch {
         &entry.path,
         notify::RecursiveMode::NonRecursive,
         move |event| {
+            // Opening `.git` is an Access event too; the hub's own tree walks
+            // and every other consumer's reads would otherwise re-probe git.
             if event.need_rescan()
-                || event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == ".git"))
+                || (!matches!(event.kind, notify::EventKind::Access(_))
+                    && event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == ".git")))
             {
                 let _ = tx.send(());
             }
@@ -416,5 +419,42 @@ mod tests {
         };
         assert!(!failed.is_live(), "a vanished folder has no live watch");
         assert!(missing_rx.try_recv().is_err(), "and never signals");
+    }
+
+    /// Another hub consumer's tree walk opens `.git` (and refreshes re-walk
+    /// every repair tick): reading the directory is not a git change, so the
+    /// space must not re-probe git for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_of_the_git_dir_by_other_watchers_do_not_recheck() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".git/refs")).unwrap();
+        let (kick_tx, mut kick_rx) = mpsc::unbounded_channel();
+        let entry = Arc::new(SpaceEntry {
+            path: root.clone(),
+            kick_tx,
+            folder_watch: Mutex::new(None),
+        });
+        let hub = FsWatchHub::new();
+        let (watch, tree) = {
+            let (hub, entry, root) = (hub.clone(), entry.clone(), root.clone());
+            tokio::task::spawn_blocking(move || {
+                let watch = watch_folder(&hub, &entry);
+                let tree = hub.watch_tree(&root, Arc::new(|_| true), |_| {});
+                hub.apply();
+                (watch, tree)
+            })
+            .await
+            .unwrap()
+        };
+        assert!(watch.is_live() && tree.is_live());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        while kick_rx.try_recv().is_ok() {}
+        tree.refresh();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            kick_rx.try_recv().is_err(),
+            "a directory read must not kick"
+        );
     }
 }

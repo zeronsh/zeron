@@ -314,6 +314,24 @@ impl MessagePart {
     }
 }
 
+/// Which parts [`fold_event_into_parts`] changed.
+///
+/// `All` is a clear (`SessionStarted` / `Steered`) or a change that touched
+/// more than one index. Callers that only need the accumulator ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Touched {
+    None,
+    Index(usize),
+    All,
+}
+
+fn touch(so_far: Touched, index: usize) -> Touched {
+    match so_far {
+        Touched::None => Touched::Index(index),
+        Touched::Index(_) | Touched::All => Touched::All,
+    }
+}
+
 /// Fold one agent event into a parts accumulator, in place.
 ///
 /// In place because the fold runs once per streamed event: rebuilding the
@@ -328,10 +346,11 @@ impl MessagePart {
 /// - `InputRequested` appends an input part; `InputResolved` marks it resolved and records the
 ///   answers it carries.
 /// - `Error` and `Done{error}` become visible error parts.
-pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
+pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) -> Touched {
     match event {
         AgentEvent::SessionStarted { .. } | AgentEvent::Steered { .. } => {
             out.clear();
+            Touched::All
         }
         AgentEvent::TextDelta { text } => {
             if let Some(MessagePart::Text { text: tail, .. }) = out.last_mut() {
@@ -343,6 +362,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     text: text.clone(),
                 });
             }
+            Touched::Index(out.len() - 1)
         }
         AgentEvent::GeneratedImage {
             id,
@@ -356,10 +376,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 name: name.clone(),
                 mime_type: mime_type.clone(),
             };
-            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
-                *existing = image;
+            if let Some(index) = out.iter().position(|p| p.id() == id) {
+                out[index] = image;
+                Touched::Index(index)
             } else {
                 out.push(image);
+                Touched::Index(out.len() - 1)
             }
         }
         AgentEvent::Visual { id, path, title } => {
@@ -368,17 +390,19 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 path: path.clone(),
                 title: title.clone(),
             };
-            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
-                *existing = visual;
+            if let Some(index) = out.iter().position(|p| p.id() == id) {
+                out[index] = visual;
+                Touched::Index(index)
             } else {
                 out.push(visual);
+                Touched::Index(out.len() - 1)
             }
         }
         AgentEvent::ReasoningDelta { text } => {
             // Empty deltas are liveness heartbeats (redacted thinking) — the
             // engine drops them before the fold, but stay tolerant here too.
             if text.is_empty() {
-                return;
+                return Touched::None;
             }
             if let Some(MessagePart::Reasoning { text: tail, .. }) = out.last_mut() {
                 tail.push_str(text);
@@ -389,15 +413,17 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     text: text.clone(),
                 });
             }
+            Touched::Index(out.len() - 1)
         }
         AgentEvent::ToolCall { id, call } => {
-            if let Some(existing) = out.iter_mut().find_map(|p| match p {
-                MessagePart::Tool {
-                    id: pid, call: c, ..
-                } if pid == id => Some(c),
-                _ => None,
+            if let Some(index) = out.iter().position(|p| match p {
+                MessagePart::Tool { id: pid, .. } => pid == id,
+                _ => false,
             }) {
-                *existing = call.clone();
+                if let MessagePart::Tool { call: slot, .. } = &mut out[index] {
+                    *slot = call.clone();
+                }
+                Touched::Index(index)
             } else {
                 out.push(MessagePart::Tool {
                     id: id.clone(),
@@ -414,6 +440,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_status: None,
                     subagent_tail: None,
                 });
+                Touched::Index(out.len() - 1)
             }
         }
         AgentEvent::ToolResult {
@@ -422,7 +449,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             output,
             diff,
         } => {
-            for p in out.iter_mut() {
+            let mut touched = Touched::None;
+            for (index, p) in out.iter_mut().enumerate() {
                 if let MessagePart::Tool {
                     id: pid,
                     is_error: e,
@@ -449,15 +477,19 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     *output_bytes = None;
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
+                    touched = touch(touched, index);
                 }
             }
+            touched
         }
         AgentEvent::InputRequested {
             request_id,
             questions,
         } => {
             let id = format!("in-{request_id}");
-            if !out.iter().any(|p| p.id() == id) {
+            if out.iter().any(|p| p.id() == id) {
+                Touched::None
+            } else {
                 out.push(MessagePart::Input {
                     id,
                     request_id: request_id.clone(),
@@ -465,13 +497,15 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     resolved: false,
                     answers: None,
                 });
+                Touched::Index(out.len() - 1)
             }
         }
         AgentEvent::InputResolved {
             request_id,
             answers,
         } => {
-            for p in out.iter_mut() {
+            let mut touched = Touched::None;
+            for (index, p) in out.iter_mut().enumerate() {
                 if let MessagePart::Input {
                     request_id: rid,
                     resolved,
@@ -486,8 +520,10 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     if let Some(answers) = answers {
                         *recorded = Some(answers.clone());
                     }
+                    touched = touch(touched, index);
                 }
             }
+            touched
         }
         AgentEvent::Error { message } => {
             let id = format!("e{}", out.len());
@@ -495,6 +531,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 id,
                 message: message.clone(),
             });
+            Touched::Index(out.len() - 1)
         }
         AgentEvent::Done { error, .. } => {
             if let Some(message) = error {
@@ -503,6 +540,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     id,
                     message: message.clone(),
                 });
+                Touched::Index(out.len() - 1)
+            } else {
+                Touched::None
             }
         }
         // Subagent-attributed CONTENT belongs to the subagent's own doc (the
@@ -528,7 +568,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
                 _ => None,
             };
-            for p in out.iter_mut() {
+            let mut touched = Touched::None;
+            for (index, p) in out.iter_mut().enumerate() {
                 if let MessagePart::Tool {
                     id,
                     call,
@@ -555,8 +596,10 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                         }
                         None => {}
                     }
+                    touched = touch(touched, index);
                 }
             }
+            touched
         }
         // AvailableCommands feeds the engine's per-harness command cache, not
         // the transcript. UserMessage becomes its own doc ENTRY (the engine's
@@ -566,7 +609,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::PlanUsage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
-        | AgentEvent::UserMessage { .. } => {}
+        | AgentEvent::UserMessage { .. } => Touched::None,
     }
 }
 
@@ -1449,5 +1492,71 @@ mod tests {
         .unwrap();
         assert_eq!(payload.part_id, "t");
         assert_eq!(payload.output.as_deref(), Some("full output"));
+    }
+
+    #[test]
+    fn fold_reports_which_parts_changed() {
+        let mut parts = Vec::new();
+        assert_eq!(
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ReasoningDelta {
+                    text: String::new()
+                },
+            ),
+            Touched::None
+        );
+        assert_eq!(
+            fold_event_into_parts(&mut parts, &AgentEvent::TextDelta { text: "a".into() },),
+            Touched::Index(0)
+        );
+        assert_eq!(
+            fold_event_into_parts(&mut parts, &AgentEvent::TextDelta { text: "b".into() },),
+            Touched::Index(0)
+        );
+        let requested = AgentEvent::InputRequested {
+            request_id: "r".into(),
+            questions: vec![],
+        };
+        assert_eq!(
+            fold_event_into_parts(&mut parts, &requested),
+            Touched::Index(1)
+        );
+        assert_eq!(fold_event_into_parts(&mut parts, &requested), Touched::None);
+
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::Exec {
+                    command: "ls".into(),
+                },
+            },
+        );
+        parts.push(parts.last().unwrap().clone());
+        assert_eq!(
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolResult {
+                    id: "t".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+            ),
+            Touched::All,
+            "one event that updates two indices reports All"
+        );
+        assert_eq!(
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                },
+            ),
+            Touched::All
+        );
+        assert!(parts.is_empty());
     }
 }

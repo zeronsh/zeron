@@ -2,18 +2,21 @@
 //! processed-command ledger (ARCHITECTURE §2 command plane: entries are marked
 //! processed BEFORE execution so a crash can never double-execute a command).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 /// Errors surfaced by [`DocsStore`].
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("loro: {0}")]
+    Loro(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -74,6 +77,79 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // Boot salvage skips a chat once its transcript has been seen non-empty.
+    // The run journal is never deleted or rewritten from this marker.
+    "CREATE TABLE salvage_checked (
+        doc_id TEXT PRIMARY KEY
+    ) STRICT;",
+    // Invalidate old unversioned receipts and tie future receipts to every
+    // change of the persisted snapshot or its pending updates.
+    "DELETE FROM salvage_checked;
+     CREATE TRIGGER salvage_snapshot_insert AFTER INSERT ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_snapshot_update AFTER UPDATE ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_snapshot_delete AFTER DELETE ON snapshots BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = OLD.doc_id;
+     END;
+     CREATE TRIGGER salvage_outbox_insert AFTER INSERT ON chat_outbox BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = NEW.doc_id;
+     END;
+     CREATE TRIGGER salvage_outbox_delete AFTER DELETE ON chat_outbox BEGIN
+       DELETE FROM salvage_checked WHERE doc_id = OLD.doc_id;
+     END;",
+    // Delta rows preserve the legacy base's bytes/cursor. These AFTER triggers
+    // are a backstop: migration 10's guard rejects a base write while deltas
+    // exist, so only a database that lost that guard reaches them.
+    "CREATE TABLE snapshot_deltas (
+        doc_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        cursor INTEGER NOT NULL,
+        roots BLOB NOT NULL,
+        PRIMARY KEY(doc_id, seq)
+    ) STRICT;
+    CREATE TRIGGER snapshot_deltas_replace AFTER UPDATE ON snapshots BEGIN
+        DELETE FROM snapshot_deltas WHERE doc_id=OLD.doc_id;
+    END;
+    CREATE TRIGGER snapshot_deltas_delete AFTER DELETE ON snapshots BEGIN
+        DELETE FROM snapshot_deltas WHERE doc_id=OLD.doc_id;
+    END;
+    CREATE TRIGGER salvage_delta_insert AFTER INSERT ON snapshot_deltas BEGIN
+        DELETE FROM salvage_checked WHERE doc_id=NEW.doc_id;
+    END;
+    CREATE TRIGGER salvage_delta_update AFTER UPDATE ON snapshot_deltas BEGIN
+        DELETE FROM salvage_checked WHERE doc_id=OLD.doc_id OR doc_id=NEW.doc_id;
+    END;
+    CREATE TRIGGER salvage_delta_delete AFTER DELETE ON snapshot_deltas BEGIN
+        DELETE FROM salvage_checked WHERE doc_id=OLD.doc_id;
+    END;",
+    // Downgrade guard. An engine that predates the delta log reads only the
+    // base and would overwrite it, discarding the delta-only state. These
+    // triggers make its save/delete fail loudly while deltas exist; the delta
+    // engine always removes the deltas first, in the same transaction.
+    "CREATE TRIGGER snapshot_deltas_guard_replace BEFORE UPDATE ON snapshots
+     WHEN EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id=OLD.doc_id) BEGIN
+        SELECT RAISE(ABORT, 'snapshot has an unmerged delta log: run the newer engine to compact it');
+     END;
+     CREATE TRIGGER snapshot_deltas_guard_delete BEFORE DELETE ON snapshots
+     WHEN EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id=OLD.doc_id) BEGIN
+        SELECT RAISE(ABORT, 'snapshot has an unmerged delta log: run the newer engine to compact it');
+     END;",
+    // Rows that failed validation are copied here before the repair
+    // compaction deletes the chain, so a damaged suffix is never destroyed
+    // without a trace. Removed with the chat.
+    "CREATE TABLE snapshot_delta_quarantine (
+        doc_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        quarantined_at INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        cursor INTEGER NOT NULL,
+        roots BLOB NOT NULL,
+        PRIMARY KEY(doc_id, quarantined_at, seq)
+    ) STRICT;",
 ];
 
 const STORE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +172,9 @@ const VACUUM_MIN_FREE_DENOMINATOR: i64 = 4;
 /// connection holds a lock.
 const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Negative `cache_size` is kibibytes: 8 MiB on each connection.
+const CACHE_SIZE_KIB: i64 = -8192;
+
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
 ///
 /// Holds warm-open doc snapshots (the DO room is authoritative; these make
@@ -103,10 +182,54 @@ const MAINTENANCE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// that gives command execution mark-BEFORE-execute idempotence.
 pub struct DocsStore {
     conn: Mutex<Connection>,
+    /// WAL reader. Each call is its own statement or read transaction, so a
+    /// committed write is visible on the next call without the writer mutex.
+    reader: Mutex<Connection>,
     failed_publications: Mutex<HashSet<String>>,
+    // Retain failed rows in submission order. Every insertion path drains a
+    // chat's failed prefix before allowing a later row to take an ordinal.
+    failed_updates: Mutex<HashMap<String, Vec<(String, Vec<u8>)>>>,
+    /// Write transactions the outbox has taken: one per [`Self::enqueue_chat_updates`]
+    /// batch, one per [`Self::enqueue_chat_update`] row.
+    outbox_write_txs: AtomicU64,
+    /// Snapshot/chat-state load calls. Salvage tests
+    /// use this to prove a checked chat is not read again.
+    snapshot_load_count: AtomicU64,
+    snapshot_payload_bytes: AtomicU64,
+    /// Run before snapshot or delta writes; see [`Self::add_snapshot_barrier`].
+    snapshot_barriers: Mutex<Vec<Weak<SnapshotBarrier>>>,
     /// Snapshot jobs wait here asynchronously before entering the blocking pool.
     pub snapshot_writer: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
+
+/// A consistent base + contiguous, checksum-checked delta prefix. The cursor
+/// belongs to the last imported row, including cursor resets (not MAX(cursor)).
+pub struct ChatState {
+    /// Exact durable base bytes, for conditional salvage receipts/copies.
+    pub base_snapshot: Vec<u8>,
+    pub doc: loro::LoroDoc,
+    pub cursor: u64,
+    pub epoch: u32,
+    pub verified: bool,
+    pub snapshot_bytes: usize,
+    pub delta_count: usize,
+    pub delta_bytes: usize,
+    /// A damaged suffix was ignored; replace the base before appending again.
+    pub needs_compaction: bool,
+    /// Rows beyond the usable prefix (the damaged row and everything after it).
+    pub ignored_deltas: usize,
+}
+
+/// Content about to become durable. A delta needs its persisted dependencies
+/// before it can be used as an independent source of publication operations.
+#[derive(Clone, Copy, Debug)]
+pub enum SnapshotWrite<'a> {
+    Full(&'a [u8]),
+    Delta(&'a [u8]),
+}
+
+/// A callback that must return before a snapshot or delta is written.
+pub type SnapshotBarrier = dyn Fn(&str, SnapshotWrite<'_>) -> Result<(), StoreError> + Send + Sync;
 
 impl DocsStore {
     /// Open (creating directory, database, and schema as needed).
@@ -118,6 +241,7 @@ impl DocsStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+        tune_connection(&conn)?;
         conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
         migrate(&mut conn)?;
         // Best-effort hygiene must never stall boot behind another connection.
@@ -125,11 +249,20 @@ impl DocsStore {
         // Only the cheap WAL truncate here: open sits on boot paths (engine
         // assembly, the iOS client), and a VACUUM's cost is linear in the
         // live size. Callers run `reclaim_free_space` off those paths.
+        // The reader opens afterwards: a live reader would make this
+        // truncate report busy.
         checkpoint_truncate(&conn, &path, "open");
         conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
+        let reader = open_reader(&path)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            reader: Mutex::new(reader),
             failed_publications: Mutex::new(HashSet::new()),
+            failed_updates: Mutex::new(HashMap::new()),
+            outbox_write_txs: AtomicU64::new(0),
+            snapshot_load_count: AtomicU64::new(0),
+            snapshot_payload_bytes: AtomicU64::new(0),
+            snapshot_barriers: Mutex::new(Vec::new()),
             snapshot_writer: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -150,17 +283,119 @@ impl DocsStore {
         batch_id: &str,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        let result = self.conn().execute(
-            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-            params![doc_id, batch_id, bytes],
-        );
+        let mut failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        let result = (|| {
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            if let Some(prefix) = failed.get(doc_id) {
+                for (id, bytes) in prefix {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+                        params![doc_id, id, bytes],
+                    )?;
+                }
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+                params![doc_id, batch_id, bytes],
+            )?;
+            tx.commit()
+        })();
         if result.is_err() {
+            let prefix = failed.entry(doc_id.to_string()).or_default();
+            if !prefix.iter().any(|(id, _)| id == batch_id) {
+                prefix.push((batch_id.to_string(), bytes.to_vec()));
+            }
             self.failed_publications
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(doc_id.to_string());
+        } else {
+            failed.remove(doc_id);
         }
         result?;
+        Ok(())
+    }
+
+    /// Insert several `(doc_id, batch_id, bytes)` rows in ONE transaction, in
+    /// slice order (so `ordinal` follows it). All or nothing. A failure is NOT
+    /// recorded as a failed publication: the caller retries the rows one by
+    /// one with [`Self::enqueue_chat_update`], which records exactly the docs
+    /// whose own row cannot be written.
+    pub fn enqueue_chat_updates(&self, items: &[(&str, &str, &[u8])]) -> Result<(), StoreError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        store_blocking(|| self.enqueue_chat_updates_blocking(items))
+    }
+
+    fn enqueue_chat_updates_blocking(
+        &self,
+        items: &[(&str, &str, &[u8])],
+    ) -> Result<(), StoreError> {
+        let failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Fall back to the ordered single-row path if any chat has a gap.
+        if items.iter().any(|(doc, _, _)| failed.contains_key(*doc)) {
+            return Err(std::io::Error::other("outbox has an earlier failed row").into());
+        }
+        self.outbox_write_txs.fetch_add(1, Ordering::Relaxed);
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
+            )?;
+            for (doc_id, batch_id, bytes) in items {
+                insert.execute(params![doc_id, batch_id, bytes])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Outbox write transactions taken so far (a batch counts once).
+    pub fn outbox_write_transactions(&self) -> u64 {
+        self.outbox_write_txs.load(Ordering::Relaxed)
+    }
+
+    /// Register a callback that runs, outside the connection lock, before every
+    /// snapshot/delta write. The engine uses it to flush its outbox writer: a
+    /// snapshot may only land once the outbox rows for the operations it
+    /// contains (or the record that such a row failed) are already on disk.
+    /// The store keeps only a weak reference; dropping the `Arc` unregisters.
+    pub fn add_snapshot_barrier(&self, barrier: &Arc<SnapshotBarrier>) {
+        let mut barriers = self
+            .snapshot_barriers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        barriers.retain(|b| b.strong_count() > 0);
+        barriers.push(Arc::downgrade(barrier));
+    }
+
+    fn run_snapshot_barriers(
+        &self,
+        doc_id: &str,
+        write: SnapshotWrite<'_>,
+    ) -> Result<(), StoreError> {
+        let live: Vec<_> = self
+            .snapshot_barriers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for barrier in live {
+            barrier(doc_id, write)?;
+        }
         Ok(())
     }
 
@@ -171,7 +406,7 @@ impl DocsStore {
     /// Admission/lifetime checks must not copy the pending payloads.
     pub fn has_pending_chat_updates(&self, doc_id: &str) -> Result<bool, StoreError> {
         store_blocking(|| {
-            Ok(self.conn().query_row(
+            Ok(self.reader().query_row(
                 "SELECT EXISTS(SELECT 1 FROM chat_outbox WHERE doc_id=?1)",
                 params![doc_id],
                 |row| row.get(0),
@@ -183,7 +418,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn
             .prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 ORDER BY ordinal")?;
         Ok(stmt
@@ -196,6 +431,7 @@ impl DocsStore {
     }
 
     fn reject_chat_update_blocking(&self, doc_id: &str, batch_id: &str) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -214,7 +450,7 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn.prepare("SELECT batch_id,bytes FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=1 ORDER BY ordinal")?;
         Ok(stmt
             .query_map(params![doc_id], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -230,6 +466,7 @@ impl DocsStore {
         doc_id: &str,
         batch_id: &str,
     ) -> Result<(), StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         self.conn().execute(
             "DELETE FROM chat_outbox WHERE doc_id=?1 AND batch_id=?2",
             params![doc_id, batch_id],
@@ -243,7 +480,7 @@ impl DocsStore {
 
     fn chat_outbox_initialized_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         Ok(self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM chat_outbox_initialized WHERE doc_id=?1",
                 params![doc_id],
@@ -270,6 +507,7 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         if tx.execute(
             "INSERT OR IGNORE INTO chat_outbox_initialized(doc_id) VALUES (?1)",
             params![doc_id],
@@ -286,14 +524,201 @@ impl DocsStore {
         Ok(())
     }
 
-    /// Latest saved snapshot for `doc_id`, if any.
+    /// Restore a chat using a single SQLite read transaction. A torn/corrupt
+    /// row (or a gap/pending causal dependency) ends the usable prefix: never
+    /// advance the cursor over missing content. SQLite itself commits rows
+    /// atomically; checksum validation also contains damaged copied databases.
+    pub fn load_chat_state(&self, doc_id: &str) -> Result<Option<ChatState>, StoreError> {
+        store_blocking(|| {
+            self.snapshot_load_count.fetch_add(1, Ordering::Relaxed);
+            let (base, rows) = {
+                let mut conn = self.reader();
+                let tx = conn.transaction()?;
+                let base = tx.query_row(
+                    "SELECT bytes,COALESCE(cursor,0),COALESCE(epoch,0),cursor_verified FROM snapshots WHERE doc_id=?1",
+                    [doc_id],
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u64>(1)?, r.get::<_, u32>(2)?, r.get::<_, bool>(3)?)),
+                ).optional()?;
+                let rows = tx
+                    .prepare(
+                        "SELECT seq,bytes,roots,cursor FROM snapshot_deltas WHERE doc_id=?1 ORDER BY seq",
+                    )?
+                    .query_map([doc_id], |r| {
+                        Ok((
+                            r.get::<_, usize>(0)?,
+                            r.get::<_, Vec<u8>>(1)?,
+                            r.get::<_, Vec<u8>>(2)?,
+                            r.get::<_, u64>(3)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                tx.commit()?;
+                (base, rows)
+            };
+            let Some((base, cursor, epoch, verified)) = base else {
+                return Ok(None);
+            };
+            let import_base = || {
+                let doc = loro::LoroDoc::new();
+                doc.import(&base)
+                    .map_err(|e| StoreError::Loro(e.to_string()))?;
+                Ok::<_, StoreError>(doc)
+            };
+            let mut state = ChatState {
+                base_snapshot: Vec::new(),
+                doc: import_base()?,
+                cursor,
+                epoch,
+                verified,
+                snapshot_bytes: base.len(),
+                delta_count: 0,
+                delta_bytes: 0,
+                needs_compaction: false,
+                ignored_deltas: 0,
+            };
+            for (seq, bytes, roots, cursor) in &rows {
+                let verdict = if *seq != state.delta_count + 1 {
+                    Err(format!(
+                        "sequence gap: expected {}, found {seq}",
+                        state.delta_count + 1
+                    ))
+                } else {
+                    import_snapshot_delta(&state.doc, bytes, roots).map_err(|e| e.to_string())
+                };
+                if let Err(reason) = verdict {
+                    state.needs_compaction = true;
+                    state.ignored_deltas = rows.len() - state.delta_count;
+                    // Not silent: the chat reopens at the last intact row's
+                    // content and cursor (room history refills the cursor gap),
+                    // and the rows are quarantined before the repair save.
+                    tracing::error!(
+                        doc = doc_id,
+                        seq,
+                        reason,
+                        usable = state.delta_count,
+                        ignored = state.ignored_deltas,
+                        "damaged snapshot delta log; opening at the last intact row"
+                    );
+                    // An import error/pending update may have partially mutated
+                    // Loro. Reconstruct only the known-good prefix.
+                    state.doc = import_base()?;
+                    for (_, bytes, roots, _) in rows.iter().take(state.delta_count) {
+                        import_snapshot_delta(&state.doc, bytes, roots)?;
+                    }
+                    break;
+                }
+                state.cursor = *cursor;
+                state.verified = true;
+                state.delta_count += 1;
+                state.delta_bytes += bytes.len() + roots.len();
+            }
+            state.base_snapshot = base;
+            Ok(Some(state))
+        })
+    }
+
+    /// Shallow root registry: empty roots have no Loro operations, but a full
+    /// snapshot preserves them. Encoding only IDs avoids materializing data.
+    /// Layout: `fnv1a64(payload) LE | payload`, payload = `ROOT_REGISTRY_V1`
+    /// then, per root, `u32 LE length | ContainerID::to_bytes()`. Loro's own
+    /// binary ID encoding is used rather than serde, whose representation of
+    /// container IDs has changed between Loro releases and would turn every
+    /// row written before an upgrade into a "damaged" one.
+    pub fn snapshot_roots(doc: &loro::LoroDoc) -> Result<Vec<u8>, StoreError> {
+        let value = doc.get_value();
+        let loro::LoroValue::Map(map) = value else {
+            return Err(StoreError::Loro("expected document root map".into()));
+        };
+        let mut payload = vec![ROOT_REGISTRY_V1];
+        for v in map.values() {
+            if let loro::LoroValue::Container(id) = v {
+                let id = id.to_bytes();
+                payload.extend((id.len() as u32).to_le_bytes());
+                payload.extend(id);
+            }
+        }
+        let mut bytes = root_registry_checksum(&payload).to_le_bytes().to_vec();
+        bytes.extend(payload);
+        Ok(bytes)
+    }
+
+    /// Append one durable update + cursor and the registry from
+    /// [`Self::snapshot_roots`]. The barrier receives a delta, not a standalone
+    /// snapshot. This log neither acknowledges nor drains the outbox.
+    pub fn append_snapshot_delta(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        cursor: u64,
+        roots: &[u8],
+    ) -> Result<(), StoreError> {
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Delta(bytes))?;
+        store_blocking(|| {
+            // Lock order matches outbox insertion. Unlike a full snapshot's
+            // replay-marker fallback, a delta must not outlive an unwritten
+            // prefix: a crash would leave later ops without their dependencies.
+            let failed = self
+                .failed_updates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if failed.contains_key(doc_id) {
+                return Err(StoreError::Io(std::io::Error::other(
+                    "cannot append snapshot delta: outbox prefix is not durable",
+                )));
+            }
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+            tx.execute(
+                "INSERT INTO snapshot_deltas(doc_id,seq,bytes,cursor,roots)
+                 SELECT ?1,COALESCE((SELECT MAX(seq) FROM snapshot_deltas WHERE doc_id=?1),0)+1,?2,?3,?4
+                 WHERE EXISTS(SELECT 1 FROM snapshots WHERE doc_id=?1)",
+                params![doc_id, bytes, cursor, roots],
+            ).and_then(|n| if n == 1 { Ok(n) } else { Err(rusqlite::Error::QueryReturnedNoRows) })?;
+            self.invalidate_failed_publication(&tx, doc_id)?;
+            tx.commit()?;
+            zeron_counters::add(zeron_counters::C::SnapshotDeltaRows, 1);
+            zeron_counters::add(
+                zeron_counters::C::SnapshotDeltaBytes,
+                (bytes.len() + roots.len()) as u64,
+            );
+            self.snapshot_payload_bytes
+                .fetch_add((bytes.len() + roots.len()) as u64, Ordering::Relaxed);
+            Ok(())
+        })
+    }
+
+    /// Committed snapshot/delta payload bytes (including root registries)
+    /// submitted to SQLite. Excludes
+    /// indexes, pages, WAL amplification and the independent publication outbox.
+    pub fn snapshot_payload_bytes_written(&self) -> u64 {
+        self.snapshot_payload_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Copy delta rows after the usable prefix (`seq > keep`) into the
+    /// quarantine table. Called before the repair save deletes the chain.
+    pub fn quarantine_delta_suffix(&self, doc_id: &str, keep: usize) -> Result<usize, StoreError> {
+        store_blocking(|| {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+            Ok(self.conn().execute(
+                "INSERT OR IGNORE INTO snapshot_delta_quarantine(doc_id,seq,quarantined_at,bytes,cursor,roots)
+                 SELECT doc_id,seq,?3,bytes,cursor,roots FROM snapshot_deltas
+                 WHERE doc_id=?1 AND seq>?2",
+                params![doc_id, keep as i64, now_ms()],
+            )?)
+        })
+    }
+
+    /// Latest full base snapshot for `doc_id`, if any. Chat readers must use
+    /// [`Self::load_chat_state`] to include the durable delta suffix.
     pub fn load_snapshot(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
         store_blocking(|| self.load_snapshot_blocking(doc_id))
     }
 
     fn load_snapshot_blocking(&self, doc_id: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.snapshot_load_count.fetch_add(1, Ordering::Relaxed);
         let bytes = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT bytes FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -305,12 +730,16 @@ impl DocsStore {
 
     /// Save (upsert) the snapshot for `doc_id`.
     pub fn save_snapshot(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| self.save_snapshot_blocking(doc_id, bytes))
     }
 
     fn save_snapshot_blocking(&self, doc_id: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        // Deltas first: the downgrade guard rejects a base write while any exist.
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
@@ -318,6 +747,8 @@ impl DocsStore {
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
+        self.snapshot_payload_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -331,6 +762,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| self.save_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch))
     }
 
@@ -343,6 +775,8 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -351,6 +785,8 @@ impl DocsStore {
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
+        self.snapshot_payload_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -361,6 +797,7 @@ impl DocsStore {
         cursor: u64,
         epoch: u32,
     ) -> Result<(), StoreError> {
+        self.run_snapshot_barriers(doc_id, SnapshotWrite::Full(bytes))?;
         store_blocking(|| {
             self.save_verified_snapshot_with_cursor_blocking(doc_id, bytes, cursor, epoch)
         })
@@ -375,6 +812,8 @@ impl DocsStore {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        tx.execute("DELETE FROM snapshot_deltas WHERE doc_id=?1", [doc_id])?;
         tx.execute(
             "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES (?1, ?2, ?3, ?4, ?5, 1)
              ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
@@ -383,13 +822,15 @@ impl DocsStore {
         )?;
         self.invalidate_failed_publication(&tx, doc_id)?;
         tx.commit()?;
+        self.snapshot_payload_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
     pub fn snapshot_cursor(&self, doc_id: &str) -> Result<u64, StoreError> {
         store_blocking(|| {
             Ok(self
-                .conn()
+                .reader()
                 .query_row(
                     "SELECT COALESCE(cursor, 0) FROM snapshots WHERE doc_id = ?1",
                     params![doc_id],
@@ -406,7 +847,7 @@ impl DocsStore {
 
     fn snapshot_cursor_verified_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         Ok(self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT cursor_verified FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -416,7 +857,8 @@ impl DocsStore {
             .unwrap_or(false))
     }
 
-    /// Snapshot + chat2 cursor + epoch. Pre-migration rows (or rows written
+    /// Full base + its chat2 cursor + epoch (does not include deltas).
+    /// Pre-migration rows (or rows written
     /// by [`Self::save_snapshot`]) read back as `(bytes, 0, 0)`.
     pub fn load_snapshot_with_cursor(
         &self,
@@ -429,7 +871,7 @@ impl DocsStore {
     pub fn snapshot_epoch(&self, doc_id: &str) -> Result<u32, StoreError> {
         store_blocking(|| {
             Ok(self
-                .conn()
+                .reader()
                 .query_row(
                     "SELECT COALESCE(epoch, 0) FROM snapshots WHERE doc_id = ?1",
                     params![doc_id],
@@ -444,8 +886,9 @@ impl DocsStore {
         &self,
         doc_id: &str,
     ) -> Result<Option<(Vec<u8>, u64, u32)>, StoreError> {
+        self.snapshot_load_count.fetch_add(1, Ordering::Relaxed);
         let row = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT bytes, cursor, epoch FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -468,8 +911,21 @@ impl DocsStore {
     }
 
     fn delete_snapshot_blocking(&self, doc_id: &str) -> Result<(), StoreError> {
+        let mut failed = self
+            .failed_updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+        tx.execute(
+            "DELETE FROM snapshot_deltas WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
+        tx.execute(
+            "DELETE FROM snapshot_delta_quarantine WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
         tx.execute("DELETE FROM snapshots WHERE doc_id = ?1", params![doc_id])?;
         tx.execute("DELETE FROM chat_outbox WHERE doc_id = ?1", params![doc_id])?;
         tx.execute(
@@ -480,8 +936,59 @@ impl DocsStore {
             "DELETE FROM chat_outbox_initialized WHERE doc_id = ?1",
             params![doc_id],
         )?;
+        tx.execute(
+            "DELETE FROM salvage_checked WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
         tx.commit()?;
+        failed.remove(doc_id);
         Ok(())
+    }
+
+    /// How many times a snapshot blob was loaded. Diagnostic; salvage tests
+    /// assert a checked chat does not move it.
+    #[doc(hidden)]
+    pub fn snapshot_loads(&self) -> u64 {
+        self.snapshot_load_count.load(Ordering::Relaxed)
+    }
+
+    /// Whether boot salvage has already seen a non-empty transcript for `doc_id`.
+    pub fn salvage_checked(&self, doc_id: &str) -> Result<bool, StoreError> {
+        store_blocking(|| {
+            let hit = self
+                .reader()
+                .query_row(
+                    "SELECT 1 FROM salvage_checked WHERE doc_id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id = ?1)",
+                    params![doc_id],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            Ok(hit.is_some())
+        })
+    }
+
+    /// Mark only the exact inspected snapshot, while no pending updates can
+    /// change its decoded transcript. Deltas must first compact into the base;
+    /// the comparison and insert are atomic with respect to both write logs.
+    pub fn mark_salvage_checked(
+        &self,
+        doc_id: &str,
+        bytes: &[u8],
+        epoch: u32,
+    ) -> Result<(), StoreError> {
+        store_blocking(|| {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
+            self.conn().execute(
+                "INSERT OR IGNORE INTO salvage_checked (doc_id)
+                 SELECT doc_id FROM snapshots WHERE doc_id = ?1 AND bytes = ?2
+                 AND COALESCE(epoch, 0) = ?3
+                 AND NOT EXISTS (SELECT 1 FROM chat_outbox WHERE doc_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM snapshot_deltas WHERE doc_id = ?1)",
+                params![doc_id, bytes, epoch],
+            )?;
+            Ok(())
+        })
     }
 
     /// Whether a snapshot row exists for `doc_id` — presence only, no blob read.
@@ -491,7 +998,7 @@ impl DocsStore {
 
     fn has_snapshot_blocking(&self, doc_id: &str) -> Result<bool, StoreError> {
         let hit = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM snapshots WHERE doc_id = ?1",
                 params![doc_id],
@@ -508,7 +1015,7 @@ impl DocsStore {
     }
 
     fn processed_commands_blocking(&self) -> Result<Vec<(String, i64)>, StoreError> {
-        let conn = self.conn();
+        let conn = self.reader();
         let mut stmt = conn.prepare("SELECT command_id, processed_at FROM processed_commands")?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -529,6 +1036,7 @@ impl DocsStore {
         let mut inserted = 0;
         let conn = self.conn();
         for (command_id, processed_at) in rows {
+            zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
             inserted += conn.execute(
                 "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
                 params![command_id, processed_at],
@@ -544,7 +1052,7 @@ impl DocsStore {
 
     fn is_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
         let hit = self
-            .conn()
+            .reader()
             .query_row(
                 "SELECT 1 FROM processed_commands WHERE command_id = ?1",
                 params![command_id],
@@ -562,6 +1070,7 @@ impl DocsStore {
     }
 
     fn mark_processed_blocking(&self, command_id: &str) -> Result<bool, StoreError> {
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         let changed = self.conn().execute(
             "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?1, ?2)",
             params![command_id, now_ms()],
@@ -618,6 +1127,100 @@ impl DocsStore {
         // connection itself is still usable.
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Read connection. Mutations and maintenance (`reclaim_free_space`,
+    /// checkpoint) stay on [`Self::conn`].
+    pub(crate) fn reader(&self) -> MutexGuard<'_, Connection> {
+        self.reader.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+// Fixed FNV-1a checksum for the small JSON registry. Loro checksums cover
+// the update blob; this covers the other payload, including valid-but-torn JSON.
+fn root_registry_checksum(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+const ROOT_REGISTRY_V1: u8 = 1;
+
+fn decode_root_registry(payload: &[u8]) -> Result<Vec<loro::ContainerID>, StoreError> {
+    let bad = |what: &str| StoreError::Loro(format!("delta root registry: {what}"));
+    let (version, mut rest) = payload.split_first().ok_or_else(|| bad("empty"))?;
+    if *version != ROOT_REGISTRY_V1 {
+        return Err(bad("unknown version"));
+    }
+    let mut roots = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest
+            .split_at_checked(4)
+            .ok_or_else(|| bad("truncated length"))?;
+        let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        let (id, tail) = tail
+            .split_at_checked(len)
+            .ok_or_else(|| bad("truncated id"))?;
+        let id = loro::ContainerID::try_from_bytes(id).map_err(|e| bad(&e.to_string()))?;
+        if !id.is_root() {
+            return Err(bad("contains a nested container"));
+        }
+        roots.push(id);
+        rest = tail;
+    }
+    Ok(roots)
+}
+
+fn import_snapshot_delta(
+    doc: &loro::LoroDoc,
+    bytes: &[u8],
+    roots: &[u8],
+) -> Result<(), StoreError> {
+    let (checksum, payload) = roots
+        .split_at_checked(8)
+        .ok_or_else(|| StoreError::Loro("truncated delta root registry".into()))?;
+    if checksum != root_registry_checksum(payload).to_le_bytes() {
+        return Err(StoreError::Loro(
+            "delta root registry checksum mismatch".into(),
+        ));
+    }
+    let roots = decode_root_registry(payload)?;
+    loro::LoroDoc::decode_import_blob_meta(bytes, true)
+        .map_err(|e| StoreError::Loro(e.to_string()))?;
+    let status = doc
+        .import(bytes)
+        .map_err(|e| StoreError::Loro(e.to_string()))?;
+    if status.pending.is_some() {
+        return Err(StoreError::Loro(
+            "delta has missing causal dependencies".into(),
+        ));
+    }
+    for id in roots {
+        if doc.get_container(id).is_none() {
+            return Err(StoreError::Loro("invalid delta root container".into()));
+        }
+    }
+    Ok(())
+}
+
+/// `temp_store` and bounded page cache. Per connection; not a schema change.
+/// `synchronous` is left as the caller set it.
+fn tune_connection(conn: &Connection) -> Result<(), StoreError> {
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB)?;
+    // Mapped snapshot reads made the profile's entire database resident in
+    // addition to the heap cache, without a measured boot-time benefit.
+    conn.pragma_update(None, "mmap_size", 0)?;
+    Ok(())
+}
+
+fn open_reader(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    tune_connection(&conn)?;
+    conn.busy_timeout(STORE_BUSY_TIMEOUT)?;
+    Ok(conn)
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -638,6 +1241,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             continue;
         }
         let tx = conn.transaction()?;
+        zeron_counters::add(zeron_counters::C::SqliteWriteTxns, 1);
         tx.execute_batch(sql)?;
         tx.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
@@ -734,6 +1338,47 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn batched_outbox_delta_and_salvage_writes_are_counted() {
+        use zeron_counters::{C, get};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &base, 0, 2)
+            .unwrap();
+        let txns = get(C::SqliteWriteTxns);
+        store.mark_salvage_checked("chat", &base, 2).unwrap();
+        store
+            .enqueue_chat_updates(&[("chat", "b1", b"one"), ("chat", "b2", b"two")])
+            .unwrap();
+        let version = doc.oplog_vv();
+        doc.get_text("text").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&version)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        let rows = get(C::SnapshotDeltaRows);
+        let bytes = get(C::SnapshotDeltaBytes);
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert!(get(C::SqliteWriteTxns) >= txns + 3);
+        assert!(get(C::SnapshotDeltaRows) >= rows + 1);
+        assert!(get(C::SnapshotDeltaBytes) >= bytes + (delta.len() + roots.len()) as u64);
+    }
+
+    #[test]
+    fn autocommit_writes_increment_transaction_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let before = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        store.enqueue_chat_update("chat", "batch", b"data").unwrap();
+        store.acknowledge_chat_update("chat", "batch").unwrap();
+        let after = zeron_counters::snapshot()[zeron_counters::C::SqliteWriteTxns as usize].1;
+        assert!(after >= before + 2);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn contended_connection_does_not_starve_a_two_worker_runtime() {
         use std::sync::Arc;
@@ -775,6 +1420,707 @@ mod tests {
         a.await.unwrap();
         b.await.unwrap();
         holding.join().unwrap();
+    }
+
+    fn assert_same_doc(a: &loro::LoroDoc, b: &loro::LoroDoc) {
+        assert_eq!(a.oplog_vv(), b.oplog_vv());
+        assert_eq!(a.get_deep_value(), b.get_deep_value());
+    }
+
+    fn random_next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Doc state after each durable step of the current chain: `[0]` is the
+    /// base, `[i]` the base plus deltas `1..=i`.
+    struct ChainStep {
+        cursor: u64,
+        vv: loro::VersionVector,
+        value: loro::LoroValue,
+    }
+
+    fn chain_step(doc: &loro::LoroDoc, cursor: u64) -> ChainStep {
+        ChainStep {
+            cursor,
+            vv: doc.oplog_vv(),
+            value: doc.get_deep_value(),
+        }
+    }
+
+    fn assert_state_is(state: &ChatState, step: &ChainStep, context: &str) {
+        assert_eq!(state.doc.oplog_vv(), step.vv, "{context}");
+        assert_eq!(state.doc.get_deep_value(), step.value, "{context}");
+        assert_eq!(state.cursor, step.cursor, "{context}");
+    }
+
+    /// A compaction that dies at one of its three stages must leave the chain
+    /// exactly as it was: nothing deleted, nothing replaced.
+    fn crash_compaction(
+        store: &DocsStore,
+        path: &std::path::Path,
+        mode: u64,
+        snapshot: &[u8],
+        cursor: u64,
+    ) {
+        match mode % 3 {
+            // The delta delete fails.
+            0 | 1 => {
+                let (table, event) = if mode % 3 == 0 {
+                    ("snapshot_deltas", "DELETE")
+                } else {
+                    // The delta delete has already run when the base upsert fails.
+                    ("snapshots", "UPDATE")
+                };
+                store
+                    .conn()
+                    .execute_batch(&format!(
+                        "CREATE TRIGGER crash BEFORE {event} ON {table} BEGIN SELECT RAISE(ABORT,'crash'); END"
+                    ))
+                    .unwrap();
+                assert!(
+                    store
+                        .save_verified_snapshot_with_cursor("chat", snapshot, cursor, 2)
+                        .is_err()
+                );
+                store.conn().execute_batch("DROP TRIGGER crash").unwrap();
+            }
+            // Power loss after both statements, before COMMIT: another
+            // connection runs the whole compaction and is dropped.
+            _ => {
+                let conn = Connection::open(path).unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                conn.execute("DELETE FROM snapshot_deltas WHERE doc_id='chat'", [])
+                    .unwrap();
+                conn.execute(
+                    "UPDATE snapshots SET bytes=?1,cursor=?2 WHERE doc_id='chat'",
+                    params![snapshot, cursor as i64],
+                )
+                .unwrap();
+                drop(conn);
+            }
+        }
+    }
+
+    /// Damage delta `seq` (1-based) the way a torn write or bit rot would.
+    fn tear_row(store: &DocsStore, seq: usize, mode: u64) {
+        let conn = store.conn();
+        let sql = match mode % 7 {
+            0 => "UPDATE snapshot_deltas SET bytes=substr(bytes,1,length(bytes)-1) WHERE seq=?1",
+            1 => "UPDATE snapshot_deltas SET bytes=substr(bytes,1,length(bytes)/2) WHERE seq=?1",
+            2 => "UPDATE snapshot_deltas SET bytes=X'' WHERE seq=?1",
+            3 => {
+                // Flip a bit in the checksummed part of the Loro payload.
+                let mut bytes: Vec<u8> = conn
+                    .query_row(
+                        "SELECT bytes FROM snapshot_deltas WHERE seq=?1",
+                        [seq],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                // Bytes 4..16 of Loro's header are unused checksum padding
+                // (flipping them changes nothing); everything else is covered.
+                let target = (bytes.len() / 2).max(16);
+                bytes[target] ^= 0x10;
+                conn.execute(
+                    "UPDATE snapshot_deltas SET bytes=?2 WHERE seq=?1",
+                    params![seq, bytes],
+                )
+                .unwrap();
+                return;
+            }
+            4 => "UPDATE snapshot_deltas SET roots=substr(roots,1,length(roots)-1) WHERE seq=?1",
+            5 => "UPDATE snapshot_deltas SET roots=zeroblob(length(roots)) WHERE seq=?1",
+            _ => "DELETE FROM snapshot_deltas WHERE seq=?1",
+        };
+        conn.execute(sql, [seq]).unwrap();
+    }
+
+    #[test]
+    fn delta_log_seeded_crash_reopen_equals_full_snapshot() {
+        let seeds = std::env::var("PERF_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        let dir = tempfile::tempdir().unwrap();
+        let full_dir = tempfile::tempdir().unwrap();
+        let mut store = DocsStore::open(dir.path()).unwrap();
+        let full = DocsStore::open(full_dir.path()).unwrap();
+        let (mut crashes_in_compaction, mut torn_rows) = (0u64, 0u64);
+        for seed in 1..=seeds {
+            let mut rng = seed as u64;
+            let mut doc = loro::LoroDoc::new();
+            doc.set_peer_id(seed as u64).unwrap();
+            let peer = loro::LoroDoc::new();
+            peer.set_peer_id(seed as u64 + 100_000).unwrap();
+            let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+            store
+                .save_verified_snapshot_with_cursor("chat", &base, 0, 2)
+                .unwrap();
+            full.save_verified_snapshot_with_cursor("chat", &base, 0, 2)
+                .unwrap();
+            let mut saved_vv = doc.oplog_vv();
+            let mut cursor = 0;
+            let mut chain = vec![chain_step(&doc, 0)];
+            for op in 0..150 {
+                let n = random_next(&mut rng);
+                match n % 6 {
+                    0 => {
+                        doc.get_map("meta")
+                            .insert(&format!("k{}", n % 9), op as i64)
+                            .unwrap();
+                    }
+                    1 => {
+                        let text = doc.get_text("stream");
+                        text.insert(text.len_unicode(), "delta🦀").unwrap();
+                    }
+                    2 => {
+                        let text = doc.get_text("stream");
+                        if text.len_unicode() > 0 {
+                            text.delete(0, 1).unwrap();
+                        }
+                    }
+                    3 => {
+                        doc.get_map("meta").delete(&format!("k{}", n % 9)).unwrap();
+                    }
+                    4 => {
+                        let list = doc.get_list("items");
+                        list.push(op as i64).unwrap();
+                        if list.len() > 4 {
+                            list.delete(0, 1).unwrap();
+                        }
+                    }
+                    _ => {
+                        peer.get_map("remote")
+                            .insert(&format!("k{}", n % 7), op as i64)
+                            .unwrap();
+                        peer.commit();
+                        doc.import(&peer.export(loro::ExportMode::all_updates()).unwrap())
+                            .unwrap();
+                    }
+                }
+                doc.commit();
+                if n % 4 != 0 {
+                    cursor += 1;
+                    let delta = doc.export(loro::ExportMode::updates(&saved_vv)).unwrap();
+                    store
+                        .append_snapshot_delta(
+                            "chat",
+                            &delta,
+                            cursor,
+                            &DocsStore::snapshot_roots(&doc).unwrap(),
+                        )
+                        .unwrap();
+                    saved_vv = doc.oplog_vv();
+                    chain.push(chain_step(&doc, cursor));
+                    let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
+                    full.save_verified_snapshot_with_cursor("chat", &snapshot, cursor, 2)
+                        .unwrap();
+                    if n % 11 == 0 {
+                        // Every compaction first dies at a random stage; the
+                        // chain must survive it intact, then compact for real.
+                        if n % 2 == 0 {
+                            crash_compaction(
+                                &store,
+                                dir.path().join("docs.sqlite3").as_path(),
+                                n / 7,
+                                &snapshot,
+                                cursor,
+                            );
+                            crashes_in_compaction += 1;
+                            let state = store.load_chat_state("chat").unwrap().unwrap();
+                            assert_eq!(state.delta_count, chain.len() - 1, "seed={seed} op={op}");
+                            assert!(!state.needs_compaction);
+                            assert_state_is(
+                                &state,
+                                chain.last().unwrap(),
+                                &format!("seed={seed} op={op} compaction crash"),
+                            );
+                        }
+                        store
+                            .save_verified_snapshot_with_cursor("chat", &snapshot, cursor, 2)
+                            .unwrap();
+                        assert_eq!(
+                            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+                            0
+                        );
+                        chain = vec![chain_step(&doc, cursor)];
+                    }
+                }
+                // A crash discards edits since the last scheduled 1 s save.
+                // Both databases must restore the same VV as well as value.
+                if n % 5 == 0 || op == 149 {
+                    drop(store);
+                    // Some crashes also leave a torn/lost delta row behind.
+                    let deltas = chain.len() - 1;
+                    let torn = (deltas > 0 && n % 3 == 0).then(|| 1 + (n / 3) as usize % deltas);
+                    store = DocsStore::open(dir.path()).unwrap();
+                    if let Some(seq) = torn {
+                        torn_rows += 1;
+                        tear_row(&store, seq, n / 5);
+                    }
+                    let delta = store.load_chat_state("chat").unwrap().unwrap();
+                    if let Some(seq) = torn {
+                        // A deleted row leaves a gap: only the rows after it are
+                        // hidden, and none if it was the last (just a shorter
+                        // chain). Any other damage also hides the row itself.
+                        let usable = seq - 1;
+                        let hidden = if n / 5 % 7 == 6 {
+                            deltas - seq
+                        } else {
+                            deltas - usable
+                        };
+                        let context = format!(
+                            "seed={seed} op={op} torn seq={seq}/{deltas} mode={}",
+                            n / 5 % 7
+                        );
+                        assert_eq!(delta.delta_count, usable, "{context}");
+                        assert_eq!(delta.ignored_deltas, hidden, "{context}");
+                        assert_eq!(delta.needs_compaction, hidden > 0, "{context}");
+                        assert_state_is(&delta, &chain[usable], &context);
+                        // Repair as the engine does: keep the damaged rows,
+                        // then replace the chain with the usable prefix.
+                        if delta.needs_compaction {
+                            let kept = store.quarantine_delta_suffix("chat", usable).unwrap();
+                            assert_eq!(kept, hidden, "{context}");
+                        }
+                        let snapshot = delta.doc.export(loro::ExportMode::Snapshot).unwrap();
+                        store
+                            .save_verified_snapshot_with_cursor("chat", &snapshot, delta.cursor, 2)
+                            .unwrap();
+                        full.save_verified_snapshot_with_cursor("chat", &snapshot, delta.cursor, 2)
+                            .unwrap();
+                        cursor = delta.cursor;
+                        let again = store.load_chat_state("chat").unwrap().unwrap();
+                        assert_eq!(
+                            (again.delta_count, again.ignored_deltas),
+                            (0, 0),
+                            "{context}"
+                        );
+                        assert_state_is(&again, &chain[usable], &context);
+                        doc = again.doc;
+                        chain = vec![chain_step(&doc, cursor)];
+                    } else {
+                        let reference = full.load_chat_state("chat").unwrap().unwrap();
+                        assert_same_doc(&delta.doc, &reference.doc);
+                        assert_eq!(delta.cursor, reference.cursor, "seed={seed} op={op}");
+                        assert!(delta.verified);
+                        assert!(!delta.needs_compaction);
+                        doc = delta.doc;
+                    }
+                    doc.set_peer_id(seed as u64).unwrap();
+                    saved_vv = doc.oplog_vv();
+                }
+            }
+        }
+        // The injected faults actually ran (a refactor must not silence them).
+        if seeds >= 50 {
+            assert!(crashes_in_compaction > 100, "{crashes_in_compaction}");
+            assert!(torn_rows > 100, "{torn_rows}");
+        }
+    }
+
+    #[test]
+    fn root_registry_encoding_is_pinned_and_rejects_foreign_ids() {
+        let doc = loro::LoroDoc::new();
+        doc.get_text("empty");
+        doc.get_map("meta").insert("k", 1).unwrap();
+        doc.commit();
+        let bytes = DocsStore::snapshot_roots(&doc).unwrap();
+        let (checksum, payload) = bytes.split_at(8);
+        assert_eq!(checksum, root_registry_checksum(payload).to_le_bytes());
+        // Loro's binary ID layout, not serde: tag byte then LEB128-length name.
+        let empty = loro::ContainerID::new_root("empty", loro::ContainerType::Text);
+        let mut expected = (empty.to_bytes().len() as u32).to_le_bytes().to_vec();
+        expected.extend(empty.to_bytes());
+        assert!(payload.windows(expected.len()).any(|w| w == expected));
+        let mut roots = decode_root_registry(payload).unwrap();
+        roots.sort_by_key(|id| id.to_string());
+        assert_eq!(roots.len(), 2);
+        // A nested ID, a future version and a short length are all rejected.
+        let nested = loro::ContainerID::new_normal(loro::ID::new(1, 0), loro::ContainerType::Map);
+        let mut foreign = vec![ROOT_REGISTRY_V1];
+        foreign.extend((nested.to_bytes().len() as u32).to_le_bytes());
+        foreign.extend(nested.to_bytes());
+        assert!(decode_root_registry(&foreign).is_err());
+        assert!(decode_root_registry(&[ROOT_REGISTRY_V1 + 1]).is_err());
+        assert!(decode_root_registry(&[ROOT_REGISTRY_V1, 9, 0]).is_err());
+        assert!(decode_root_registry(&[]).is_err());
+    }
+
+    #[test]
+    fn delta_log_preserves_unversioned_empty_roots_and_rejects_torn_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("empty");
+        assert_eq!(doc.oplog_vv(), vv, "accessing a root records no operation");
+        store
+            .append_snapshot_delta(
+                "chat",
+                &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                1,
+                &DocsStore::snapshot_roots(&doc).unwrap(),
+            )
+            .unwrap();
+        let full = loro::LoroDoc::new();
+        full.import(&doc.export(loro::ExportMode::Snapshot).unwrap())
+            .unwrap();
+        assert_same_doc(&store.load_chat_state("chat").unwrap().unwrap().doc, &full);
+        store
+            .conn()
+            .execute(
+                "UPDATE snapshot_deltas SET roots=substr(roots,1,length(roots)-1)",
+                [],
+            )
+            .unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.cursor, 0);
+        assert_eq!(state.delta_count, 0);
+        assert!(state.needs_compaction);
+        assert_same_doc(&state.doc, &loro::LoroDoc::new());
+    }
+
+    #[test]
+    fn delta_log_torn_row_and_dependent_suffix_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let mut vv = doc.oplog_vv();
+        for cursor in 1..=3 {
+            doc.get_text("text").insert(0, "abc").unwrap();
+            doc.commit();
+            store
+                .append_snapshot_delta(
+                    "chat",
+                    &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                    cursor,
+                    &DocsStore::snapshot_roots(&doc).unwrap(),
+                )
+                .unwrap();
+            vv = doc.oplog_vv();
+        }
+        let first = store
+            .conn()
+            .query_row("SELECT bytes FROM snapshot_deltas WHERE seq=1", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .unwrap();
+        let expected = loro::LoroDoc::new();
+        expected.import(&first).unwrap();
+        // Simulate a copied/truncated payload with a committed cursor. A
+        // real interrupted SQLite INSERT instead rolls back the entire row.
+        store
+            .conn()
+            .execute(
+                "UPDATE snapshot_deltas SET bytes=substr(bytes,1,length(bytes)-7) WHERE seq=2",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_same_doc(&state.doc, &expected);
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.delta_count, 1);
+        assert!(state.needs_compaction);
+        assert_eq!(state.ignored_deltas, 2, "the torn row and its dependent");
+        // The repair keeps the rows it is about to delete, and a chat delete
+        // removes them with everything else.
+        let txns = zeron_counters::get(zeron_counters::C::SqliteWriteTxns);
+        assert_eq!(store.quarantine_delta_suffix("chat", 1).unwrap(), 2);
+        assert!(zeron_counters::get(zeron_counters::C::SqliteWriteTxns) >= txns + 1);
+        let quarantined = |store: &DocsStore| -> i64 {
+            store
+                .conn()
+                .query_row(
+                    "SELECT count(*) FROM snapshot_delta_quarantine WHERE doc_id='chat'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(quarantined(&store), 2);
+        let snapshot = state.doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &snapshot, state.cursor, 2)
+            .unwrap();
+        assert_eq!(quarantined(&store), 2, "survives the repair save");
+        let again = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!((again.delta_count, again.ignored_deltas), (0, 0));
+        assert!(!again.needs_compaction);
+        store.delete_snapshot("chat").unwrap();
+        assert_eq!(quarantined(&store), 0);
+    }
+
+    #[test]
+    fn delta_log_sequence_gap_ends_the_usable_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let mut vv = doc.oplog_vv();
+        let mut after_first = None;
+        for cursor in 1..=4 {
+            doc.get_text("text").insert(0, "abc").unwrap();
+            doc.commit();
+            store
+                .append_snapshot_delta(
+                    "chat",
+                    &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                    cursor,
+                    &DocsStore::snapshot_roots(&doc).unwrap(),
+                )
+                .unwrap();
+            vv = doc.oplog_vv();
+            if cursor == 1 {
+                after_first = Some(doc.get_deep_value());
+            }
+        }
+        // A lost middle row: rows 3 and 4 are intact but unreachable.
+        store
+            .conn()
+            .execute("DELETE FROM snapshot_deltas WHERE seq=2", [])
+            .unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(
+            (state.delta_count, state.ignored_deltas, state.cursor),
+            (1, 2, 1)
+        );
+        assert!(state.needs_compaction);
+        assert_eq!(Some(state.doc.get_deep_value()), after_first);
+    }
+
+    #[test]
+    fn delta_log_compaction_and_insert_rollback_preserve_prefix_and_outbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                7,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("text").insert(0, "durable").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        store
+            .append_snapshot_delta("chat", &delta, 8, &DocsStore::snapshot_roots(&doc).unwrap())
+            .unwrap();
+        store
+            .enqueue_chat_update("chat", "unacked", &delta)
+            .unwrap();
+        // A crash before COMMIT publishes neither content nor its cursor.
+        {
+            let mut conn = store.conn();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO snapshot_deltas VALUES('chat',2,?1,999,X'5b5d')",
+                [&delta],
+            )
+            .unwrap();
+        }
+        // Failure during DELETE rolls back the base upsert AND trigger deletes.
+        store.conn().execute_batch("CREATE TRIGGER fail_compact BEFORE DELETE ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'crash'); END;").unwrap();
+        let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
+        assert!(
+            store
+                .save_verified_snapshot_with_cursor("chat", &snapshot, 8, 2)
+                .is_err()
+        );
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.delta_count, 1);
+        assert_eq!(state.cursor, 8);
+        assert_same_doc(&state.doc, &doc);
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER fail_compact")
+            .unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &snapshot, 8, 2)
+            .unwrap();
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.delta_count, 0);
+        assert_eq!(state.cursor, 8);
+        assert_same_doc(&state.doc, &doc);
+        assert_eq!(store.pending_chat_updates("chat").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delta_log_invalidates_salvage_receipts_and_prevents_stale_certification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        doc.get_text("text").insert(0, "healthy base").unwrap();
+        doc.commit();
+        let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &base, 1, 2)
+            .unwrap();
+        store.mark_salvage_checked("chat", &base, 2).unwrap();
+        assert!(store.salvage_checked("chat").unwrap());
+        let vv = doc.oplog_vv();
+        doc.get_text("text").delete(0, 12).unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        // Failed appends cannot invalidate the receipt of unchanged content.
+        store.conn().execute_batch("CREATE TRIGGER fail_delta BEFORE INSERT ON snapshot_deltas BEGIN SELECT RAISE(ABORT,'crash'); END;").unwrap();
+        assert!(
+            store
+                .append_snapshot_delta("chat", &delta, 2, &DocsStore::snapshot_roots(&doc).unwrap())
+                .is_err()
+        );
+        assert!(store.salvage_checked("chat").unwrap());
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER fail_delta")
+            .unwrap();
+        store
+            .append_snapshot_delta("chat", &delta, 2, &DocsStore::snapshot_roots(&doc).unwrap())
+            .unwrap();
+        assert!(!store.salvage_checked("chat").unwrap());
+        // A scan of the old healthy base raced the append that emptied it.
+        store.mark_salvage_checked("chat", &base, 2).unwrap();
+        assert!(!store.salvage_checked("chat").unwrap());
+        for sql in [
+            "UPDATE snapshot_deltas SET cursor=3 WHERE doc_id='chat'",
+            "DELETE FROM snapshot_deltas WHERE doc_id='chat'",
+        ] {
+            store
+                .conn()
+                .execute("INSERT INTO salvage_checked VALUES('chat')", [])
+                .unwrap(); // an old binary may certify only the legacy base
+            assert!(!store.salvage_checked("chat").unwrap());
+            store.conn().execute(sql, []).unwrap();
+            assert!(!store.salvage_checked("chat").unwrap());
+        }
+        // Compaction's replacement base may be certified once both logs clear.
+        let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("chat", &snapshot, 3, 2)
+            .unwrap();
+        store.mark_salvage_checked("chat", &snapshot, 2).unwrap();
+        assert!(store.salvage_checked("chat").unwrap());
+    }
+
+    #[test]
+    fn delta_log_legacy_migration_and_old_engine_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docs.sqlite3");
+        let doc = loro::LoroDoc::new();
+        doc.get_map("legacy").insert("key", 1).unwrap();
+        doc.commit();
+        let base = doc.export(loro::ExportMode::Snapshot).unwrap();
+        // Build the exact pre-delta schema, then apply only the new migrations.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at INTEGER NOT NULL) STRICT").unwrap();
+            for (index, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 3).enumerate() {
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_migrations VALUES(?1,0)", [index + 1])
+                    .unwrap();
+            }
+            conn.execute("INSERT INTO snapshots(doc_id,bytes,saved_at,cursor,epoch) VALUES('chat',?1,0,10,2)", [&base]).unwrap();
+        }
+        let store = DocsStore::open(dir.path()).unwrap();
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_same_doc(&state.doc, &doc);
+        assert!(!state.verified);
+        let vv = doc.oplog_vv();
+        doc.get_map("new").insert("delta", true).unwrap();
+        doc.commit();
+        store
+            .append_snapshot_delta(
+                "chat",
+                &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                11,
+                &DocsStore::snapshot_roots(&doc).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_snapshot_with_cursor("chat").unwrap().unwrap(),
+            (base.clone(), 10, 2)
+        );
+        // Execute the old binary's actual SQL. It must not be able to replace
+        // or delete a base while delta-only state exists: that state is the
+        // only copy of the newest edits, and the old engine cannot read it.
+        let old = Connection::open(path).unwrap();
+        for sql in [
+            "UPDATE snapshots SET bytes=x'00',cursor=12 WHERE doc_id='chat'",
+            "INSERT INTO snapshots (doc_id, bytes, saved_at, cursor, epoch, cursor_verified) VALUES ('chat', x'00', 1, 12, 2, 1)
+             ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at,
+                 cursor = excluded.cursor, epoch = excluded.epoch, cursor_verified = 1",
+            "DELETE FROM snapshots WHERE doc_id='chat'",
+        ] {
+            let error = old.execute(sql, []).unwrap_err().to_string();
+            assert!(error.contains("unmerged delta log"), "{error}");
+        }
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.delta_count, 1);
+        assert_eq!(state.cursor, 11);
+        assert_same_doc(&state.doc, &doc);
+        // Once the delta engine compacts, the old binary may save again.
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                11,
+                2,
+            )
+            .unwrap();
+        old.execute("UPDATE snapshots SET cursor=12 WHERE doc_id='chat'", [])
+            .unwrap();
+        assert_eq!(store.load_chat_state("chat").unwrap().unwrap().cursor, 12);
+        // Deleting a chat removes its deltas before the guarded base row.
+        let vv = doc.oplog_vv();
+        doc.get_map("more").insert("delta", 2).unwrap();
+        doc.commit();
+        store
+            .append_snapshot_delta(
+                "chat",
+                &doc.export(loro::ExportMode::updates(&vv)).unwrap(),
+                13,
+                &DocsStore::snapshot_roots(&doc).unwrap(),
+            )
+            .unwrap();
+        store.delete_snapshot("chat").unwrap();
+        assert!(store.load_chat_state("chat").unwrap().is_none());
+        let rows: i64 = old
+            .query_row("SELECT count(*) FROM snapshot_deltas", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]
@@ -888,6 +2234,345 @@ mod tests {
         );
         assert!(store.is_processed("cmd-1").unwrap());
         assert!(!store.mark_processed("cmd-1").unwrap());
+    }
+
+    fn pragma_i64(conn: &rusqlite::Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn writer_and_reader_bound_cache_without_mmap_or_synchronous_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let writer = store.conn();
+        let reader = store.reader();
+        for conn in [&*writer, &*reader] {
+            assert_eq!(pragma_i64(conn, "temp_store"), 2, "MEMORY");
+            assert_eq!(pragma_i64(conn, "cache_size"), CACHE_SIZE_KIB);
+            assert_eq!(pragma_i64(conn, "mmap_size"), 0, "no mapped database pages");
+        }
+        assert_eq!(pragma_i64(&writer, "synchronous"), 1, "NORMAL stays");
+        let journal: String = writer
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert!(journal.eq_ignore_ascii_case("wal"));
+        assert!(reader.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+        assert!(!writer.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+    }
+
+    #[test]
+    fn batched_outbox_insert_is_one_ordered_idempotent_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let before = store.outbox_write_transactions();
+        store
+            .enqueue_chat_updates(&[
+                ("a", "a1", b"1"),
+                ("b", "b1", b"2"),
+                ("a", "a2", b"3"),
+                ("a", "a1", b"1"),
+            ])
+            .unwrap();
+        assert_eq!(store.outbox_write_transactions() - before, 1);
+        let ids = |doc| -> Vec<String> {
+            store
+                .pending_chat_updates(doc)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        assert_eq!(ids("a"), vec!["a1", "a2"], "slice order, duplicate ignored");
+        assert_eq!(ids("b"), vec!["b1"]);
+        store.enqueue_chat_updates(&[]).unwrap();
+        assert_eq!(store.outbox_write_transactions() - before, 1);
+    }
+
+    #[test]
+    fn a_failed_batch_leaves_no_rows_and_no_failed_publication_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.initialize_chat_outbox("good", &[]).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_one BEFORE INSERT ON chat_outbox WHEN NEW.batch_id='poison' BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+        assert!(
+            store
+                .enqueue_chat_updates(&[("good", "g1", b"1"), ("bad", "poison", b"2")])
+                .is_err()
+        );
+        assert!(store.pending_chat_updates("good").unwrap().is_empty());
+        // Not marked failed: a later snapshot of "good" keeps its marker.
+        store.save_snapshot("good", b"snapshot").unwrap();
+        assert!(store.chat_outbox_initialized("good").unwrap());
+        // Row by row, only the poisoned doc is marked.
+        store.enqueue_chat_update("good", "g1", b"1").unwrap();
+        assert!(store.enqueue_chat_update("bad", "poison", b"2").is_err());
+        assert_eq!(store.pending_chat_updates("good").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn later_rows_cannot_overtake_a_failed_row_even_across_retry_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER poison BEFORE INSERT ON chat_outbox WHEN NEW.batch_id='first' BEGIN SELECT RAISE(FAIL,'injected'); END;").unwrap();
+        assert!(store.enqueue_chat_update("a", "first", b"1").is_err());
+        assert!(
+            store
+                .enqueue_chat_updates(&[("a", "second", b"2")])
+                .is_err()
+        );
+        assert!(store.enqueue_chat_update("a", "second", b"2").is_err());
+        store.enqueue_chat_update("b", "other", b"3").unwrap();
+        assert!(store.pending_chat_updates("a").unwrap().is_empty());
+        store.conn().execute_batch("DROP TRIGGER poison;").unwrap();
+        // A client may retry the later row before the supervisor retries first.
+        store.enqueue_chat_update("a", "second", b"2").unwrap();
+        let ids: Vec<_> = store
+            .pending_chat_updates("a")
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["first", "second"]);
+        store.enqueue_chat_update("a", "first", b"1").unwrap();
+        assert_eq!(store.pending_chat_updates("a").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delta_barriers_receive_the_incremental_blob_and_can_reject_the_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("body").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        let expected = delta.clone();
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move |chat, write| {
+            assert_eq!(chat, "chat");
+            let SnapshotWrite::Delta(bytes) = write else {
+                panic!("expected delta");
+            };
+            assert_eq!(bytes, expected);
+            Err(StoreError::Io(std::io::Error::other(
+                "injected barrier failure",
+            )))
+        });
+        store.add_snapshot_barrier(&barrier);
+        assert!(
+            store
+                .append_snapshot_delta("chat", &delta, 1, &roots)
+                .is_err()
+        );
+        let state = store.load_chat_state("chat").unwrap().unwrap();
+        assert_eq!(state.delta_count, 0);
+        assert_eq!(state.cursor, 0);
+        drop(barrier);
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            1
+        );
+    }
+
+    #[test]
+    fn a_delta_cannot_become_durable_while_its_outbox_prefix_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let doc = loro::LoroDoc::new();
+        store
+            .save_verified_snapshot_with_cursor(
+                "chat",
+                &doc.export(loro::ExportMode::Snapshot).unwrap(),
+                0,
+                2,
+            )
+            .unwrap();
+        let vv = doc.oplog_vv();
+        doc.get_text("body").insert(0, "delta").unwrap();
+        doc.commit();
+        let delta = doc.export(loro::ExportMode::updates(&vv)).unwrap();
+        let roots = DocsStore::snapshot_roots(&doc).unwrap();
+        store.conn().execute_batch("CREATE TRIGGER fail_outbox BEFORE INSERT ON chat_outbox BEGIN SELECT RAISE(FAIL,'injected'); END;").unwrap();
+        assert!(store.enqueue_chat_update("chat", "batch", &delta).is_err());
+        assert!(
+            store
+                .append_snapshot_delta("chat", &delta, 1, &roots)
+                .unwrap_err()
+                .to_string()
+                .contains("outbox prefix is not durable")
+        );
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            0
+        );
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER fail_outbox;")
+            .unwrap();
+        store.enqueue_chat_update("chat", "batch", &delta).unwrap();
+        store
+            .append_snapshot_delta("chat", &delta, 1, &roots)
+            .unwrap();
+        assert_eq!(
+            store.load_chat_state("chat").unwrap().unwrap().delta_count,
+            1
+        );
+    }
+
+    #[test]
+    fn snapshot_barriers_run_before_each_snapshot_write_and_unregister_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
+        let barrier: Arc<SnapshotBarrier> = Arc::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        store.add_snapshot_barrier(&barrier);
+        store.save_snapshot("a", b"1").unwrap();
+        store.save_snapshot_with_cursor("a", b"2", 1, 2).unwrap();
+        store
+            .save_verified_snapshot_with_cursor("a", b"3", 1, 2)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        drop(barrier);
+        store.save_snapshot("a", b"4").unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn reader_sees_committed_writes_while_a_writer_transaction_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(DocsStore::open(dir.path()).unwrap());
+        store
+            .save_snapshot_with_cursor("chat", b"committed", 7, 2)
+            .unwrap();
+        store.mark_processed("cmd-1").unwrap();
+        store.initialize_chat_outbox("chat", &[]).unwrap();
+        store
+            .enqueue_chat_update("chat", "batch", b"bytes")
+            .unwrap();
+        store.reject_chat_update("chat", "batch").unwrap();
+        store.schedule_sync_job("chat", "wake").unwrap();
+
+        let holder = store.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel::<()>();
+        let holding = std::thread::spawn(move || {
+            let mut conn = holder.conn();
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO snapshots (doc_id, bytes, saved_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(doc_id) DO UPDATE SET bytes = excluded.bytes, saved_at = excluded.saved_at",
+                params!["chat", vec![9u8; 20 * 1024 * 1024], 1i64],
+            )
+            .unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            tx.commit().unwrap();
+            commit_tx.send(()).unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let reader_store = store.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let snapshot = reader_store.load_snapshot("chat").unwrap();
+            let with_cursor = reader_store.load_snapshot_with_cursor("chat").unwrap();
+            let cursor = reader_store.snapshot_cursor("chat").unwrap();
+            let epoch = reader_store.snapshot_epoch("chat").unwrap();
+            let verified = reader_store.snapshot_cursor_verified("chat").unwrap();
+            let has = reader_store.has_snapshot("chat").unwrap();
+            let processed = reader_store.is_processed("cmd-1").unwrap();
+            let missing = reader_store.is_processed("other").unwrap();
+            let ledger = reader_store.processed_commands().unwrap();
+            let outbox = reader_store.chat_outbox_initialized("chat").unwrap();
+            let pending = reader_store.pending_chat_updates("chat").unwrap();
+            let has_pending = reader_store.has_pending_chat_updates("chat").unwrap();
+            let rejected = reader_store.rejected_chat_updates("chat").unwrap();
+            let jobs = reader_store.pending_sync_jobs("wake", "", 10).unwrap();
+            done_tx
+                .send((
+                    started.elapsed(),
+                    snapshot,
+                    with_cursor,
+                    cursor,
+                    epoch,
+                    verified,
+                    has,
+                    processed,
+                    missing,
+                    ledger,
+                    outbox,
+                    pending,
+                    has_pending,
+                    rejected,
+                    jobs,
+                ))
+                .unwrap();
+        });
+        let read = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reads blocked on the writer transaction");
+        release_tx.send(()).unwrap();
+        holding.join().unwrap();
+        reading.join().unwrap();
+        commit_rx.recv().unwrap();
+
+        let (
+            elapsed,
+            snapshot,
+            with_cursor,
+            cursor,
+            epoch,
+            verified,
+            has,
+            processed,
+            missing,
+            ledger,
+            outbox,
+            pending,
+            has_pending,
+            rejected,
+            jobs,
+        ) = read;
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "read took {elapsed:?} behind a 20 MB open upsert"
+        );
+        assert_eq!(snapshot.as_deref(), Some(&b"committed"[..]));
+        assert_eq!(with_cursor, Some((b"committed".to_vec(), 7, 2)));
+        assert_eq!(cursor, 7);
+        assert_eq!(epoch, 2);
+        assert!(!verified);
+        assert!(has);
+        assert!(processed);
+        assert!(!missing);
+        assert!(ledger.iter().any(|(id, _)| id == "cmd-1"));
+        assert!(outbox);
+        assert_eq!(pending, vec![("batch".into(), b"bytes".to_vec())]);
+        assert!(has_pending);
+        assert_eq!(rejected, pending);
+        assert_eq!(jobs, vec!["chat".to_string()]);
+
+        let committed = store.load_snapshot("chat").unwrap().unwrap();
+        assert_eq!(committed.len(), 20 * 1024 * 1024);
+        assert!(committed.iter().all(|byte| *byte == 9));
     }
 }
 

@@ -401,9 +401,17 @@ impl LocalImporter {
     ) -> Result<bool, EngineError> {
         // Doc bytes may be absent (a chat row created but never opened) — the
         // row alone is still worth carrying; a doc materializes on first open.
-        if let Some(bytes) = source_store.load_snapshot(&chat.id)?
+        if let Some(state) = source_store.load_chat_state(&chat.id)?
             && !self.inner.target_store.has_snapshot(&chat.id)?
         {
+            let bytes = if state.delta_count == 0 {
+                state.base_snapshot
+            } else {
+                state
+                    .doc
+                    .export(loro::ExportMode::Snapshot)
+                    .map_err(|e| EngineError::Other(e.to_string()))?
+            };
             self.inner.target_store.save_snapshot_with_cursor(
                 &chat.id,
                 &bytes,

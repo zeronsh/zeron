@@ -9,13 +9,11 @@ use zeron_doc::SessionDoc;
 use zeron_sync::DocsStore;
 
 fn load_doc(store: &DocsStore, doc_id: &str) -> LoroDoc {
-    let bytes = store
-        .load_snapshot(doc_id)
+    let state = store
+        .load_chat_state(doc_id)
         .expect("load snapshot")
         .unwrap_or_else(|| panic!("no snapshot for doc {doc_id}"));
-    let doc = LoroDoc::new();
-    doc.import(&bytes).expect("import snapshot");
-    doc
+    state.doc
 }
 
 fn main() {

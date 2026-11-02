@@ -39,6 +39,39 @@ enum Verdict {
 }
 const NOT_HTTP_INITIAL_BACKOFF: Duration = Duration::from_secs(4);
 const NOT_HTTP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const SCAN_PERIOD_WATCHED: Duration = Duration::from_secs(2);
+const SCAN_PERIOD_IDLE: Duration = Duration::from_secs(10);
+
+const NEW_LISTENER_WINDOW: Duration = Duration::from_secs(30);
+
+fn scan_period(watched: bool, recent_listener: bool) -> Duration {
+    if watched || recent_listener {
+        SCAN_PERIOD_WATCHED
+    } else {
+        SCAN_PERIOD_IDLE
+    }
+}
+
+#[derive(Default)]
+struct ScanCadence {
+    previous: HashSet<(u32, u64, SocketAddr)>,
+    newest: Option<Instant>,
+}
+impl ScanCadence {
+    fn observe(&mut self, listeners: HashSet<(u32, u64, SocketAddr)>, now: Instant) {
+        if listeners.iter().any(|key| !self.previous.contains(key)) {
+            self.newest = Some(now);
+        }
+        self.previous = listeners;
+    }
+    fn period(&self, watched: bool, now: Instant) -> Duration {
+        scan_period(
+            watched,
+            self.newest
+                .is_some_and(|time| now.saturating_duration_since(time) < NEW_LISTENER_WINDOW),
+        )
+    }
+}
 
 /// (servers already confirmed HTTP, listeners to probe this cycle)
 type Planned<T> = (Vec<(T, discovery::Listener)>, Vec<(T, discovery::Listener)>);
@@ -130,20 +163,32 @@ pub type Projects = Arc<dyn Fn() -> Scope + Send + Sync>;
 fn candidates(
     scope: Scope,
     origins: &mut discovery::Origins,
-) -> Option<Vec<(PathBuf, discovery::Listener)>> {
+) -> Option<(
+    Vec<(PathBuf, discovery::Listener)>,
+    bool,
+    discovery::SocketEvidence,
+)> {
     let Scope {
         chats,
         terminals,
         reserved_ports,
     } = scope;
     let mut canonical = HashMap::new();
+    let mut scope_complete = true;
     let chats: HashMap<String, PathBuf> = chats
         .into_iter()
         .filter_map(|(chat, cwd)| {
-            let cwd = canonical
+            let cwd = match canonical
                 .entry(cwd.clone())
                 .or_insert_with(|| cwd.canonicalize().ok())
-                .clone()?;
+                .clone()
+            {
+                Some(cwd) => cwd,
+                None => {
+                    scope_complete = false;
+                    return None;
+                }
+            };
             Some((chat, cwd))
         })
         .collect();
@@ -154,11 +199,15 @@ fn candidates(
         .into_iter()
         .collect();
     if roots.is_empty() {
-        return Some(Vec::new());
+        return Some((Vec::new(), false, discovery::SocketEvidence::default()));
     }
     roots.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    let listeners = discovery::listeners(origins)?;
-    Some(
+    let (listeners, complete, unreadable, evidence) =
+        discovery::listeners_with_completeness(origins)?;
+    if unreadable > 0 {
+        tracing::debug!(unreadable, "preview discovery skipped unreadable processes");
+    }
+    Some((
         listeners
             .into_iter()
             .filter(|l| {
@@ -186,7 +235,9 @@ fn candidates(
                 Some((root, listener))
             })
             .collect(),
-    )
+        complete && scope_complete,
+        evidence,
+    ))
 }
 impl PreviewService {
     pub fn new(file: PathBuf, device_id: String, device_name: String) -> anyhow::Result<Self> {
@@ -346,6 +397,7 @@ impl PreviewService {
         let scanner = tokio::spawn(async move {
             let mut memory = ProbeMemory::default();
             let mut origins = discovery::Origins::default();
+            let mut cadence = ScanCadence::default();
             loop {
                 let memory = &mut memory;
                 let origins = &mut origins;
@@ -358,25 +410,33 @@ impl PreviewService {
                     })
                     .await;
                     let candidates = match scanned {
-                        Ok((Some(candidates), kept)) => {
+                        Ok((Some((candidates, complete, evidence)), kept)) => {
                             *origins = kept;
-                            candidates
+                            (candidates, complete, evidence)
                         }
                         // A failed enumeration says nothing about what runs:
                         // keep the services already listed.
                         Ok((None, kept)) => {
                             *origins = kept;
+                            catalog.scan_incomplete();
                             tracing::debug!(
                                 "preview scan could not read processes; keeping the last result"
                             );
                             return;
                         }
                         Err(error) => {
+                            catalog.scan_incomplete();
                             tracing::warn!(%error, "preview scan failed; keeping the last result");
                             return;
                         }
                     };
-                    let (mut servers, probe) = memory.plan(candidates, Instant::now());
+                    let (candidates, mut complete, evidence) = candidates;
+                    let candidate_count = candidates.len();
+                    let now = Instant::now();
+                    let listeners: HashSet<_> =
+                        candidates.iter().map(|(_, l)| probe_key(l)).collect();
+                    cadence.observe(listeners, now);
+                    let (mut servers, probe) = memory.plan(candidates, now);
                     let probed: Vec<_> = stream::iter(probe)
                         .map(|(root, listener)| async move {
                             let http = discovery::is_http(listener.address).await;
@@ -392,12 +452,16 @@ impl PreviewService {
                             servers.push((root, listener));
                         }
                     }
-                    if let Err(error) = catalog.replace_local(servers) {
+                    complete &= servers.len() == candidate_count;
+                    if let Err(error) =
+                        catalog.replace_local_scanned_with_sockets(servers, complete, &evidence)
+                    {
                         tracing::warn!(%error, "could not update preview services");
                     }
                 };
                 tokio::select! { _ = stop.cancelled() => break, _ = scan => {} }
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
+                let period = cadence.period(catalog.watched(), Instant::now());
+                tokio::select! { _ = stop.cancelled() => break, _ = catalog.scan_wake() => {}, _ = tokio::time::sleep(period) => {} }
             }
         });
         let mut tasks = self.0.tasks.lock().unwrap();
@@ -531,5 +595,63 @@ mod tests {
         }
         let (_, probe) = memory.plan(vec![((), listener(7, 8081))], now);
         assert_eq!(probe.len(), 1, "still retried once per max backoff");
+    }
+    #[test]
+    fn cadence_tracks_new_listeners_and_subscribers() {
+        let mut cadence = ScanCadence::default();
+        let t = Instant::now();
+        assert_eq!(cadence.period(false, t), SCAN_PERIOD_IDLE);
+        assert_eq!(cadence.period(true, t), SCAN_PERIOD_WATCHED);
+        let key = probe_key(&listener(7, 8081));
+        cadence.observe(HashSet::from([key]), t);
+        assert_eq!(
+            cadence.period(false, t + Duration::from_secs(29)),
+            SCAN_PERIOD_WATCHED
+        );
+        cadence.observe(HashSet::from([key]), t + Duration::from_secs(29));
+        assert_eq!(
+            cadence.period(false, t + Duration::from_secs(30)),
+            SCAN_PERIOD_IDLE
+        );
+        cadence.observe(
+            HashSet::from([key, probe_key(&listener(8, 8082))]),
+            t + Duration::from_secs(35),
+        );
+        assert_eq!(
+            cadence.period(false, t + Duration::from_secs(35)),
+            SCAN_PERIOD_WATCHED
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual cadence measurement"]
+    fn measure_scan_cadence() {
+        std::thread::scope(|scope| {
+            for watched in [false, true] {
+                scope.spawn(move || {
+                    let mut origins = discovery::Origins::default();
+                    let start = Instant::now();
+                    let mut count = 0;
+                    let mut complete = 0;
+                    let mut skipped = 0;
+                    let period = ScanCadence::default().period(watched, start);
+                    while count < if watched { 10 } else { 2 } {
+                        std::thread::sleep(period);
+                        let (_, scan_complete, unreadable, _) = discovery::listeners_with_completeness(&mut origins).expect("process scan");
+                        complete += usize::from(scan_complete);
+                        skipped += unreadable;
+                        count += 1;
+                    }
+                    let seconds = start.elapsed().as_secs_f64();
+                    eprintln!("watched={watched} scans={count} complete={complete} skipped_total={skipped} seconds={seconds:.3} scans_per_minute={:.2}", count as f64 * 60.0 / seconds);
+                });
+            }
+        });
+    }
+    #[test]
+    fn an_unwatched_catalog_scans_less_often() {
+        assert_eq!(scan_period(true, false), Duration::from_secs(2));
+        assert_eq!(scan_period(false, false), Duration::from_secs(10));
+        assert_eq!(scan_period(false, true), Duration::from_secs(2));
     }
 }

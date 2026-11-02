@@ -21,7 +21,9 @@ pub(crate) struct LossyLines<R> {
 impl<R: AsyncRead + Unpin> LossyLines<R> {
     pub(crate) fn new(reader: R) -> Self {
         Self {
-            reader: BufReader::new(reader),
+            // Bigger than a typical stream-json line, so a refill is not one
+            // read per line. The default is 8 KiB.
+            reader: BufReader::with_capacity(64 * 1024, reader),
             pending: Vec::new(),
         }
     }
@@ -71,6 +73,17 @@ mod tests {
         );
         assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("last"));
         assert_eq!(lines.next_line().await.unwrap(), None);
+        assert_eq!(lines.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn lines_larger_than_buffer_remain_complete() {
+        let long = "a".repeat(64 * 1024 + 17);
+        let input = format!("{long}\r\nnext\n{long}");
+        let mut lines = lossy_lines(input.as_bytes());
+        assert_eq!(lines.next_line().await.unwrap(), Some(long.clone()));
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("next"));
+        assert_eq!(lines.next_line().await.unwrap(), Some(long));
         assert_eq!(lines.next_line().await.unwrap(), None);
     }
 

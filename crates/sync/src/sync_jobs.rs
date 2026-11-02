@@ -105,7 +105,7 @@ impl DocsStore {
         limit: usize,
     ) -> Result<Vec<String>, StoreError> {
         store_blocking(|| {
-            let conn = self.conn();
+            let conn = self.reader();
             let mut q = conn.prepare("SELECT doc_id FROM chat_sync_jobs WHERE kind=?1 AND doc_id>?2 ORDER BY doc_id LIMIT ?3")?;
             Ok(
                 q.query_map(params![kind, after, limit.min(64) as i64], |r| r.get(0))?

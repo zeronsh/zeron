@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
-use super::{MAX_PATH_ARGUMENT_BYTES, capture_git, path_argument, path_batches};
+use super::{MAX_PATH_ARGUMENT_BYTES, capture_git, note_git_spawn, path_argument, path_batches};
 use crate::EngineError;
 use crate::repos::Repos;
 
@@ -383,6 +383,7 @@ async fn snapshot_git(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
+    note_git_spawn(Some(root));
     let mut child = cmd.spawn()?;
     if let Some(input) = stdin
         && let Some(mut pipe) = child.stdin.take()
@@ -668,6 +669,10 @@ mod tests {
         let root = tmp.join("repo");
         std::fs::create_dir_all(&root).expect("repo dir");
         git(&root, &["init", "-b", "main"]).await;
+        // Keep the fixture's commit from starting background maintenance that
+        // can add/remove objects/maintenance.lock during the object comparison.
+        git(&root, &["config", "maintenance.auto", "false"]).await;
+        git(&root, &["config", "gc.auto", "0"]).await;
         std::fs::write(root.join("a.txt"), "one\ntwo\n").expect("write a.txt");
         git(&root, &["add", "."]).await;
         git(&root, &["commit", "-m", "initial"]).await;
@@ -776,7 +781,19 @@ mod tests {
             .expect("git cat-file spawns");
         assert!(!plain.status.success());
 
-        // The store lives exactly as long as the snapshot.
+        // The turn diff's temporary store is deleted off-thread on drop.
+        // Wait for that cleanup before counting the original snapshot's store.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let expected = vec![turn.store.dir.clone()];
+        while store_dirs(&data_dir) != expected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "temporary turn-diff store was not deleted: {:?}",
+                store_dirs(&data_dir)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The original store stays until the last snapshot reference drops.
         assert_eq!(store_dirs(&data_dir).len(), 1);
         drop(turn);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

@@ -164,7 +164,7 @@ async fn connect(
     )
     .await??;
     let (mut write, mut read) = socket.split();
-    let mut changes = catalog.subscribe();
+    let mut changes = catalog.subscribe_internal();
     let mut advertised = catalog.local_services();
     write
         .send(Message::Text(

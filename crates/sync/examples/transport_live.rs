@@ -20,10 +20,11 @@ struct Sink {
 impl Sink {
     fn new(dir: &std::path::Path) -> Self {
         let store = DocsStore::open(dir).unwrap();
-        let doc = LoroDoc::new();
-        if let Some(bytes) = store.load_snapshot("live").unwrap() {
-            doc.import(&bytes).unwrap();
-        }
+        let doc = store
+            .load_chat_state("live")
+            .unwrap()
+            .map(|state| state.doc)
+            .unwrap_or_else(LoroDoc::new);
         Self {
             doc: Mutex::new(doc),
             store,

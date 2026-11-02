@@ -629,7 +629,7 @@ async fn queued_run_command_executes_end_to_end() {
     let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
     assert_eq!(replay.len(), mock_script().len());
     assert!(matches!(
-        replay.last().map(|j| &j.event),
+        replay.last().map(|j| j.event.as_ref()),
         Some(AgentEvent::Done {
             status: DoneStatus::Completed,
             ..
@@ -772,16 +772,17 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         core.sessions
             .session_status(CHAT)
             .unwrap()
-            .last_turn_outcome.map(|o| o.status),
+            .last_turn_outcome
+            .map(|o| o.status),
         Some(DoneStatus::Interrupted)
     );
     wait_for(
         || {
-            core.sessions
-                .watch_sessions()
-                .borrow()
-                .iter()
-                .any(|s| s.chat_id == CHAT && s.last_turn_outcome.is_some_and(|o| o.status == DoneStatus::Interrupted))
+            core.sessions.watch_sessions().borrow().iter().any(|s| {
+                s.chat_id == CHAT
+                    && s.last_turn_outcome
+                        .is_some_and(|o| o.status == DoneStatus::Interrupted)
+            })
         },
         "interrupted activity projection",
     )
@@ -2751,18 +2752,22 @@ async fn empty_reasoning_deltas_are_heartbeats_not_journal_noise() {
     let replay = core.sessions.subscribe(CHAT, 0).unwrap().0;
     let empties = replay
         .iter()
-        .filter(|j| matches!(&j.event, AgentEvent::ReasoningDelta { text } if text.is_empty()))
+        .filter(
+            |j| matches!(j.event.as_ref(), AgentEvent::ReasoningDelta { text } if text.is_empty()),
+        )
         .count();
     let nonempty = replay
         .iter()
-        .filter(|j| matches!(&j.event, AgentEvent::ReasoningDelta { text } if !text.is_empty()))
+        .filter(
+            |j| matches!(j.event.as_ref(), AgentEvent::ReasoningDelta { text } if !text.is_empty()),
+        )
         .count();
     assert_eq!(empties, 0, "empty reasoning deltas never reach the journal");
     assert_eq!(nonempty, 1, "real reasoning text is preserved");
     assert!(
         replay
             .iter()
-            .any(|j| matches!(&j.event, AgentEvent::TextDelta { text } if text == "done")),
+            .any(|j| matches!(j.event.as_ref(), AgentEvent::TextDelta { text } if text == "done")),
         "text deltas unaffected"
     );
 }
@@ -2813,7 +2818,11 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
             "trailing frames must not re-arm Working"
         );
         assert_eq!(
-            core.sessions.session_status(CHAT).unwrap().last_turn_outcome.map(|o| o.status),
+            core.sessions
+                .session_status(CHAT)
+                .unwrap()
+                .last_turn_outcome
+                .map(|o| o.status),
             Some(DoneStatus::Completed),
             "parked teardown must preserve the real turn outcome"
         );
@@ -3231,7 +3240,7 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(duplicate.event, AgentEvent::Done { .. }));
+        assert!(matches!(duplicate.event.as_ref(), AgentEvent::Done { .. }));
         // drive_run publishes and settles synchronously before polling again.
         tokio::task::yield_now().await;
         drop(tx);

@@ -211,7 +211,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
             .iter()
             .filter(|event| {
                 matches!(
-                    event.event,
+                    event.event.as_ref(),
                     zeron_proto::AgentEvent::Done {
                         status: zeron_proto::DoneStatus::Completed,
                         ..

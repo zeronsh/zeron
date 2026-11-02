@@ -103,7 +103,7 @@ async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
             tokio::time::sleep(backoff).await;
             continue;
         };
-        let rows_flushed = host.inner.store.has_pending_chat_updates(chat).ok() == Some(false);
+        let rows_flushed = host.outbox_pending(chat).ok() == Some(false);
         let sent = async {
             let bearer = edge.bearer().await?;
             let url = format!("{}/device/{target}/nudge", edge.url.trim_end_matches('/'));
@@ -148,7 +148,7 @@ async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
         };
         if rows_flushed
             && accepted
-            && host.inner.store.has_pending_chat_updates(chat).ok() == Some(false)
+            && host.outbox_pending(chat).ok() == Some(false)
         {
             match host
                 .inner
