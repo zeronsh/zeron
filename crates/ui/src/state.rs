@@ -520,6 +520,14 @@ impl EngineHandle {
 
     #[cfg(test)]
     pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with_capabilities(client, zeron_proto::capabilities::current())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_client_with_capabilities(
+        client: RpcClient,
+        capabilities: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -532,11 +540,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                // What a current engine advertises.
-                capabilities: zeron_proto::capabilities::CURRENT
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect(),
+                capabilities,
             },
             deferred_state: None,
         }

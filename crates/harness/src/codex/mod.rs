@@ -1675,13 +1675,7 @@ async fn run_session(session: Session) {
             effort: thread["reasoningEffort"].as_str().map(str::to_owned),
             plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
         };
-        Ok::<_, HarnessError>((
-            thread_id,
-            children,
-            voice_context,
-            restore_notice,
-            thread_mode,
-        ))
+        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice, thread_mode))
     };
     let (thread_id, mut children, voice_context, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
@@ -3169,11 +3163,7 @@ mod tests {
         };
         assert_eq!(
             wire(AccessMode::FullAccess, false),
-            (
-                "never",
-                "danger-full-access",
-                json!({"type": "dangerFullAccess"})
-            )
+            ("never", "danger-full-access", json!({"type": "dangerFullAccess"}))
         );
         assert_eq!(
             wire(AccessMode::AutoAcceptEdits, false),
@@ -3208,8 +3198,9 @@ mod tests {
             "item/commandExecution/requestApproval",
             "item/permissions/requestApproval",
         ];
-        let allowed =
-            |access| methods.map(|method| allowed_without_asking(access, approval_action(method)));
+        let allowed = |access| {
+            methods.map(|method| allowed_without_asking(access, approval_action(method)))
+        };
         assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
         assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
         assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
