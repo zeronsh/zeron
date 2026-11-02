@@ -1912,6 +1912,88 @@ impl SessionsEngine {
 }
 
 impl Inner {
+    /// Store image bytes a tool result already carried. The model-supplied
+    /// path is never opened. A bad payload leaves no preview and does not
+    /// fail the turn. The same key overwrites the same uploads file.
+    async fn store_tool_result_images(
+        &self,
+        chat_id: &str,
+        parents: &[String],
+        tool_id: &str,
+        payloads: Vec<zeron_proto::ToolResultImage>,
+    ) -> Vec<String> {
+        let Some((uploads, _)) = self.generated_images.get() else {
+            tracing::warn!(
+                chat = %chat_id,
+                tool = %tool_id,
+                "tool image dropped: uploads are not configured"
+            );
+            return Vec::new();
+        };
+        let uploads = uploads.clone();
+        let chat_id = chat_id.to_owned();
+        let parents = parents.to_vec();
+        let tool_id = tool_id.to_owned();
+        let chat_for_log = chat_id.clone();
+        let tool_for_log = tool_id.clone();
+        tokio::task::spawn_blocking(move || {
+            use base64::Engine as _;
+            use sha2::{Digest, Sha256};
+            let mut paths = Vec::new();
+            for (index, payload) in payloads.into_iter().enumerate().take(4) {
+                let bytes = match base64::engine::general_purpose::STANDARD
+                    .decode(payload.data_base64.trim())
+                {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        tracing::warn!(
+                            chat = %chat_id,
+                            tool = %tool_id,
+                            index,
+                            error = %err,
+                            "tool image rejected"
+                        );
+                        continue;
+                    }
+                };
+                let mut key = String::new();
+                key.push_str(&chat_id);
+                for parent in &parents {
+                    key.push('\0');
+                    key.push_str(parent);
+                }
+                key.push('\0');
+                key.push_str(&tool_id);
+                key.push('\0');
+                key.push_str(&index.to_string());
+                let id = format!("{:x}", Sha256::digest(key.as_bytes()));
+                match uploads.store_shown_image(&id, &payload.name, &bytes) {
+                    Ok(image) => paths.push(image.path),
+                    Err(err) => {
+                        tracing::warn!(
+                            chat = %chat_id,
+                            tool = %tool_id,
+                            index,
+                            error = %err,
+                            "tool image rejected"
+                        );
+                    }
+                }
+            }
+            paths
+        })
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                chat = %chat_for_log,
+                tool = %tool_for_log,
+                error = %err,
+                "tool image store failed"
+            );
+            Vec::new()
+        })
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// Sanitize before ANY journal/publish path, including nested subagent events.
     async fn prepare_generated_image(
@@ -1930,56 +2012,87 @@ impl Inner {
             parents.push(parent_tool_use_id);
             leaf = *event;
         }
-        let events = if let AgentEvent::GeneratedImage { id, path, .. } = leaf {
-            let key = std::iter::once(chat_id)
-                .chain(parents.iter().map(String::as_str))
-                .chain(std::iter::once(id.as_str()))
-                .collect::<Vec<_>>()
-                .join("\0");
-            if seen.contains(&key) {
-                return vec![];
-            }
-            let result = if let Some((uploads, allowed_root)) = self.generated_images.get() {
-                let uploads = uploads.clone();
-                let root = allowed_root.clone();
-                let stable_key = key.clone();
-                tokio::task::spawn_blocking(move || {
-                    uploads.import_generated_image(std::path::Path::new(&path), &root, &stable_key)
-                })
-                .await
-                .unwrap_or_else(|err| Err(EngineError::Other(err.to_string())))
-            } else {
-                Err(EngineError::Other(
-                    "Generated image intake is not configured".into(),
-                ))
-            };
-            match result {
-                Ok(image) => {
-                    seen.insert(key);
-                    vec![AgentEvent::GeneratedImage {
-                        id,
-                        path: image.path,
-                        name: image.name,
-                        mime_type: image.mime_type,
-                    }]
+        let events = match leaf {
+            AgentEvent::GeneratedImage { id, path, .. } => {
+                let key = std::iter::once(chat_id)
+                    .chain(parents.iter().map(String::as_str))
+                    .chain(std::iter::once(id.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\0");
+                if seen.contains(&key) {
+                    return vec![];
                 }
-                Err(err) => {
-                    tracing::warn!(chat = %chat_id, error = %err, "generated image import failed");
-                    vec![
-                        AgentEvent::ToolResult {
-                            id: id.strip_suffix(":image").unwrap_or(&id).into(),
-                            is_error: true,
-                            output: None,
-                            diff: None,
-                        },
-                        AgentEvent::Error {
-                            message: "Generated image unavailable".into(),
-                        },
-                    ]
+                let result = if let Some((uploads, allowed_root)) = self.generated_images.get() {
+                    let uploads = uploads.clone();
+                    let root = allowed_root.clone();
+                    let stable_key = key.clone();
+                    tokio::task::spawn_blocking(move || {
+                        uploads.import_generated_image(
+                            std::path::Path::new(&path),
+                            &root,
+                            &stable_key,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(EngineError::Other(err.to_string())))
+                } else {
+                    Err(EngineError::Other(
+                        "Generated image intake is not configured".into(),
+                    ))
+                };
+                match result {
+                    Ok(image) => {
+                        seen.insert(key);
+                        vec![AgentEvent::GeneratedImage {
+                            id,
+                            path: image.path,
+                            name: image.name,
+                            mime_type: image.mime_type,
+                        }]
+                    }
+                    Err(err) => {
+                        tracing::warn!(chat = %chat_id, error = %err, "generated image import failed");
+                        vec![
+                            AgentEvent::ToolResult {
+                                id: id.strip_suffix(":image").unwrap_or(&id).into(),
+                                is_error: true,
+                                output: None,
+                                diff: None,
+                                preview_paths: Vec::new(),
+                                image_payloads: Vec::new(),
+                            },
+                            AgentEvent::Error {
+                                message: "Generated image unavailable".into(),
+                            },
+                        ]
+                    }
                 }
             }
-        } else {
-            vec![leaf]
+            AgentEvent::ToolResult {
+                id,
+                is_error,
+                output,
+                diff,
+                preview_paths,
+                image_payloads,
+            } if !image_payloads.is_empty() => {
+                let stored = self
+                    .store_tool_result_images(chat_id, &parents, &id, image_payloads)
+                    .await;
+                vec![AgentEvent::ToolResult {
+                    id,
+                    is_error,
+                    output,
+                    diff,
+                    preview_paths: if stored.is_empty() {
+                        preview_paths
+                    } else {
+                        stored
+                    },
+                    image_payloads: Vec::new(),
+                }]
+            }
+            other => vec![other],
         };
         events
             .into_iter()
@@ -3326,6 +3439,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                preview_paths,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3344,6 +3458,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref: subagent_ref.clone(),
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
+                preview_paths: preview_paths.clone(),
             },
             other => other.clone(),
         })
@@ -5248,6 +5363,147 @@ mod tests {
             serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
         assert!(!journal.contains(source));
         assert!(!journal.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn tool_result_images_are_stored_inside_uploads() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let uploads_dir = dir.path().join("uploads");
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let uploads = crate::uploads::Uploads::from_root(&uploads_dir);
+        sessions.set_generated_images(uploads.clone(), dir.path().join("generated"));
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let payload = || AgentEvent::Subagent {
+            parent_tool_use_id: "child".into(),
+            event: Box::new(AgentEvent::ToolResult {
+                id: "tool-1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: vec![zeron_proto::ToolResultImage {
+                    name: "1.png".into(),
+                    data_base64: png_b64.into(),
+                }],
+            }),
+        };
+        let events = sessions
+            .inner
+            .prepare_generated_image("chat", payload(), &mut std::collections::HashSet::new())
+            .await;
+        assert_eq!(events.len(), 1);
+        let AgentEvent::Subagent {
+            parent_tool_use_id,
+            event,
+        } = &events[0]
+        else {
+            panic!("lost owner");
+        };
+        assert_eq!(parent_tool_use_id, "child");
+        let AgentEvent::ToolResult {
+            preview_paths,
+            image_payloads,
+            is_error,
+            ..
+        } = event.as_ref()
+        else {
+            panic!("expected a tool result");
+        };
+        assert!(!*is_error);
+        assert!(image_payloads.is_empty());
+        assert_eq!(preview_paths.len(), 1);
+        assert!(
+            std::path::Path::new(&preview_paths[0]).starts_with(&uploads_dir),
+            "{}",
+            preview_paths[0]
+        );
+        let chunk = uploads.read_chunk(&preview_paths[0], 0, &[]).unwrap();
+        assert!(chunk.done);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(chunk.data)
+                .unwrap(),
+            base64::engine::general_purpose::STANDARD
+                .decode(png_b64)
+                .unwrap()
+        );
+        let again = sessions
+            .inner
+            .prepare_generated_image("chat", payload(), &mut std::collections::HashSet::new())
+            .await;
+        let AgentEvent::Subagent {
+            event: again_event, ..
+        } = &again[0]
+        else {
+            panic!("lost owner");
+        };
+        let AgentEvent::ToolResult {
+            preview_paths: again_paths,
+            ..
+        } = again_event.as_ref()
+        else {
+            panic!("expected a tool result");
+        };
+        assert_eq!(again_paths, preview_paths);
+        sessions.inner.publish("chat", &events[0]);
+        let journal =
+            serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
+        assert!(!journal.contains(png_b64));
+        assert!(journal.contains(&preview_paths[0]));
+
+        let bad = AgentEvent::ToolResult {
+            id: "tool-2".into(),
+            is_error: false,
+            output: None,
+            diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: vec![zeron_proto::ToolResultImage {
+                name: "note.txt".into(),
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(b"not an image")
+                    .into(),
+            }],
+        };
+        let rejected = sessions
+            .inner
+            .prepare_generated_image("chat", bad, &mut std::collections::HashSet::new())
+            .await;
+        assert!(matches!(
+            &rejected[..],
+            [AgentEvent::ToolResult {
+                preview_paths,
+                image_payloads,
+                is_error: false,
+                ..
+            }] if preview_paths.is_empty() && image_payloads.is_empty()
+        ));
+
+        let bare = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals-bare")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let dropped = bare
+            .inner
+            .prepare_generated_image("chat", payload(), &mut std::collections::HashSet::new())
+            .await;
+        let AgentEvent::Subagent { event, .. } = &dropped[0] else {
+            panic!("lost owner");
+        };
+        assert!(matches!(
+            event.as_ref(),
+            AgentEvent::ToolResult {
+                preview_paths,
+                image_payloads,
+                ..
+            } if preview_paths.is_empty() && image_payloads.is_empty()
+        ));
     }
 
     /// The backwards journal scan must answer exactly what the old full forward

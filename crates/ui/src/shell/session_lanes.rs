@@ -741,6 +741,7 @@ mod tests {
             subagent_ref: doc.map(str::to_owned),
             subagent_status: status,
             subagent_tail: None,
+            preview_paths: Vec::new(),
         }
     }
 

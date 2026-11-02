@@ -2175,6 +2175,7 @@ impl AppState {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    preview_paths: Vec::new(),
                 }],
                 created_at: created_at + 1,
                 device_id: "local".into(),

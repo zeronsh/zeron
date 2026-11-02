@@ -173,6 +173,13 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
+    /// Bookkeeping frame, not a person typing. Image scale notes ride this.
+    #[serde(default, rename = "isMeta")]
+    pub is_meta: bool,
+    /// Structured tool outcome. An image result repeats its bytes here when
+    /// the content blocks do not.
+    #[serde(default, rename = "toolUseResult")]
+    pub tool_use_result: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]

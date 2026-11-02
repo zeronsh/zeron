@@ -239,6 +239,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // fileChange (single add): WriteFile, refreshed at completion.
@@ -261,6 +263,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // mcpToolCall with failed status.
@@ -277,6 +281,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: true,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // webSearch lifecycle.
@@ -291,6 +297,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // Completion-only todoList still opens and closes the lifecycle.
@@ -308,6 +316,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
         is_error: false,
         output: None,
         diff: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // Streamed agentMessage must not re-emit its completed text…
@@ -1493,6 +1503,8 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
             is_error: false,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         }),
     }));
     // The parent's steer (a userMessage item on the CHILD thread) arrives as
@@ -1908,6 +1920,8 @@ async fn view_image_reads_as_a_file_read() {
                 is_error: false,
                 output: None,
                 diff: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         ]
     );
