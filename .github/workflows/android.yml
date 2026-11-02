@@ -13,6 +13,12 @@ name: Android
 # Without them the APK is signed with a throwaway debug key and not published.
 # ci.yml passes them only on pushes to main (which publish): pull requests and
 # the merge queue build with the debug key.
+#
+# The credentials live in GitHub environments that only main may use, so a
+# branch can't reach them however its workflows are edited: the keystore in
+# `android-release`, the Play service account in `google-play`, the Cloudflare
+# token in `cloudflare`. A job's environment secret takes precedence over the
+# one ci.yml passes in.
 
 # Called by ci.yml, which decides when Android runs (the app, its Rust core or
 # the shared fonts and icons changed) and holds the runners for it.
@@ -66,6 +72,10 @@ env:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    # Main's pushes and dispatches sign with the release key; everything else
+    # (pull requests, the merge queue, nightlies, other branches) takes no
+    # environment and builds with the debug key, as before.
+    environment: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'android-release' || '' }}
     # Cold: the core for arm64 (thin LTO on main), the bindings generator, Gradle.
     timeout-minutes: 60
     outputs:
@@ -187,6 +197,7 @@ jobs:
       ((github.event_name == 'push' && vars.PLAY_UPLOAD_ENABLED == 'true') ||
        (github.event_name == 'workflow_dispatch' && inputs.upload_play))
     runs-on: ubuntu-latest
+    environment: google-play
     timeout-minutes: 20
     concurrency:
       group: android-google-play
@@ -201,7 +212,7 @@ jobs:
           SIGNED: ${{ needs.apk.outputs.signed }}
         run: |
           test "$SIGNED" = true || { echo 'A release signing key is required for Play.' >&2; exit 1; }
-          test -n "$PLAY_SERVICE_ACCOUNT_JSON" || { echo 'Set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON in repository secrets.' >&2; exit 1; }
+          test -n "$PLAY_SERVICE_ACCOUNT_JSON" || { echo 'Set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON in the google-play environment.' >&2; exit 1; }
           case "$PLAY_TRACK" in beta|internal) ;; *) echo 'Only testing tracks are supported.' >&2; exit 1;; esac
           case "$PLAY_STATUS" in draft|completed) ;; *) echo 'Use draft or completed for PLAY_RELEASE_STATUS.' >&2; exit 1;; esac
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -225,6 +236,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.apk.outputs.signed == 'true'
     needs: apk
     runs-on: ubuntu-latest
+    environment: cloudflare
     concurrency:
       group: android-publish
       cancel-in-progress: false

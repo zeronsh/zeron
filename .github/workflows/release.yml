@@ -63,8 +63,12 @@ jobs:
   #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
   #     key (raw .p8 contents), for notarytool. All three present → the package
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
+  # They live in the `apple-release` environment, which only release tags and
+  # main may use: a run from any other branch gets no environment, so no
+  # credentials, and builds ad-hoc-signed.
   macos:
     runs-on: macos-latest # Apple silicon
+    environment: ${{ (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main') && 'apple-release' || '' }}
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -146,6 +150,7 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [cursor-compatibility, linux, macos, windows]
     runs-on: ubuntu-latest
+    environment: cloudflare
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface
       # the token through job env and gate on that instead.

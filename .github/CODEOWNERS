@@ -1,4 +1,21 @@
-# The credential vault and CI/deploy configuration are security-sensitive:
-# changes need the owner's review (docs/design/cloud-device.md).
-/edge/vault/ @wingleeio
-/.github/ @wingleeio
+# The credential vault, CI/deploy configuration, and everything that runs with
+# signing or deploy credentials are security-sensitive: changes need an
+# owner's review (docs/design/cloud-device.md). Enforced by the "Protect main"
+# ruleset's "require review from Code Owners".
+#
+# Workflows, composite actions, and this file itself.
+/.github/ @SinaKhalili @wingleeio
+/edge/vault/ @SinaKhalili @wingleeio
+
+# Scripts the workflows run to plan, admit, and gate CI.
+/scripts/ci/ @SinaKhalili @wingleeio
+
+# Release packaging: these run in the jobs that hold the Apple signing and
+# notarization credentials, and produce the artifacts users install.
+/scripts/package-macos.sh @SinaKhalili @wingleeio
+/scripts/package-linux.sh @SinaKhalili @wingleeio
+/scripts/package-windows.ps1 @SinaKhalili @wingleeio
+/scripts/ios/ @SinaKhalili @wingleeio
+
+# Reads the Android release keystore (ZERON_ANDROID_KEYSTORE*).
+/apps/android/app/build.gradle.kts @SinaKhalili @wingleeio
