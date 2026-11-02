@@ -1431,7 +1431,9 @@ async fn run_session(session: Session) {
                         }
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
-                                turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                                let tasks = system.tasks.as_deref().unwrap_or_default();
+                                turn.set_background(tasks.len());
+                                turn.set_background_agents(background_agents(tasks));
                             }
                             // The first, or a background wake's: either way a
                             // turn is running.
@@ -2136,10 +2138,31 @@ fn updated_input_with_answers(
     Value::Object(updated)
 }
 
+/// The agents among `background_tasks_changed`'s tasks. Background shells
+/// (`local_bash`) are not agents: a dev server never finishes.
+fn background_agents(tasks: &[Value]) -> usize {
+    tasks
+        .iter()
+        .filter(|task| task["task_type"] == "local_agent")
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn background_agents_leave_shells_out() {
+        let tasks = [
+            json!({"task_id": "a1", "task_type": "local_agent", "description": "scout"}),
+            json!({"task_id": "b1", "task_type": "local_bash", "description": "npm run dev"}),
+            json!({"task_id": "a2", "task_type": "local_agent", "parent_task_id": "a1"}),
+        ];
+        assert_eq!(background_agents(&tasks), 2);
+        assert_eq!(background_agents(&tasks[1..2]), 0);
+        assert_eq!(background_agents(&[]), 0);
+    }
 
     #[test]
     fn probe_timeout_says_what_the_cli_printed_without_its_secrets() {

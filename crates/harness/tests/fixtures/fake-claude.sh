@@ -576,7 +576,7 @@ case "$first" in
   # run declared perTaskStopAffordance (live-verified 2.1.285).
   [ "$initialized" = true ] || exit 7
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-stop"}'
-  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_agent","description":"scout"}]}'
+  emit '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_agent","description":"scout"},{"task_id":"sh-1","task_type":"local_bash","description":"npm run dev"}]}'
   emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}'
   read -r stop || exit 1
   case "$stop" in *'"subtype":"interrupt"'*) ;; *) exit 8 ;; esac

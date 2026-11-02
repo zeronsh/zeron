@@ -72,10 +72,13 @@ mod chat_dropzone_tests;
 mod chat_pull_requests;
 #[cfg(test)]
 mod chat_rename_tests;
+#[cfg(test)]
+mod inbox_actions_tests;
 mod command_palette;
 mod file_mutations;
 mod files_panel;
 mod harness_updates;
+pub(crate) mod inbox;
 mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
@@ -211,20 +214,54 @@ fn move_settings_focus(
     }
 }
 
-/// Whether the chat menu's Copy submenu is open beside it.
+/// Which of the chat menu's submenus is open beside it, if any.
 #[derive(Clone, Copy, PartialEq)]
 enum ChatMenuPage {
     Root,
     Copy,
+    Snooze,
 }
 
-/// Hover-intent keys for the chat menu's rows; only Copy owns a submenu.
+impl ChatMenuPage {
+    /// The page hovering the row `key` opens: its submenu, else none.
+    fn for_row(key: u8) -> Self {
+        match key {
+            CHAT_MENU_ROW_COPY => ChatMenuPage::Copy,
+            CHAT_MENU_ROW_SNOOZE => ChatMenuPage::Snooze,
+            _ => ChatMenuPage::Root,
+        }
+    }
+
+    /// The row that owns this page's submenu.
+    fn row(self) -> Option<u8> {
+        match self {
+            ChatMenuPage::Root => None,
+            ChatMenuPage::Copy => Some(CHAT_MENU_ROW_COPY),
+            ChatMenuPage::Snooze => Some(CHAT_MENU_ROW_SNOOZE),
+        }
+    }
+}
+
+/// Hover-intent keys for the chat menu's rows; Copy and Snooze own submenus.
 const CHAT_MENU_ROW_RENAME: u8 = 0;
 const CHAT_MENU_ROW_PIN: u8 = 1;
 const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_DELETE: u8 = 4;
+/// The four tab-close rows take 5..=8.
 const CHAT_MENU_ROW_TAB: u8 = 5;
+const CHAT_MENU_ROW_SNOOZE: u8 = 9;
+
+/// The archive action's glyph and label, on the row corner and in the chat
+/// menu. Inbox mode calls archiving settling.
+fn chat_archive_action(inbox_mode: bool, archived: bool) -> (&'static str, &'static str) {
+    match (inbox_mode, archived) {
+        (true, true) => (icons::ARCHIVE_UP_MINIMALISTIC, "Unsettle"),
+        (true, false) => (icons::CHECK, "Settle"),
+        (false, true) => (icons::ARCHIVE_UP_MINIMALISTIC, "Unarchive"),
+        (false, false) => (icons::ARCHIVE_MINIMALISTIC, "Archive"),
+    }
+}
 
 #[derive(Clone, Copy)]
 enum TabCloseAction {
@@ -2237,13 +2274,13 @@ pub struct Shell {
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
     appearance_settings_sub: Option<Subscription>,
-    /// Session-row context menu, including the Copy submenu.
+    /// Session-row context menu, including its Copy and Snooze submenus.
     chat_menu: popover::Popup<ChatMenuState>,
-    /// The Copy submenu's hover grace, its painted bounds, and which side
+    /// The open submenu's hover grace, its painted bounds, and which side
     /// of the menu it opens on (the sidebar options menu's recipe).
-    chat_copy_intent: popover::HoverIntent<u8>,
-    chat_copy_bounds: Option<gpui::Bounds<Pixels>>,
-    chat_copy_left: bool,
+    chat_submenu_intent: popover::HoverIntent<u8>,
+    chat_submenu_bounds: Option<gpui::Bounds<Pixels>>,
+    chat_submenu_left: bool,
     /// The chat title being edited in place on its row.
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
@@ -2811,9 +2848,9 @@ impl Shell {
             files_settings_sub: None,
             appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
-            chat_copy_intent: Default::default(),
-            chat_copy_bounds: None,
-            chat_copy_left: false,
+            chat_submenu_intent: Default::default(),
+            chat_submenu_bounds: None,
+            chat_submenu_left: false,
             chat_rename: None,
             delete_confirm: None,
             discard_working_tree: None,
@@ -3162,6 +3199,7 @@ impl Shell {
                 bool,
                 Option<String>,
                 bool,
+                bool,
             );
             let (sessions, connectivity, connectivity_observed) = {
                 let state = state.read(cx);
@@ -3174,7 +3212,8 @@ impl Shell {
                         let chat = state.chats.iter().find(|c| c.id == s.chat_id);
                         let title = chat.and_then(|c| c.title.clone());
                         let notify = chat.is_some_and(|c| c.is_top_level());
-                        (s.chat_id.clone(), status, send_pending, title, notify)
+                        let snoozed = chat.is_some_and(|c| c.snoozed_at(now));
+                        (s.chat_id.clone(), status, send_pending, title, notify, snoozed)
                     })
                     .collect();
                 (
@@ -3191,7 +3230,7 @@ impl Shell {
             // The engine posts the banners when it can (with the window
             // closed too); the app then only chimes.
             let engine_posts = state.read(cx).engine_posts_banners();
-            for (chat_id, status, send_pending, title, notify) in sessions {
+            for (chat_id, status, send_pending, title, notify, snoozed) in sessions {
                 let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
                 // Keep side-chat baselines current, but never emit their
                 // completion, input-request, or failure sounds/banners.
@@ -3200,6 +3239,9 @@ impl Shell {
                     && let Some(sound) = status
                         .ping_since(&prev, send_pending)
                         .map(crate::sound::Sound::from)
+                    // A snoozed chat stays quiet about finishing, like the
+                    // engine's banner; input requests and failures wake it.
+                    && !(snoozed && sound == crate::sound::Sound::Done)
                 {
                     if self.settings.session_sound_enabled(sound) {
                         let should_play = sound != crate::sound::Sound::Attention
@@ -5329,7 +5371,7 @@ impl Shell {
 
     /// Close the session-row context menu through the exit animation.
     fn close_chat_menu(&mut self, cx: &mut Context<Self>) {
-        self.chat_copy_intent.reset();
+        self.chat_submenu_intent.reset();
         if self.chat_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.chat_menu);
             cx.notify();
@@ -5349,26 +5391,20 @@ impl Shell {
         crate::toast::show(cx, kind, message);
     }
 
-    fn set_chat_copy_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        let page = if open {
-            ChatMenuPage::Copy
-        } else {
-            ChatMenuPage::Root
-        };
+    fn set_chat_submenu(&mut self, page: ChatMenuPage, cx: &mut Context<Self>) {
         if let Some(menu) = self.chat_menu.open_mut()
             && menu.page != page
         {
             menu.page = page;
-            if !open {
-                self.chat_copy_bounds = None;
-            }
+            // The next submenu reports its own bounds when it paints.
+            self.chat_submenu_bounds = None;
             cx.notify();
         }
     }
 
-    /// Pointer intent over a chat-menu row: hovering Copy opens its submenu,
-    /// any other row closes it — after a grace while the pointer is heading
-    /// into the open submenu.
+    /// Pointer intent over a chat-menu row: hovering Copy or Snooze opens its
+    /// submenu, any other row closes it — after a grace while the pointer is
+    /// heading into the open submenu.
     fn hover_chat_menu_row(
         &mut self,
         key: u8,
@@ -5376,33 +5412,29 @@ impl Shell {
         moved: bool,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .chat_menu
-            .as_open()
-            .filter(|menu| menu.page == ChatMenuPage::Copy)
-            .map(|_| CHAT_MENU_ROW_COPY);
-        let (bounds, left) = (self.chat_copy_bounds, self.chat_copy_left);
+        let current = self.chat_menu.as_open().and_then(|menu| menu.page.row());
+        let (bounds, left) = (self.chat_submenu_bounds, self.chat_submenu_left);
         let action = if moved {
-            self.chat_copy_intent
+            self.chat_submenu_intent
                 .moved(current.as_ref(), &key, pointer, bounds, left)
         } else {
-            self.chat_copy_intent
+            self.chat_submenu_intent
                 .enter(current.as_ref(), &key, pointer, bounds, left)
         };
         match action {
             popover::HoverAction::None => {}
             popover::HoverAction::Open => {
-                self.set_chat_copy_open(key == CHAT_MENU_ROW_COPY, cx);
-                self.chat_copy_intent.record_origin(pointer);
+                self.set_chat_submenu(ChatMenuPage::for_row(key), cx);
+                self.chat_submenu_intent.record_origin(pointer);
             }
             popover::HoverAction::Defer => {
-                self.chat_copy_intent.defer(cx, move |this, cx| {
+                self.chat_submenu_intent.defer(cx, move |this, cx| {
                     if this.chat_menu.is_open()
-                        && this.chat_copy_intent.pending() == Some(&key)
+                        && this.chat_submenu_intent.pending() == Some(&key)
                     {
-                        this.chat_copy_intent.cancel();
-                        this.set_chat_copy_open(key == CHAT_MENU_ROW_COPY, cx);
-                        this.chat_copy_intent.record_origin(pointer);
+                        this.chat_submenu_intent.cancel();
+                        this.set_chat_submenu(ChatMenuPage::for_row(key), cx);
+                        this.chat_submenu_intent.record_origin(pointer);
                     }
                 });
             }
@@ -5423,7 +5455,7 @@ impl Shell {
                 if *hovered {
                     this.hover_chat_menu_row(key, window.mouse_position(), false, cx);
                 } else {
-                    this.chat_copy_intent.leave(&key);
+                    this.chat_submenu_intent.leave(&key);
                 }
             }))
             .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -5433,27 +5465,38 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The chat menu's Copy row: opens its submenu beside the menu on hover
-    /// (or click), on whichever side has room.
-    fn render_chat_copy_trigger(
+    /// The chat menu's Copy or Snooze row: opens its submenu beside the menu
+    /// on hover (or click), on whichever side has room.
+    fn render_chat_submenu_trigger(
         &mut self,
         chat_id: &str,
+        page: ChatMenuPage,
         open: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (id, submenu_id, glyph, label) = match page {
+            ChatMenuPage::Snooze => (
+                "chat-menu-snooze",
+                "chat-snooze-submenu",
+                icons::CLOCK_CIRCLE,
+                "Snooze",
+            ),
+            _ => ("chat-menu-copy", "chat-copy-submenu", icons::COPY, "Copy"),
+        };
         let entity = cx.entity().downgrade();
         let exit_entity = entity.clone();
-        let mut row = popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
-            .id("chat-menu-copy")
+        let mut row = popover::menu_row_nav(theme, open, false, format!("{id}-{chat_id}"))
+            .id(id)
+            .debug_selector(move || id.to_owned())
             .relative()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.chat_copy_intent.reset();
-                this.set_chat_copy_open(true, cx);
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.chat_submenu_intent.reset();
+                this.set_chat_submenu(page, cx);
                 cx.stop_propagation();
             }))
-            .child(icon(icons::COPY).size(px(16.0)).text_color(theme.text_muted))
-            .child(div().flex_1().child(SharedString::from("Copy")))
+            .child(icon(glyph).size(px(16.0)).text_color(theme.text_muted))
+            .child(div().flex_1().child(SharedString::from(label)))
             .child(
                 icon(icons::ALT_ARROW_RIGHT)
                     .size(px(14.0))
@@ -5464,8 +5507,8 @@ impl Shell {
                     move |bounds, window, cx| {
                         let left = bounds.right() + px(244.0) > window.viewport_size().width;
                         let _ = entity.update(cx, |this, cx| {
-                            if this.chat_copy_left != left {
-                                this.chat_copy_left = left;
+                            if this.chat_submenu_left != left {
+                                this.chat_submenu_left = left;
                                 cx.notify();
                             }
                         });
@@ -5481,15 +5524,18 @@ impl Shell {
                                 return;
                             }
                             let _ = exit_entity.update(cx, |this, cx| {
-                                let (bounds, left) = (this.chat_copy_bounds, this.chat_copy_left);
-                                if this
-                                    .chat_copy_intent
-                                    .contains_pointer(trigger, bounds, event.position, left)
-                                {
+                                let (bounds, left) =
+                                    (this.chat_submenu_bounds, this.chat_submenu_left);
+                                if this.chat_submenu_intent.contains_pointer(
+                                    trigger,
+                                    bounds,
+                                    event.position,
+                                    left,
+                                ) {
                                     return;
                                 }
-                                this.chat_copy_intent.reset();
-                                this.set_chat_copy_open(false, cx);
+                                this.chat_submenu_intent.reset();
+                                this.set_chat_submenu(ChatMenuPage::Root, cx);
                             });
                         });
                     },
@@ -5498,11 +5544,14 @@ impl Shell {
                 .inset_0(),
             );
         if open {
-            let submenu = self.render_chat_copy_submenu(chat_id, theme, cx);
+            let submenu = match page {
+                ChatMenuPage::Snooze => self.render_chat_snooze_submenu(chat_id, theme, cx),
+                _ => self.render_chat_copy_submenu(chat_id, theme, cx),
+            };
             row = row.child(popover::nested_menu(
-                format!("chat-copy-submenu-{chat_id}"),
+                format!("{submenu_id}-{chat_id}"),
                 submenu,
-                self.chat_copy_left,
+                self.chat_submenu_left,
             ));
         }
         row.into_any_element()
@@ -5573,7 +5622,8 @@ impl Shell {
             .child(
                 gpui::canvas(
                     move |bounds, _, cx| {
-                        let _ = entity.update(cx, |this, _| this.chat_copy_bounds = Some(bounds));
+                        let _ =
+                            entity.update(cx, |this, _| this.chat_submenu_bounds = Some(bounds));
                     },
                     |_, _, _, _| {},
                 )
@@ -5581,6 +5631,59 @@ impl Shell {
                 .inset_0(),
             )
             .into_any_element()
+    }
+
+    /// The Snooze submenu's card: the presets offered right now.
+    fn render_chat_snooze_submenu(
+        &mut self,
+        chat_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = Utc::now();
+        let entity = cx.entity().downgrade();
+        let mut menu = popover::popover_card(theme)
+            .w(px(232.0))
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
+        for (ix, preset) in inbox::SnoozePreset::ALL.into_iter().enumerate() {
+            if preset.wake_at_local(now).is_none() {
+                continue;
+            }
+            let snooze_id = chat_id.to_owned();
+            let id = format!("chat-snooze-{ix}");
+            menu = menu.child(
+                popover::menu_row(theme, false, format!("{id}-{chat_id}"))
+                    .id(SharedString::from(id.clone()))
+                    .debug_selector(move || id.clone())
+                    // The wake time is taken at the click, not when the menu
+                    // opened. A preset that lapsed meanwhile ("This evening"
+                    // past 17:00) closes the menu instead of doing nothing.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match preset.wake_at_local(Utc::now()) {
+                            Some(until) => this.set_chat_snoozed(snooze_id.clone(), Some(until), cx),
+                            None => {
+                                this.close_chat_menu(cx);
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .child(preset.label()),
+            );
+        }
+        menu.child(
+            gpui::canvas(
+                move |bounds, _, cx| {
+                    let _ = entity.update(cx, |this, _| this.chat_submenu_bounds = Some(bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .into_any_element()
     }
 
     fn copy_zeron_conversation_link(&mut self, chat_id: &str, cx: &mut Context<Self>) {
@@ -6614,6 +6717,57 @@ impl Shell {
             cx,
         );
         cx.notify();
+    }
+
+    /// Snooze `chat_id` until `until`; `None` clears it, and `now` wakes it.
+    pub(super) fn set_chat_snoozed(
+        &mut self,
+        chat_id: String,
+        until: Option<DateTime<Utc>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_chat_menu(cx);
+        self.mutate(
+            serde_json::json!({
+                "op": "setChatSnoozed",
+                "chatId": chat_id,
+                "until": until.map(|until| until.timestamp_millis()),
+            }),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Whether the local engine takes `setChatSnoozed`; without it the
+    /// snooze actions hide and settle (archive) still works.
+    fn chat_snooze_supported(&self, cx: &App) -> bool {
+        self.state.read(cx).engine().is_some_and(|engine| {
+            engine
+                .engine_info()
+                .supports(zeron_proto::capabilities::CHAT_SNOOZE_V1)
+        })
+    }
+
+    /// The inbox section `chat_id` sits in, by the rules the layout draws with.
+    /// `status` is its inbox status when the caller already has it (a drawn
+    /// row); else it is derived here ([`AppState::inbox_status_for`]).
+    fn chat_inbox_section(
+        &self,
+        chat_id: &str,
+        status: Option<zeron_proto::ChatIndicator>,
+        cx: &App,
+    ) -> Option<inbox::InboxSection> {
+        let pinned = self.active_sidebar_pins(cx).iter().any(|id| id == chat_id);
+        let state = self.state.read(cx);
+        let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+        let now = Utc::now();
+        Some(inbox::inbox_section(
+            chat,
+            status.unwrap_or_else(|| state.inbox_status_for(chat, now)),
+            pinned,
+            self.settings.sidebar_inbox_working,
+            now,
+        ))
     }
 
     /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
@@ -8995,6 +9149,35 @@ impl Shell {
                 .child(glyph)
                 .into_any_element()
         });
+        // Inbox mode renames archive to settle, and a snoozed row's corner
+        // wakes it instead. The palette's copy of the row keeps archive.
+        let inbox_mode = self.settings.sidebar_inbox && search_query.is_none();
+        let snoozed_until = inbox_mode
+            .then(|| {
+                let snoozed =
+                    self.chat_inbox_section(&id, Some(status), cx)
+                        == Some(inbox::InboxSection::Snoozed);
+                let state = self.state.read(cx);
+                let chat = state.chats.iter().find(|chat| chat.id == id)?;
+                chat.snoozed_until.filter(|_| snoozed)
+            })
+            .flatten();
+        let wakes = snoozed_until.is_some() && self.chat_snooze_supported(cx);
+        let (corner_glyph, corner_label) = if wakes {
+            (icons::BELL, "Wake")
+        } else {
+            chat_archive_action(inbox_mode, archived)
+        };
+        let corner_tooltip = if wakes {
+            SharedString::from("Wake now")
+        } else {
+            format!("{corner_label} session").into()
+        };
+        let compact_tooltip = corner_tooltip.clone();
+        // A snoozed row's idle corner counts down to its wake.
+        let corner_time = snoozed_until
+            .map(|until| SharedString::from(inbox::format_time_until(until, Utc::now())))
+            .unwrap_or_else(|| time_ago.clone());
         let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
         let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
@@ -9023,29 +9206,21 @@ impl Shell {
                         .hover(|s| s.bg(crate::theme::wash(0.18)))
                 })
                 .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(if compact {
-                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
-                    } else {
-                        11.0
-                    }))
-                    .flex_none()
-                    .text_color(theme.text_muted),
+                    icon(corner_glyph)
+                        .size(px(if compact {
+                            SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
+                        } else {
+                            11.0
+                        }))
+                        .flex_none()
+                        .text_color(theme.text_muted),
                 )
                 .when(!compact, |el| {
                     el.child(
                         div()
                             .text_size(crate::typography::ui_rems(10.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(if archived {
-                                "Unarchive"
-                            } else {
-                                "Archive"
-                            })),
+                            .child(SharedString::from(corner_label)),
                     )
                 })
                 .into_any_element()
@@ -9118,7 +9293,7 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .children(subagent_pill("idle"))
-                    .child(time_ago.clone())
+                    .child(corner_time)
                     .into_any_element(),
             }
         };
@@ -9136,7 +9311,7 @@ impl Shell {
                     move || format!("{row_id}-corner")
                 })
                 .aria_label(if corner_hovered {
-                    if archived { "Unarchive" } else { "Archive" }
+                    corner_label
                 } else {
                     if compact {
                         if remote {
@@ -9173,14 +9348,14 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.chat_hover_resync = true;
-                        this.set_chat_archived(archive_id.clone(), !archived, cx);
+                        if wakes {
+                            this.set_chat_snoozed(archive_id.clone(), Some(Utc::now()), cx);
+                        } else {
+                            this.set_chat_archived(archive_id.clone(), !archived, cx);
+                        }
                     }))
                     // Above the pill: below it the chip would cover the next row.
-                    .tooltip(crate::settings::widgets::text_tooltip_above(if archived {
-                        "Unarchive session"
-                    } else {
-                        ShortcutId::ArchiveSession.label()
-                    }))
+                    .tooltip(crate::settings::widgets::text_tooltip_above(corner_tooltip))
                 })
                 .child(corner_body)
                 .into_any_element()
@@ -9554,7 +9729,7 @@ impl Shell {
                                 .items_center()
                                 .justify_end()
                                 .aria_label(if show_archive {
-                                    if archived { "Unarchive" } else { "Archive" }
+                                    corner_label
                                 } else {
                                     "Session time"
                                 })
@@ -9570,26 +9745,32 @@ impl Shell {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.chat_hover_resync = true;
-                                            this.set_chat_archived(
-                                                archive_id.clone(),
-                                                !archived,
-                                                cx,
-                                            );
+                                            if wakes {
+                                                this.set_chat_snoozed(
+                                                    archive_id.clone(),
+                                                    Some(Utc::now()),
+                                                    cx,
+                                                );
+                                            } else {
+                                                this.set_chat_archived(
+                                                    archive_id.clone(),
+                                                    !archived,
+                                                    cx,
+                                                );
+                                            }
                                         }))
                                         .tooltip(crate::settings::widgets::text_tooltip_above(
-                                            if archived {
-                                                "Unarchive session"
+                                            if inbox_mode {
+                                                compact_tooltip
+                                            } else if archived {
+                                                "Unarchive session".into()
                                             } else {
-                                                ShortcutId::ArchiveSession.label()
+                                                ShortcutId::ArchiveSession.label().into()
                                             },
                                         ))
                                 })
                                 .child(if show_archive {
-                                    icon(if archived {
-                                        icons::ARCHIVE_UP_MINIMALISTIC
-                                    } else {
-                                        icons::ARCHIVE_MINIMALISTIC
-                                    })
+                                    icon(corner_glyph)
                                     .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(theme.text_muted)
@@ -9837,7 +10018,11 @@ impl Shell {
         let regular_start = pinned_count + custom_count;
         let mut keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
-        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        // The inbox sidebar's sections are groups with their own headers;
+        // only the plain one list sits under a "Sessions" disclosure.
+        let inbox = self.settings.sidebar_inbox;
+        let ungrouped =
+            !inbox && self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
@@ -10072,8 +10257,11 @@ impl Shell {
                             .children(custom_items),
                     )
                 })
+                // Inbox sections take no drops, so there is no "Drop here to
+                // unpin" slot to offer either.
                 .when(
-                    !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
+                    !regular_items.is_empty()
+                        || (!inbox && self.sidebar_session_transfer.is_some()),
                     |el| {
                         el.child(
                             self.render_sessions_section(
@@ -10086,6 +10274,7 @@ impl Shell {
                                               _,
                                               _| {
                                             if regular_empty
+                                                && !inbox
                                                 && event.bounds.contains(&event.event.position)
                                             {
                                                 let top = f32::from(
@@ -10118,7 +10307,11 @@ impl Shell {
                                         },
                                     ))
                                     .on_drop::<SidebarSessionDrag>(cx.listener(
-                                        |this, payload, _, cx| {
+                                        move |this, payload, _, cx| {
+                                            if inbox {
+                                                this.cancel_sidebar_session_transfer(cx);
+                                                return;
+                                            }
                                             this.finish_sidebar_session_transfer(
                                                 payload,
                                                 SidebarSessionDrop::Regular,
@@ -11221,17 +11414,50 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let archived = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && chat.archived);
+            // Inbox mode says Settle for archive, and offers Snooze on live
+            // rows (or Wake now on a snoozed one) when the engine takes it.
+            let inbox_mode = self.settings.sidebar_inbox;
+            enum SnoozeRow {
+                Snooze,
+                Wake,
+            }
+            let snooze_row = if inbox_mode && self.chat_snooze_supported(cx) {
+                let status = {
+                    let state = self.state.read(cx);
+                    state
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == chat_id)
+                        .map(|chat| state.inbox_status_for(chat, Utc::now()))
+                };
+                match (self.chat_inbox_section(&chat_id, status, cx), status) {
+                    (Some(inbox::InboxSection::Snoozed), _) => Some(SnoozeRow::Wake),
+                    (Some(section), Some(status)) if inbox::can_snooze(section, status) => {
+                        Some(SnoozeRow::Snooze)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
+            let wake_id = chat_id.clone();
             let delete_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
                 .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    // The Copy submenu floats outside this card: a press on
-                    // it is inside the menu.
+                    // A submenu floats outside this card: a press on it is
+                    // inside the menu.
                     if this
-                        .chat_copy_bounds
+                        .chat_submenu_bounds
                         .is_some_and(|bounds| bounds.contains(&event.position))
                     {
                         return;
@@ -11241,6 +11467,7 @@ impl Shell {
                 .flex()
                 .flex_col();
             let copy_open = menu_state.page == ChatMenuPage::Copy;
+            let snooze_open = menu_state.page == ChatMenuPage::Snooze;
             let menu = if chat_id.is_empty() {
                 menu
             } else {
@@ -11263,22 +11490,61 @@ impl Shell {
                         }))
                         .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" }));
+                    let (archive_glyph, archive_label) = chat_archive_action(inbox_mode, archived);
                     let archive =
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
+                            .debug_selector(|| "chat-menu-archive".into())
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.archive_chat(archive_id.clone(), cx)
+                                this.set_chat_archived(archive_id.clone(), !archived, cx)
                             }))
                             .child(
-                                icon(icons::ARCHIVE_MINIMALISTIC)
+                                icon(archive_glyph)
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Archive"));
-                    let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                            .child(SharedString::from(archive_label));
+                    let snooze = snooze_row.map(|row| match row {
+                        SnoozeRow::Snooze => self.render_chat_submenu_trigger(
+                            &chat_id,
+                            ChatMenuPage::Snooze,
+                            snooze_open,
+                            &theme,
+                            cx,
+                        ),
+                        SnoozeRow::Wake => {
+                            popover::menu_row(&theme, false, format!("chat-menu-wake-{chat_id}"))
+                                .id("chat-menu-wake")
+                                .debug_selector(|| "chat-menu-wake".into())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_chat_snoozed(wake_id.clone(), Some(Utc::now()), cx)
+                                }))
+                                .child(
+                                    icon(icons::BELL)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Wake now"))
+                                .into_any_element()
+                        }
+                    });
+                    let copy = self.render_chat_submenu_trigger(
+                        &chat_id,
+                        ChatMenuPage::Copy,
+                        copy_open,
+                        &theme,
+                        cx,
+                    );
+                    let menu = menu
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
+                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx));
+                    let menu = match snooze {
+                        Some(snooze) => {
+                            menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_SNOOZE, snooze, cx))
+                        }
+                        None => menu,
+                    };
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
@@ -14608,6 +14874,8 @@ mod tests {
             space_id: None,
             last_seen_at: None,
             room_gen: None,
+            snoozed_until: None,
+            archived_at: None,
             parent_chat_id: None,
         }
     }
@@ -17745,6 +18013,8 @@ mod exit_regressions {
                         space_id: Some("other".into()),
                         last_seen_at: None,
                         room_gen: None,
+                        snoozed_until: None,
+                        archived_at: None,
                     }]);
                     state.select_space(Some("mine".into()), cx);
                 });

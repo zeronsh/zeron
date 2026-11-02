@@ -462,6 +462,13 @@ impl Runner {
         .await;
     }
 
+    /// Muse's background work is all agents: subagents and workflows.
+    fn report_background(&self) {
+        let running = self.norm.running_subagents.len();
+        self.turn.set_background(running);
+        self.turn.set_background_agents(running);
+    }
+
     fn owns(&self, turn: &str) -> bool {
         self.active.as_deref() == Some(turn) || self.joined.contains(turn)
     }
@@ -586,7 +593,7 @@ impl Runner {
                     // Background work finishing outside a turn still counts down.
                     if matches!(kind, "subagent" | "workflow") {
                         self.norm.item(item);
-                        self.turn.set_background(self.norm.running_subagents.len());
+                        self.report_background();
                     }
                     return Ok(());
                 }
@@ -603,7 +610,7 @@ impl Runner {
                 for event in self.norm.item(item) {
                     self.emit(event).await?;
                 }
-                self.turn.set_background(self.norm.running_subagents.len());
+                self.report_background();
             }
             "item/delta" => {
                 if self.active.is_some() {

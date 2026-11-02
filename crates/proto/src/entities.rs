@@ -258,6 +258,15 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// Synced LWW snooze (inbox sidebar): the chat hides from the inbox
+    /// until this instant. Waking is derived by each client from the clock;
+    /// the stamp stays behind, and archiving or a send clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    /// When the chat was last archived ("settled" in the inbox sidebar).
+    /// Absent on rows archived before the stamp existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 impl Chat {
@@ -265,6 +274,11 @@ impl Chat {
     /// (`parent_chat_id`) nor a hidden voice orchestrator.
     pub fn is_top_level(&self) -> bool {
         self.parent_chat_id.is_none() && !crate::voice::is_orchestrator_chat(&self.id)
+    }
+
+    /// Snoozed right now: its wake time is still ahead.
+    pub fn snoozed_at(&self, now: DateTime<Utc>) -> bool {
+        self.snoozed_until.is_some_and(|until| until > now)
     }
 
     /// True when this chat syncs over the chat2 dumb relay.

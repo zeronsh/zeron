@@ -2147,6 +2147,11 @@ async fn a_stopped_turn_keeps_the_process_and_its_background_work() {
         turn.background_live(),
         "background_tasks_changed must report the live task"
     );
+    assert_eq!(
+        turn.background_agents(),
+        1,
+        "the background agent counts, the background shell does not"
+    );
 
     turn.stop_turn();
     let stopped = loop {

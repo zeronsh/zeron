@@ -1105,6 +1105,8 @@ impl WorkspaceHost {
                 // to seed, no migration race to lose. Only pre-existing chats
                 // go through the seed+flip path (the host migration sweep).
                 room_gen: Some(2),
+                snoozed_until: None,
+                archived_at: None,
                 harness_session_cwd: None,
                 harness_session_harness: None,
                 space_id: space.as_ref().map(|s| s.id.clone()),
@@ -1381,6 +1383,15 @@ impl WorkspaceHost {
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+    }
+
+    /// Inbox snooze from any device (LWW); `None` clears it.
+    pub fn set_chat_snoozed(
+        &self,
+        chat_id: &str,
+        until: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_snoozed(chat_id, until))?)
     }
 
     /// LWW full-config replace on the chat row (zeron `SetChatConfig` — the

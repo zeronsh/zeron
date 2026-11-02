@@ -801,6 +801,8 @@ impl Client {
             space_id,
             last_seen_at: None,
             room_gen: Some(2),
+            snoozed_until: None,
+            archived_at: None,
             parent_chat_id: None,
         };
         let id = chat.id.clone();

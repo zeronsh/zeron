@@ -689,6 +689,8 @@ impl Client {
             space_id: Some(space_id.to_owned()),
             last_seen_at: None,
             room_gen: Some(2),
+            snoozed_until: None,
+            archived_at: None,
             parent_chat_id: None,
         };
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;

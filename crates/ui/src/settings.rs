@@ -1094,6 +1094,12 @@ pub struct UiSettings {
     pub sidebar_show_project_filter: bool,
     /// The Archived accordion below the active session list.
     pub sidebar_show_archived: bool,
+    /// Inbox sidebar: one flat list split into
+    /// Inbox / Working / Snoozed / Settled, archive relabelled "Settle".
+    pub sidebar_inbox: bool,
+    /// With the inbox sidebar: running sessions fold into a Working section
+    /// instead of staying in the Inbox.
+    pub sidebar_inbox_working: bool,
     /// The sidebar's "Star on GitHub" banner was dismissed (its close button
     /// or following the link). Device-local; never shown again once set.
     pub github_star_banner_dismissed: bool,
@@ -1304,6 +1310,8 @@ impl Default for UiSettings {
             sidebar_show_pull_request: true,
             sidebar_show_project_filter: true,
             sidebar_show_archived: true,
+            sidebar_inbox: false,
+            sidebar_inbox_working: true,
             github_star_banner_dismissed: false,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
@@ -2150,6 +2158,8 @@ impl UiSettings {
             sidebar_show_pull_request,
             sidebar_show_project_filter,
             sidebar_show_archived,
+            sidebar_inbox,
+            sidebar_inbox_working,
             github_star_banner_dismissed,
             last_space_id,
             last_project_action_by_space_id,
@@ -3318,6 +3328,8 @@ mod tests {
             sidebar_show_pull_request: false,
             sidebar_show_project_filter: false,
             sidebar_show_archived: false,
+            sidebar_inbox: true,
+            sidebar_inbox_working: false,
             github_star_banner_dismissed: true,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
