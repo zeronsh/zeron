@@ -208,6 +208,14 @@ fun SessionScreen(
     val cloudOutOfCredits = isCloud && model.cloud.outOfCredits
     var nudges by remember { mutableIntStateOf(0) }
     LaunchedEffect(isCloud) { if (isCloud && model.cloud.info == null) model.cloud.refresh() }
+    // The agent's logins on the chat's computer: the composer's usage pill and quick switcher.
+    val harness = row?.harness ?: "claude-code"
+    // Not until the row says which agent and computer: no pill for a guessed agent or a Cloud chat.
+    val accounts = rememberAccountUsage(core, composer.host.deviceId, harness, enabled = row != null && !row.isCloud)
+    val signsIn = remember(harness) { uniffi.zeron_core.agentLoginRules(harness).signsIn }
+    fun openAccounts() {
+        signInTarget(model, chatId)?.let { onOpenAccounts(it, false) }
+    }
     val companions = rememberCompanions(model, chatId, includeSideChats = parentId == null)
     var companionsSheet by remember { mutableStateOf<CompanionSection?>(null) }
     var showCompanions by remember { mutableStateOf(false) }
@@ -307,6 +315,7 @@ fun SessionScreen(
                             listOfNotNull(
                                 row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
                                 MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                                if (signsIn) MenuAction("Accounts & usage", ZIcons.Key) { openAccounts() } else null,
                                 row?.let {
                                     MenuAction("Archive", ZIcons.Archive) {
                                         model.archive(chatId)
@@ -371,11 +380,17 @@ fun SessionScreen(
                 if (input != null) {
                     QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
                 } else {
-                    Composer(model, core, handle, composer, row, transcript, draft, openModelPicker = openPicker, beforeSend = {
-                        // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
-                        if (cloudOutOfCredits) nudges++
-                        !cloudOutOfCredits
-                    })
+                    Composer(
+                        model, core, handle, composer, row, transcript, draft,
+                        openModelPicker = openPicker,
+                        beforeSend = {
+                            // Out of credits, a Cloud send can't wake its machine: say so instead of a send that never lands.
+                            if (cloudOutOfCredits) nudges++
+                            !cloudOutOfCredits
+                        },
+                        accounts = accounts,
+                        onManageAccounts = ::openAccounts,
+                    )
                 }
             }
         }

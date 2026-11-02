@@ -234,11 +234,7 @@ private fun CapsuleContent(text: String, @DrawableRes icon: Int?, busy: Boolean)
 @Composable
 fun UsageBar(window: UsageWindowInfo, modifier: Modifier = Modifier) {
     val used = window.usedFraction.coerceIn(0f, 1f)
-    val tone = when {
-        used >= 0.9f -> MaterialTheme.colorScheme.error
-        used >= 0.7f -> Color(0xFFD97706)
-        else -> MaterialTheme.colorScheme.primary
-    }
+    val tone = usageTone(used)
     Column(modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(window.label, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)

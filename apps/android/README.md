@@ -60,7 +60,8 @@ terminal/    TerminalView (a shell on the chat's host: paints the Rust
              emulator's frames, IME and hardware keys, scrollback fling,
              pinch to resize, selection), TerminalGlyphs (box drawing, blocks)
 ui/          Sign-in and the welcome pages, sessions (a Material 3 bottom
-             app bar with the New session FAB), session + composer,
+             app bar with the New session FAB), session + composer (its
+             plan-usage pill opens a quick switcher of the agent's logins),
              companions (subagents, side chats, terminals: chips above the
              composer and a sheet), subagent transcripts, terminal + key bar,
              new session (Cloud too), search, settings, and Cloud: Providers,

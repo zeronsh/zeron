@@ -78,7 +78,6 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
     val online = onCloud || device?.online == true
 
     val harnesses = remember { mutableStateMapOf<String, List<HarnessInfo>>() }
-    val accounts = remember { mutableStateMapOf<String, List<DeviceAccountInfo>>() }
     val failed = remember { mutableStateMapOf<String, String>() }
     val toggling = remember { mutableStateMapOf<String, Boolean>() }
     var signingIn by remember { mutableStateOf<String?>(null) }
@@ -89,7 +88,8 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
         val c = client ?: return
         if (computers.firstOrNull { it.id == id }?.online != true) return
         try {
-            accounts[id] = c.deviceAgentAccounts(id)
+            // Kept with the accounts page and the usage pill, so a switch there shows here.
+            DeviceAccountsCache.put(c, id, c.deviceAgentAccounts(id))
             failed.remove(id)
         } catch (e: CancellationException) {
             throw e
@@ -192,7 +192,7 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
                     if (list == null) {
                         CloudRow(0, 1, "Loading…", leading = { LoadingIndicator(Modifier.size(32.dp)) })
                     } else {
-                        val logins = accounts[selected]
+                        val logins = client?.let { DeviceAccountsCache.get(it, selected) }
                         val enabledCount = list.count { it.offered }
                         val sorted = list.sortedWith(compareBy({ if (it.installed) 0 else 1 }, { it.label }))
                         sorted.forEachIndexed { i, h ->

@@ -1396,6 +1396,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func deviceAgentAccounts(deviceId: String) async throws  -> [DeviceAccountInfo]
     
     /**
+     * [`Self::device_agent_accounts`] with each login's plan usage probed
+     * now rather than served from the computer's cache (slower: up to a
+     * minute) — what a usage meter asks for when it opens.
+     */
+    func deviceAgentUsage(deviceId: String) async throws  -> [DeviceAccountInfo]
+    
+    /**
      * Remove a saved login from `device_id`.
      */
     func deviceForgetAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
@@ -2769,6 +2776,27 @@ open func deviceAgentAccounts(deviceId: String)async throws  -> [DeviceAccountIn
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_zeron_mobile_fn_method_coreclient_device_agent_accounts(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * [`Self::device_agent_accounts`] with each login's plan usage probed
+     * now rather than served from the computer's cache (slower: up to a
+     * minute) — what a usage meter asks for when it opens.
+     */
+open func deviceAgentUsage(deviceId: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_agent_usage(
                         self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
                 )
             },
@@ -22103,6 +22131,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_agent_accounts() != 45781) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_agent_usage() != 48809) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_forget_account() != 47260) {

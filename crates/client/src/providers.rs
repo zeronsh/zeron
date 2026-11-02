@@ -284,11 +284,18 @@ impl Client {
     }
 
     /// `ListAgentAccounts` on `device_id`: its CLI logins per agent.
-    pub async fn device_agent_accounts(&self, device_id: &str) -> Result<AgentAccountsSnapshot> {
+    /// `force_usage` has the computer probe each login's plan usage now
+    /// (slower); otherwise it serves its short-lived usage cache, which is
+    /// empty until something forced a probe.
+    pub async fn device_agent_accounts(
+        &self,
+        device_id: &str,
+        force_usage: bool,
+    ) -> Result<AgentAccountsSnapshot> {
         self.accounts_call(
             device_id,
             zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
-            serde_json::json!({}),
+            serde_json::json!({ "forceUsage": force_usage }),
         )
         .await
     }
@@ -338,11 +345,36 @@ impl Client {
         match self.inner.backend() {
             Backend::Demo(_) => Ok(demo_accounts()),
             Backend::Live(live) => {
-                let reply = live.relay.call(device_id, method, params).await?;
-                serde_json::from_value(reply).map_err(|e| ClientError::HostError(e.to_string()))
+                decode_snapshot(live.relay.call(device_id, method, params).await?)
             }
         }
     }
+}
+
+/// A computer's account list, skipping rows (a login, a warning) for an
+/// agent this build doesn't know rather than failing the whole list — a
+/// newer engine may sign in to agents this phone has never heard of.
+fn decode_snapshot(reply: serde_json::Value) -> Result<AgentAccountsSnapshot> {
+    fn rows<T: serde::de::DeserializeOwned>(value: Option<&serde_json::Value>) -> Vec<T> {
+        value
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| T::deserialize(item).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    if !reply.is_object() {
+        return Err(ClientError::HostError(
+            "ListAgentAccounts: bad reply".into(),
+        ));
+    }
+    Ok(AgentAccountsSnapshot {
+        accounts: rows(reply.get("accounts")),
+        warnings: rows(reply.get("warnings")),
+    })
 }
 
 fn stop_relay(login_id: &str) {
@@ -375,13 +407,19 @@ fn demo_accounts() -> AgentAccountsSnapshot {
         used_fraction: used,
         resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(hours)),
     };
+    // Each login its own usage, so a switch visibly moves the composer's pill.
+    let usage = |id: &str| match id {
+        "demo-claude-1" => vec![window("Session", 0.42, 3), window("Week", 0.78, 80)],
+        "demo-claude-2" => vec![window("Session", 0.05, 4), window("Week", 0.12, 120)],
+        _ => vec![window("5h", 0.93, 1), window("Week", 0.31, 50)],
+    };
     let account = |id: &str, harness: HarnessId, email: &str, plan: &str| AgentAccount {
         id: id.into(),
         harness,
         email: Some(email.into()),
         plan_label: Some(plan.into()),
         active: false,
-        usage_windows: vec![window("Session", 0.34, 3), window("Week", 0.12, 96)],
+        usage_windows: usage(id),
         usage_fetched_at: None,
         usage_error: None,
         display_name: None,
@@ -427,5 +465,35 @@ fn demo_accounts() -> AgentAccountsSnapshot {
     AgentAccountsSnapshot {
         accounts,
         warnings: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_skips_rows_for_unknown_agents() {
+        let snapshot = decode_snapshot(serde_json::json!({
+            "accounts": [
+                { "id": "a", "harness": "claude-code", "email": null, "planLabel": "Max", "active": true },
+                { "id": "b", "harness": "from-the-future", "email": null, "planLabel": null, "active": false }
+            ],
+            "warnings": [
+                { "harness": "from-the-future", "message": "?" },
+                { "harness": "codex", "message": "Signed out" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .accounts
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        assert_eq!(snapshot.warnings.len(), 1);
+        assert!(decode_snapshot(serde_json::json!([])).is_err());
     }
 }

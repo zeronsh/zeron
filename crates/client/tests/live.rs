@@ -542,6 +542,8 @@ struct HostService {
     chunks: Mutex<std::collections::BTreeMap<(String, u64), String>>,
     committed: Mutex<Vec<(String, String, Vec<u8>)>>,
     spaces: Mutex<Vec<String>>,
+    /// `forceUsage` of each ListAgentAccounts.
+    account_lists: Mutex<Vec<serde_json::Value>>,
 }
 
 const HOST_IMAGE: &str = "/Users/dev/.zeron/uploads/host.png";
@@ -614,6 +616,13 @@ impl zeron_rpc::RpcService for HostService {
                     .unwrap()
                     .push(params["spaceId"].as_str().unwrap_or_default().to_owned());
                 json!({ "ok": true })
+            }
+            m::LIST_AGENT_ACCOUNTS => {
+                self.account_lists
+                    .lock()
+                    .unwrap()
+                    .push(params["forceUsage"].clone());
+                json!({ "accounts": [], "warnings": [] })
             }
             m::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let item = json!({
@@ -797,6 +806,18 @@ async fn host_rpcs_ride_the_device_relay() {
         .await
         .unwrap();
     assert!(service.spaces.lock().unwrap().contains(&space_id));
+
+    // An account list has the host probe plan usage only when forced.
+    for force in [false, true] {
+        let c = client.clone();
+        zeron_client::runtime::run(async move { c.device_agent_accounts(HOST, force).await })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        *service.account_lists.lock().unwrap(),
+        [serde_json::json!(false), serde_json::json!(true)]
+    );
     client.shutdown();
 }
 
