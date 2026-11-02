@@ -23,6 +23,11 @@ impl TailReader {
         }
     }
 
+    /// Bytes consumed, including an incomplete trailing record.
+    pub(crate) fn position(&self) -> u64 {
+        self.offset
+    }
+
     /// New complete entries since the last poll; io/parse failures read as
     /// "nothing new" (fail soft — the formats are vendor-private).
     pub(crate) fn read_new(&mut self) -> Vec<Value> {
@@ -63,11 +68,15 @@ mod tests {
         let mut tail = TailReader::new(path.clone());
         // Not written yet: nothing, and no error.
         assert!(tail.read_new().is_empty());
+        assert_eq!(tail.position(), 0);
         let mut file = std::fs::File::create(&path).unwrap();
         write!(file, "{{\"n\":1}}\nnot json\n{{\"n\":").unwrap();
         // The torn line waits for its end.
         assert_eq!(tail.read_new(), [json!({"n": 1})]);
+        let position = tail.position();
+        assert_eq!(position, std::fs::metadata(&path).unwrap().len());
         assert!(tail.read_new().is_empty());
+        assert_eq!(tail.position(), position);
         write!(file, "2}}\n{{\"n\":3}}\n").unwrap();
         assert_eq!(tail.read_new(), [json!({"n": 2}), json!({"n": 3})]);
         assert!(tail.read_new().is_empty());

@@ -24,6 +24,7 @@ pub(crate) fn context(
             vec![root.join("settings.json"), root.join(".credentials.json")]
         }
         HarnessId::Cursor => vec![home.join(".cursor/sdk/auth.json")],
+        HarnessId::Droid => droid_files(&root("FACTORY_HOME_OVERRIDE", home)),
         HarnessId::Fx => vec![
             home.join(".fx/auth.json"),
             home.join(".fx/settings.json"),
@@ -113,6 +114,7 @@ pub(crate) fn context(
         HarnessId::Devin => &["DEVIN_"],
         HarnessId::Antigravity => &["GEMINI_", "GOOGLE_"],
         HarnessId::Cursor => &["CURSOR_"],
+        HarnessId::Droid => &["FACTORY_", "DROID_"],
         HarnessId::Fx => &["FX_", "AI_GATEWAY_", "OPENAI_", "ANTHROPIC_"],
         _ => &[],
     };
@@ -133,6 +135,11 @@ pub(crate) fn context(
         binary_path: binary,
         binary_version: version,
     })
+}
+
+fn droid_files(home: &Path) -> Vec<PathBuf> {
+    ["settings.json", "settings.local.json", "auth-deployment.json"]
+        .map(|name| home.join(".factory").join(name)).to_vec()
 }
 
 fn field(hash: &mut Sha256, bytes: &[u8]) {
@@ -169,6 +176,29 @@ impl ModelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn droid_context_excludes_self_rewriting_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".factory");
+        std::fs::create_dir(&root).unwrap();
+        let key = || {
+            let mut hash = Sha256::new();
+            hash_files(&mut hash, droid_files(dir.path()).iter()).unwrap();
+            hash.finalize()
+        };
+        let original = key();
+        for name in ["auth.v2.json", "auth.v2.key", "org-managed-settings.cache.json", "org-managed-settings.cache.json.lock"] {
+            std::fs::write(root.join(name), "first").unwrap();
+            assert_eq!(original, key());
+            std::fs::write(root.join(name), "rewritten").unwrap();
+            assert_eq!(original, key());
+        }
+        for name in ["settings.json", "settings.local.json", "auth-deployment.json"] {
+            let before = key();
+            std::fs::write(root.join(name), "changed").unwrap();
+            assert_ne!(before, key(), "{name}");
+        }
+    }
     #[test]
     fn content_changes_and_missing_files_invalidate_without_exposing_secrets() {
         let dir = tempfile::tempdir().unwrap();

@@ -508,6 +508,12 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: Some(&["update", "--self"]),
             manual_command: "pi update --self",
         },
+        HarnessId::Droid => ProviderSpec {
+            version_args: &["--version"],
+            latest: LatestSource::Npm("droid"),
+            update_args: None,
+            manual_command: "Update Droid with its installer (npm install -g droid for npm installs)",
+        },
         HarnessId::Opencode => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Opencode,
@@ -4611,6 +4617,85 @@ esac
         assert_eq!(installed_version(HarnessId::Muse, "Muse Code 1.4.14").as_deref(), Some("1.4.14"));
         // Only Muse goes by this: another tool's first version stands.
         assert_eq!(installed_version(HarnessId::Codex, "codex 0.155.1 (x 1.0.0-R2)").as_deref(), Some("0.155.1"));
+    }
+
+    #[test]
+    fn droid_updates_only_through_the_installation_owner() {
+        use super::{
+            PlanContext, UpdatePlan, can_apply_update, manual_update_command, ownership, update_plan,
+        };
+        use std::path::Path;
+        assert!(matches!(
+            provider(HarnessId::Droid).latest,
+            LatestSource::Npm("droid")
+        ));
+        assert!(provider(HarnessId::Droid).update_args.is_none());
+        assert_eq!(
+            ownership::npm_package(HarnessId::Droid, Some("1.1.0")),
+            Some("droid")
+        );
+        if cfg!(unix) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("Caskroom/droid/1.1.0/droid");
+            assert!(update_plan(
+                HarnessId::Droid,
+                &path,
+                PlanContext { installed: Some("1.1.0"), channel: None },
+            ).is_err());
+            let brew = dir.path().join("bin/brew");
+            std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
+            std::fs::write(&brew, "#!/bin/sh\nexit 0\n").unwrap();
+            let plan = update_plan(
+                HarnessId::Droid,
+                &path,
+                PlanContext { installed: Some("1.1.0"), channel: None },
+            ).unwrap();
+            let UpdatePlan::Homebrew(package) = plan else {
+                panic!("Homebrew must own its cask");
+            };
+            assert_eq!(package.upgrade_command(), "brew upgrade --cask droid");
+            assert_eq!(package.upgrade_args(), ["upgrade", "--cask", "droid"]);
+            assert!(matches!(ownership::package_owner(Path::new("/opt/homebrew/lib/node_modules/droid/bin/droid"), "droid"), Some(ownership::PackageOwner::Npm {prefix}) if prefix==Path::new("/opt/homebrew")));
+        }
+        assert!(!can_apply_update(
+            HarnessId::Droid,
+            Path::new("/unmanaged/droid")
+        ));
+        assert!(
+            manual_update_command(HarnessId::Droid, Path::new("/unmanaged/droid"), false)
+                .unwrap().contains("installer")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn droid_npm_update_uses_its_own_prefix() {
+        use super::{PlanContext, UpdatePlan, ownership, update_plan};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let npm = dir.path().join("bin/npm");
+        let executable = dir.path().join("lib/node_modules/droid/bin/droid");
+        for path in [&npm, &executable] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let plan = update_plan(
+            HarnessId::Droid,
+            &executable,
+            PlanContext {
+                installed: Some("1.1.0"),
+                channel: None,
+            },
+        )
+        .unwrap();
+        let UpdatePlan::Package {
+            owner: ownership::PackageOwner::Npm { prefix }, package, ..
+        } = plan else {
+            panic!("npm must own its global package");
+        };
+        assert_eq!(prefix, dir.path().canonicalize().unwrap());
+        assert_eq!(package, "droid");
     }
 
     #[test]

@@ -40,7 +40,7 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
 done
 # `misc` (harness, engine and preview): the small suites, one binary each.
 # The orb geometry tests live in zeron-orb's `geometry`.
-for t in misc geometry session_publication restart_resume side_chats message_queue voice_runtime device_routing device_room; do
+for t in misc geometry session_publication restart_resume side_chats message_queue droid_resume voice_runtime device_routing device_room; do
   tests+=(--test "$t")
 done
 

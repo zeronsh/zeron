@@ -785,8 +785,8 @@ pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
 /// Render-only privacy policy — strip heavy/sensitive tool inputs before a call enters the doc.
 ///
 /// Keeps: command / path / pattern / url / query / todo items / server+tool names,
-/// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
-/// identifiers the chip names the child by).
+/// a subagent spawn's model/type (see [`spawn_badge`]), and a native plan's
+/// bounded title/body — user-facing chat content, not private tool arguments.
 /// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
 /// Full inputs remain only in the host's local run journal. Idempotent.
 pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
@@ -811,7 +811,9 @@ pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
         },
         ToolCall::Unknown { name, .. } => ToolCall::Unknown {
             name: name.clone(),
-            input: spawn_badge(call),
+            input: zeron_proto::agent_plans::proposed_plan(call)
+                .map(|plan| plan.display_input())
+                .or_else(|| spawn_badge(call)),
         },
         other => other.clone(),
     }
@@ -1184,6 +1186,41 @@ mod tests {
             }
         );
         assert_eq!(sanitize_tool_call(&clean), clean);
+    }
+
+    #[test]
+    fn sanitize_keeps_only_native_plan_display_fields() {
+        let call = ToolCall::Unknown {
+            name: "ExitSpecMode".into(),
+            input: Some(serde_json::json!({
+                "title":"Proposal", "plan":"1. Inspect\n2. Test\n",
+                "prompt":"private context", "credentials":"never sync",
+            })),
+        };
+        let clean = sanitize_tool_call(&call);
+        assert_eq!(
+            clean,
+            ToolCall::Unknown {
+                name: "ExitSpecMode".into(),
+                input: Some(
+                    serde_json::json!({"title":"Proposal", "plan":"1. Inspect\n2. Test\n"})
+                ),
+            }
+        );
+        assert_eq!(sanitize_tool_call(&clean), clean);
+        for name in ["Other", "ExitPlanMode"] {
+            let call = ToolCall::Unknown {
+                name: name.into(),
+                input: Some(serde_json::json!({"plan":"not a native proposal"})),
+            };
+            assert_eq!(
+                sanitize_tool_call(&call),
+                ToolCall::Unknown {
+                    name: name.into(),
+                    input: None
+                }
+            );
+        }
     }
 
     /// A spawn keeps the two short identifiers its chip names the child by and

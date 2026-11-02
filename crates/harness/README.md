@@ -13,6 +13,7 @@ pinned Antigravity archive.
 | [Cursor](https://cursor.com/docs/cli/installation) | `curl https://cursor.com/install -fsS \| bash` | `irm 'https://cursor.com/install?win32=true' \| iex` |
 | [OpenCode](https://opencode.ai/docs/) | `curl -fsSL https://opencode.ai/install \| bash` | `npm.cmd install -g @opencode/cli` |
 | [Pi](https://pi.dev/docs/latest) | `curl -fsSL https://pi.dev/install.sh \| sh` | `npm.cmd install -g --ignore-scripts @earendil-works/pi-coding-agent` |
+| [Factory Droid](https://docs.factory.com/droid-cli/overview) | `npm install -g droid` | `npm.cmd install -g droid` |
 | [Grok](https://docs.x.ai/developers/release-notes) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `npm.cmd install -g @xai-official/grok` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
@@ -49,6 +50,17 @@ the normal installed probe runs again. A missing binary produces PATH guidance;
 the running app's login-shell snapshot is not refreshed. Authentication remains a
 separate step. Hermes may additionally require its documented ACP Python extra
 for agent sessions; the Install action checks CLI detection only.
+
+## Factory Droid
+
+`DroidHarness` speaks native `stream-jsonrpc`, with streaming deltas, shared
+approvals, plan mode, steering, stop-in-place and session resume. Models and
+efforts come from the sessionless `list_models` RPC and the normal catalog cache.
+`DROID_EXECUTABLE` overrides detection. Login stays CLI-managed: run `droid`
+and use `/login`, or set `FACTORY_API_KEY`. Automatic CLI updates are disabled
+for child processes. Zeron updates proven Homebrew/npm installations through
+their owner; standalone copies require a manual update. See
+[`droid/PROTOCOL.md`](src/droid/PROTOCOL.md) for the tested wire contract.
 
 ## Muse Code
 
