@@ -88,6 +88,9 @@ android {
 
     buildFeatures { compose = true }
 
+    // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
+    testOptions { unitTests.isReturnDefaultValues = true }
+
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
         jniLibs.directories.add(coreOut.resolve("jniLibs").path)
@@ -126,6 +129,7 @@ dependencies {
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
     debugImplementation(libs.compose.ui.tooling)
+    testImplementation(libs.junit)
 }
 
 kotlin {
