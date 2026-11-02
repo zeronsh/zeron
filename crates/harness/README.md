@@ -3,8 +3,8 @@
 Settings → Providers → **Install** runs on the selected device, as its user. Merely
 listing or detecting agents never invokes these CLI installers. The table below
 was checked with `curl -fsSL` against the linked vendor documentation on
-2026-09-21. Commands download the vendor's current release, except for the existing
-pinned Antigravity archive.
+2026-09-21 (Droid rechecked on 2026-11-03). Commands download the vendor's current
+release, except for the existing pinned Antigravity archive.
 
 | Agent / documentation | Unix command (Linux and macOS) | Native Windows command |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ pinned Antigravity archive.
 | [Cursor](https://cursor.com/docs/cli/installation) | `curl https://cursor.com/install -fsS \| bash` | `irm 'https://cursor.com/install?win32=true' \| iex` |
 | [OpenCode](https://opencode.ai/docs/) | `curl -fsSL https://opencode.ai/install \| bash` | `npm.cmd install -g @opencode/cli` |
 | [Pi](https://pi.dev/docs/latest) | `curl -fsSL https://pi.dev/install.sh \| sh` | `npm.cmd install -g --ignore-scripts @earendil-works/pi-coding-agent` |
-| [Factory Droid](https://docs.factory.com/droid-cli/overview) | `npm install -g droid` | `npm.cmd install -g droid` |
+| [Factory Droid](https://docs.factory.com/droid-cli/quickstart.md) | `curl -fsSL https://app.factory.ai/cli \| sh` | `irm https://app.factory.ai/cli/windows \| iex` |
 | [Grok](https://docs.x.ai/developers/release-notes) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `npm.cmd install -g @xai-official/grok` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
@@ -30,8 +30,11 @@ If shell prerequisites are absent, these documented npm alternatives are used
 when npm resolves: `npm install -g @openai/codex`,
 `npm install -g @opencode/cli`,
 `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, and
-`npm install -g @xai-official/grok`. Codex also falls back to npm on Windows when
-PowerShell is unavailable. Grok's npm route is documented in its
+`npm install -g @xai-official/grok`. Droid tries its native shell/PowerShell
+installer first, then `brew install --cask droid` on macOS when available, then
+`npm install -g droid`. These choices are also listed in Factory's
+[welcome guide](https://docs.factory.com/welcome/index.md). Codex and Droid fall
+back to npm on Windows when PowerShell is unavailable. Grok's npm route is documented in its
 [enterprise guide](https://docs.x.ai/build/enterprise); its
 [published package metadata](https://registry.npmjs.org/@xai-official/grok/latest)
 includes Windows binaries. No action is offered when none of the documented

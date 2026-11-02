@@ -50,17 +50,51 @@ pub fn engine_config_from_env() -> zeron_engine::EngineConfig {
 /// `ZERON_HARNESS` (kebab-case id) picks the default harness for chats without a
 /// config row — `mock` powers the e2e smoke; default `claude-code`.
 pub fn harness_from_env() -> zeron_engine::HarnessId {
-    match std::env::var("ZERON_HARNESS").as_deref().map(str::trim) {
-        Ok("mock") => zeron_engine::HarnessId::Mock,
-        Ok("codex") => zeron_engine::HarnessId::Codex,
-        Ok("cursor") => zeron_engine::HarnessId::Cursor,
-        Ok("devin") => zeron_engine::HarnessId::Devin,
-        Ok("grok") => zeron_engine::HarnessId::Grok,
-        Ok("hermes") => zeron_engine::HarnessId::Hermes,
-        Ok("pi") => zeron_engine::HarnessId::Pi,
-        Ok("antigravity") => zeron_engine::HarnessId::Antigravity,
-        Ok("muse") => zeron_engine::HarnessId::Muse,
+    harness_from_setting(std::env::var("ZERON_HARNESS").ok().as_deref())
+}
+
+fn harness_from_setting(value: Option<&str>) -> zeron_engine::HarnessId {
+    match value.map(str::trim) {
+        Some("mock") => zeron_engine::HarnessId::Mock,
+        Some("codex") => zeron_engine::HarnessId::Codex,
+        Some("cursor") => zeron_engine::HarnessId::Cursor,
+        Some("devin") => zeron_engine::HarnessId::Devin,
+        Some("grok") => zeron_engine::HarnessId::Grok,
+        Some("hermes") => zeron_engine::HarnessId::Hermes,
+        Some("pi") => zeron_engine::HarnessId::Pi,
+        Some("droid") => zeron_engine::HarnessId::Droid,
+        Some("antigravity") => zeron_engine::HarnessId::Antigravity,
+        Some("muse") => zeron_engine::HarnessId::Muse,
         _ => zeron_engine::HarnessId::ClaudeCode,
+    }
+}
+
+#[cfg(test)]
+mod harness_setting_tests {
+    use super::harness_from_setting;
+    use zeron_engine::HarnessId;
+
+    #[test]
+    fn default_provider_setting_resolves_droid_and_preserves_existing_choices() {
+        for (name, expected) in [
+            ("droid", HarnessId::Droid),
+            ("mock", HarnessId::Mock),
+            ("codex", HarnessId::Codex),
+            ("cursor", HarnessId::Cursor),
+            ("devin", HarnessId::Devin),
+            ("grok", HarnessId::Grok),
+            ("hermes", HarnessId::Hermes),
+            ("pi", HarnessId::Pi),
+            ("antigravity", HarnessId::Antigravity),
+            ("muse", HarnessId::Muse),
+            ("claude-code", HarnessId::ClaudeCode),
+        ] {
+            assert_eq!(harness_from_setting(Some(name)), expected, "{name}");
+        }
+        assert_eq!(harness_from_setting(Some(" \tdroid\n")), HarnessId::Droid);
+        for value in [None, Some(""), Some("  "), Some("unknown"), Some("Droid")] {
+            assert_eq!(harness_from_setting(value), HarnessId::ClaudeCode);
+        }
     }
 }
 

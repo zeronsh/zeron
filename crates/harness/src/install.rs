@@ -35,7 +35,7 @@ enum Method {
     Shell(&'static str, &'static str),
     Npm(&'static str, bool),
     PowerShell(&'static str),
-    Brew,
+    Brew(&'static str),
 }
 
 // Commands verified against these vendor pages with curl -fsSL on 2026-09-21.
@@ -47,6 +47,7 @@ enum Method {
 // https://docs.x.ai/developers/release-notes and https://docs.x.ai/build/enterprise
 // https://hermes-agent.nousresearch.com/docs/getting-started/installation
 // https://cli.devin.ai/
+// https://docs.factory.com/droid-cli/quickstart.md
 fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     use HarnessId::*;
     use Method::*;
@@ -58,7 +59,19 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
-        Droid => vec![Npm("droid", false)],
+        Droid if windows => vec![
+            PowerShell("irm https://app.factory.ai/cli/windows | iex"),
+            Npm("droid", false),
+        ],
+        Droid if platform == Platform::Mac => vec![
+            Shell("curl -fsSL https://app.factory.ai/cli | sh", "sh"),
+            Brew("droid"),
+            Npm("droid", false),
+        ],
+        Droid => vec![
+            Shell("curl -fsSL https://app.factory.ai/cli | sh", "sh"),
+            Npm("droid", false),
+        ],
         Muse if windows => vec![PowerShell("irm https://dev.meta.ai/install.ps1 | iex")],
         Muse => vec![Shell("curl -fsSL https://dev.meta.ai/install.sh | sh", "sh")],
         ClaudeCode if windows => vec![PowerShell("irm https://claude.ai/install.ps1 | iex")],
@@ -104,7 +117,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             "irm https://static.devin.ai/cli/setup.ps1 | iex",
         )],
         Devin if platform == Platform::Mac => vec![
-            Brew,
+            Brew("devin-cli"),
             Shell("curl -fsSL https://cli.devin.ai/install.sh | bash", "bash"),
         ],
         Devin => vec![Shell(
@@ -133,7 +146,7 @@ fn available(
         Method::Shell(_, shell) => has("sh") && has("curl") && has(shell),
         Method::Npm(..) => has("npm") && (platform == Platform::Windows || has("sh")),
         Method::PowerShell(_) => has("powershell"),
-        Method::Brew => has("brew") && has("sh"),
+        Method::Brew(_) => has("brew") && has("sh"),
     }
 }
 
@@ -180,7 +193,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Cursor => ("cursor-agent", "~/.local/bin or ~/.cursor/bin"),
         Opencode => ("opencode", "~/.opencode/bin or the npm global bin"),
         Pi => ("pi", "the npm global bin"),
-        Droid => ("droid", "the npm global bin"),
+        Droid => ("droid", "~/.local/bin, the Homebrew bin or the npm global bin"),
         Grok => ("grok", "~/.grok/bin or the npm global bin"),
         Hermes => ("hermes", "~/.local/bin or ~/.hermes/bin"),
         Devin => ("devin", "~/.local/bin"),
@@ -297,7 +310,7 @@ fn command(method: Method) -> Result<Command, HarnessError> {
                 ""
             }
         ))?,
-        Method::Brew => shell_command("brew install --cask devin-cli")?,
+        Method::Brew(cask) => shell_command(&format!("brew install --cask {cask}"))?,
         Method::Archive => unreachable!("archives have a separate executor"),
     };
     configure(&mut command);
@@ -409,12 +422,13 @@ async fn run(
 mod tests {
     use super::*;
 
-    const IDS: [HarnessId; 11] = [
+    const IDS: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
         HarnessId::Opencode,
         HarnessId::Pi,
+        HarnessId::Droid,
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Fx,
@@ -443,13 +457,21 @@ mod tests {
                             }
                         }
                         Method::PowerShell(_) => assert_eq!(platform, Platform::Windows),
-                        Method::Brew => assert_eq!(platform, Platform::Mac),
+                        Method::Brew(_) => {
+                            assert_eq!(platform, Platform::Mac);
+                            for missing in ["brew", "sh"] {
+                                assert!(!available(method, platform, &|p| p != missing, true));
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
-        assert_eq!(methods(HarnessId::Devin, Platform::Mac)[0], Method::Brew);
+        assert_eq!(
+            methods(HarnessId::Devin, Platform::Mac)[0],
+            Method::Brew("devin-cli")
+        );
         assert!(matches!(
             methods(HarnessId::Codex, Platform::Unix)[0],
             Method::Shell(_, "sh")
@@ -579,11 +601,58 @@ mod tests {
     }
 
     #[test]
-    fn droid_installs_through_its_npm_package_on_every_platform() {
-        for platform in [Platform::Unix, Platform::Mac, Platform::Windows] {
-            assert_eq!(methods(HarnessId::Droid, platform), vec![Method::Npm("droid", false)]);
-        }
+    fn droid_prefers_documented_native_installers_before_npm() {
+        let shell = Method::Shell("curl -fsSL https://app.factory.ai/cli | sh", "sh");
+        let powershell = Method::PowerShell("irm https://app.factory.ai/cli/windows | iex");
+        let npm = Method::Npm("droid", false);
+        assert_eq!(methods(HarnessId::Droid, Platform::Unix), vec![shell, npm]);
+        assert_eq!(
+            methods(HarnessId::Droid, Platform::Mac),
+            vec![shell, Method::Brew("droid"), npm]
+        );
+        assert_eq!(
+            methods(HarnessId::Droid, Platform::Windows),
+            vec![powershell, npm]
+        );
+        // The portable manual hint remains usable for npm installations.
         assert_eq!(manual_command(HarnessId::Droid), Some("npm install -g droid"));
-        assert_eq!(cli_and_dir(HarnessId::Droid), ("droid", "the npm global bin"));
+        assert_eq!(
+            cli_and_dir(HarnessId::Droid),
+            ("droid", "~/.local/bin, the Homebrew bin or the npm global bin")
+        );
+    }
+
+    #[test]
+    fn droid_installer_selection_follows_available_prerequisites() {
+        for platform in [Platform::Unix, Platform::Mac, Platform::Windows] {
+            let choose = |tools: &[&str]| {
+                methods(HarnessId::Droid, platform)
+                    .into_iter()
+                    .find(|method| available(*method, platform, &|name| tools.contains(&name), false))
+            };
+            let native = methods(HarnessId::Droid, platform)[0];
+            assert_eq!(
+                choose(&["sh", "curl", "powershell", "brew", "npm"]),
+                Some(native)
+            );
+            assert_eq!(choose(&[]), None);
+            if platform == Platform::Windows {
+                assert_eq!(choose(&["powershell"]), Some(native));
+                assert_eq!(choose(&["npm"]), Some(Method::Npm("droid", false)));
+            } else {
+                assert_eq!(choose(&["sh", "curl"]), Some(native));
+                assert_eq!(choose(&["sh", "npm"]), Some(Method::Npm("droid", false)));
+                assert_eq!(choose(&["npm"]), None);
+                assert_eq!(choose(&["curl"]), None);
+                assert_eq!(
+                    choose(&["sh", "brew", "npm"]),
+                    Some(if platform == Platform::Mac {
+                        Method::Brew("droid")
+                    } else {
+                        Method::Npm("droid", false)
+                    })
+                );
+            }
+        }
     }
 }
