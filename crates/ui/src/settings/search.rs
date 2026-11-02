@@ -135,10 +135,18 @@ settings_index! {
         "question waiting approval audio sound"),
     (ErrorSound, Notifications, Some("Sounds"), "Errors and disconnections",
         "failure offline audio sound"),
+    (VoiceProvider, Voice, None, "Voice provider",
+        "codex grok choose which subscription"),
     (CodexVoiceDevice, Voice, None, "Codex voice device",
         "remote host machine"),
     (CodexVoiceStyle, Voice, None, "Codex voice style",
         "speech tone"),
+    (GrokVoice, Voice, None, "Grok voice",
+        "altair ara atlas aurora carina castor celeste cosmo eve helios helix iris kepler leo liora lumen luna lux naksh orion perseus rex rigel sal sirius ursa zagan zenith speech"),
+    (GrokPersonality, Voice, None, "Grok personality",
+        "assistant therapist storyteller doctor meditation conspiracy kids"),
+    (GrokVoiceSpeed, Voice, None, "Grok speech speed",
+        "faster slower playback rate"),
     (Dictation, Voice, None, "Dictation",
         "speech to text transcribe talk"),
     (Microphone, Voice, None, "Microphone",
@@ -191,6 +199,9 @@ impl SettingId {
             SettingId::BackgroundEffect => Some(SettingId::NewThreadBackground),
             SettingId::Microphone | SettingId::SpeechModel => Some(SettingId::Dictation),
             SettingId::AutosaveDelay => Some(SettingId::Autosave),
+            SettingId::GrokVoice | SettingId::GrokPersonality | SettingId::GrokVoiceSpeed => {
+                Some(SettingId::VoiceProvider)
+            }
             _ => None,
         }
     }
@@ -365,7 +376,7 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::General => "preferences composer conversations behavior",
         SettingsSection::Appearance => "theme look colors fonts",
         SettingsSection::Notifications => "alerts sounds banners",
-        SettingsSection::Voice => "speech dictation microphone codex",
+        SettingsSection::Voice => "speech dictation microphone codex grok personality speed",
         SettingsSection::Shortcuts => "keyboard keybindings hotkeys keys",
         SettingsSection::Harnesses | SettingsSection::Agents => {
             "harnesses agents cli claude code codex cursor devin grok hermes pi opencode \

@@ -43,6 +43,8 @@ pub mod methods {
     pub const REPORT_VOICE_MEDIA_V2: &str = "ReportVoiceMediaV2";
     pub const STOP_VOICE_V2: &str = "StopVoiceV2";
     pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
+    pub const PREPARE_GROK_VOICE: &str = "PrepareGrokVoice";
+    pub const APPEND_GROK_VOICE_TRANSCRIPT: &str = "AppendGrokVoiceTranscript";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";

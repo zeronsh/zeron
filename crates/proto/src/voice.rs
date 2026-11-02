@@ -42,6 +42,14 @@ pub enum VoiceRejection {
     MicrophoneMetadataMissing,
     Protocol,
     NativeRuntimeUnavailable,
+    GrokSignInRequired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VoiceProvider {
+    Codex,
+    Grok,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -175,6 +183,23 @@ pub struct VoiceTranscript {
     pub text: String,
     #[serde(default)]
     pub promoted_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareGrokVoice {
+    pub config: crate::ChatConfig,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedGrokVoice {
+    pub chat_id: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendGrokVoiceTranscript {
+    pub chat_id: String,
+    pub transcript: VoiceTranscript,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

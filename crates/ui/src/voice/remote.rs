@@ -34,6 +34,26 @@ pub(super) async fn run(
     host: String,
     config: zeron_proto::ChatConfig,
     voice: Option<String>,
+    grok: super::GrokStyle,
+    provider: VoiceProvider,
+    cancel: CancellationToken,
+    events: mpsc::Sender<VoiceEvent>,
+    controls: mpsc::Receiver<super::VoiceControl>,
+) -> Result<(), VoiceRejection> {
+    match provider {
+        VoiceProvider::Codex => {
+            run_codex(engine, host, config, voice, cancel, events, controls).await
+        }
+        VoiceProvider::Grok => run_grok(engine, config, grok, cancel, events, controls).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex(
+    engine: EngineHandle,
+    host: String,
+    config: zeron_proto::ChatConfig,
+    voice: Option<String>,
     cancel: CancellationToken,
     events: mpsc::Sender<VoiceEvent>,
     mut controls: mpsc::Receiver<super::VoiceControl>,
@@ -63,6 +83,33 @@ pub(super) async fn run(
             result=&mut call=>return result,
             command=controls.recv()=>match command {
                 Some(super::VoiceControl::Mute(value))=>{mute_tx.send_replace(value);},
+                Some(super::VoiceControl::Retune(_))=>{},
+                None=>{cancel.cancel();return (&mut call).await;},
+            }
+        }
+    }
+}
+
+async fn run_grok(
+    engine: EngineHandle,
+    config: zeron_proto::ChatConfig,
+    grok: super::GrokStyle,
+    cancel: CancellationToken,
+    events: mpsc::Sender<VoiceEvent>,
+    mut controls: mpsc::Receiver<super::VoiceControl>,
+) -> Result<(), VoiceRejection> {
+    let (mute_tx, muted) = watch::channel(false);
+    let (tune_tx, tune_rx) = watch::channel(super::grok::tune_from(&grok));
+    let call = super::grok::run(engine, config, cancel.clone(), muted, tune_rx, events);
+    tokio::pin!(call);
+    loop {
+        tokio::select! {biased;
+            result=&mut call=>return result,
+            command=controls.recv()=>match command {
+                Some(super::VoiceControl::Mute(value))=>{mute_tx.send_replace(value);},
+                Some(super::VoiceControl::Retune(style))=>{
+                    let _ = tune_tx.send(super::grok::tune_from(&style));
+                },
                 None=>{cancel.cancel();return (&mut call).await;},
             }
         }

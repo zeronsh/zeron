@@ -4,7 +4,7 @@
 //! threads freely while the orchestrator keeps listening.
 
 use super::*;
-use zeron_proto::voice::{VoicePhase, VoiceWork};
+use zeron_proto::voice::{VoicePhase, VoiceProvider, VoiceWork};
 
 /// The stage paints the hero preset magnified to fill the canvas.
 pub(super) const VOICE_STAGE_ORB_SCALE: f32 = 2.25;
@@ -30,41 +30,60 @@ pub(super) fn stage_reveal(open: bool, elapsed_ms: f32, reduced: bool) -> f32 {
 }
 
 impl Shell {
-    /// The footer microphone: a new orchestrator in a projectless Codex chat
-    /// on this device. The chat's model follows the composer when it already
-    /// targets Codex; otherwise Codex's own default model runs the delegations.
-    pub(super) fn start_voice(&mut self, cx: &mut Context<Self>) {
+    /// The footer microphone. Codex follows the composer when it already
+    /// targets Codex, otherwise Codex's default, and may run on the saved
+    /// device. Grok stays on this computer and uses the saved voice,
+    /// personality, and speed on the next session.
+    pub(super) fn start_voice(&mut self, provider: VoiceProvider, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let (Some(engine), Some(device)) = (state.engine().cloned(), state.local_device_id.clone())
+        let (Some(engine), Some(local)) = (state.engine().cloned(), state.local_device_id.clone())
         else {
             return;
         };
-        let config = self
-            .composer
-            .read(cx)
-            .pickers()
-            .read(cx)
-            .resolved(cx)
-            .chat_config()
-            .filter(|config| config.harness == HarnessId::Codex)
-            .unwrap_or_else(|| ChatConfig {
-                harness: HarnessId::Codex,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                access: Default::default(),
-                plan: false,
-            });
         let saved = settings::current(cx);
-        let device = saved.codex_voice_device.unwrap_or(device);
-        let voice = saved.codex_voice;
+        let grok = crate::voice::GrokStyle::from_settings(&saved);
+        let (config, device, voice) = match provider {
+            VoiceProvider::Codex => {
+                let config = self
+                    .composer
+                    .read(cx)
+                    .pickers()
+                    .read(cx)
+                    .resolved(cx)
+                    .chat_config()
+                    .filter(|config| config.harness == HarnessId::Codex)
+                    .unwrap_or_else(|| ChatConfig {
+                        harness: HarnessId::Codex,
+                        model: None,
+                        reasoning: None,
+                        model_options: Default::default(),
+                        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                        access: Default::default(),
+                        plan: false,
+                    });
+                let device = saved.codex_voice_device.clone().unwrap_or(local);
+                (config, device, saved.codex_voice.clone())
+            }
+            VoiceProvider::Grok => (
+                ChatConfig {
+                    harness: HarnessId::Grok,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                    access: Default::default(),
+                    plan: false,
+                },
+                local,
+                None,
+            ),
+        };
         let host_name = state
             .device_name(&device)
             .unwrap_or("This device")
             .to_owned();
         self.voice.update(cx, |controller, cx| {
-            controller.start(engine, device, config, voice, cx);
+            controller.start(engine, device, config, voice, grok, provider, cx);
             controller.host_name = Some(host_name);
             controller.set_stage_open(true, cx);
         });
@@ -130,7 +149,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         self.check_voice_codex(false, cx);
         let voice = self.voice.read(cx);
-        // Without Codex on this device a call could only fail.
+        // Hidden only when neither provider can take a call.
         if !voice.offered() {
             return None;
         }
@@ -145,6 +164,10 @@ impl Shell {
             voice.speaker_level(),
         );
         let reduced = self.reduced_motion;
+        let preference = settings::current(cx).voice_provider;
+        let menu_open = !live && voice.provider_menu_mounted();
+        let menu_closing = voice.provider_menu_closing();
+        let idle_tip = voice.idle_tooltip(preference);
         self.voice_footer_orb.update(cx, |orb, cx| {
             orb.set_visible(live, cx);
             orb.set_state(orb_state, cx);
@@ -195,14 +218,45 @@ impl Shell {
 
         let tooltip: SharedString = failure
             .map(SharedString::from)
-            .unwrap_or_else(|| "Start voice · Codex orchestrator".into());
-        let button = button
+            .unwrap_or_else(|| idle_tip.into());
+        let mut button = button
             .aria_label("Start voice")
             .tooltip(move |_, cx| {
                 let text = tooltip.clone();
                 cx.new(|_| SurfaceTabTooltip { text }).into()
             })
-            .on_click(cx.listener(|this, _, _, cx| this.start_voice(cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.prevent_default();
+                    this.voice
+                        .update(cx, |voice, _| voice.note_provider_press());
+                }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                let dismissed = this
+                    .voice
+                    .update(cx, |voice, _| voice.take_provider_press_was_open());
+                if dismissed {
+                    this.voice
+                        .update(cx, |voice, cx| voice.close_provider_menu(cx));
+                    return;
+                }
+                let preference = settings::current(cx).voice_provider;
+                let decision = this.voice.read(cx).resolve_provider(preference);
+                match decision {
+                    Some(crate::voice::ProviderDecision::Menu) => {
+                        this.voice
+                            .update(cx, |voice, cx| voice.toggle_provider_menu(cx));
+                    }
+                    Some(crate::voice::ProviderDecision::Start(provider)) => {
+                        this.voice
+                            .update(cx, |voice, cx| voice.close_provider_menu(cx));
+                        this.start_voice(provider, cx);
+                    }
+                    None => {}
+                }
+            }))
             .child(
                 icon(icons::MICROPHONE)
                     .size(px(15.0))
@@ -212,6 +266,13 @@ impl Shell {
                         theme.text,
                     )),
             );
+        if menu_open {
+            button = button.child(popover::anchored_menu_above(
+                "voice-provider-menu",
+                self.render_voice_provider_menu(theme, cx),
+                menu_closing,
+            ));
+        }
         let Some(failure) = failure else {
             return Some(button.into_any_element());
         };
@@ -241,6 +302,7 @@ impl Shell {
             .child(
                 div()
                     .id("voice-failure-dismiss")
+                    .debug_selector(|| "voice-failure-dismiss".into())
                     .flex_none()
                     .cursor_pointer()
                     .rounded(px(4.0))
@@ -268,13 +330,103 @@ impl Shell {
                     .rounded_full()
                     .bg(theme.warning),
             )
-            .child(popover::anchored_menu_above_end(
+            // Not a menu: it stays until its own dismiss control, so an
+            // outside press must still reach the rest of the window.
+            .child(popover::anchored_notice_above_end(
                 "voice-failure",
                 card,
                 None,
             ))
             .into_any_element()
             .into()
+    }
+
+    fn render_voice_provider_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = theme.for_popup();
+        let preference = settings::current(cx).voice_provider;
+        let codex = self.voice_provider_row(
+            &theme,
+            "voice-provider-codex",
+            "Codex",
+            "ChatGPT subscription",
+            preference == settings::VoiceProviderChoice::Codex,
+            VoiceProvider::Codex,
+            settings::VoiceProviderChoice::Codex,
+            cx,
+        );
+        let grok = self.voice_provider_row(
+            &theme,
+            "voice-provider-grok",
+            "Grok",
+            "Grok subscription on this computer",
+            preference == settings::VoiceProviderChoice::Grok,
+            VoiceProvider::Grok,
+            settings::VoiceProviderChoice::Grok,
+            cx,
+        );
+        popover::popover_card(&theme)
+            .w(px(300.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.voice
+                    .update(cx, |voice, cx| voice.close_provider_menu(cx));
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(codex)
+                    .child(grok),
+            )
+            .into_any_element()
+    }
+
+    fn voice_provider_row(
+        &mut self,
+        theme: &Theme,
+        id: &'static str,
+        title: &'static str,
+        detail: &'static str,
+        checked: bool,
+        provider: VoiceProvider,
+        choice: settings::VoiceProviderChoice,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        popover::menu_row(theme, checked, id)
+            .id(id)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                settings::update(settings::SavePolicy::Immediate, cx, move |settings| {
+                    settings.voice_provider = choice;
+                });
+                cx.refresh_windows();
+                this.voice
+                    .update(cx, |voice, cx| voice.close_provider_menu(cx));
+                this.start_voice(provider, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().child(title))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    ),
+            )
+            .when(checked, |row| {
+                row.child(
+                    icon(icons::CHECK)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+            })
+            .into_any_element()
     }
 
     /// The live orb above the orchestrator chat's composer. Every other chat
@@ -579,6 +731,11 @@ impl Shell {
         let elapsed = voice
             .active_since
             .map(|since| crate::voice::format_elapsed(since.elapsed().as_secs()));
+        let provider_label = match voice.provider() {
+            Some(VoiceProvider::Grok) => "Grok",
+            Some(VoiceProvider::Codex) | None => "Codex",
+        };
+        let grok = matches!(voice.provider(), Some(VoiceProvider::Grok));
         let live_tone = if awaiting {
             popup.warning
         } else if muted {
@@ -602,6 +759,12 @@ impl Shell {
                     .text_size(crate::typography::ui_rems(13.0))
                     .text_color(popup.text_muted)
                     .child(SharedString::from(elapsed.unwrap_or_else(|| "–:––".into()))),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(popup.text_muted)
+                    .child(provider_label),
             );
 
         let clock = clock.children(voice.host_name.clone().map(|name| {
@@ -637,17 +800,19 @@ impl Shell {
             );
 
         let transcript = chat_id.map(|chat_id| {
+            let (label, tip) = if grok {
+                ("Open the voice transcript", "Transcript")
+            } else if awaiting {
+                (
+                    "Answer Codex in the transcript",
+                    "Codex is asking you something",
+                )
+            } else {
+                ("Open the voice transcript", "Transcript")
+            };
             round_control("voice-bar-transcript", &popup, false)
-                .aria_label(if awaiting {
-                    "Answer Codex in the transcript"
-                } else {
-                    "Open the voice transcript"
-                })
-                .tooltip(stage_tooltip(if awaiting {
-                    "Codex is asking you something"
-                } else {
-                    "Transcript"
-                }))
+                .aria_label(label)
+                .tooltip(stage_tooltip(tip))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_chat(chat_id.clone(), cx)))
                 .child(
                     icon(icons::CHAT_ROUND_LINE)
@@ -730,6 +895,7 @@ impl Shell {
             .text_color(popup.text)
             .child(clock)
             .child(divider())
+            .when(grok, |bar| bar.child(self.grok_call_menu.clone()))
             .child(mic)
             .children(transcript)
             .child(end)

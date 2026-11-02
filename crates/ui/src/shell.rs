@@ -2096,6 +2096,8 @@ pub struct Shell {
     composer: Entity<Composer>,
     /// The window's voice orchestrator: independent of the selected chat.
     voice: Entity<crate::voice::VoiceController>,
+    /// Grok call-bar menu: voice, personality, speed, and microphone.
+    grok_call_menu: Entity<crate::voice::GrokCallMenu>,
     /// Sidebar footer orb (session live) and the full-window stage's orb.
     voice_footer_orb: Entity<crate::orb::Orb>,
     voice_stage_orb: Entity<crate::orb::Orb>,
@@ -2112,6 +2114,8 @@ pub struct Shell {
     voice_stage_selection: Option<String>,
     _voice_observation: gpui::Subscription,
     _voice_catalog: gpui::Subscription,
+    /// Saved Grok voice, personality, speed, and microphone reach the live call.
+    _grok_style: gpui::Subscription,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -2544,6 +2548,7 @@ impl Shell {
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let voice = cx.new(|_| crate::voice::VoiceController::default());
+        let grok_call_menu = cx.new(|cx| crate::voice::GrokCallMenu::new(voice.clone(), cx));
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
                 .size(crate::orb::OrbSize::Inline)
@@ -2568,6 +2573,11 @@ impl Shell {
         let voice_catalog =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Shell, cx| {
                 this.check_voice_codex(true, cx)
+            });
+        let grok_style =
+            cx.observe_global::<crate::settings::SettingsStore>(|this: &mut Shell, cx| {
+                this.voice
+                    .update(cx, |voice, cx| voice.sync_grok_style(cx));
             });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
@@ -2724,6 +2734,7 @@ impl Shell {
             transcript,
             composer,
             voice,
+            grok_call_menu,
             voice_footer_orb,
             voice_stage_orb,
             voice_composer_orb,
@@ -2735,6 +2746,7 @@ impl Shell {
             voice_stage_selection: None,
             _voice_observation: voice_observation,
             _voice_catalog: voice_catalog,
+            _grok_style: grok_style,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -6106,7 +6118,9 @@ impl Shell {
                     ));
                 }
                 let live = self.voice.read(cx).is_live();
+                let (codex_ready, grok_ready) = self.voice.read(cx).provider_readiness();
                 card.update(cx, |card, cx| card.set_hosts(hosts, live, cx));
+                card.update(cx, |card, cx| card.set_providers(codex_ready, grok_ready, cx));
                 if let Some(snapshot) = &self.voice.read(cx).snapshot {
                     let voices = snapshot.voices.clone();
                     card.update(cx, |card, cx| card.set_voices(&voices, cx));
@@ -16816,6 +16830,83 @@ mod exit_regressions {
                 }
             });
         }
+    }
+
+    #[gpui::test]
+    fn voice_failure_notice_leaves_the_rest_of_the_window_clickable(cx: &mut TestAppContext) {
+        // The footer sits at the bottom, as it does in the window: the notice
+        // opens upward and must not cover the row, or swallow clicks outside it.
+        struct FooterHost(Entity<Shell>);
+        impl Render for FooterHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    div().size_full().flex().flex_col().justify_end().child(
+                        div()
+                            .w(px(256.0))
+                            .child(shell.render_sidebar_footer(&Theme::default(), cx)),
+                    )
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            FooterHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        shell.update(cx, |shell, cx| {
+            shell.voice.update(cx, |voice, _| {
+                voice.phase = zeron_proto::voice::VoicePhase::Failed;
+                voice.reason = Some(zeron_proto::voice::VoiceRejection::NativeRuntimeUnavailable);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("voice-failure-dismiss").is_some(),
+            "the failure notice is showing"
+        );
+        let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
+        cx.simulate_click(trigger, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert!(
+                matches!(shell.route, Route::Settings(SettingsSection::General)),
+                "settings still opens while the notice is up"
+            );
+            assert_eq!(
+                shell.voice.read(cx).phase,
+                zeron_proto::voice::VoicePhase::Failed,
+                "that click does not dismiss the notice"
+            );
+        });
+        let dismiss = cx.debug_bounds("voice-failure-dismiss").unwrap().center();
+        cx.simulate_click(dismiss, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.voice.read(cx).phase,
+                zeron_proto::voice::VoicePhase::Closed
+            );
+        });
     }
 
     #[gpui::test]
