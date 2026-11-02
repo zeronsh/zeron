@@ -2933,6 +2933,7 @@ impl RpcService for EngineRpc {
                         .doc()
                         .push_message(&zeron_doc::SessionMessageEntry {
                             duration_ms: None,
+                            finished_at: None,
                             id: marker_id.clone(),
                             role: zeron_doc::MessageRole::System,
                             parts: vec![zeron_doc::MessagePart::Fork {
@@ -5238,6 +5239,7 @@ mod tests {
                 status: None,
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             })
             .unwrap();
         // Hold publication blocked: the opening must not await the full mirror.
@@ -5667,6 +5669,7 @@ mod context_usage_tests {
                     status: Some(zeron_doc::MessageStatus::Streaming),
                     continuation_of: None,
                     duration_ms: None,
+                    finished_at: None,
                 })
                 .unwrap()
         };
@@ -5788,6 +5791,7 @@ mod context_usage_tests {
             status: Some(zeron_doc::MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         handle.doc().push_message(&entry("local-before")).unwrap();
         source.update_context_usage(Some(10), Some(100)).unwrap();

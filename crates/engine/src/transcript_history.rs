@@ -152,6 +152,7 @@ mod tests {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 

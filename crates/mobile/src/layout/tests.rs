@@ -177,6 +177,7 @@ fn messages_the_agent_sent_show_as_one_line_naming_the_recipient() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })],
         ..Default::default()
     };
@@ -222,6 +223,7 @@ fn question_chip_reads_what_was_answered() {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             })],
             ..Default::default()
         };
@@ -295,6 +297,7 @@ fn thinking_renders_styled_markdown_not_markers() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })],
         ..Default::default()
     };
@@ -335,6 +338,7 @@ fn thinking_renders_styled_markdown_not_markers() {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             })],
             ..Default::default()
         };
@@ -368,6 +372,7 @@ fn streaming_thought_markdown_settles_to_the_fresh_parse() {
             status: Some(status),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
     };
     let mut live = worker(390.0);
@@ -418,6 +423,7 @@ fn thought_input(text: &str, streaming: bool) -> TranscriptInput {
             status: Some(if streaming { MessageStatus::Streaming } else { MessageStatus::Complete }),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })],
         ..Default::default()
     }
@@ -560,6 +566,7 @@ fn bench_layout_passes() {
             status: Some(MessageStatus::Streaming),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }));
         w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true, workspace: None };
         let t = Instant::now();
@@ -693,6 +700,7 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             })],
             ..Default::default()
         };
@@ -759,6 +767,7 @@ fn visual_rows_take_the_height_their_worker_measures() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })],
         ..Default::default()
     });
@@ -1399,6 +1408,7 @@ fn errors_render_as_cards_with_a_log_in_button_when_signing_in_fixes_them() {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         })
     };
     let mut w = worker(390.0);

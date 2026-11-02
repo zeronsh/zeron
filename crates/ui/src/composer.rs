@@ -9490,6 +9490,7 @@ impl Composer {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         self.launching_new_chat = is_new;
         if is_new {
@@ -9696,6 +9697,7 @@ impl Composer {
                             status: None,
                             continuation_of: None,
                             duration_ms: None,
+                            finished_at: None,
                         };
                         let echo_chat_id = chat_id.clone();
                         this.update(cx, |composer, cx| {
@@ -16861,6 +16863,7 @@ mod tests {
                 status: Some(zeron_doc::MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             }]
         };
         state.update(cx, |s, _| s.selected_chat = Some("a".into()));
@@ -16936,6 +16939,7 @@ mod tests {
                 status: Some(zeron_doc::MessageStatus::Streaming),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             }]
         });
         composer.update(cx, |c, cx| {
@@ -16970,6 +16974,7 @@ mod tests {
             status,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         // Streaming entry with unresolved input → panel.
         let t = vec![entry(
@@ -17007,6 +17012,7 @@ mod tests {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             },
         ];
         assert!(pending_input_request(&t).is_none());
@@ -17041,6 +17047,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         let t = vec![
             entry(Some(MessageStatus::Streaming), vec![input_part.clone()]),

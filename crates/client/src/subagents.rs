@@ -312,6 +312,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         });
         let list = subagents(&[entry]);
         assert_eq!(list.len(), 3);

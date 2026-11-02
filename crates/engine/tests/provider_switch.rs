@@ -232,6 +232,7 @@ impl Rig {
                 status: Some(MessageStatus::Complete),
                 continuation_of: None,
                 duration_ms: None,
+                finished_at: None,
             })
             .unwrap();
         self.turn(harness, prompt, message_id).await
@@ -574,6 +575,7 @@ async fn replayed_history_is_capped_to_the_newest_messages() {
         doc.doc()
             .push_message(&SessionMessageEntry {
                 duration_ms: None,
+                finished_at: None,
                 id: id.clone(),
                 role,
                 parts: vec![MessagePart::Text {
@@ -745,6 +747,7 @@ async fn a_switched_side_chat_counts_only_its_own_seams() {
         doc.doc()
             .push_message(&SessionMessageEntry {
                 duration_ms: None,
+                finished_at: None,
                 id: id.into(),
                 role: MessageRole::System,
                 parts: vec![part],

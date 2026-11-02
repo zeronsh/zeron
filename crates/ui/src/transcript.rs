@@ -1171,10 +1171,10 @@ pub struct Row {
     /// The owning message entry — hover anywhere on the entry's rows reveals
     /// its timestamp strip (zeron chat-view.tsx `group`/`group-hover`).
     pub entry_id: SharedString,
-    /// Epoch-ms for the 16px hover-timestamp strip UNDER this row: set on the
-    /// LAST row of a completed entry (user rows always; assistant rows only
-    /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
-    pub timestamp: Option<i64>,
+    /// The hover-timestamp strip UNDER this row: set on the LAST row of a
+    /// completed entry (user rows always; assistant rows only once streaming
+    /// ends — "the turn isn't at a time yet", chat-view.tsx).
+    pub timestamp: Option<RowTime>,
     /// Text copied by the entry-level hover action. Present only on the last
     /// settled row, beside the timestamp; tools and transport-only metadata
     /// are deliberately excluded.
@@ -1183,21 +1183,60 @@ pub struct Row {
     pub compact_fold: Option<SharedString>,
 }
 
-/// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
+/// What a row's hover strip says about when its entry was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowTime {
+    /// Epoch-ms the label shows.
+    At(i64),
+    /// Not known: the strip and its copy action stay, with no label rather
+    /// than 1970 or a misleading start time.
+    Unknown,
+}
+
+impl RowTime {
+    fn of(entry: &SessionMessageEntry) -> Self {
+        entry.settled_at().map_or(Self::Unknown, Self::At)
+    }
+}
+
+/// A reply's time never reads past the user message right below it: a steer
+/// or a held send lands under a reply that finished after it was sent, and
+/// "10:05" above "10:03" reads as out of order. It caps at that message, or
+/// at the reply's own start if the message predates even that.
+fn cap_reply_time(row: &mut Row, started_at: i64, next_user_at: i64) {
+    if let Some(RowTime::At(at)) = row.timestamp
+        && next_user_at > 0
+        && at > next_user_at
+    {
+        let capped = next_user_at.max(started_at);
+        row.timestamp = Some(RowTime::At(capped));
+        // The label changed under an unchanged entry: key the row diff on it.
+        row.version ^= (capped as u64).rotate_left(29);
+    }
+}
+
+/// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the
 /// `formatTimestamp` shape (utils.ts: short month, numeric day, hour,
-/// 2-digit minutes, no leading zero on the hour). Pure over an explicit
-/// timezone so tests don't depend on the host's local time.
-pub fn format_timestamp<Tz: chrono::TimeZone>(ms: i64, tz: &Tz) -> String
+/// 2-digit minutes, no leading zero on the hour). Unlike the original, a
+/// time outside `now_ms`'s year names its year ("Jul 1, 2025, 3:45 PM"), so
+/// last year's messages don't read as this year's. Pure over an explicit timezone and clock so
+/// tests don't depend on the host's.
+pub fn format_timestamp<Tz: chrono::TimeZone>(ms: i64, now_ms: i64, tz: &Tz) -> String
 where
     Tz::Offset: std::fmt::Display,
 {
-    match chrono::DateTime::from_timestamp_millis(ms) {
-        Some(utc) => utc
-            .with_timezone(tz)
-            .format("%b %-d, %-I:%M %p")
-            .to_string(),
-        None => String::new(),
-    }
+    use chrono::Datelike;
+    let Some(at) = chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(tz)) else {
+        return String::new();
+    };
+    let same_year = chrono::DateTime::from_timestamp_millis(now_ms)
+        .is_some_and(|now| now.with_timezone(tz).year() == at.year());
+    let shape = if same_year {
+        "%b %-d, %-I:%M %p"
+    } else {
+        "%b %-d, %Y, %-I:%M %p"
+    };
+    at.format(shape).to_string()
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -1460,7 +1499,7 @@ pub fn rows_for_entry(
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
-            timestamp: Some(entry.created_at),
+            timestamp: Some(RowTime::of(entry)),
             copy_text,
             compact_fold: None,
         }];
@@ -1879,6 +1918,7 @@ pub fn rows_for_entry(
                 let work_entry = SessionMessageEntry {
                     parts: work_parts,
                     duration_ms: None,
+                    finished_at: None,
                     continuation_of: None,
                     ..entry.clone()
                 };
@@ -1932,7 +1972,9 @@ pub fn rows_for_entry(
         first.turn_start = true;
     }
     // Timestamp strip under the entry's LAST row once the turn has settled
-    // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
+    // (chat-view.tsx: "No timestamp hover mid-stream"), reading when the
+    // turn ENDED: `createdAt` is its start, a moment after the question,
+    // so the two would otherwise share a time. The version bit keeps
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
     if !streaming
@@ -1942,7 +1984,7 @@ pub fn rows_for_entry(
             RowKind::ForkMarker { .. } | RowKind::SwitchMarker { .. }
         )
     {
-        last.timestamp = Some(entry.created_at);
+        last.timestamp = Some(RowTime::of(entry));
         last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
@@ -5182,7 +5224,15 @@ impl Transcript {
                 .chat_id
                 .as_ref()
                 .and_then(|id| state.prepared_transcripts.get(id));
+            // The previous reply's last row and start, for `cap_reply_time`.
+            let mut reply: Option<(usize, i64)> = None;
             for entry in entries {
+                if entry.role == MessageRole::User
+                    && let Some((ix, started_at)) = reply
+                {
+                    cap_reply_time(&mut new_rows[ix], started_at, entry.created_at);
+                }
+                let first = new_rows.len();
                 if !self.compact_mode
                     && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
                 {
@@ -5190,9 +5240,14 @@ impl Transcript {
                 } else {
                     new_rows.extend(self.rows_for(entry, false));
                 }
+                reply = (entry.role == MessageRole::Assistant && new_rows.len() > first)
+                    .then(|| (new_rows.len() - 1, entry.created_at));
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
+                    if let Some((ix, started_at)) = reply.take() {
+                        cap_reply_time(&mut new_rows[ix], started_at, echo.created_at);
+                    }
                     new_rows.extend(self.rows_for(echo, true));
                 }
             }
@@ -8340,11 +8395,21 @@ impl Transcript {
         let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
-        let strip = row.timestamp.map(|ms| {
-            let timestamp = div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted.opacity(0.55))
-                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+        let strip = row.timestamp.map(|time| {
+            let timestamp = match time {
+                RowTime::At(ms) => Some(ms),
+                RowTime::Unknown => None,
+            }
+            .map(|ms| {
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted.opacity(0.55))
+                    .child(SharedString::from(format_timestamp(
+                        ms,
+                        chrono::Utc::now().timestamp_millis(),
+                        &chrono::Local,
+                    )))
+            });
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
                 let fade_key = format!("copy-message-hover-{entry_id}");
@@ -8383,7 +8448,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = metadata.child(timestamp).children(copy);
+            let metadata = metadata.children(timestamp).children(copy);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -11183,6 +11248,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
     });
     acc.push(pending as u8);
     acc.extend_from_slice(&entry.duration_ms.unwrap_or(0).to_le_bytes());
+    // The hover timestamp row reads this; a stamp landing alone must re-row.
+    acc.extend_from_slice(&entry.settled_at().unwrap_or(0).to_le_bytes());
     for part in &entry.parts {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
@@ -13062,6 +13129,7 @@ mod tests {
             status: Some(status),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
@@ -13102,6 +13170,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
@@ -13172,6 +13241,7 @@ mod tests {
             status: Some(MessageStatus::Complete),
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
@@ -17744,7 +17814,10 @@ mod tests {
         let ms = chrono::DateTime::parse_from_rfc3339("2026-07-01T19:45:00Z")
             .unwrap()
             .timestamp_millis();
-        assert_eq!(format_timestamp(ms, &tz), "Jul 1, 3:45 PM");
+        assert_eq!(format_timestamp(ms, ms, &tz), "Jul 1, 3:45 PM");
+        // Another year names it.
+        let next_year = ms + 365 * 24 * 3600 * 1000;
+        assert_eq!(format_timestamp(ms, next_year, &tz), "Jul 1, 2026, 3:45 PM");
 
         // User entries carry the strip on their single row (pending too).
         let user = SessionMessageEntry {
@@ -17756,12 +17829,14 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         };
         let rows = rows_for_entry(&user, true, false, &mut parse);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].timestamp, Some(ms));
+        assert_eq!(rows[0].timestamp, Some(RowTime::At(ms)));
 
-        // Assistant entries: strip on the LAST row once settled…
+        // Assistant entries: strip on the LAST row once settled; an unknown
+        // time (createdAt 0) keeps the strip and its copy, with no label…
         let done = assistant(
             "a1",
             MessageStatus::Complete,
@@ -17769,13 +17844,28 @@ mod tests {
         );
         let rows = rows_for_entry(&done, false, false, &mut parse);
         assert!(rows.len() >= 2);
-        assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
+        assert_eq!(
+            rows.last().unwrap().timestamp,
+            Some(RowTime::Unknown),
+            "createdAt 0"
+        );
         assert_eq!(
             rows.last().unwrap().copy_text.as_deref(),
             Some("one\n\ntwo")
         );
         assert!(rows[..rows.len() - 1].iter().all(|r| r.timestamp.is_none()));
         assert!(rows[..rows.len() - 1].iter().all(|r| r.copy_text.is_none()));
+
+        // …reading when the turn ENDED, not when it began a moment after
+        // the question (both used to show the same minute)…
+        let mut finished = done.clone();
+        finished.created_at = ms;
+        finished.finished_at = Some(ms + 95_000);
+        let rows = rows_for_entry(&finished, false, false, &mut parse);
+        assert_eq!(
+            rows.last().unwrap().timestamp,
+            Some(RowTime::At(ms + 95_000))
+        );
 
         // …but never mid-stream (chat-view.tsx: no hover under a moving reply).
         let live = assistant(
@@ -17788,6 +17878,33 @@ mod tests {
         assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
         assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
+    }
+
+    #[test]
+    fn a_reply_time_never_reads_past_the_message_below_it() {
+        let mut reply = assistant("a1", MessageStatus::Complete, vec![text_part("p1", "done")]);
+        reply.created_at = 1_000;
+        reply.finished_at = Some(5_000);
+        let mut row = rows_for_entry(&reply, false, false, &mut parse)
+            .pop()
+            .unwrap();
+        let version = row.version;
+        // A message sent after the reply finished leaves it alone.
+        cap_reply_time(&mut row, 1_000, 6_000);
+        assert_eq!(
+            (row.timestamp, row.version),
+            (Some(RowTime::At(5_000)), version)
+        );
+        // A steer sent while it worked caps it, and re-keys the row.
+        cap_reply_time(&mut row, 1_000, 3_000);
+        assert_eq!(row.timestamp, Some(RowTime::At(3_000)));
+        assert_ne!(row.version, version);
+        // Never below the reply's own start; unknown times stay unknown.
+        cap_reply_time(&mut row, 1_000, 500);
+        assert_eq!(row.timestamp, Some(RowTime::At(1_000)));
+        row.timestamp = Some(RowTime::Unknown);
+        cap_reply_time(&mut row, 1_000, 500);
+        assert_eq!(row.timestamp, Some(RowTime::Unknown));
     }
 
     #[test]
@@ -18043,6 +18160,7 @@ mod tests {
             status: None,
             continuation_of: None,
             duration_ms: None,
+            finished_at: None,
         }
     }
 
