@@ -14,12 +14,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyTooltip, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, LayoutId,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, PathPromptOptions, Pixels, Point, Role, ScrollWheelEvent, SharedString, Style,
-    StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
+    AnyTooltip, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke,
+    LayoutId, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PaintQuad, PathPromptOptions, Pixels, Point, Role, ScrollWheelEvent, SharedString,
+    Style, StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
     Window, WrappedLine, actions, div, fill, img, point, prelude::*, px, quad, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -6371,6 +6371,10 @@ pub struct Composer {
     failure_key: Option<String>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
+    /// Focus the answer field on the next frame. A click can leave focus on
+    /// the panel (that is how bare digits pick), but a new page or a closed
+    /// panel is answered by typing, so the caret comes back on its own.
+    focus_answer_next_frame: bool,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
@@ -6684,6 +6688,7 @@ impl Composer {
             failure: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
+            focus_answer_next_frame: false,
             answered_requests: HashSet::new(),
             failure_key: None,
             action_task: None,
@@ -10192,6 +10197,17 @@ impl Composer {
         cx.notify();
     }
 
+    /// A press the answer field did not take moves focus to the panel, where
+    /// bare digits pick options and Enter advances. The field blurs itself on
+    /// presses outside its bounds (`on_mouse_down_out`, capture phase), so by
+    /// the time this bubbles up its focus flag already tells the two apart:
+    /// a press inside the field leaves it focused and this does nothing.
+    fn focus_wizard(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input.read(cx).focus_handle.is_focused(window) {
+            window.focus(&self.wizard_focus, cx);
+        }
+    }
+
     fn schedule_auto_advance(&mut self, cx: &mut Context<Self>) {
         self.advance_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -10213,6 +10229,7 @@ impl Composer {
             _ => {
                 let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
                 self.input.update(cx, |input, cx| input.set_text(text, cx));
+                self.focus_answer_next_frame = true;
                 cx.notify();
             }
         }
@@ -10225,6 +10242,7 @@ impl Composer {
             wizard.back();
             let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
             self.input.update(cx, |input, cx| input.set_text(text, cx));
+            self.focus_answer_next_frame = true;
             cx.notify();
         }
     }
@@ -10242,6 +10260,7 @@ impl Composer {
             return;
         };
         self.advance_task = None;
+        self.focus_answer_next_frame = true;
         self.answered_requests.insert(wizard.request_id.clone());
         let draft = self
             .drafts
@@ -10310,25 +10329,32 @@ impl Composer {
     }
 
     fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
-        // Keys bubbling out of the free-text input must not double-handle:
-        // digits select options only while the input is empty, and Enter is the
-        // input's own Submit action when it has focus.
+        // The answer field owns every key while it has the caret: a digit
+        // typed there is TEXT (an answer can start with "1", "2.5s", "8080")
+        // and Enter is the input's own Submit. Clicking anywhere else in the
+        // panel hands focus to the panel (see `focus_wizard`), and only then
+        // do bare digits pick.
         let input_focused = self.input.read(cx).focus_handle.is_focused(window);
         let input_empty = self.input.read(cx).is_empty();
         let key = event.keystroke.key.as_str();
-        // A BARE digit picks an option. With a modifier held the keystroke
-        // belongs to an app shortcut — ⌘1..⌘9 jump to a sidebar row — and the
-        // panel must not also consume it as a selection.
-        if let Ok(digit) = key.parse::<usize>()
-            && (1..=9).contains(&digit)
-            && !event.keystroke.modifiers.modified()
+        let options = self
+            .wizard
+            .as_ref()
+            .and_then(|wizard| wizard.current())
+            .map_or(0, |question| question.options.len());
+        let digit = key
+            .parse::<usize>()
+            .ok()
+            .filter(|digit| (1..=9).contains(digit) && *digit <= options);
+        let bare = !event.keystroke.modifiers.modified();
+        if let Some(digit) = digit
+            && bare
+            && !input_focused
         {
-            if !input_focused || input_empty {
-                self.wizard_select(digit - 1, cx);
-                // Consumed as a selection: stop the platform from also
-                // inserting the digit into the focused free-text input.
-                cx.stop_propagation();
-            }
+            self.wizard_select(digit - 1, cx);
+            // Consumed as a selection: stop the platform from also inserting
+            // the digit into whatever else is listening.
+            cx.stop_propagation();
         } else if key == "enter" {
             if !input_focused {
                 self.wizard_advance(cx);
@@ -10438,11 +10464,16 @@ impl Composer {
                         .child(SharedString::from(label.clone())),
                 )
                 .when(ix < 9, |el| {
+                    // Kbd chip naming the number that picks this row. The
+                    // digit is text while the answer field has the caret;
+                    // clicking anywhere else on the panel makes it pick.
+                    let shortcut = (ix + 1).to_string();
                     el.child(
-                        // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
                             .flex_none()
-                            .size(px(22.0))
+                            .min_w(px(22.0))
+                            .h(px(22.0))
+                            .px(px(4.0))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -10458,7 +10489,7 @@ impl Composer {
                             } else {
                                 theme.text_muted.opacity(0.6)
                             })
-                            .child(SharedString::from(format!("{}", ix + 1))),
+                            .child(SharedString::from(shortcut)),
                     )
                 })
         });
@@ -10468,7 +10499,12 @@ impl Composer {
         // show through unblurred.
         let panel = div()
             .id("question-panel")
+            .debug_selector(|| "question-panel".into())
             .track_focus(&self.wizard_focus)
+            // A press outside the answer field leaves focus on the panel, so
+            // bare digits pick options; inside the field it stays with the
+            // caret and every digit is text.
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::focus_wizard))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
             }))
@@ -11246,6 +11282,10 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_answer_next_frame) {
+            let focus = self.input.read(cx).focus_handle.clone();
+            window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        }
         if self.dictation_blur.is_none() {
             // Stop, Send and keyboard navigation within the composer must not
             // discard capture. Only leaving the whole composer invalidates it.
@@ -16949,6 +16989,152 @@ mod tests {
             c.on_state_changed(cx);
             assert!(c.wizard.is_none());
         });
+    }
+
+    /// A real composer window with one pending question, the answer input
+    /// focused, and the panel drawn so its key handler is in the tree.
+    fn wizard_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (tempfile::TempDir, gpui::WindowHandle<Composer>) {
+        wizard_window_asking(cx, vec![question("q", &["first", "second"], false)])
+    }
+
+    /// [`wizard_window`] with the questions the test needs.
+    fn wizard_window_asking(
+        cx: &mut gpui::TestAppContext,
+        questions: Vec<UserInputQuestion>,
+    ) -> (tempfile::TempDir, gpui::WindowHandle<Composer>) {
+        let (dir, handle) = composer_focus_window(cx);
+        let state = handle
+            .update(cx, |composer, _, _| composer.state.clone())
+            .unwrap();
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("a".into());
+            state.transcript = vec![SessionMessageEntry {
+                id: "assistant".into(),
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Input {
+                    id: "input".into(),
+                    request_id: "r1".into(),
+                    questions,
+                    resolved: false,
+                    answers: None,
+                }],
+                created_at: 0,
+                device_id: "device".into(),
+                status: Some(zeron_doc::MessageStatus::Streaming),
+                continuation_of: None,
+                duration_ms: None,
+            }];
+        });
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.on_state_changed(cx);
+                assert!(composer.wizard.is_some());
+                let input_focus = composer.input.read(cx).focus_handle.clone();
+                window.focus(&input_focus, cx);
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        (dir, handle)
+    }
+
+    /// The answer field owns typing: a bare digit always lands in the input,
+    /// so an answer can start with a number ("2.5s", "8080", "1st").
+    #[gpui::test]
+    fn wizard_answer_can_start_with_a_digit(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = wizard_window(cx);
+        cx.simulate_keystrokes(handle.into(), "1");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input.read(cx).text(), "1");
+                assert!(
+                    !composer.wizard.as_ref().unwrap().is_picked(0),
+                    "a typed digit must not pick an option"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The caret owns typing and the panel owns picking: a press outside the
+    /// answer field hands focus to the panel, and there a bare digit picks an
+    /// option without touching the answer.
+    #[gpui::test]
+    fn wizard_click_outside_the_answer_field_makes_digits_pick(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = wizard_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let panel = visual.debug_bounds("question-panel").unwrap();
+        // The header, well clear of the answer field.
+        visual.simulate_click(
+            point(panel.center().x, panel.top() + px(8.0)),
+            gpui::Modifiers::default(),
+        );
+        handle
+            .update(cx, |composer, window, cx| {
+                assert!(composer.wizard_focus.is_focused(window));
+                assert!(!composer.input.read(cx).focus_handle.is_focused(window));
+            })
+            .unwrap();
+        visual.simulate_keystrokes("1");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input.read(cx).text(), "");
+                assert!(composer.wizard.as_ref().unwrap().is_picked(0));
+            })
+            .unwrap();
+    }
+
+    /// Picker mode is only for picking: a page change hands the caret back,
+    /// because the next page is answered by typing.
+    #[gpui::test]
+    fn wizard_page_change_hands_the_caret_back(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = wizard_window_asking(
+            cx,
+            vec![
+                question("q1", &["first", "second"], false),
+                question("q2", &["third"], false),
+            ],
+        );
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let panel = visual.debug_bounds("question-panel").unwrap();
+        visual.simulate_click(
+            point(panel.center().x, panel.top() + px(8.0)),
+            gpui::Modifiers::default(),
+        );
+        handle
+            .update(cx, |composer, window, _| {
+                assert!(composer.wizard_focus.is_focused(window));
+            })
+            .unwrap();
+        visual.simulate_keystrokes("enter");
+        visual.update(|window, cx| window.draw(cx).clear());
+        handle
+            .update(cx, |composer, window, cx| {
+                assert_eq!(composer.wizard.as_ref().unwrap().counter(), "2/2");
+                assert!(composer.input.read(cx).focus_handle.is_focused(window));
+            })
+            .unwrap();
+    }
+
+    /// A digit past the last option is not a pick: it stays available to the
+    /// layout instead of selecting something that does not exist.
+    #[gpui::test]
+    fn wizard_digit_past_the_options_is_not_consumed(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = wizard_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let panel = visual.debug_bounds("question-panel").unwrap();
+        visual.simulate_click(
+            point(panel.center().x, panel.top() + px(8.0)),
+            gpui::Modifiers::default(),
+        );
+        visual.simulate_keystrokes("9");
+        handle
+            .update(cx, |composer, _, cx| {
+                assert!(!composer.wizard.as_ref().unwrap().is_picked(0));
+                assert_eq!(composer.input.read(cx).text(), "");
+            })
+            .unwrap();
     }
 
     #[test]
