@@ -42,7 +42,7 @@ export const getMeta = (sql: SqlStorage, key: string): string | undefined => {
 
 export const setMeta = (sql: SqlStorage, key: string, value: string): void => {
   sql.exec(
-    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE meta.value IS NOT excluded.value",
     key,
     value
   );
