@@ -11,6 +11,11 @@ name: deploy
 # Workers R2 Storage (edit), Workflows (edit). Account id is pinned in
 # edge/wrangler.jsonc. One-time setup: create the `vault-production`
 # environment (Settings → Environments) with required reviewers.
+#
+# The token is an environment secret, never a repository one: the edge,
+# landing and www-redirect jobs read it from `cloudflare`, the vault from
+# `vault-production`. Both environments admit main only, so a dispatch from
+# any other branch fails at those jobs instead of deploying it.
 
 on:
   push:
@@ -91,6 +96,7 @@ jobs:
       && needs.vault-changes.result == 'success'
       && (needs.vault.result == 'success' || needs.vault.result == 'skipped')
     runs-on: ubuntu-latest
+    environment: cloudflare
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface
       # the token through job env and gate on that instead.
@@ -146,6 +152,7 @@ jobs:
   # Static landing page (zeron.sh) — assets-only worker, no build step.
   landing:
     runs-on: ubuntu-latest
+    environment: cloudflare
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
@@ -182,6 +189,7 @@ jobs:
   # www.zeron.sh → zeron.sh 301 (see apps/www-redirect/wrangler.jsonc).
   www-redirect:
     runs-on: ubuntu-latest
+    environment: cloudflare
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
