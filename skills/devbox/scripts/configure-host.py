@@ -385,19 +385,23 @@ def write_new(path, content, mode):
         target.write(content)
 
 
+def device_name(config):
+    """`devbox-<provider ID>`: Crew's device picker truncates long names, so the ID is
+    what tells devboxes apart. Boat IDs drop their `bx_` prefix."""
+    return "devbox-" + config["COMET_DEVBOX_ID"].removeprefix("bx_")
+
+
 def configure():
     config = coordinates()
     # Check native identity before creating even a configuration directory.
     config["COMET_DEVBOX_PROVIDER"] = os.environ.get("COMET_DEVBOX_PROVIDER", "")
     config["COMET_DEVBOX_ID"] = os.environ.get("COMET_DEVBOX_ID", "")
     check_identity(config)
-    owner = os.environ.get("CREW_OWNER_NAME", "")
     name = os.environ.get("CREW_DEVBOX_NAME", "")
-    require(owner.strip() and len(owner) <= 200 and owner.isprintable()
-            and "%" not in owner and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name),
-            "Set the real owner and owner-qualified devbox name (no controls or systemd % specifiers).")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name),
+            "Set the owner-qualified devbox machine name (letters, digits, '.', '_', '-').")
     config.update(COMET_DATA_DIR=str(profile_path()),
-                  ZERON_DEVICE_NAME=f"{owner} · Devbox · {name}",
+                  ZERON_DEVICE_NAME=device_name(config),
                   CREW_BINARY=os.environ.get("CREW_BINARY", ""),
                   CREW_BINARY_SHA256=os.environ.get("CREW_BINARY_SHA256", ""),
                   CREW_PATH=f'{home()}/.local/bin:/usr/local/bin:/usr/bin:/bin')
@@ -407,7 +411,11 @@ def configure():
     verify_binary(config)
     existing = config_path().exists()
     if existing:
-        require(load_config() == config, "Existing devbox binding differs; refusing to overwrite it.")
+        current = load_config()
+        # Crew owns a registered device's name (rename it in Crew), so a re-run keeps
+        # the name this box was set up with, including the older naming.
+        config["ZERON_DEVICE_NAME"] = current["ZERON_DEVICE_NAME"]
+        require(current == config, "Existing devbox binding differs; refusing to overwrite it.")
     else:
         profile = profile_path()
         require(not profile.exists() or config["CREW_EXISTING_DEVICE_ID"],

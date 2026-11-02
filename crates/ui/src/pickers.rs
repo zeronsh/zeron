@@ -3285,7 +3285,9 @@ impl Pickers {
                                         .flex_row()
                                         .items_baseline()
                                         .gap(px(6.0))
-                                        .child(div().flex_none().child(label))
+                                        // Shrinks with an ellipsis: a long name must not run
+                                        // under the "You" tag or the offline glyph.
+                                        .child(div().min_w_0().truncate().child(label))
                                         .when_some(detail, |el, detail| {
                                             el.child(
                                                 div()

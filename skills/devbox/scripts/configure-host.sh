@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Shared owner-private bootstrap. Never provision, authenticate or start an engine.
 set -euo pipefail
-: "${CREW_OWNER_NAME:?Set the real owner display name}"
 : "${CREW_DEVBOX_NAME:?Set the owner-qualified devbox name}"
 : "${COMET_DEVBOX_PROVIDER:?Set namespace or boat}"
 : "${COMET_DEVBOX_ID:?Set the immutable provider ID}"

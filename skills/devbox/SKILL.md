@@ -12,7 +12,7 @@ Native WakeDevice in this port is restricted to an authenticated local synced **
 
 ## Provider and identity
 
-Resolve the signed-in owner through `gh api user --jq '{login,name}'`; use a confirmed name if the profile is empty. Name the machine `<owner-login>-ashler-dev` and the Crew device `<Owner Name> · Devbox · <machine-name>`. Existing device names survive reboot; rename a reused device through Crew rather than assuming an environment change changes its row.
+Resolve the signed-in owner through `gh api user --jq '{login,name}'`; use a confirmed name if the profile is empty. Name the machine `<owner-login>-ashler-dev`. Setup names the Crew device `devbox-<provider ID>`, without Boat's `bx_` prefix (for example `devbox-2t4nmptv`), because Crew's device picker truncates long names and the ID is what tells devboxes apart. Existing device names survive reboot and setup re-runs; rename a reused device through Crew rather than assuming an environment change changes its row.
 
 Read only the selected provisioning variant:
 
@@ -54,7 +54,6 @@ Install/verify Node/npm, Python, gcloud, passwordless sudo, and the selected pro
 Upload the selected workflow's complete script set into one private directory. For this native workflow, use the host's actual immutable extracted executable path and raw executable checksum, then run:
 
 ```bash
-CREW_OWNER_NAME="$OWNER_NAME" \
 CREW_DEVBOX_NAME="$DEVBOX_NAME" \
 COMET_DEVBOX_PROVIDER="$PROVIDER" \
 COMET_DEVBOX_ID="$DEVBOX_ID" \

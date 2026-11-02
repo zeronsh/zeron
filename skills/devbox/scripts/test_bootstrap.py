@@ -38,7 +38,7 @@ class BootstrapChecks(unittest.TestCase):
         self.env = {
             "HOME": str(self.home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "BOAT_ID": "bx_jdyh7avc", "COMET_DEVBOX_PROVIDER": "boat",
-            "COMET_DEVBOX_ID": "bx_jdyh7avc", "CREW_OWNER_NAME": "Real Owner",
+            "COMET_DEVBOX_ID": "bx_jdyh7avc",
             "CREW_DEVBOX_NAME": "owner-ashler-dev", "CREW_BINARY": str(self.binary),
             "CREW_CHANNEL": "staging", "CREW_BINARY_SHA256": hashlib.sha256(self.binary.read_bytes()).hexdigest(),
         }
@@ -67,9 +67,30 @@ class BootstrapChecks(unittest.TestCase):
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("BOAT_ID=", config.read_text())
         self.assertFalse((self.home / ".crew-staging").exists())
-        with patch.dict(os.environ, {"CREW_OWNER_NAME": "Other Owner"}):
+        with patch.dict(os.environ, {"CREW_EXISTING_DEVICE_ID": "other-device"}):
             with self.assertRaises(bootstrap.Refusal):
                 self.configure()
+
+    # Crew's device picker truncates long names, so `<Owner> · Devbox · <machine>` rows
+    # all read the same; the provider ID is what tells two devboxes apart.
+    def test_devices_are_named_after_their_provider_id(self):
+        self.configure()
+        self.assertEqual(bootstrap.load_config()["ZERON_DEVICE_NAME"], "devbox-jdyh7avc")
+
+    def test_namespace_devices_are_named_after_their_instance_id(self):
+        is_dir = Path.is_dir
+        with patch.dict(os.environ, {"BOAT_ID": "", "COMET_DEVBOX_PROVIDER": "namespace", "COMET_DEVBOX_ID": "abcdefgh23456"}), \
+             patch.object(Path, "is_dir", autospec=True, side_effect=lambda path: str(path) == "/.namespace/tasks" or is_dir(path)):
+            self.configure()
+            self.assertEqual(bootstrap.load_config()["ZERON_DEVICE_NAME"], "devbox-abcdefgh23456")
+
+    # Crew owns a registered device's name, so a box set up under the old naming must
+    # still re-run setup instead of refusing because the default name changed.
+    def test_rerun_keeps_the_name_an_existing_binding_was_set_up_with(self):
+        with patch.object(bootstrap, "device_name", return_value="Real Owner · Devbox · owner-ashler-dev"):
+            self.configure()
+        self.configure()
+        self.assertEqual(bootstrap.load_config()["ZERON_DEVICE_NAME"], "Real Owner · Devbox · owner-ashler-dev")
 
 
     def test_namespace_does_not_install_a_boat_unit(self):
