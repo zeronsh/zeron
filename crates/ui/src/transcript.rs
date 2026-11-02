@@ -17550,6 +17550,7 @@ mod tests {
                     chat: Some("chat".into()),
                     root: "/work/app".into(),
                     local: true,
+                    own: true,
                 }])),
                 handler: Rc::new(move |activation, _, _| {
                     recorded.borrow_mut().push(activation.clone());
