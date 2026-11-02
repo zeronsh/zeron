@@ -329,6 +329,26 @@ impl Client {
         .await
     }
 
+    /// `SetAgentAccountRotation`: spread new chats of `harness` across that
+    /// computer's saved accounts (`enabled`), or run them all on its active
+    /// account again. The reply's `rotation` carries the new state.
+    pub async fn device_set_account_rotation(
+        &self,
+        device_id: &str,
+        harness: &str,
+        enabled: bool,
+    ) -> Result<AgentAccountsSnapshot> {
+        if self.inner.is_demo() {
+            lock(&DEMO_ROTATION).insert(harness.to_owned(), enabled);
+        }
+        self.accounts_call(
+            device_id,
+            zeron_rpc::methods::SET_AGENT_ACCOUNT_ROTATION,
+            serde_json::json!({ "harness": harness, "enabled": enabled }),
+        )
+        .await
+    }
+
     async fn accounts_call(
         &self,
         device_id: &str,
@@ -355,6 +375,7 @@ fn stop_relay(login_id: &str) {
 static DEMO_DISABLED: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
 static DEMO_ACTIVE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 static DEMO_FORGOTTEN: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Default::default);
+static DEMO_ROTATION: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
 
 /// The demo catalog with the toggles applied.
 pub(crate) fn with_demo_toggles(demo: bool, mut list: Vec<HarnessInfo>) -> Vec<HarnessInfo> {
@@ -424,8 +445,38 @@ fn demo_accounts() -> AgentAccountsSnapshot {
             picked |= a.active;
         }
     }
+    drop(active);
+    let enabled = lock(&DEMO_ROTATION);
+    let rotation = [HarnessId::ClaudeCode, HarnessId::Codex]
+        .into_iter()
+        .map(|harness| {
+            let key = serde_json::to_value(harness)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let ids: Vec<String> = accounts
+                .iter()
+                .filter(|a| a.harness == harness)
+                .map(|a| a.id.clone())
+                .collect();
+            let enabled = enabled.get(&key).copied().unwrap_or(false);
+            let active = enabled && ids.len() >= 2;
+            zeron_proto::AgentAccountRotation {
+                harness,
+                supported: true,
+                enabled,
+                active,
+                next_account_id: active.then(|| ids[0].clone()),
+                accounts: ids,
+                chats: Vec::new(),
+                note: (!active).then(|| "Needs at least two signed-in accounts".into()),
+                skipped: Vec::new(),
+            }
+        })
+        .collect();
     AgentAccountsSnapshot {
         accounts,
         warnings: Vec::new(),
+        rotation,
     }
 }

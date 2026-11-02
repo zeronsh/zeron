@@ -1849,6 +1849,9 @@ impl AcpHarness {
             dir.apply(&mut cmd);
         }
         crate::apply_run_env(&mut cmd, run_env);
+        if let Some((key, value)) = account_proxy_env(self.spec.id, run_env) {
+            cmd.env(key, value);
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -5736,9 +5739,44 @@ async fn run_session(session: Session) {
     child.shutdown(kill_grace).await;
 }
 
+/// The CLI setting that points a rotating chat's agent at its account-proxy
+/// route ([`crate::account_proxy`]). Grok sends every API call, its
+/// auxiliary ones included, to `GROK_CLI_CHAT_PROXY_BASE_URL`; its OIDC
+/// refresh stays on its own login.
+fn account_proxy_env(
+    harness: HarnessId,
+    run_env: &std::collections::BTreeMap<String, String>,
+) -> Option<(&'static str, String)> {
+    match harness {
+        HarnessId::Grok => crate::account_proxy::grok_base_url(run_env)
+            .map(|base| ("GROK_CLI_CHAT_PROXY_BASE_URL", base)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proxied_grok_chat_gets_its_route_as_the_chat_proxy_base() {
+        let env = std::collections::BTreeMap::from([(
+            crate::account_proxy::GROK.to_string(),
+            "http://127.0.0.1:41000/r/abc".to_string(),
+        )]);
+        assert_eq!(
+            account_proxy_env(HarnessId::Grok, &env),
+            Some((
+                "GROK_CLI_CHAT_PROXY_BASE_URL",
+                "http://127.0.0.1:41000/r/abc/v1".to_string()
+            ))
+        );
+        assert_eq!(account_proxy_env(HarnessId::Devin, &env), None);
+        assert_eq!(
+            account_proxy_env(HarnessId::Grok, &Default::default()),
+            None
+        );
+    }
 
     #[test]
     fn unix_browser_suppression_falls_back_to_zerons_noop_mode() {

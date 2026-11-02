@@ -1404,6 +1404,127 @@ pub enum AgentAuthKind {
 pub struct AgentAccountsSnapshot {
     pub accounts: Vec<AgentAccount>,
     pub warnings: Vec<AgentAccountWarning>,
+    /// Account rotation, one entry per harness that has saved accounts
+    /// (supported or not — see [`AgentAccountRotation::supported`]).
+    /// Additive + serde-defaulted: an older engine sends none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rotation: Vec<AgentAccountRotation>,
+}
+
+impl AgentAccountsSnapshot {
+    /// `harness`'s rotation state, when the engine reported one.
+    pub fn rotation_for(&self, harness: HarnessId) -> Option<&AgentAccountRotation> {
+        self.rotation.iter().find(|r| r.harness == harness)
+    }
+
+    /// The account a rotated chat runs on (`None`: the chat isn't rotated —
+    /// it runs on the harness's active account, like before rotation).
+    pub fn chat_account(&self, chat_id: &str) -> Option<&AgentAccount> {
+        self.rotation.iter().find_map(|rotation| {
+            let chat = rotation.chats.iter().find(|c| c.chat_id == chat_id)?;
+            self.accounts
+                .iter()
+                .find(|a| a.harness == rotation.harness && a.id == chat.account_id)
+        })
+    }
+}
+
+/// "Spread new chats across this harness's saved accounts" — per device,
+/// per harness, off by default. Toggled with `SetAgentAccountRotation`.
+///
+/// Every new chat of the harness (main, side or worker chat) is pinned to
+/// one account for its lifetime; the next chat gets the next account in
+/// round-robin order, skipping accounts that are signed out or whose usage
+/// is exhausted while another still has headroom. Rotated chats never
+/// change the active (live) login: the active account is still what
+/// everything outside rotated chats runs on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccountRotation {
+    pub harness: HarnessId,
+    /// This device can rotate this harness's accounts. `false`: the toggle
+    /// is shown disabled with `note` as the reason.
+    pub supported: bool,
+    /// The user's setting (persisted; off by default).
+    pub enabled: bool,
+    /// Rotation is in effect now: enabled, supported, and at least two
+    /// usable accounts take part. While `false`, new chats run on the
+    /// active account exactly as without rotation.
+    pub active: bool,
+    /// [`AgentAccount::id`]s taking part, in rotation order (saved
+    /// subscription logins; API-key logins never rotate).
+    #[serde(default)]
+    pub accounts: Vec<String>,
+    /// The account the next new chat would get (`None` while not active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_account_id: Option<String>,
+    /// Chats pinned to an account, most recently used first. Only chats
+    /// used in the last few days are listed.
+    #[serde(default)]
+    pub chats: Vec<AgentAccountChat>,
+    /// Why rotation is unsupported or not in effect ("Needs at least two
+    /// signed-in accounts"), for the toggle's caption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Participating accounts new chats skip right now, and why (signed
+    /// out, out of usage — from a usage probe or a provider's limit reply).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<AgentAccountSkip>,
+}
+
+/// A participating account rotation skips for now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccountSkip {
+    pub account_id: String,
+    /// Display text: "Signed out" or "Usage limit".
+    pub reason: String,
+    /// Epoch millis the account is expected back (its limit resets);
+    /// `None` until it signs in again, or when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+}
+
+impl AgentAccountRotation {
+    /// How many listed chats run on `account_id`.
+    pub fn chat_count(&self, account_id: &str) -> usize {
+        self.chats
+            .iter()
+            .filter(|c| c.account_id == account_id)
+            .count()
+    }
+
+    /// How many listed chats on `account_id` are running now.
+    pub fn running_count(&self, account_id: &str) -> usize {
+        self.chats
+            .iter()
+            .filter(|c| c.account_id == account_id && c.running)
+            .count()
+    }
+}
+
+/// One chat pinned to an account by rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccountChat {
+    pub chat_id: String,
+    pub account_id: String,
+    /// Epoch millis the chat was (last) assigned this account.
+    pub assigned_at: i64,
+    /// Epoch millis a run of the chat last started on it.
+    pub used_at: i64,
+    /// The account the chat ran on before a fallback moved it (its account
+    /// was signed out, removed, or ran out of usage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_account_id: Option<String>,
+    /// Why the chat moved, for display ("Usage limit on alice@…, moved to
+    /// bob@…"). Set with `previous_account_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_reason: Option<String>,
+    /// The chat has a turn in flight right now (streaming, or waiting on an
+    /// answer). An older engine sends none: every chat reads idle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
 }
 
 /// A per-harness detection warning (e.g. Keychain denied reading the live login).

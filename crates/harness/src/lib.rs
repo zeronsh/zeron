@@ -349,6 +349,7 @@ pub trait Harness: Send + Sync {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
 }
 
+pub mod account_proxy;
 pub mod acp;
 pub(crate) mod adapter_install;
 pub mod approval;
@@ -360,9 +361,9 @@ mod catalog_failure;
 pub(crate) mod code_signature;
 pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
+pub mod agent_ports;
 pub mod claude;
 pub mod codex;
-pub mod agent_ports;
 pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
@@ -370,8 +371,8 @@ pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
-pub mod muse;
 mod model_context;
+pub mod muse;
 pub mod opencode;
 pub mod pi;
 pub mod process;
@@ -408,7 +409,12 @@ pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
 /// broker output on a Cloud device) to an agent child. Call it after the
 /// driver's own env setup so the host's values win. Values are never logged.
 pub fn apply_run_env(cmd: &mut process::Command, env: &std::collections::BTreeMap<String, String>) {
-    for (key, value) in env {
+    // Account-proxy routes are for the harness to translate into its CLI's
+    // own setting (see [`account_proxy`]); they aren't passed on as they are.
+    for (key, value) in env
+        .iter()
+        .filter(|(key, _)| !account_proxy::is_route_var(key))
+    {
         cmd.env(key, value);
     }
 }
@@ -657,8 +663,8 @@ pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
-pub use opencode::OpencodeHarness;
 pub use muse::MuseHarness;
+pub use opencode::OpencodeHarness;
 pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------

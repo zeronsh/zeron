@@ -1,0 +1,28 @@
+[package]
+name = "zeron-account-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes = "1"
+chrono.workspace = true
+futures.workspace = true
+getrandom = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { workspace = true, features = ["stream"] }
+# Body rewrites must not reorder the CLI's JSON keys.
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2.workspace = true
+subtle = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true

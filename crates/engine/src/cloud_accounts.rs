@@ -234,6 +234,7 @@ async fn snapshot(
     Ok(AgentAccountsSnapshot {
         accounts: out,
         warnings: Vec::new(),
+        rotation: Vec::new(),
     })
 }
 

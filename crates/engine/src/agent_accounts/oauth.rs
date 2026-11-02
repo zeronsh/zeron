@@ -23,7 +23,7 @@ use super::*;
 /// OpenAI's OAuth issuer (`/oauth/authorize`, `/oauth/token`).
 pub(super) const OPENAI_AUTH: &str = "https://auth.openai.com";
 /// The Codex CLI's public client — the one OpenCode and Pi sign in with.
-const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub(super) const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Fixed by the client's registered redirect.
 pub(super) const OPENAI_LOOPBACK_PORT: u16 = 1455;
 const OPENAI_SCOPES: &str = "openid profile email offline_access";

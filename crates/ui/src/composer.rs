@@ -12201,15 +12201,19 @@ impl Render for Composer {
                 let harness = (!self.side_chat)
                     .then(|| self.pickers.read(cx).resolved(cx).harness)
                     .flatten();
-                let target = {
+                let (target, chat) = {
                     let state = self.state.read(cx);
-                    state
-                        .selected_chat_row()
-                        .map(|chat| chat.device_id.clone())
-                        .filter(|device| state.local_device_id.as_ref() != Some(device))
+                    let chat = state.selected_chat_row();
+                    (
+                        chat.map(|chat| chat.device_id.clone())
+                            .filter(|device| state.local_device_id.as_ref() != Some(device)),
+                        chat.map(|chat| chat.id.clone()),
+                    )
                 };
-                self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, target, cx));
+                let running = self.run_live(cx);
+                self.account_usage.update(cx, |usage, cx| {
+                    usage.track(harness, target, chat, running, cx)
+                });
             }
             container.child(
                 div()

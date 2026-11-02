@@ -150,18 +150,20 @@ pub const CLOUD_HARNESS_IDS: &[HarnessId] = &[HarnessId::Codex, HarnessId::Claud
 #[async_trait::async_trait]
 pub trait RunEnvironment: Send + Sync {
     /// `Err` = the run can't start: no credential for `harness` (the
-    /// message says where to sign in).
+    /// message says where to sign in). `chat_id` is the chat the run
+    /// belongs to (`None` for runs of no chat, such as title generation).
     async fn prepare(
         &self,
         harness: HarnessId,
+        chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String>;
 
-    /// Which credential a run of `harness` would use now (an opaque
-    /// fingerprint), `None` when unknown. A parked session started with a
-    /// different one is replaced before its next turn, so switching the
-    /// account applies from the next turn.
-    async fn credential(&self, _harness: HarnessId) -> Option<String> {
+    /// Which credential a run of `harness` for `chat_id` would use now (an
+    /// opaque fingerprint), `None` when unknown. A parked session started
+    /// with a different one is replaced before its next turn, so switching
+    /// the account applies from the next turn.
+    async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
         None
     }
 
@@ -330,15 +332,16 @@ impl HarnessRegistry {
         self.commit_credit.get()
     }
 
-    /// Fill `request.env` for a spawn of `harness` (no-op without a provider),
-    /// and credit Zeron in its commits when that's on.
+    /// Fill `request.env` for a spawn of `harness` for `chat_id` (no-op
+    /// without a provider), and credit Zeron in its commits when that's on.
     pub async fn prepare_run(
         &self,
         harness: HarnessId,
+        chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
         for environment in self.environments() {
-            environment.prepare(harness, request).await?;
+            environment.prepare(harness, chat_id, request).await?;
         }
         if let Some(credit) = self.commit_credit.get() {
             credit.apply(&mut request.env);
@@ -347,9 +350,13 @@ impl HarnessRegistry {
     }
 
     /// [`RunEnvironment::credential`] (`None` without a provider).
-    pub async fn run_credential(&self, harness: HarnessId) -> Option<String> {
+    pub async fn run_credential(
+        &self,
+        harness: HarnessId,
+        chat_id: Option<&str>,
+    ) -> Option<String> {
         for environment in self.environments() {
-            if let Some(credential) = environment.credential(harness).await {
+            if let Some(credential) = environment.credential(harness, chat_id).await {
                 return Some(credential);
             }
         }
@@ -1859,6 +1866,7 @@ mod gate_tests {
             async fn prepare(
                 &self,
                 harness: HarnessId,
+                _chat_id: Option<&str>,
                 request: &mut zeron_proto::RunRequest,
             ) -> Result<(), String> {
                 request.env.insert("HARNESS".into(), format!("{harness:?}"));
@@ -1871,13 +1879,13 @@ mod gate_tests {
         .unwrap();
         let registry = HarnessRegistry::new();
         registry
-            .prepare_run(HarnessId::Codex, &mut request)
+            .prepare_run(HarnessId::Codex, None, &mut request)
             .await
             .unwrap();
         assert!(request.env.is_empty());
         registry.set_run_environment(Arc::new(Fill));
         registry
-            .prepare_run(HarnessId::Codex, &mut request)
+            .prepare_run(HarnessId::Codex, None, &mut request)
             .await
             .unwrap();
         assert_eq!(
@@ -1899,7 +1907,7 @@ mod gate_tests {
         credit.set(true).unwrap();
         registry.set_commit_credit(credit.clone());
         registry
-            .prepare_run(HarnessId::ClaudeCode, &mut request)
+            .prepare_run(HarnessId::ClaudeCode, None, &mut request)
             .await
             .unwrap();
         let hooks = data.path().join("git-hooks");
@@ -1917,7 +1925,7 @@ mod gate_tests {
         credit.set(false).unwrap();
         request.env.clear();
         registry
-            .prepare_run(HarnessId::ClaudeCode, &mut request)
+            .prepare_run(HarnessId::ClaudeCode, None, &mut request)
             .await
             .unwrap();
         assert!(request.env.is_empty());

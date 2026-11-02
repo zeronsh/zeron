@@ -1416,6 +1416,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func deviceLoginStart(deviceId: String, harness: String, provider: String?, doneUrl: String) async throws  -> DeviceLoginInfo
     
     /**
+     * Spread `harness`'s new chats on `device_id` across its saved accounts
+     * (`enabled`), or run them all on the active one again.
+     */
+    func deviceSetAccountRotation(deviceId: String, harness: String, enabled: Bool) async throws  -> [DeviceAccountInfo]
+    
+    /**
      * Offer `harness` on `device_id` or not; the device's fresh catalog.
      */
     func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws  -> [HarnessInfo]
@@ -2860,6 +2866,26 @@ open func deviceLoginStart(deviceId: String, harness: String, provider: String?,
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeDeviceLoginInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Spread `harness`'s new chats on `device_id` across its saved accounts
+     * (`enabled`), or run them all on the active one again.
+     */
+open func deviceSetAccountRotation(deviceId: String, harness: String, enabled: Bool)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_set_account_rotation(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(harness),FfiConverterBool.lower(enabled)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -8582,6 +8608,46 @@ public struct DeviceAccountInfo: Equatable, Hashable {
      * Why usage couldn't be read ("Sign in again", "Rate limited …").
      */
     public var usageError: String?
+    /**
+     * The computer reports rotation for this agent at all (an older
+     * engine, or an agent it doesn't list, doesn't: no Rotation section).
+     */
+    public var rotationReported: Bool
+    /**
+     * Its agent's account rotation on this device — the same on every row
+     * of the agent: the user's setting, and whether this agent can rotate.
+     */
+    public var rotationEnabled: Bool
+    public var rotationSupported: Bool
+    /**
+     * Rotation is in effect (enabled, supported, two usable accounts).
+     */
+    public var rotationActive: Bool
+    /**
+     * Why rotation is unsupported or not in effect, for the switch's caption.
+     */
+    public var rotationNote: String?
+    /**
+     * This account takes turns.
+     */
+    public var inRotation: Bool
+    /**
+     * The next new chat starts on this account.
+     */
+    public var rotationNext: Bool
+    /**
+     * Chats rotation put on this account with a turn running right now.
+     */
+    public var liveChats: UInt32
+    /**
+     * Why rotation passes it over right now, the computer's words
+     * ("Usage limit", "Signed out").
+     */
+    public var rotationSkipped: String?
+    /**
+     * Epoch millis a skipped account is expected back (its limit resets).
+     */
+    public var rotationSkippedUntilMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8601,7 +8667,37 @@ public struct DeviceAccountInfo: Equatable, Hashable {
          */provider: String?, usage: [UsageWindowInfo], 
         /**
          * Why usage couldn't be read ("Sign in again", "Rate limited …").
-         */usageError: String?) {
+         */usageError: String?, 
+        /**
+         * The computer reports rotation for this agent at all (an older
+         * engine, or an agent it doesn't list, doesn't: no Rotation section).
+         */rotationReported: Bool, 
+        /**
+         * Its agent's account rotation on this device — the same on every row
+         * of the agent: the user's setting, and whether this agent can rotate.
+         */rotationEnabled: Bool, rotationSupported: Bool, 
+        /**
+         * Rotation is in effect (enabled, supported, two usable accounts).
+         */rotationActive: Bool, 
+        /**
+         * Why rotation is unsupported or not in effect, for the switch's caption.
+         */rotationNote: String?, 
+        /**
+         * This account takes turns.
+         */inRotation: Bool, 
+        /**
+         * The next new chat starts on this account.
+         */rotationNext: Bool, 
+        /**
+         * Chats rotation put on this account with a turn running right now.
+         */liveChats: UInt32, 
+        /**
+         * Why rotation passes it over right now, the computer's words
+         * ("Usage limit", "Signed out").
+         */rotationSkipped: String?, 
+        /**
+         * Epoch millis a skipped account is expected back (its limit resets).
+         */rotationSkippedUntilMs: Int64?) {
         self.id = id
         self.harness = harness
         self.email = email
@@ -8614,6 +8710,16 @@ public struct DeviceAccountInfo: Equatable, Hashable {
         self.provider = provider
         self.usage = usage
         self.usageError = usageError
+        self.rotationReported = rotationReported
+        self.rotationEnabled = rotationEnabled
+        self.rotationSupported = rotationSupported
+        self.rotationActive = rotationActive
+        self.rotationNote = rotationNote
+        self.inRotation = inRotation
+        self.rotationNext = rotationNext
+        self.liveChats = liveChats
+        self.rotationSkipped = rotationSkipped
+        self.rotationSkippedUntilMs = rotationSkippedUntilMs
     }
 
     
@@ -8643,7 +8749,17 @@ public struct FfiConverterTypeDeviceAccountInfo: FfiConverterRustBuffer {
                 organization: FfiConverterOptionString.read(from: &buf), 
                 provider: FfiConverterOptionString.read(from: &buf), 
                 usage: FfiConverterSequenceTypeUsageWindowInfo.read(from: &buf), 
-                usageError: FfiConverterOptionString.read(from: &buf)
+                usageError: FfiConverterOptionString.read(from: &buf), 
+                rotationReported: FfiConverterBool.read(from: &buf), 
+                rotationEnabled: FfiConverterBool.read(from: &buf), 
+                rotationSupported: FfiConverterBool.read(from: &buf), 
+                rotationActive: FfiConverterBool.read(from: &buf), 
+                rotationNote: FfiConverterOptionString.read(from: &buf), 
+                inRotation: FfiConverterBool.read(from: &buf), 
+                rotationNext: FfiConverterBool.read(from: &buf), 
+                liveChats: FfiConverterUInt32.read(from: &buf), 
+                rotationSkipped: FfiConverterOptionString.read(from: &buf), 
+                rotationSkippedUntilMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -8660,6 +8776,16 @@ public struct FfiConverterTypeDeviceAccountInfo: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.provider, into: &buf)
         FfiConverterSequenceTypeUsageWindowInfo.write(value.usage, into: &buf)
         FfiConverterOptionString.write(value.usageError, into: &buf)
+        FfiConverterBool.write(value.rotationReported, into: &buf)
+        FfiConverterBool.write(value.rotationEnabled, into: &buf)
+        FfiConverterBool.write(value.rotationSupported, into: &buf)
+        FfiConverterBool.write(value.rotationActive, into: &buf)
+        FfiConverterOptionString.write(value.rotationNote, into: &buf)
+        FfiConverterBool.write(value.inRotation, into: &buf)
+        FfiConverterBool.write(value.rotationNext, into: &buf)
+        FfiConverterUInt32.write(value.liveChats, into: &buf)
+        FfiConverterOptionString.write(value.rotationSkipped, into: &buf)
+        FfiConverterOptionInt64.write(value.rotationSkippedUntilMs, into: &buf)
     }
 }
 
@@ -22118,6 +22244,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_start() != 47566) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_set_account_rotation() != 61479) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_harness_enabled() != 59215) {

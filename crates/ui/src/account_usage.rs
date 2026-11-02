@@ -13,6 +13,7 @@ use gpui::{
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 use zeron_rpc::methods;
 
+use crate::account_rotation;
 use crate::popover;
 use crate::settings::accounts::{
     self, AccountsSnapshotCache, UsageLevel, render_usage_meter, reports_usage, signs_in,
@@ -37,6 +38,18 @@ pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
         .reduce(f32::max)
 }
 
+/// The account a chat runs on: the one rotation started it on, else the
+/// harness's live account. Pure.
+pub fn chat_account<'a>(
+    snapshot: &'a AgentAccountsSnapshot,
+    harness: HarnessId,
+    chat: Option<&str>,
+) -> Option<&'a AgentAccount> {
+    chat.and_then(|chat| snapshot.chat_account(chat))
+        .filter(|account| account.harness == harness)
+        .or_else(|| active_account(snapshot, harness))
+}
+
 /// The harness's live account, when it reports usage. Pure.
 pub fn active_account(
     snapshot: &AgentAccountsSnapshot,
@@ -54,12 +67,19 @@ pub struct AccountUsage {
     /// `None` = this device, as in [`AccountsSnapshotCache`].
     target: Option<String>,
     harness: Option<HarnessId>,
+    /// The composer's chat, whose rotated account the ring reads.
+    chat: Option<String>,
+    /// Its turn is running: a start or an end may move it to an account.
+    running: bool,
     /// Once any list has been asked for the current target.
     loaded: bool,
     last_forced: Option<Instant>,
     error: Option<SharedString>,
     load_task: Option<Task<()>>,
+    /// A cache-only re-list (no probe) after the chat or its turn changed.
+    refresh_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
+    rotation_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
     _poll: Task<()>,
     _cache: Subscription,
@@ -88,11 +108,15 @@ impl AccountUsage {
             state,
             target: None,
             harness: None,
+            chat: None,
+            running: false,
             loaded: false,
             last_forced: None,
             error: None,
             load_task: None,
+            refresh_task: None,
             action_task: None,
+            rotation_task: None,
             popup: popover::Popup::default(),
             _poll: poll,
             // Settings → Accounts writes the same cache.
@@ -100,26 +124,77 @@ impl AccountUsage {
         }
     }
 
-    /// Point at the session's harness and device; loads on first sight of a
-    /// device. Cheap enough to call every render.
+    /// Point at the session's harness, device, chat and whether its turn
+    /// runs; loads on first sight of a device. Rotation picks a new chat's
+    /// account on its first run and may move it when a limit hits, so a
+    /// switched chat — or, while rotation is in effect, a turn starting or
+    /// ending — re-reads the engine's cached list (no usage probe). Cheap
+    /// enough to call every render.
     pub fn track(
         &mut self,
         harness: Option<HarnessId>,
         target: Option<String>,
+        chat: Option<String>,
+        running: bool,
         cx: &mut Context<Self>,
     ) {
         let harness = harness.filter(|h| signs_in(*h) && reports_usage(*h));
         self.harness = harness;
-        if self.target != target {
+        let retargeted = self.target != target;
+        if retargeted {
             self.target = target;
             self.loaded = false;
             self.last_forced = None;
             self.error = None;
         }
-        if harness.is_some() && !self.loaded {
+        let rechatted = self.chat != chat;
+        let turn_moved = self.running != running;
+        self.chat = chat;
+        self.running = running;
+        if rechatted {
+            self.error = None;
+        }
+        let Some(harness) = harness else {
+            return;
+        };
+        if !self.loaded {
             self.loaded = true;
             self.load(true, cx);
+        } else if rechatted || (turn_moved && self.rotation_active(harness, cx)) {
+            self.refresh(cx);
         }
+    }
+
+    fn rotation_active(&self, harness: HarnessId, cx: &gpui::App) -> bool {
+        self.snapshot(cx)
+            .and_then(|snapshot| snapshot.rotation_for(harness))
+            .is_some_and(|rotation| rotation.active)
+    }
+
+    /// Re-read the engine's list without probing usage: which account each
+    /// rotated chat is on moves with turns, the meters don't need to.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let key = self.target.clone();
+        let params = self.params(serde_json::json!({ "forceUsage": false }));
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            let snapshot = engine
+                .client()
+                .call(methods::LIST_AGENT_ACCOUNTS, params)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<AgentAccountsSnapshot>(value).ok());
+            if let Some(snapshot) = snapshot {
+                this.update(cx, |_, cx| {
+                    cx.default_global::<AccountsSnapshotCache>()
+                        .0
+                        .insert(key, snapshot);
+                })
+                .ok();
+            }
+        }));
     }
 
     fn snapshot<'a>(&self, cx: &'a gpui::App) -> Option<&'a AgentAccountsSnapshot> {
@@ -235,10 +310,124 @@ impl AccountUsage {
         cx.notify();
     }
 
-    /// The ring's reading: the live account's most-used window, when the
-    /// harness has a live account with usage to show.
+    /// The card's rotation switch, for a provider with two accounts to take
+    /// turns between (or one already rotating, so it can be turned off).
+    fn rotation_row(
+        &self,
+        rotation: Option<&account_rotation::ProviderRotation>,
+        rows: &[AgentAccount],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let rotation = rotation?;
+        let usable = account_rotation::usable_accounts(rows);
+        let availability = account_rotation::availability(Some(rotation), usable);
+        if availability != account_rotation::Availability::Available {
+            return None;
+        }
+        // On but not in effect (down to one usable account): say why.
+        let caption = account_rotation::caption(rotation.harness, Some(rotation), availability)
+            .unwrap_or_else(|| account_rotation::CARD_DESCRIPTION.to_string());
+        let harness = rotation.harness;
+        let on = rotation.enabled;
+        let busy = self.rotation_task.is_some();
+        Some(
+            popover::menu_row(theme, false, "account-usage-rotation")
+                .id("account-usage-rotation")
+                .role(gpui::Role::Switch)
+                .aria_label(account_rotation::TITLE)
+                .aria_toggled(if on {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .when(busy, |row| row.opacity(0.7).cursor_default())
+                .when(!busy, |row| {
+                    row.on_click(cx.listener(move |usage, _, _, cx| {
+                        usage.set_rotation(harness, !on, cx);
+                    }))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().child(account_rotation::CARD_TITLE))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(caption)),
+                        ),
+                )
+                .child(widgets::toggle_switch(
+                    theme,
+                    on,
+                    "account-usage-rotation-switch",
+                )),
+        )
+    }
+
+    /// Flip the provider's rotation, optimistically like a switch: the card
+    /// changes at once, the engine's list replaces it, a refusal restores it.
+    fn set_rotation(&mut self, harness: HarnessId, enabled: bool, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let key = self.target.clone();
+        let cache = &mut cx.default_global::<AccountsSnapshotCache>().0;
+        // Only this provider's rotation is put back on a refusal: anything
+        // else (a list, another provider's flip) may land meanwhile.
+        let previous = cache
+            .get(&key)
+            .and_then(|snapshot| snapshot.rotation_for(harness).cloned());
+        if let Some(snapshot) = cache.get_mut(&key) {
+            account_rotation::mark_enabled(snapshot, harness, enabled);
+        }
+        self.error = None;
+        let params = self.params(account_rotation::set_params(harness, enabled));
+        self.rotation_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(account_rotation::SET_METHOD, params)
+                .await;
+            this.update(cx, |usage, cx| {
+                usage.rotation_task = None;
+                match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
+                    Ok(Ok(snapshot)) => {
+                        cx.default_global::<AccountsSnapshotCache>()
+                            .0
+                            .insert(key, snapshot);
+                    }
+                    Ok(Err(_)) => usage.load(false, cx),
+                    Err(err) => {
+                        if let Some(snapshot) =
+                            cx.default_global::<AccountsSnapshotCache>().0.get_mut(&key)
+                        {
+                            account_rotation::restore_rotation(snapshot, harness, previous);
+                        }
+                        // Said on the card only while it still shows that device.
+                        if usage.target == key {
+                            usage.error = Some(err.to_string().into());
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The ring's reading: the chat's account's most-used window — the one
+    /// rotation started it on, else the live one — when it has usage.
     fn fraction(&self, cx: &gpui::App) -> Option<f32> {
-        used_fraction(active_account(self.snapshot(cx)?, self.harness?)?)
+        used_fraction(chat_account(
+            self.snapshot(cx)?,
+            self.harness?,
+            self.chat.as_deref(),
+        )?)
     }
 
     /// A trigger click: open this ring's popover, or close it when the
@@ -309,6 +498,25 @@ impl AccountUsage {
                 .collect(),
             _ => Vec::new(),
         };
+        let rotation = match (harness, self.snapshot(cx)) {
+            (Some(harness), Some(snapshot)) => {
+                account_rotation::provider_rotation(snapshot, harness)
+            }
+            _ => None,
+        };
+        let rotation_row = self.rotation_row(rotation.as_ref(), &rows, theme, cx);
+        // The account rotation started this chat on, marked among the rows.
+        let this_chat = self
+            .chat
+            .as_deref()
+            .zip(self.snapshot(cx))
+            .and_then(|(chat, snapshot)| {
+                let id = snapshot.chat_account(chat)?.id.clone();
+                let moved = account_rotation::chat_account(snapshot, chat)?
+                    .moved_from
+                    .is_some();
+                Some((id, moved))
+            });
         let title = format!(
             "{} accounts",
             harness.map_or("Agent", accounts::provider_name)
@@ -335,20 +543,37 @@ impl AccountUsage {
                             .into_any_element()
                     })
                     .collect();
+                let marks = account_rotation::markers(rotation.as_ref(), &account.id);
+                if let Some((_, moved)) = this_chat.as_ref().filter(|(id, _)| *id == account.id) {
+                    meta.push(
+                        div()
+                            .text_color(theme.accent)
+                            .child(SharedString::from(if *moved {
+                                "This chat · moved here"
+                            } else {
+                                "This chat"
+                            }))
+                            .into_any_element(),
+                    );
+                }
                 if account.active {
                     meta.push(
                         div()
                             .text_color(theme.accent)
-                            .child(SharedString::from("In use"))
+                            .child(SharedString::from(account_rotation::active_label(
+                                rotation.as_ref(),
+                            )))
                             .into_any_element(),
                     );
-                } else if let Some(reason) = account
-                    .usage_error
-                    .clone()
-                    .filter(|_| account.usage_windows.is_empty())
+                } else if marks.is_empty()
+                    && let Some(reason) = account
+                        .usage_error
+                        .clone()
+                        .filter(|_| account.usage_windows.is_empty())
                 {
                     meta.push(div().child(SharedString::from(reason)).into_any_element());
                 }
+                meta.extend(account_rotation::marker_fragments(&marks, theme));
                 let switch_to = account.clone();
                 popover::menu_row(theme, account.active, format!("account-usage-row-{ix}"))
                     .id(("account-usage-row", ix))
@@ -395,6 +620,9 @@ impl AccountUsage {
                             ),
                     )
             }))
+            .when_some(rotation_row, |card, row| {
+                card.child(popover::menu_separator()).child(row)
+            })
             .children(self.error.clone().map(|error| {
                 div()
                     .px(px(8.0))
@@ -518,11 +746,234 @@ mod tests {
                 account(HarnessId::Codex, true, &[0.2]),
             ],
             warnings: Vec::new(),
+            rotation: Vec::new(),
         };
         assert_eq!(
             active_account(&snapshot, HarnessId::Codex).map(|a| a.id.as_str()),
             Some("Codex-true")
         );
         assert!(active_account(&snapshot, HarnessId::Cursor).is_none());
+    }
+
+    fn rotation(harness: HarnessId, enabled: bool) -> zeron_proto::AgentAccountRotation {
+        zeron_proto::AgentAccountRotation {
+            harness,
+            supported: true,
+            enabled,
+            active: enabled,
+            accounts: vec![format!("{harness:?}-true"), format!("{harness:?}-false")],
+            next_account_id: None,
+            chats: Vec::new(),
+            note: None,
+            skipped: Vec::new(),
+        }
+    }
+
+    fn pinned(chat: &str, account: &str) -> zeron_proto::AgentAccountChat {
+        zeron_proto::AgentAccountChat {
+            chat_id: chat.into(),
+            account_id: account.into(),
+            assigned_at: 0,
+            used_at: 0,
+            previous_account_id: None,
+            moved_reason: None,
+            running: false,
+        }
+    }
+
+    /// Two Codex and two Claude accounts; Codex rotates and has put chat
+    /// "c1" on its saved (not live) account.
+    fn rotating() -> AgentAccountsSnapshot {
+        let mut codex = rotation(HarnessId::Codex, true);
+        codex.chats = vec![pinned("c1", "Codex-false")];
+        AgentAccountsSnapshot {
+            accounts: vec![
+                account(HarnessId::ClaudeCode, true, &[0.3]),
+                account(HarnessId::ClaudeCode, false, &[0.9]),
+                account(HarnessId::Codex, true, &[0.2]),
+                account(HarnessId::Codex, false, &[0.7]),
+            ],
+            warnings: Vec::new(),
+            rotation: vec![codex, rotation(HarnessId::ClaudeCode, false)],
+        }
+    }
+
+    #[test]
+    fn the_ring_reads_the_account_rotation_put_the_chat_on() {
+        let snapshot = rotating();
+        let read = |harness, chat: Option<&str>| {
+            chat_account(&snapshot, harness, chat).map(|a| a.id.as_str())
+        };
+        // The rotated chat: its own account, not the live one.
+        assert_eq!(read(HarnessId::Codex, Some("c1")), Some("Codex-false"));
+        // A chat rotation didn't place, or none: the live account.
+        assert_eq!(read(HarnessId::Codex, Some("other")), Some("Codex-true"));
+        assert_eq!(read(HarnessId::Codex, None), Some("Codex-true"));
+        // The composer switched agents: the pin belongs to another one.
+        assert_eq!(
+            read(HarnessId::ClaudeCode, Some("c1")),
+            Some("ClaudeCode-true")
+        );
+        assert_eq!(
+            used_fraction(chat_account(&snapshot, HarnessId::Codex, Some("c1")).unwrap()),
+            Some(0.7)
+        );
+    }
+
+    type Calls = std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// Lists answer [`rotating`]; flips are refused.
+    fn engine(calls: Calls) -> std::sync::Arc<crate::pull_request_test_support::ScriptedRpc> {
+        crate::pull_request_test_support::ScriptedRpc::new(move |method, params| {
+            calls.lock().unwrap().push((method.clone(), params));
+            async move {
+                match method.as_str() {
+                    methods::LIST_AGENT_ACCOUNTS => zeron_rpc::RpcReply::value(&rotating()),
+                    account_rotation::SET_METHOD => {
+                        Err(zeron_rpc::RpcError::Failed("rotation refused".into()))
+                    }
+                    other => panic!("unexpected request {other}"),
+                }
+            }
+        })
+    }
+
+    fn cached(cx: &mut gpui::TestAppContext, key: Option<String>) -> AgentAccountsSnapshot {
+        cx.update(|cx| {
+            cx.global::<AccountsSnapshotCache>()
+                .0
+                .get(&key)
+                .cloned()
+                .unwrap()
+        })
+    }
+
+    /// A refused flip puts back only its own provider's rotation (another
+    /// provider's flip that landed meanwhile stays), on the device the card
+    /// targets, and the card says why.
+    #[gpui::test]
+    fn a_refused_flip_reverts_only_its_provider_on_its_device(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support as fixture;
+        use gpui::AppContext as _;
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let calls = Calls::default();
+        let rpc = engine(calls.clone());
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+        let usage = cx.new(|cx| AccountUsage::new(state, cx));
+        let remote = Some("remote".to_string());
+        let mut off = rotating();
+        off.rotation[0].enabled = false;
+        off.rotation[0].active = false;
+        cx.update(|cx| {
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .insert(remote.clone(), off);
+        });
+        usage.update(cx, |usage, cx| {
+            usage.target = remote.clone();
+            usage.loaded = true;
+            usage.harness = Some(HarnessId::Codex);
+            usage.set_rotation(HarnessId::Codex, true, cx);
+        });
+        // Optimistic: on at once.
+        assert!(
+            cached(cx, remote.clone())
+                .rotation_for(HarnessId::Codex)
+                .unwrap()
+                .enabled
+        );
+        // Meanwhile Claude's rotation is turned on elsewhere.
+        cx.update(|cx| {
+            let cache = &mut cx.default_global::<AccountsSnapshotCache>().0;
+            account_rotation::mark_enabled(
+                cache.get_mut(&remote).unwrap(),
+                HarnessId::ClaudeCode,
+                true,
+            );
+        });
+        rpc.settle(cx, &runtime, |cx| {
+            usage.read_with(cx, |usage, _| usage.rotation_task.is_none())
+        });
+        let after = cached(cx, remote.clone());
+        assert!(!after.rotation_for(HarnessId::Codex).unwrap().enabled);
+        assert!(after.rotation_for(HarnessId::ClaudeCode).unwrap().enabled);
+        usage.read_with(cx, |usage, _| {
+            assert!(
+                usage
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("rotation refused"))
+            );
+        });
+        let calls = calls.lock().unwrap();
+        let (method, params) = calls.last().unwrap();
+        assert_eq!(method, account_rotation::SET_METHOD);
+        assert_eq!(params["targetDeviceId"], "remote");
+        assert_eq!(params["harness"], "codex");
+        assert_eq!(params["enabled"], true);
+    }
+
+    /// The chat's account shows up promptly: switching chats re-reads the
+    /// engine's cached list, as does a turn starting or ending while
+    /// rotation is in effect — never with a usage probe.
+    #[gpui::test]
+    fn chat_switches_and_turns_reread_the_cached_list(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support as fixture;
+        use gpui::AppContext as _;
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        fixture::init(cx);
+        let calls = Calls::default();
+        let rpc = engine(calls.clone());
+        let state = cx.update(|cx| fixture::state(cx, Some(rpc.client())));
+        let usage = cx.new(|cx| AccountUsage::new(state, cx));
+        cx.update(|cx| {
+            cx.default_global::<AccountsSnapshotCache>()
+                .0
+                .insert(None, rotating());
+        });
+        let lists = |calls: &Calls| {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _)| method == methods::LIST_AGENT_ACCOUNTS)
+                .map(|(_, params)| params["forceUsage"].as_bool().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let track = |cx: &mut gpui::TestAppContext, chat: &str, running: bool| {
+            usage.update(cx, |usage, cx| {
+                usage.track(Some(HarnessId::Codex), None, Some(chat.into()), running, cx)
+            });
+        };
+        usage.update(cx, |usage, _| usage.loaded = true);
+        // A different chat: one cache-only list.
+        track(cx, "c1", false);
+        rpc.settle(cx, &runtime, |_| rpc.completed() == 1);
+        assert_eq!(lists(&calls), [false]);
+        // Same chat, same turn state: nothing.
+        track(cx, "c1", false);
+        cx.run_until_parked();
+        assert_eq!(lists(&calls).len(), 1);
+        // Its turn starts, then ends: Codex rotates, so each re-reads.
+        track(cx, "c1", true);
+        rpc.settle(cx, &runtime, |_| rpc.completed() == 2);
+        track(cx, "c1", false);
+        rpc.settle(cx, &runtime, |_| rpc.completed() == 3);
+        assert_eq!(lists(&calls), [false, false, false]);
+        // Claude doesn't rotate: its turns don't.
+        usage.update(cx, |usage, cx| {
+            usage.track(
+                Some(HarnessId::ClaudeCode),
+                None,
+                Some("c1".into()),
+                true,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(lists(&calls).len(), 3);
     }
 }

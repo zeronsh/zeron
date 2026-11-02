@@ -343,9 +343,11 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
-        registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
+        registry.set_account_environment(Arc::new(agent_accounts::AccountsRunEnvironment(
             agent_accounts.clone(),
         )));
+        // Rotation's per-account chat counts are the chats running now.
+        agent_accounts.set_running_chats(Arc::new(sessions.running_chats_probe()));
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();

@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -73,6 +74,8 @@ private data class Account(
     val isKey: Boolean,
     /** Cloud's vault provider (`claude`, `anthropic-key`, …). */
     val cloudProvider: String?,
+    /** While its agent's chats take turns: "Next", "2 chats", … */
+    val marks: String? = null,
 )
 
 /** A sign-in under way: which option, and what to show while it waits. */
@@ -112,6 +115,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
     var askKey by remember { mutableStateOf(false) }
     var codeRequest by remember { mutableStateOf<CompletableDeferred<String?>?>(null) }
     var removing by remember { mutableStateOf<Account?>(null) }
+    var rotating by remember { mutableStateOf(false) }
 
     suspend fun load() {
         when (target) {
@@ -159,11 +163,13 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
                 title = deviceAccountTitle(a),
                 detail = listOfNotNull(a.planLabel, a.organization, option).joinToString(" · ").ifEmpty { null },
                 usage = if (rules.reportsUsage) a.usage else emptyList(),
-                note = a.usageError,
+                // A rotation skip says why the account sits out; it beats the usage reason.
+                note = rotationSkipNote(a) ?: a.usageError,
                 active = a.active,
                 switchable = a.switchable && rules.switches,
                 isKey = a.apiKey,
                 cloudProvider = null,
+                marks = rotationMarks(a),
             )
         }
     }
@@ -202,6 +208,45 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
             when (target) {
                 is AccountsTarget.Cloud -> { cloudAccount(a)?.let { cloud.activate(it, a.cloudProvider!!) } }
                 is AccountsTarget.Device -> { deviceAccounts = c.deviceActivateAccount(target.deviceId, target.harness, a.id) }
+            }
+        }
+    }
+
+    /** The agent's rotation on this computer, read off its accounts (every row carries it). */
+    val mine = (target as? AccountsTarget.Device)?.let { t -> deviceAccounts.orEmpty().filter { it.harness == t.harness } }.orEmpty()
+    val rotationOn = mine.any { it.rotationEnabled }
+    val rotationActive = mine.any { it.rotationActive }
+    val rotationSupported = mine.any { it.rotationSupported }
+    // API keys never take turns.
+    val usableCount = mine.count { it.switchable && !it.apiKey }
+    // Already on, it can always go off; otherwise it needs support and two accounts.
+    val rotationFlippable = rotationOn || (rotationSupported && usableCount >= 2)
+    // Why it can't be turned on, or why an enabled rotation isn't in effect yet.
+    val rotationCaption = if (!rotationFlippable || (rotationOn && !rotationActive)) {
+        mine.firstNotNullOfOrNull { it.rotationNote } ?: if (rotationSupported) "Add a second account to take turns." else "This agent can't run chats on separate accounts yet."
+    } else {
+        null
+    }
+    // Driven by what the computer reports (an older engine, or an agent it doesn't list, shows nothing):
+    // a supported (or already on) agent with an account, or any agent with two.
+    val showRotation = target is AccountsTarget.Device && mine.any { it.rotationReported } &&
+        ((rotationSupported || rotationOn) && mine.isNotEmpty() || usableCount >= 2)
+
+    fun setRotation(on: Boolean) {
+        val t = target as? AccountsTarget.Device ?: return
+        val c = client ?: return
+        if (rotating) return
+        rotating = true
+        scope.launch {
+            try {
+                deviceAccounts = c.deviceSetAccountRotation(t.deviceId, t.harness, on)
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                model.toast(CloudStore.message(e))
+            } finally {
+                rotating = false
             }
         }
     }
@@ -335,6 +380,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
                     AccountRow(
                         a, target.harness, i++, count,
                         busy = busy == a.id,
+                        activeLabel = if (rotationActive) "Default" else "In use",
                         onSwitch = { activate(a) },
                         onRemove = if (a.switchable && busy == null) ({ removing = a }) else null,
                     )
@@ -362,6 +408,20 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
                     leading = { LoadingIndicator(Modifier.size(32.dp)) },
                     trailing = {},
                     onClick = if (device) ({ signJob?.cancel() }) else null,
+                )
+            }
+        }
+        if (showRotation) {
+            cloudSection("Rotation", footer = "Accounts at their usage limit or signed out are skipped.") {
+                CloudRow(
+                    0, 1, "Rotate accounts across chats",
+                    rotationCaption ?: "New chats take turns across your saved accounts, and a chat that hits a limit moves to the next account.",
+                    trailing = {
+                        if (rotating) LoadingIndicator(Modifier.size(32.dp))
+                        else Switch(checked = rotationOn, onCheckedChange = { setRotation(it) }, enabled = rotationFlippable)
+                    },
+                    enabled = rotationFlippable,
+                    onClick = { setRotation(!rotationOn) },
                 )
             }
         }
@@ -401,7 +461,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
 /** One account: mark, name and plan with "In use" or Switch beside them, and the plan's usage underneath. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AccountRow(a: Account, harness: String, index: Int, count: Int, busy: Boolean, onSwitch: () -> Unit, onRemove: (() -> Unit)?) {
+private fun AccountRow(a: Account, harness: String, index: Int, count: Int, busy: Boolean, activeLabel: String = "In use", onSwitch: () -> Unit, onRemove: (() -> Unit)?) {
     val view = LocalView.current
     var menu by remember { mutableStateOf(false) }
     val fixed = !a.active && !a.switchable
@@ -417,10 +477,11 @@ private fun AccountRow(a: Account, harness: String, index: Int, count: Int, busy
             leadingContent = {
                 if (a.isKey) IconTile(ZIcons.Key, chipContainer(), MaterialTheme.colorScheme.onSurface) else AgentTile(harness)
             },
-            supportingContent = if (a.detail != null || a.usage.isNotEmpty() || a.note != null) {
+            supportingContent = if (a.detail != null || a.marks != null || a.usage.isNotEmpty() || a.note != null) {
                 {
                     Column {
                         a.detail?.let { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                        a.marks?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
                         if (a.usage.isNotEmpty()) {
                             Spacer(Modifier.height(10.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -439,7 +500,7 @@ private fun AccountRow(a: Account, harness: String, index: Int, count: Int, busy
             trailingContent = {
                 when {
                     busy -> LoadingIndicator(Modifier.size(32.dp))
-                    a.active -> InUseBadge()
+                    a.active -> InUseBadge(activeLabel)
                     a.switchable -> FilledTonalButton(onClick = onSwitch) { Text("Switch") }
                 }
             },
@@ -465,10 +526,10 @@ private fun AccountRow(a: Account, harness: String, index: Int, count: Int, busy
 }
 
 @Composable
-private fun InUseBadge() {
+private fun InUseBadge(label: String = "In use") {
     val tone = successColor()
     Surface(shape = RoundedCornerShape(8.dp), color = tone.copy(alpha = 0.12f), contentColor = tone) {
-        Text("In use", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+        Text(label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
     }
 }
 
@@ -526,4 +587,47 @@ private fun PasteCodeDialog(onDismiss: () -> Unit, onCode: (String) -> Unit) {
         confirmButton = { TextButton(onClick = { onCode(code.trim()) }, enabled = code.isNotBlank()) { Text("Continue") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** A rotating agent's marks for one account: next up and its chats running now ("Next · 2 chats running"). */
+private fun rotationMarks(a: DeviceAccountInfo): String? {
+    if (!a.rotationActive) return null
+    val chats = a.liveChats.toInt()
+    return listOfNotNull(
+        // A skip shows as the row's note instead — unless every account is at its limit and
+        // the computer still starts the next chat here.
+        when {
+            a.rotationNext && a.rotationSkipped != null -> "Next — all at limit"
+            a.rotationSkipped != null -> null
+            a.rotationNext -> "Next"
+            !a.inRotation -> "Not in rotation"
+            else -> null
+        },
+        when (chats) {
+            0 -> null
+            1 -> "1 chat running"
+            else -> "$chats chats running"
+        },
+    ).joinToString(" · ").ifEmpty { null }
+}
+
+/** "Skipped — usage limit until 3:40 PM", "Skipped — signed out"; none while rotation isn't in effect or the account is still next. */
+private fun rotationSkipNote(a: DeviceAccountInfo): String? {
+    val reason = a.rotationSkipped ?: return null
+    if (!a.rotationActive || a.rotationNext) return null
+    val what = reason.replaceFirstChar { it.lowercase() }
+    val until = a.rotationSkippedUntilMs?.let { formatUntil(it) }
+    return if (until != null) "Skipped — $what until $until" else "Skipped — $what"
+}
+
+/** When a skipped account is back: its time today ("3:40 PM"), "tomorrow at 3:40 PM", or the date ("Nov 3"). */
+private fun formatUntil(ms: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val at = java.time.Instant.ofEpochMilli(ms).atZone(zone)
+    val time = at.format(java.time.format.DateTimeFormatter.ofLocalizedTime(java.time.format.FormatStyle.SHORT))
+    return when (java.time.temporal.ChronoUnit.DAYS.between(java.time.LocalDate.now(zone), at.toLocalDate())) {
+        in Long.MIN_VALUE..0L -> time
+        1L -> "tomorrow at $time"
+        else -> at.format(java.time.format.DateTimeFormatter.ofPattern("MMM d"))
+    }
 }

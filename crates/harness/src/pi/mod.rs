@@ -2,6 +2,7 @@
 mod catalog;
 mod mcp;
 mod normalize;
+mod proxy;
 mod rpc;
 mod sessions;
 mod ui;
@@ -165,6 +166,7 @@ impl PiHarness {
         let scratch = mcp
             .map(|config| self::mcp::configure(&mut cmd, config))
             .transpose()?;
+        let proxy_scratch = self::proxy::configure(&mut cmd, run_env)?;
         let child = cmd.spawn().map_err(|e| {
             crate::executable::spawn_error(e, Some(cwd), || crate::executable::binary_hint(&exe))
         })?;
@@ -185,6 +187,7 @@ impl PiHarness {
         Ok(Process {
             child,
             _scratch: scratch,
+            _proxy_scratch: proxy_scratch,
             transport,
             tail,
             stderr_task,
@@ -196,6 +199,8 @@ impl PiHarness {
 struct Process {
     child: Child,
     _scratch: Option<crate::scratch::ScratchDir>,
+    /// The account-proxy extension of a rotating chat ([`proxy`]).
+    _proxy_scratch: Option<crate::scratch::ScratchDir>,
     transport: rpc::Transport,
     tail: crate::StderrTail,
     stderr_task: tokio::task::JoinHandle<()>,

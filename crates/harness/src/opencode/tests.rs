@@ -4150,3 +4150,28 @@ async fn a_stopped_server_process_fails_the_turn_and_is_torn_down() {
     assert!(!alive, "the stopped server {pid} outlived its run");
     drop(steer_tx);
 }
+
+#[test]
+fn a_proxied_chat_points_the_chatgpt_provider_at_its_route() {
+    let base = "http://127.0.0.1:41000/r/abc/backend-api/codex";
+    let inherited = r#"{"mcp":{"servers":{"zeron":{"type":"local"}}},"providers":{"openai":{"settings":{"timeout":5}}}}"#;
+    let v2: Value =
+        serde_json::from_str(&account_proxy_config(Some(inherited), base, Protocol::V2).unwrap())
+            .unwrap();
+    assert_eq!(
+        v2["providers"]["openai"]["settings"],
+        json!({"timeout": 5, "baseURL": base, "transport": "http", "encoding": "zstd"})
+    );
+    // Earlier layers (the Zeron MCP server) survive the merge.
+    assert_eq!(v2["mcp"]["servers"]["zeron"]["type"], "local");
+    let v1: Value =
+        serde_json::from_str(&account_proxy_config(None, base, Protocol::V1).unwrap()).unwrap();
+    assert_eq!(
+        v1,
+        json!({"provider": {"openai": {"options": {"baseURL": base}}}})
+    );
+    // A provider entry that isn't an object is refused, not overwritten.
+    assert!(
+        account_proxy_config(Some(r#"{"providers":{"openai":1}}"#), base, Protocol::V2).is_err()
+    );
+}

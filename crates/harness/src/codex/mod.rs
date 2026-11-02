@@ -898,6 +898,26 @@ impl CodexHarness {
     }
 }
 
+/// A chat that rotates accounts talks to ChatGPT through its account-proxy
+/// route ([`crate::account_proxy`]): `openai_base_url` is a per-thread config
+/// override (the built-in OpenAI provider keeps its identity, and auth stays
+/// the CLI's own login, which the proxy swaps per request). Applies to
+/// `thread/resume` too, which reuses these parameters.
+fn account_proxy_overrides(
+    params: &mut serde_json::Map<String, Value>,
+    env: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(base) = crate::account_proxy::codex_base_url(env) else {
+        return;
+    };
+    params
+        .entry("config")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("thread/start config overrides are an object")
+        .insert("openai_base_url".into(), Value::String(base));
+}
+
 /// One `codex app-server` process and its wire.
 struct AppServer {
     child: Child,
@@ -1404,6 +1424,7 @@ async fn run_session(session: Session) {
                 overrides.extend(agent_tools_off());
             }
         }
+        account_proxy_overrides(&mut p, &request.env);
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(sandbox).into());
         if asks_person(&request) {
@@ -1607,7 +1628,13 @@ async fn run_session(session: Session) {
             effort: thread["reasoningEffort"].as_str().map(str::to_owned),
             plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
         };
-        Ok::<_, HarnessError>((thread_id, children, voice_context, restore_notice, thread_mode))
+        Ok::<_, HarnessError>((
+            thread_id,
+            children,
+            voice_context,
+            restore_notice,
+            thread_mode,
+        ))
     };
     let (thread_id, mut children, voice_context, restore_notice, thread_mode) = tokio::select! {
         res = setup => match res {
@@ -3031,6 +3058,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_proxied_chat_points_codex_at_its_route() {
+        let mut params = serde_json::Map::new();
+        params.insert("config".into(), json!({"mcp_servers.zeron.command": "z"}));
+        let env = std::collections::BTreeMap::from([(
+            crate::account_proxy::CHATGPT.to_string(),
+            "http://127.0.0.1:41000/r/abc".to_string(),
+        )]);
+        account_proxy_overrides(&mut params, &env);
+        assert_eq!(
+            params["config"]["openai_base_url"],
+            "http://127.0.0.1:41000/r/abc/backend-api/codex"
+        );
+        // Other overrides stay.
+        assert_eq!(params["config"]["mcp_servers.zeron.command"], "z");
+        // No route: nothing changes.
+        let mut params = serde_json::Map::new();
+        account_proxy_overrides(&mut params, &Default::default());
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn shown_commands_drop_the_login_shell() {
         assert_eq!(
             shown_command("/usr/bin/zsh -lc 'npm run dev'"),
@@ -3095,7 +3143,11 @@ mod tests {
         };
         assert_eq!(
             wire(AccessMode::FullAccess, false),
-            ("never", "danger-full-access", json!({"type": "dangerFullAccess"}))
+            (
+                "never",
+                "danger-full-access",
+                json!({"type": "dangerFullAccess"})
+            )
         );
         assert_eq!(
             wire(AccessMode::AutoAcceptEdits, false),
@@ -3130,9 +3182,8 @@ mod tests {
             "item/commandExecution/requestApproval",
             "item/permissions/requestApproval",
         ];
-        let allowed = |access| {
-            methods.map(|method| allowed_without_asking(access, approval_action(method)))
-        };
+        let allowed =
+            |access| methods.map(|method| allowed_without_asking(access, approval_action(method)));
         assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
         assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
         assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);

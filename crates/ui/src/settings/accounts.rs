@@ -27,6 +27,7 @@ use zeron_proto::{
 };
 use zeron_rpc::methods;
 
+use crate::account_rotation;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -437,6 +438,11 @@ pub struct AccountsPage {
     refreshing: bool,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
+    /// Rotation flips in flight, one per provider: flipping another
+    /// provider never cancels this one's.
+    rotation_tasks: std::collections::HashMap<HarnessId, Task<()>>,
+    /// A provider's refused flip, shown on its switch until the next flip.
+    rotation_errors: std::collections::HashMap<HarnessId, SharedString>,
     /// The account whose `⋯` actions menu is open.
     row_menu: popover::Popup<String>,
     login: Option<LoginFlow>,
@@ -489,6 +495,8 @@ impl AccountsPage {
             snapshot: Loadable::Idle,
             refreshing: false,
             busy_account: None,
+            rotation_tasks: Default::default(),
+            rotation_errors: Default::default(),
             row_menu: popover::Popup::default(),
             login: None,
             login_attempts: 0,
@@ -524,6 +532,8 @@ impl AccountsPage {
         self.login = None;
         self.api_key = None;
         self.busy_account = None;
+        self.rotation_tasks.clear();
+        self.rotation_errors.clear();
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
@@ -1309,18 +1319,30 @@ impl AccountsPage {
             .flatten()
             .map(|fragment| div().child(SharedString::from(fragment)).into_any_element())
             .collect();
+        let rotation = self
+            .snapshot
+            .ready()
+            .and_then(|snapshot| account_rotation::provider_rotation(snapshot, account.harness));
         if account.active {
             meta.push(
                 div()
                     .text_color(theme.accent)
-                    .child(SharedString::from("In use"))
+                    .child(SharedString::from(account_rotation::active_label(
+                        rotation.as_ref(),
+                    )))
                     .into_any_element(),
             );
         }
+        // While chats take turns: next up, chats running, or sitting out.
+        let marks = account_rotation::markers(rotation.as_ref(), &account.id);
+        meta.extend(account_rotation::marker_fragments(&marks, theme));
         // Meters XOR the reason they're missing — the reason joins the meta
-        // line, so a failed probe never changes the row's height.
+        // line, so a failed probe never changes the row's height. A
+        // rotation mark already says why the account sits out.
         let usage: AnyElement = if account.usage_windows.is_empty() {
-            meta.extend(self.render_usage_missing(account, theme));
+            if marks.is_empty() {
+                meta.extend(self.render_usage_missing(account, theme));
+            }
             div()
                 .w(px(USAGE_COLUMN_WIDTH))
                 .flex_none()
@@ -1521,6 +1543,154 @@ impl AccountsPage {
             .py(px(2.0))
             .child(body)
             .into_any_element()
+    }
+
+    /// The provider's "Rotate accounts across chats" switch, closing its
+    /// accounts list, wherever the engine reports rotation (see
+    /// [`account_rotation::shows_switch`]); disabled, with the reason as its
+    /// description, while it can't take effect.
+    fn render_rotation_row(
+        &self,
+        harness: HarnessId,
+        snapshot: &AgentAccountsSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.targets_cloud() {
+            return None;
+        }
+        let accounts = provider_accounts(snapshot, harness);
+        let usable = account_rotation::usable_accounts(accounts.iter().copied());
+        let rotation = account_rotation::provider_rotation(snapshot, harness);
+        if !account_rotation::shows_switch(rotation.as_ref(), accounts.len(), usable) {
+            return None;
+        }
+        let on = rotation.as_ref().is_some_and(|r| r.enabled);
+        let availability = account_rotation::availability(rotation.as_ref(), usable);
+        let busy = self.rotation_tasks.contains_key(&harness);
+        let error = self.rotation_errors.get(&harness).cloned();
+        let can_flip = availability == account_rotation::Availability::Available && !busy;
+        let description = account_rotation::caption(harness, rotation.as_ref(), availability)
+            .unwrap_or_else(|| account_rotation::DESCRIPTION.to_string());
+        let row = div()
+            .id(("account-rotation", harness as usize))
+            .debug_selector(move || format!("account-rotation-{harness:?}"))
+            .min_h(px(52.0))
+            .py(px(10.0))
+            .border_t_1()
+            .border_color(widgets::row_divider(theme))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(16.0))
+            .role(gpui::Role::Switch)
+            .aria_label(account_rotation::TITLE)
+            .aria_toggled(if on {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .when(!can_flip, |row| row.opacity(if busy { 0.7 } else { 0.55 }))
+            .when(can_flip, |row| {
+                row.tab_index(0)
+                    .cursor_pointer()
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.set_rotation(harness, !on, cx);
+                    }))
+                    .on_key_down(cx.listener(move |page, event: &gpui::KeyDownEvent, _, cx| {
+                        if !event.is_held
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            page.set_rotation(harness, !on, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, account_rotation::TITLE))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![
+                            div()
+                                .child(SharedString::from(description))
+                                .into_any_element(),
+                        ],
+                    ))
+                    // A refused flip says why on its own switch.
+                    .when_some(error, |text, error| {
+                        text.child(
+                            div()
+                                .mt(px(2.0))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .child(error),
+                        )
+                    }),
+            )
+            .child(widgets::toggle_switch(
+                theme,
+                on,
+                format!("account-rotation-{harness:?}"),
+            ));
+        Some(
+            div()
+                .when(!self.embedded, |el| el.mx(px(16.0)))
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
+    /// Turn `harness`'s rotation on or off, optimistically like a switch:
+    /// the row flips at once, the engine's fresh list replaces it, and a
+    /// refusal puts that provider's rotation back (only its own: another
+    /// provider's flip may have landed meanwhile) and says why on its row.
+    fn set_rotation(&mut self, harness: HarnessId, enabled: bool, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let previous = self
+            .snapshot
+            .ready()
+            .and_then(|snapshot| snapshot.rotation_for(harness).cloned());
+        if let Loadable::Ready(snapshot) = &mut self.snapshot {
+            account_rotation::mark_enabled(snapshot, harness, enabled);
+        }
+        self.rotation_errors.remove(&harness);
+        let params = self.params(account_rotation::set_params(harness, enabled));
+        let key = self.target_device.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(account_rotation::SET_METHOD, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.rotation_tasks.remove(&harness);
+                match result.map(serde_json::from_value::<AgentAccountsSnapshot>) {
+                    Ok(Ok(snapshot)) => {
+                        cx.default_global::<AccountsSnapshotCache>()
+                            .0
+                            .insert(key, snapshot.clone());
+                        page.snapshot = Loadable::Ready(snapshot);
+                    }
+                    Ok(Err(_)) => page.load(force_usage_for(LoadTrigger::PostAction), cx),
+                    Err(err) => {
+                        if let Loadable::Ready(snapshot) = &mut page.snapshot {
+                            account_rotation::restore_rotation(snapshot, harness, previous);
+                        }
+                        page.rotation_errors
+                            .insert(harness, format!("{err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.rotation_tasks.insert(harness, task);
+        cx.notify();
     }
 
     /// A ghost of [`Self::render_account_row`] for an expanded provider:
@@ -1936,12 +2106,14 @@ impl AccountsPage {
                                 )
                             })
                     });
+                    let rotation = self.render_rotation_row(harness, snapshot, theme, cx);
                     div()
                         .flex()
                         .flex_col()
                         .children(rows)
                         .children(add_row)
                         .children(self.render_api_key_entry(harness, theme, cx))
+                        .children(rotation)
                         .into_any_element()
                 }
             };
@@ -2187,6 +2359,7 @@ impl Render for AccountsPage {
                                  with \u{201C}{cli}\u{201D} or add an account."
                             ),
                         };
+                        let rotation = self.render_rotation_row(harness, &snapshot, &theme, cx);
                         let card = if empty {
                             card.child(
                                 div()
@@ -2197,7 +2370,7 @@ impl Render for AccountsPage {
                                     .child(SharedString::from(empty_copy)),
                             )
                         } else {
-                            card.children(rows)
+                            card.children(rows).children(rotation)
                         };
                         div()
                             .mt(px(16.0))
@@ -2557,6 +2730,7 @@ mod tests {
                 row("grok-a", HarnessId::Grok, None, true),
             ],
             warnings: vec![],
+            rotation: Vec::new(),
         };
         let target = snapshot.accounts[1].clone();
         mark_switched(&mut snapshot, &target);
@@ -2715,6 +2889,7 @@ mod tests {
                         },
                     ],
                     warnings: vec![],
+                    rotation: Vec::new(),
                 });
                 page.login = Some(LoginFlow {
                     provider: Some("github-copilot"),
@@ -2776,6 +2951,7 @@ mod tests {
                         provider: None,
                     }],
                     warnings: vec![],
+                    rotation: Vec::new(),
                 });
                 page.open_api_key(HarnessId::ClaudeCode, cx);
                 page.save_api_key(cx);
@@ -2839,6 +3015,134 @@ mod tests {
             .unwrap();
     }
 
+    /// The rotation switch closes a provider's accounts where the engine
+    /// reports rotation and there's something to rotate; it follows the
+    /// engine's support, not a list of agents.
+    #[gpui::test]
+    fn the_rotation_switch_follows_what_the_engine_reports(cx: &mut gpui::TestAppContext) {
+        let window = page(cx);
+        let account = |id: &str, active| AgentAccount {
+            id: id.into(),
+            harness: HarnessId::Codex,
+            email: Some(format!("{id}@example.com")),
+            plan_label: None,
+            active,
+            usage_windows: vec![],
+            usage_fetched_at: None,
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: None,
+        };
+        let snapshot = |supported, enabled, accounts: Vec<AgentAccount>| AgentAccountsSnapshot {
+            rotation: vec![zeron_proto::AgentAccountRotation {
+                harness: HarnessId::Codex,
+                supported,
+                enabled,
+                active: enabled && supported && accounts.len() >= 2,
+                accounts: accounts.iter().map(|a| a.id.clone()).collect(),
+                next_account_id: Some("b".into()),
+                chats: vec![],
+                note: None,
+                skipped: Vec::new(),
+            }],
+            accounts,
+            warnings: vec![],
+        };
+        let shown = |cx: &mut gpui::TestAppContext, snapshot: AgentAccountsSnapshot| {
+            window
+                .update(cx, |page, _, cx| {
+                    page.set_embedded_harness(HarnessId::Codex, cx);
+                    page.snapshot = Loadable::Ready(snapshot);
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.debug_bounds("account-rotation-Codex").is_some()
+        };
+        let two = || vec![account("a", true), account("b", false)];
+        assert!(shown(cx, snapshot(true, false, two())), "off, flippable");
+        assert!(shown(cx, snapshot(true, true, two())), "on");
+        // Supported with one account: shown, asking for a second.
+        assert!(shown(cx, snapshot(true, false, vec![account("a", true)])));
+        // Unsupported: only once there are two accounts to explain it to.
+        assert!(!shown(cx, snapshot(false, false, vec![account("a", true)])));
+        assert!(shown(cx, snapshot(false, false, two())));
+        // An engine without rotation: nothing.
+        assert!(!shown(
+            cx,
+            AgentAccountsSnapshot {
+                rotation: vec![],
+                ..snapshot(true, false, two())
+            }
+        ));
+
+        // The optimistic flip takes effect at once with two accounts.
+        let mut on = snapshot(true, false, two());
+        account_rotation::mark_enabled(&mut on, HarnessId::Codex, true);
+        let rotation = on.rotation_for(HarnessId::Codex).unwrap();
+        assert!(rotation.enabled && rotation.active);
+        account_rotation::mark_enabled(&mut on, HarnessId::Codex, false);
+        let rotation = on.rotation_for(HarnessId::Codex).unwrap();
+        assert!(!rotation.active && rotation.next_account_id.is_none());
+    }
+
+    /// Flipping a second provider's rotation never cancels the first's:
+    /// each has its own flip in flight, and its own busy state.
+    #[gpui::test]
+    fn each_providers_rotation_flip_runs_on_its_own(cx: &mut gpui::TestAppContext) {
+        use crate::pull_request_test_support::{self as fixture, ScriptedRpc};
+        use gpui::AppContext as _;
+        let runtime = fixture::runtime();
+        let _guard = runtime.enter();
+        let _settings = fixture::settings(cx, Default::default());
+        cx.update(gpui_base::init);
+        // The engine never answers: both flips stay in flight.
+        let rpc = ScriptedRpc::new(|_, _| {
+            futures::future::pending::<Result<zeron_rpc::RpcReply, zeron_rpc::RpcError>>()
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = fixture::state(cx, Some(rpc.client()));
+            AccountsPage::new_embedded(state, None, HarnessId::Codex, cx)
+        });
+        let entry = |harness| zeron_proto::AgentAccountRotation {
+            harness,
+            supported: true,
+            enabled: false,
+            active: false,
+            accounts: vec!["a".into(), "b".into()],
+            next_account_id: None,
+            chats: vec![],
+            note: None,
+            skipped: vec![],
+        };
+        window
+            .update(cx, |page, _, cx| {
+                page.snapshot = Loadable::Ready(AgentAccountsSnapshot {
+                    accounts: vec![],
+                    warnings: vec![],
+                    rotation: vec![entry(HarnessId::Codex), entry(HarnessId::ClaudeCode)],
+                });
+                page.set_rotation(HarnessId::Codex, true, cx);
+                page.set_rotation(HarnessId::ClaudeCode, true, cx);
+                assert!(page.rotation_tasks.contains_key(&HarnessId::Codex));
+                assert!(page.rotation_tasks.contains_key(&HarnessId::ClaudeCode));
+                let snapshot = page.snapshot.ready().unwrap();
+                for harness in [HarnessId::Codex, HarnessId::ClaudeCode] {
+                    assert!(snapshot.rotation_for(harness).unwrap().enabled);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |page, _, _| assert_eq!(page.rotation_tasks.len(), 2))
+            .unwrap();
+    }
+
     #[test]
     fn provider_grouping_keeps_engine_order_even_when_active_is_later() {
         let account = |id: &str, harness: HarnessId, active: bool| AgentAccount {
@@ -2864,6 +3168,7 @@ mod tests {
                 account("c2", HarnessId::ClaudeCode, true),
             ],
             warnings: vec![],
+            rotation: Vec::new(),
         };
         let claude = provider_accounts(&snapshot, HarnessId::ClaudeCode);
         let ids: Vec<&str> = claude.iter().map(|a| a.id.as_str()).collect();
