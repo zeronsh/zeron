@@ -489,11 +489,13 @@
         "create_section": "创建分区",
         "keep_active": "折叠时显示活跃会话",
         "devices_first": "设备优先",
-        "projects_first": "项目优先"
+        "projects_first": "项目优先",
+        "empty_projects": "空项目"
       },
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
-      "show_less": "显示更少"
+      "show_less": "显示更少",
+      "empty_projects": "{n, plural, other {# 个空项目}}"
     },
     "git": {
       "pull_request": "拉取请求",
