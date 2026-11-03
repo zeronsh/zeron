@@ -322,23 +322,30 @@ test("closing a terminal with a program running asks first; an idle one closes a
 	end)).to_be(true)
 end)
 
--- Where a tab starts, across the window (from its line in the tree).
-local function tab_x(app: any): number?
+-- Where a tab starts, across the window and down it (from its line in
+-- the tree).
+local function tab_at(app: any): (number?, number?)
 	for line in app:tree("#panel-strip"):gmatch("[^\n]+") do
 		if line:find('tab "', 1, true) then
-			return tonumber(line:match(" (%-?%d+),%-?%d+ %d+x%d+"))
+			local x, y = line:match(" (%-?%d+),(%-?%d+) %d+x%d+")
+			return tonumber(x), tonumber(y)
 		end
 	end
-	return nil
+	return nil, nil
+end
+local function tab_x(app: any): number?
+	return (tab_at(app))
 end
 
 test("at the window's edge the tabs start after the title bar's controls, and come back as it moves off", function()
 	local app = open_panel()
 	app:click("#panel-open-files")
 	expect(app:wait("#panel-strip >> role:tab", { timeout_ms = 15000 })).to_be(true)
-	-- Beside a chat: its own start.
-	local beside = tab_x(app)
-	expect(beside).to_be(8)
+	-- Beside a chat: its own start, as far in from the panel card's side
+	-- as from its top (an even inset: the band's room over a tab).
+	local beside, top = tab_at(app)
+	expect(beside).to_be(top)
+	expect(beside > 0).to_be(true)
 	-- Expanded over the window's edge: past the window's buttons and the
 	-- title bar's sidebar toggle, back and forward.
 	app:set_state("test_panel_left", 0)
@@ -354,7 +361,7 @@ test("at the window's edge the tabs start after the title bar's controls, and co
 	end)).to_be(true)
 	app:set_state("test_panel_left", 1000)
 	expect(eventually(app, function(): boolean
-		return tab_x(app) == 8
+		return tab_x(app) == beside
 	end)).to_be(true)
 end)
 

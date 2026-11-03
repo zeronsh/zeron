@@ -1281,6 +1281,33 @@ local function Composer(): Node
 		end
 		glide_to(y)
 	end)
+	-- (Moving to another chat, as the focus moves between a split's
+	-- panes, is shown for something else too: its draft, and its size for
+	-- it, there at once rather than growing or shrinking into it.)
+	local chat_was: string? = route.chat:peek().session
+	ui.effect(function()
+		local now = route.chat:get().session
+		if now ~= chat_was then
+			chat_was = now
+			snap_until = ui.now() + SNAP_MS
+			snap:set(snap:peek() + 1)
+		end
+	end)
+	-- (The sidebar opening or closing moves the page's edges (a new
+	-- chat's page goes to the window's edges as it closes): its place
+	-- follows the page as it moves, at once, rather than easing after it on
+	-- a clock of its own, which drew a small loop as the two went their own
+	-- ways.)
+	local shell_view = require("@app/screens/shell/view")
+	local fit = require("@app/screens/shell/fit")
+	local sidebar_was = not shell_view.collapsed:peek() and fit.current:peek().sidebar
+	ui.effect(function()
+		local now = not shell_view.collapsed:get() and fit.current:get().sidebar
+		if now ~= sidebar_was then
+			sidebar_was = now
+			snap_until = ui.now() + SNAP_MS
+		end
+	end)
 	-- Over the whole pane, the pointer passing through it to the page
 	-- (its wheel too) but for the composer itself. (Under settings the shell
 	-- hides the chat frame, its state kept: nothing here is made again.)
