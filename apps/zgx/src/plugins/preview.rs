@@ -18,7 +18,7 @@
 //! what this guards.)
 //!
 //! **Safe mode** (`safe`) is the way back that no template can undo: "Use
-//! Zeron's Template" in the host's menu, Revert in its toast, holding ⌥ as Zeron opens,
+//! Default Interface" in the host's menu, Revert in its toast, holding ⌥ as Zeron opens,
 //! or a template that crashed the window at launch twice running. It runs
 //! Zeron's own whatever `.active` says (a template re-selecting itself from
 //! a timer, a terminal or an agent changes nothing), closes the terminals

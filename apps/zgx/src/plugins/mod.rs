@@ -680,7 +680,7 @@ pub fn prepare_live() -> PathBuf {
     }
 }
 
-/// The host's own menu item's action ("Use Zeron's Template").
+/// The host's own menu item's action ("Use Default Interface").
 pub const USE_ZERON_TEMPLATE: &str = "zeron.use-zeron-template";
 /// The host's own "Keep <template>…": the keep sheet for the one in preview.
 pub const KEEP_TEMPLATE: &str = "zeron.keep-template";
@@ -958,7 +958,7 @@ pub fn set_view(handle: zgx::compose::ViewHandle) {
     }
 }
 
-/// "Use Zeron's Template" (the host's own menu item, and Revert in its toast, which no
+/// "Use Default Interface" (the host's own menu item, and Revert in its toast, which no
 /// template can take away): safe mode (preview.rs), so Zeron's own runs
 /// whatever `.active` says until you pick a template on the Templates page,
 /// and the terminals templates started are closed. The window follows.
@@ -3298,13 +3298,13 @@ mod markdown_tests;
 
 #[cfg(test)]
 mod menu_tests {
-    /// "Use Zeron's Template" is the host's own, in View, whatever the
+    /// "Use Default Interface" is the host's own, in View, whatever the
     /// scripts declare (none here, as when a template broke before any).
     #[test]
     fn the_host_s_menu_always_has_a_way_back_to_zeron_s_template() {
         let menus = format!("{:?}", crate::menus(&[]));
         assert!(menus.contains("View"), "{menus}");
-        assert!(menus.contains("Use Zeron's Template"), "{menus}");
+        assert!(menus.contains("Use Default Interface"), "{menus}");
         assert!(menus.contains(super::USE_ZERON_TEMPLATE), "{menus}");
     }
 
@@ -3328,7 +3328,7 @@ mod menu_tests {
         let shown = format!("{bar:?}");
         assert!(zgx_desktop::app_menu_bar(bar, |_| {}).is_ok(), "the platform takes the bar: {shown}");
         assert_eq!(shown.matches(super::USE_ZERON_TEMPLATE).count(), 1, "{shown}");
-        assert!(shown.contains("Use Zeron's Template") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
+        assert!(shown.contains("Use Default Interface") && !shown.contains("Stay Here") && !shown.contains("Keep Me"), "{shown}");
         assert!(!shown.contains("zeron.anything") && shown.contains("New Chat"), "{shown}");
     }
 }

@@ -8,7 +8,7 @@ A template is a whole interface for Zeron, like a WordPress theme. It's a folder
 - Saving a file rewrites only what changed, and the window reloads **in place**. State is kept wherever both versions have the module.
 - **Fallback, per file:** a file that fails (to load, to build, or later) is replaced by Zeron's own copy of that file alone. You get one notice, and `template_status` names it with its error. Save it again to retry.
 - **Fallback, whole:** if your `app.luau` fails, the whole window goes back to Zeron's own and the template shows as broken.
-- **The way back from any template:** View → Use Zeron's Template (in the menu bar, or the bar Zeron draws at the window's top on Linux and Windows), Revert on a preview's bar, holding ⌥ as Zeron opens, or launching it with `--zeron-template`. Each starts **safe mode**: Zeron's own interface runs whatever `.active` says, the terminals templates opened are closed, and it stays so across launches until the person picks a template on Zeron's Templates page. A template that crashes Zeron at launch twice in a row starts it too.
+- **The way back from any template:** View → Use Default Interface (in the menu bar, or the bar Zeron draws at the window's top on Linux and Windows), Revert on a preview's toast, holding ⌥ as Zeron opens, or launching it with `--zeron-template`. Each starts **safe mode**: Zeron's own interface runs whatever `.active` says, the terminals templates opened are closed, and it stays so across launches until the person picks a template on Zeron's Templates page. A template that crashes Zeron at launch twice in a row starts it too.
 
 ## Preview until the person keeps it
 

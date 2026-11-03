@@ -12,13 +12,14 @@
 //!   on another device, this device's revoked), and the default interface
 //!   at launch because the template crashed Zeron (safe mode);
 //! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Zeron's Template is always in
+//!   bar (zgx's `app_menu_bar`): View → Use Default Interface is always in
 //!   it, the host's own item.
 //!
 //! The toasts look like the app's own (ds/toast.luau: its width, corner,
-//! padding and type), in the bottom-left corner: the composer sits centred
-//! in the page right of the sidebar with its send button at its right end,
-//! where the app's own toasts (bottom right) would cover it.
+//! padding and type) and share their corner, the window's bottom right,
+//! 16 points in, in one column: the host's at its foot (they stay put as
+//! the app's come and go above them), the app's stacked over them from
+//! `toast_floor`, a shared value the host publishes (`follow`).
 //!
 //! A template replaces the whole interface, `ds/` and its toasts included,
 //! so nothing here comes from the scripts: the toasts are a layer of the
@@ -34,7 +35,7 @@ use std::sync::Arc;
 
 use zgx::compose::{ModalPlacement, PlacementEdge, View, button, column, component, modal, row, svg, switch, text};
 use zgx::cursor::Cursor;
-use zgx::scene::{BoxShadow, Color, Transform};
+use zgx::scene::{BoxShadow, Color, NodeId, Scene, Transform};
 use zgx::semantics::{Live, Role};
 use zgx::style::Styled;
 use zgx::svg::SvgData;
@@ -67,8 +68,9 @@ pub struct Notice {
     pub stays: bool,
 }
 
-/// "Use default": the default interface, in safe mode.
-const USE_DEFAULT: Action = Action { label: "Use default", command: super::USE_ZERON_TEMPLATE };
+/// The default interface, in safe mode (the menu bar's "Use Default
+/// Interface").
+const USE_DEFAULT: Action = Action { label: "Use default interface", command: super::USE_ZERON_TEMPLATE };
 
 impl Notice {
     /// The template changed without you choosing it here: to `name`, or
@@ -360,6 +362,7 @@ fn card(id: &str, title: &str, body: &str, tone: Tone, ink: Ink, corner_button: 
         .child(corner_button);
     let mut out = column()
         .id(id)
+        .pointer_events(true)
         .w(WIDTH)
         .rounded(RADIUS)
         .border(BORDER)
@@ -382,6 +385,7 @@ fn card(id: &str, title: &str, body: &str, tone: Tone, ink: Ink, corner_button: 
 fn pill(title: &str, ink: Ink, open: impl FnMut() + 'static) -> View {
     button()
         .id("host-preview-pill")
+        .pointer_events(true)
         .accessible_label(format!("{title}: show"))
         .h(PILL_H)
         .pl(10.)
@@ -425,6 +429,7 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
     }
     let themes = zgx::theme::Themes::of(runtime);
     let shown = runtime.signal(true);
+    CORNER.with(|c| *c.borrow_mut() = Some(Corner { scene: None, node: None, floor: None, told: f32::NAN }));
     let (heard, folded) = (notices.clone(), minimised.clone());
     let stack = switch(
         move || {
@@ -433,7 +438,7 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
         },
         move |(preview, list, mini, dark), _| {
             let ink = if dark { DARK } else { LIGHT };
-            let mut out = column().items_start().gap(GAP);
+            let mut out = column().items_end().gap(GAP);
             for shown in list {
                 let id = shown.id;
                 let gone = notices.clone();
@@ -485,17 +490,90 @@ fn toasts(runtime: &zgx::reactive::Runtime) -> View {
             .layer()
             .autofocus(false)
             .modal_placement(ModalPlacement {
-                x: PlacementEdge::Start,
+                x: PlacementEdge::End,
                 y: PlacementEdge::End,
-                insets: [0., 0., OFF_CORNER, OFF_CORNER],
+                insets: [0., OFF_CORNER, OFF_CORNER, 0.],
             })
             .p(0.)
             .bg(Color(0, 0, 0, 0))
             .border(0.)
             .shadow_none()
             .overflow_visible()
-            .child(column().id("host-toasts").items_start().on_mount(keep_on_top).child(stack))
+            // (The stack's blank space takes no clicks; the toasts take
+            // theirs.)
+            .pointer_events(false)
+            .child(
+                column()
+                    .id("host-toasts")
+                    .items_end()
+                    .pointer_events(false)
+                    .on_mount(|handle| {
+                        CORNER.with(|c| {
+                            if let Some(c) = c.borrow_mut().as_mut() {
+                                c.scene = handle.scene();
+                                c.node = Some(handle.node());
+                            }
+                        });
+                        keep_on_top(handle);
+                    })
+                    .child(stack),
+            )
     })
+}
+
+// ── The corner ──────────────────────────────────────────────────────────────
+
+/// The host's stack, measured for the app's toasts to stand over.
+struct Corner {
+    scene: Option<std::rc::Rc<RefCell<Scene>>>,
+    /// The host's stack (`#host-toasts`).
+    node: Option<NodeId>,
+    /// Where the app's toasts stand, told to the scripts (`toast_floor`).
+    floor: Option<zgx_script::Shared>,
+    /// The floor last told.
+    told: f32,
+}
+
+thread_local! {
+    static CORNER: RefCell<Option<Corner>> = const { RefCell::new(None) };
+}
+
+/// The shared value the app's toasts stand on (`toast_floor`, in points up
+/// from the window's foot): over the host's, or 16 with none showing.
+pub fn follow(floor: zgx_script::Shared) {
+    CORNER.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.told = f32::NAN;
+            c.floor = Some(floor);
+        }
+    });
+    measure();
+}
+
+/// Tells the app's toasts where to stand: over the host's stack, `GAP`
+/// apart, as it is laid out now. After every layout.
+fn measure() {
+    let found = CORNER.with(|c| {
+        let c = c.borrow();
+        let c = c.as_ref()?;
+        let floor = c.floor.clone()?;
+        let scene = c.scene.clone()?;
+        let scene = scene.try_borrow().ok()?;
+        let node = c.node.filter(|n| scene.contains(*n))?;
+        let stack = scene.transformed_bounds(node).height;
+        Some((stack, c.told, floor))
+    });
+    let Some((stack, told, floor)) = found else { return };
+    let over = if stack > 0.5 { OFF_CORNER + stack + GAP } else { OFF_CORNER };
+    if (told - over).abs() <= 0.5 {
+        return;
+    }
+    floor.set(zgx_script::Value::from(f64::from(over)));
+    CORNER.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.told = over;
+        }
+    });
 }
 
 /// Keeps what holds `handle` (the host's layer) the window root's last
@@ -526,7 +604,10 @@ fn keep_on_top(handle: zgx::compose::NodeHandle) {
     };
     let first = raise.clone();
     first();
-    handle.on_layout(raise);
+    handle.on_layout(move || {
+        raise();
+        measure();
+    });
 }
 
 #[cfg(test)]
@@ -550,11 +631,30 @@ mod tests {
         );
         app.frames(30);
         assert_eq!(app.error(), None, "the scripts failed");
+        // As the main window does: the app's toasts told where to stand.
+        follow(app.host.shared("toast_floor", 16.));
+        app.frames(6);
         app
     }
 
+    /// The shell, with the app's own toasts on command (`fixture.toast`).
     fn mount() -> TestApp {
-        mount_at(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau"), |_| {})
+        mount_at(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/host_toasts_fixture.luau"), |_| {})
+    }
+
+    fn overlap(a: zgx::scene::Rect, b: zgx::scene::Rect) -> bool {
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    }
+
+    /// The card (ds's or the host's, `WIDTH` wide) a text is in.
+    fn card_of(app: &mut TestApp, text: &str) -> zgx::scene::Rect {
+        let node = app.find(&format!("\"{text}\"")).unwrap_or_else(|| panic!("no {text}"));
+        let scene = app.ui.scene.borrow();
+        std::iter::once(node)
+            .chain(scene.ancestors(node))
+            .map(|n| scene.transformed_bounds(n))
+            .find(|r| (r.width - WIDTH).abs() < 0.5)
+            .unwrap_or_else(|| panic!("{text} in no card"))
     }
 
     fn bounds(app: &mut TestApp, selector: &str) -> zgx::scene::Rect {
@@ -604,7 +704,7 @@ mod tests {
     /// bottom-left corner, 16 points in, ds's toast's width; never over the
     /// title bar; gone with the preview.
     #[test]
-    fn the_preview_shows_as_a_toast_in_the_bottom_left_corner() {
+    fn the_preview_shows_as_a_toast_in_the_bottom_right_corner() {
         preview::set(None);
         let mut app = mount();
         app.ui.scene.borrow_mut().resize(1240., 820.);
@@ -612,7 +712,7 @@ mod tests {
         preview::set(Some(sleek()));
         app.frames(6);
         let card = bounds(&mut app, "#host-preview");
-        assert_eq!((card.x, card.width), (OFF_CORNER, WIDTH), "{card:?}");
+        assert_eq!((card.x + card.width, card.width), (1240. - OFF_CORNER, WIDTH), "16 off the end: {card:?}");
         assert!((card.y + card.height - (820. - OFF_CORNER)).abs() < 0.5, "16 off the foot: {card:?}");
         assert!(card.y > 400., "near the foot, far from the title bar: {card:?}");
         let texts = app.texts().join("|");
@@ -648,7 +748,7 @@ mod tests {
         app.frames(6);
         assert!(app.find("#host-preview").is_none(), "folded");
         let pill = bounds(&mut app, "#host-preview-pill");
-        assert_eq!(pill.x, OFF_CORNER, "{pill:?}");
+        assert_eq!(pill.x + pill.width, 1240. - OFF_CORNER, "{pill:?}");
         assert!((pill.y + pill.height - (820. - OFF_CORNER)).abs() < 0.5, "{pill:?}");
         assert_eq!(pill.height, PILL_H, "{pill:?}");
         app.click("#host-preview-pill");
@@ -675,7 +775,7 @@ mod tests {
         app.frames(6);
         let texts = app.texts().join("|");
         assert!(texts.contains("Switched to Ledger") && texts.contains("A chat switched the template. You didn't choose it here."), "{texts}");
-        assert!(app.find("role:button \"Use default\"").is_some(), "a way back");
+        assert!(app.find("role:button \"Use default interface\"").is_some(), "a way back");
         let (switch, preview_card) = (bounds(&mut app, "role:status \"Switched to Ledger\""), bounds(&mut app, "#host-preview"));
         assert!(switch.y + switch.height <= preview_card.y, "over the preview's: {switch:?} {preview_card:?}");
 
@@ -736,6 +836,46 @@ mod tests {
         preview::set(None);
     }
 
+    /// One column in the window's bottom-right corner, 16 in from its
+    /// edges, whatever the page shows: the host's toasts at its foot, the
+    /// app's (ds/toast) stacked over them, none on another; the app's come
+    /// down to the corner once the host's are gone. At 1240 and 900 wide,
+    /// on a session (its composer docked at the foot).
+    #[test]
+    fn the_host_s_and_the_app_s_toasts_share_the_window_s_corner() {
+        preview::set(Some(sleek()));
+        let mut app = mount();
+        app.ui.scene.borrow_mut().resize(1240., 820.);
+        app.frames(20);
+        app.click("#shell-sidebar >> role:button \"Fix the build\"");
+        app.frames(20);
+        notice(Notice::key("key_added", Some("Wing's iPhone"), ""));
+        assert!(app.host.run_command("fixture.toast") && app.host.run_command("fixture.toast"));
+        for (w, h) in [(1240., 820.), (900., 600.)] {
+            app.ui.scene.borrow_mut().resize(w, h);
+            app.frames(20);
+            let host = bounds(&mut app, "#host-toasts");
+            assert!((host.x + host.width - (w - OFF_CORNER)).abs() < 0.5, "{w}: 16 off the end: {host:?}");
+            assert!((host.y + host.height - (h - OFF_CORNER)).abs() < 0.5, "{w}: 16 off the foot: {host:?}");
+            let (preview_card, key) = (card_of(&mut app, "Previewing Sleek"), card_of(&mut app, "New signing key"));
+            assert!(preview_card.y > key.y, "{w}: the preview's lowest");
+            let ds = [card_of(&mut app, "Pushed to origin (1)"), card_of(&mut app, "Pushed to origin (2)")];
+            for card in ds {
+                assert!((card.x + card.width - (w - OFF_CORNER)).abs() < 0.5, "{w}: the same column: {card:?}");
+                assert!(card.y + card.height <= host.y - GAP + 0.5, "{w}: the app's over the host's: {card:?} {host:?}");
+                assert!(!overlap(card, preview_card) && !overlap(card, key), "{w}: {card:?}");
+            }
+            assert!(!overlap(ds[0], ds[1]), "{w}: {ds:?}");
+        }
+        // The host's put away: the app's come down to the corner.
+        preview::set(None);
+        NOTICES.with(|n| n.borrow().as_ref().map(|s| s.set(Vec::new())));
+        app.frames(20);
+        let ds = card_of(&mut app, "Pushed to origin (2)");
+        assert!((ds.y + ds.height - (600. - OFF_CORNER)).abs() < 0.5, "the app's at the corner: {ds:?}");
+        app.host.run_command("fixture.toasts_clear");
+    }
+
     /// No script can cover the toasts or take their clicks: a modal over
     /// the whole window (its dim and an opaque panel) and a layer, opened
     /// after the toast, still draw under it, and a click on Keep reaches
@@ -790,7 +930,7 @@ return ui.column {
         assert!(app.find("role:button \"Keep\"").is_none(), "the fake and the host's");
         let keep = app.find("#host-preview >> role:button \"Keep\"").expect("the host's Keep");
         let at = app.ui.scene.borrow().transformed_bounds(keep);
-        let hit = app.ui.scene.borrow().hit_test(at.x + at.width / 2., at.y + at.height / 2.);
+        let hit = app.ui.input.pointer_target(&app.ui.scene.borrow(), at.x + at.width / 2., at.y + at.height / 2.);
         let scene = app.ui.scene.borrow();
         assert!(hit.is_some_and(|h| h == keep || scene.ancestors(h).any(|a| a == keep)), "Keep takes its click: {hit:?}");
         drop(scene);
