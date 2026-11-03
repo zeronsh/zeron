@@ -190,8 +190,7 @@ pub fn approve(id: &str, digest: &str) -> Result<(), String> {
 }
 
 /// Whether template `id` in `templates` runs with the app's powers: Zeron's
-/// own, one of its built-in themes as this build wrote it, or one you kept
-/// as it is.
+/// own, or one you kept as it is.
 pub fn trusted(templates: &Path, id: &str) -> bool {
     id == live::BUILTIN || approvals_path().is_some_and(|p| trusted_at(templates, id, &p))
 }
@@ -202,7 +201,7 @@ pub fn trusted_at(templates: &Path, id: &str, approvals: &Path) -> bool {
         return true;
     }
     let dir = templates.join(id);
-    super::theme_templates::verified(&dir).is_some() || approved_at(approvals, id, &digest(&dir))
+    approved_at(approvals, id, &digest(&dir))
 }
 
 // ── Safe mode ───────────────────────────────────────────────────────────────

@@ -43,7 +43,7 @@ end
 -- `threshold` holds none (the picture as it is), the rest a glyph of
 -- ` .-+xXS80#@` rising steeply with the brightness at its centre (the
 -- highlights dense, the mid tones light), its strokes lit in that colour at
--- its full value over the picture as it is; laid over it at `strength`.
+-- its full value over the picture at 75%; laid over it at `strength`.
 -- params[0]: the font pixel (points), the strength (0 to 1), the threshold
 -- (0 to 1).
 M.ascii = ui.layer_shader(decode.GLYPHS .. [[
@@ -57,15 +57,16 @@ fn layer(input:LayerInput)->vec4<f32> {
  let t=input.params[0].z;
  let level=pow(clamp((lum-t)/max(1.-t,.01),0.,1.),1.4);
  let i=u32(level*10.999);
- // No glyph here: the picture, untouched.
- if i==0u {return input.color;}
+ // Between the strokes, everywhere alike (a glyph's cell or none, so no
+ // character is boxed in): the picture a little dimmer, so the glyphs
+ // stand out of it and its own softness shows less.
+ let dim=input.color.rgb*.75;
+ if i==0u {return vec4(mix(input.color.rgb,dim,input.params[0].y),input.color.a);}
  let g=glyph(i);
  let fp=vec2<u32>(floor((input.p-cell*size)/px));
  var lit=0u;
  if fp.x<5u && fp.y<7u {lit=(select(g.y,g.x>>(fp.y*5u),fp.y<6u)>>(4u-fp.x))&1u;}
- // Only the glyph's own pixels: the cell around them stays the picture
- // (darkening it would box every character in).
- let art=select(input.color.rgb,c.rgb/max(peak,.004),lit==1u);
+ let art=select(dim,c.rgb/max(peak,.004),lit==1u);
  return vec4(mix(input.color.rgb,art,input.params[0].y),input.color.a);
 }
 ]])

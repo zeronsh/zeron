@@ -517,9 +517,11 @@ test("a comment left on a line is staged for the chat and stands under it until 
 	expect(eventually(app, function(): boolean
 		return string.find(calls(app), "comment:long.txt:3:Why twice?", 1, true) ~= nil
 	end)).to_be(true)
-	-- It stands on its line, pending (sent with the next message).
+	-- It stands on its line (sent with the next message): your name and
+	-- what you said, no time and no "Pending".
 	expect(app:wait('role:article "You: Why twice?"', { timeout_ms = 15000 })).to_be(true)
-	expect(app:has('"Pending"')).to_be(true)
+	expect(app:has('"Pending"')).to_be(false)
+	expect(app:has('role:article "You: Why twice?" >> "just now"')).to_be(false)
 	expect(app:has('"long.txt:3"')).to_be(false)
 	-- Deleted from its card: unstaged, gone.
 	app:hover('role:article "You: Why twice?"')

@@ -1,29 +1,33 @@
--- The palettes a window can wear, Zeron's built-in themes (crates/theme
--- builtins.rs, its seeds copied as they are): each a few colours a theme
--- is grown from. Zeron Dark and Zeron Light are the design system's own
--- themes (themes/*.json) and change nothing; every other one overrides the
--- colour tokens through `tokens(p)`, the one mapping from a palette to
--- zgx's tokens, in the window's glass as Zeron's are: the window and its
--- frosted tint from its background, menus and the composer from its chrome
--- and card, every hairline and wash from its text's own ink, its accent and
--- tones, its code's and Markdown's colours, diffs, git, statuses, and a
--- visual's chart colours from its terminal's ANSI ones. (The terminal's
--- own colours have no token yet: zgx's terminal paints a fixed palette.)
+-- The palettes a window can wear, and the one mapping from a palette to
+-- zgx's tokens (`tokens(p)`): every theme is a few colours it's grown from,
+-- in the window's glass as Zeron's are: the window and its frosted tint
+-- from its background, menus and the composer from its chrome and card,
+-- every hairline and wash from its text's own ink, its accent and tones,
+-- its code's and Markdown's colours, diffs, git, statuses, and a visual's
+-- chart colours from its terminal's ANSI ones. (The terminal's own colours
+-- have no token yet: zgx's terminal paints a fixed palette.) Zeron's own
+-- (zeron-dark, zeron-light) are the design system's themes (themes/*.json)
+-- and change nothing.
 --
 -- Each palette stays legible: an ink that reads too faint on the palette's
 -- surfaces is moved toward black or white until it reads (body text and
 -- code at 4.5:1, faint text, comments and fills at 3:1), and `tokens`
 -- says what it moved.
 --
---   palettes.LIST            every built-in one, in Zeron's order ({ id, name, kind, … })
---   palettes.imported()      your imported VS Code themes' (src/themes.rs), followed
---   palettes.find(id)        one, built in or imported, by its id (nil if none)
---   palettes.tokens(p)       the token overrides that make a window wear it,
+-- The themes themselves are the host's (src/themes.rs): Zeron's built in,
+-- each template's own and your imported ones, and the one chosen for each
+-- scheme. A scheme with none chosen wears the running template's own
+-- (its theme.luau), else Zeron's.
+--
+--   palettes.library()       the host's list ({ state, list, entries, chosen })
+--   palettes.find(id)        one theme's palette by its id (nil if none)
+--   palettes.slots(own)      what each scheme wears now: the theme chosen for
+--                            it, else `own`'s (a template's theme.luau:
+--                            `{ name?, dark?, light? }`), else nil (Zeron's)
+--   palettes.wear(slots)     those palettes worn as the window's two themes
+--   palettes.scheme          their names ({ dark, light }), which never change
+--   palettes.tokens(p)       the token overrides that make a window wear `p`,
 --                            and the inks moved to stay legible ({ Fix })
---   palettes.wear(family)    a template's palettes (its theme.luau: `{ name,
---                            dark?, light? }`, or nil for Zeron's own) as the
---                            themes each scheme wears: their names
---   palettes.scheme          those names now ({ dark, light })
 --   palettes.contrast(a, b)  two colours' contrast ratio (WCAG 2)
 
 local M = {}
@@ -44,7 +48,7 @@ export type Palette = {
 	-- comment, keyword, string, number, type, function, property,
 	-- variable, punctuation, tag, attribute, invalid (Zeron's order).
 	syntax: { string },
-	-- An imported one's library entry (src/themes.rs).
+	-- The theme it's listed under (src/themes.rs).
 	entry: string?,
 	-- The shipping app's chrome and card surfaces (the window's where
 	-- absent), its terminal's background and its sixteen ANSI colours
@@ -55,52 +59,22 @@ export type Palette = {
 	ansi: { string }?,
 }
 
--- A template's palettes (its theme.luau): one per scheme it has.
+-- A theme's palettes, one per scheme it has (a template's theme.luau).
 export type Family = { name: string?, dark: Palette?, light: Palette? }
+-- What each scheme wears: a palette, or nil for Zeron's.
+export type Slots = { dark: Palette?, light: Palette? }
 
 -- An ink `tokens` moved to keep it legible: its role, the source's colour,
 -- what it wears, and the contrast it was held to.
 export type Fix = { role: string, from: string, to: string, min: number }
 
-M.LIST = {
-	{ id = "zeron-dark", name = "Zeron Dark", kind = "dark", background = "#060606", raised = "#343438", text = "#e8e8ea", muted = "#a9a9ae", faint = "#85858a", accent = "#8b7cf6", danger = "#f87171", warning = "#facc15", success = "#34d399", syntax = { "#92929a", "#8b7cf6", "#34d399", "#facc15", "#c084fc", "#60a5fa", "#f472b6", "#e8e8ea", "#a1a1aa", "#f472b6", "#22d3ee", "#f87171" } },
-	{ id = "zeron-light", name = "Zeron Light", kind = "light", background = "#ffffff", raised = "#ededf0", text = "#303035", muted = "#62626a", faint = "#797981", accent = "#5b43e8", danger = "#dc2626", warning = "#a16207", success = "#15803d", syntax = { "#6b7280", "#5b43e8", "#15803d", "#a16207", "#7e22ce", "#2563eb", "#be185d", "#303035", "#52525b", "#be185d", "#0e7490", "#b91c1c" } },
-	{ id = "vscode-dark-plus", name = "Dark+", kind = "dark", background = "#1e1e1e", raised = "#2a2d2e", text = "#d4d4d4", muted = "#a8a8a8", faint = "#858585", accent = "#007acc", danger = "#f48771", warning = "#cca700", success = "#89d185", syntax = { "#6a9955", "#c586c0", "#ce9178", "#b5cea8", "#4ec9b0", "#dcdcaa", "#9cdcfe", "#d4d4d4", "#d4d4d4", "#569cd6", "#9cdcfe", "#f44747" } },
-	{ id = "vscode-light-plus", name = "Light+", kind = "light", background = "#ffffff", raised = "#e8e8e8", text = "#1f1f1f", muted = "#616161", faint = "#767676", accent = "#0078d4", danger = "#a1260d", warning = "#895503", success = "#008000", syntax = { "#008000", "#0000ff", "#a31515", "#098658", "#267f99", "#795e26", "#001080", "#1f1f1f", "#1f1f1f", "#800000", "#ff0000", "#cd3131" } },
-	{ id = "catppuccin-mocha", name = "Catppuccin Mocha", kind = "dark", background = "#1e1e2e", raised = "#313244", text = "#cdd6f4", muted = "#a6adc8", faint = "#9399b2", accent = "#cba6f7", danger = "#f38ba8", warning = "#f9e2af", success = "#a6e3a1", syntax = { "#6c7086", "#cba6f7", "#a6e3a1", "#fab387", "#f9e2af", "#89b4fa", "#94e2d5", "#cdd6f4", "#bac2de", "#f38ba8", "#f5c2e7", "#f38ba8" } },
-	{ id = "catppuccin-latte", name = "Catppuccin Latte", kind = "light", background = "#eff1f5", raised = "#dce0e8", text = "#4c4f69", muted = "#5c5f77", faint = "#6c6f85", accent = "#8839ef", danger = "#d20f39", warning = "#df8e1d", success = "#40a02b", syntax = { "#8c8fa1", "#8839ef", "#40a02b", "#fe640b", "#df8e1d", "#1e66f5", "#179299", "#4c4f69", "#6c6f85", "#d20f39", "#ea76cb", "#d20f39" } },
-	{ id = "tokyo-night", name = "Tokyo Night", kind = "dark", background = "#1a1b26", raised = "#292e42", text = "#c0caf5", muted = "#9aa5ce", faint = "#7f87ad", accent = "#7aa2f7", danger = "#f7768e", warning = "#e0af68", success = "#9ece6a", syntax = { "#565f89", "#bb9af7", "#9ece6a", "#ff9e64", "#2ac3de", "#7aa2f7", "#73daca", "#c0caf5", "#9abdf5", "#f7768e", "#e0af68", "#f7768e" } },
-	{ id = "tokyo-night-light", name = "Tokyo Night Light", kind = "light", background = "#d5d6db", raised = "#bfc0c6", text = "#343b59", muted = "#485e7d", faint = "#5a6378", accent = "#34548a", danger = "#8c4351", warning = "#8f5e15", success = "#33635c", syntax = { "#6c6e75", "#5a4a78", "#33635c", "#965027", "#0f4b6e", "#34548a", "#166775", "#343b59", "#485e7d", "#8c4351", "#8f5e15", "#8c4351" } },
-	{ id = "dracula", name = "Dracula", kind = "dark", background = "#282a36", raised = "#44475a", text = "#f8f8f2", muted = "#c5c8c6", faint = "#9a9cab", accent = "#bd93f9", danger = "#ff5555", warning = "#f1fa8c", success = "#50fa7b", syntax = { "#6272a4", "#ff79c6", "#f1fa8c", "#bd93f9", "#8be9fd", "#50fa7b", "#8be9fd", "#f8f8f2", "#f8f8f2", "#ff79c6", "#50fa7b", "#ff5555" } },
-	{ id = "github-light", name = "GitHub Light", kind = "light", background = "#ffffff", raised = "#d0d7de", text = "#1f2328", muted = "#656d76", faint = "#818b98", accent = "#0969da", danger = "#cf222e", warning = "#9a6700", success = "#1a7f37", syntax = { "#6e7781", "#cf222e", "#0a3069", "#0550ae", "#953800", "#8250df", "#116329", "#1f2328", "#57606a", "#116329", "#953800", "#cf222e" } },
-	{ id = "github-dark", name = "GitHub Dark", kind = "dark", background = "#0d1117", raised = "#21262d", text = "#e6edf3", muted = "#8b949e", faint = "#6e7681", accent = "#2f81f7", danger = "#f85149", warning = "#d29922", success = "#3fb950", syntax = { "#8b949e", "#ff7b72", "#a5d6ff", "#79c0ff", "#ffa657", "#d2a8ff", "#7ee787", "#e6edf3", "#b1bac4", "#7ee787", "#ffa657", "#f85149" } },
-	{ id = "ayu-light", name = "Ayu Light", kind = "light", background = "#fcfcfc", raised = "#e6e9ed", text = "#5c6166", muted = "#828e9f", faint = "#969da8", accent = "#f29718", danger = "#e65050", warning = "#eba400", success = "#6cbf43", syntax = { "#adaeb1", "#fa8532", "#86b300", "#a37acc", "#55b4d4", "#f29718", "#f07171", "#5c6166", "#828e9f", "#55b4d4", "#e59645", "#e65050" } },
-	{ id = "ayu-dark", name = "Ayu Dark", kind = "dark", background = "#10141c", raised = "#1b1f29", text = "#bfbdb6", muted = "#8a9199", faint = "#5a6673", accent = "#e6b450", danger = "#d95757", warning = "#ffb454", success = "#70bf56", syntax = { "#5a6673", "#ff8f40", "#aad94c", "#d2a6ff", "#39bae6", "#ffb454", "#f07178", "#bfbdb6", "#8a9199", "#39bae6", "#e6c08a", "#d95757" } },
-	{ id = "ayu-mirage", name = "Ayu Mirage", kind = "dark", background = "#242936", raised = "#343d4d", text = "#cccac2", muted = "#8a94a6", faint = "#6e7c8f", accent = "#ffcc66", danger = "#ff6666", warning = "#ffcc66", success = "#87d96c", syntax = { "#6e7c8f", "#ffa659", "#d5ff80", "#dfbfff", "#5ccfe6", "#ffcd66", "#f28779", "#cccac2", "#8a94a6", "#5ccfe6", "#d9be98", "#ff6666" } },
-	{ id = "gruvbox-light", name = "Gruvbox Light", kind = "light", background = "#fbf1c7", raised = "#d5c4a1", text = "#3c3836", muted = "#665c54", faint = "#7c6f64", accent = "#076678", danger = "#9d0006", warning = "#b57614", success = "#79740e", syntax = { "#928374", "#9d0006", "#79740e", "#8f3f71", "#b57614", "#076678", "#427b58", "#3c3836", "#665c54", "#9d0006", "#af3a03", "#cc241d" } },
-	{ id = "gruvbox-dark", name = "Gruvbox Dark", kind = "dark", background = "#282828", raised = "#504945", text = "#ebdbb2", muted = "#bdae93", faint = "#928374", accent = "#8ec07c", danger = "#fb4934", warning = "#fabd2f", success = "#b8bb26", syntax = { "#928374", "#fb4934", "#b8bb26", "#d3869b", "#fabd2f", "#83a598", "#8ec07c", "#ebdbb2", "#bdae93", "#fb4934", "#fe8019", "#fb4934" } },
-	{ id = "rose-pine-dawn", name = "Rosé Pine Dawn", kind = "light", background = "#faf4ed", raised = "#dfdad9", text = "#575279", muted = "#797593", faint = "#9893a5", accent = "#907aa9", danger = "#b4637a", warning = "#ea9d34", success = "#56949f", syntax = { "#9893a5", "#286983", "#ea9d34", "#d7827e", "#56949f", "#b4637a", "#56949f", "#d7827e", "#797593", "#56949f", "#907aa9", "#b4637a" } },
-	{ id = "rose-pine-moon", name = "Rosé Pine Moon", kind = "dark", background = "#232136", raised = "#393552", text = "#e0def4", muted = "#908caa", faint = "#6e6a86", accent = "#c4a7e7", danger = "#eb6f92", warning = "#f6c177", success = "#9ccfd8", syntax = { "#6e6a86", "#3e8fb0", "#f6c177", "#ea9a97", "#9ccfd8", "#eb6f92", "#9ccfd8", "#ea9a97", "#908caa", "#9ccfd8", "#c4a7e7", "#eb6f92" } },
-	{ id = "nord", name = "Nord", kind = "dark", background = "#2e3440", raised = "#434c5e", text = "#d8dee9", muted = "#aeb6c4", faint = "#7f899b", accent = "#88c0d0", danger = "#bf616a", warning = "#ebcb8b", success = "#a3be8c", syntax = { "#616e88", "#81a1c1", "#a3be8c", "#b48ead", "#8fbcbb", "#88c0d0", "#d08770", "#d8dee9", "#aeb6c4", "#81a1c1", "#8fbcbb", "#bf616a" } },
-	{ id = "one-dark-pro", name = "One Dark Pro", kind = "dark", background = "#282c34", raised = "#2c313a", text = "#abb2bf", muted = "#9da5b4", faint = "#7f848e", accent = "#528bff", danger = "#e05561", warning = "#d19a66", success = "#8cc265", syntax = { "#7f848e", "#c678dd", "#e06c75", "#c678dd", "#e5c07b", "#e5c07b", "#d19a66", "#abb2bf", "#abb2bf", "#c678dd", "#56b6c2", "#e05561" } },
-	{ id = "atom-one-dark", name = "Atom One Dark", kind = "dark", background = "#282c34", raised = "#2c313a", text = "#abb2bf", muted = "#9da5b4", faint = "#5c6370", accent = "#528bff", danger = "#e06c75", warning = "#d19a66", success = "#98c379", syntax = { "#5c6370", "#c678dd", "#98c379", "#d19a66", "#e5c07b", "#61afef", "#56b6c2", "#e06c75", "#abb2bf", "#e06c75", "#61afef", "#e06c75" } },
-	{ id = "night-owl", name = "Night Owl", kind = "dark", background = "#011627", raised = "#0b253a", text = "#d6deeb", muted = "#8ca6ba", faint = "#637777", accent = "#82aaff", danger = "#ef5350", warning = "#ffeb95", success = "#22da6e", syntax = { "#637777", "#82aaff", "#c5e478", "#f78c6c", "#ffcb8b", "#c5e478", "#bec5d4", "#d7dbe0", "#82aaff", "#7fdbca", "#f78c6c", "#ef5350" } },
-	{ id = "night-owl-light", name = "Night Owl Light", kind = "light", background = "#fbfbfb", raised = "#d3e8f8", text = "#403f53", muted = "#66657a", faint = "#7a8297", accent = "#4876d6", danger = "#de3d3b", warning = "#a67d00", success = "#08916a", syntax = { "#6f7896", "#4876d6", "#0c8f75", "#aa0982", "#111111", "#4876d6", "#111111", "#403f53", "#4876d6", "#111111", "#aa0982", "#de3d3b" } },
-	{ id = "winter-dark-blue", name = "Winter is Coming Dark Blue", kind = "dark", background = "#011627", raised = "#0b253a", text = "#d6deeb", muted = "#8ca6ba", faint = "#5f7e97", accent = "#219fd5", danger = "#ef5350", warning = "#ffca28", success = "#22da6e", syntax = { "#8095a8", "#c792ea", "#78bd65", "#8dec95", "#d29ffc", "#87aff4", "#7fdbca", "#cbcdd2", "#4fb4d8", "#6dbdfa", "#f7ecb5", "#ef5350" } },
-	{ id = "winter-light", name = "Winter is Coming Light", kind = "light", background = "#ffffff", raised = "#e5e5e5", text = "#1857a4", muted = "#62626a", faint = "#66768a", accent = "#2f86d2", danger = "#de3d3b", warning = "#9b6a00", success = "#08916a", syntax = { "#357b42", "#7942a8", "#87429a", "#174781", "#0444ac", "#b1108e", "#207b76", "#224555", "#4f7aa0", "#0444ac", "#b46a0f", "#c73532" } },
-	{ id = "palenight", name = "Palenight", kind = "dark", background = "#292d3e", raised = "#34384c", text = "#eeffff", muted = "#a6accd", faint = "#697098", accent = "#82aaff", danger = "#ff5572", warning = "#ffcb6b", success = "#c3e88d", syntax = { "#697098", "#c792ea", "#c3e88d", "#f78c6c", "#eeffff", "#ffcb6b", "#89ddff", "#bfc7d5", "#82aaff", "#89ddff", "#7986e7", "#ff5572" } },
-	{ id = "synthwave-84", name = "SynthWave '84", kind = "dark", background = "#262335", raised = "#37294d", text = "#ffffff", muted = "#b8b5c6", faint = "#848bbd", accent = "#ff7edb", danger = "#fe4450", warning = "#fede5d", success = "#72f1b8", syntax = { "#848bbd", "#72f1b8", "#f97e72", "#2ee2fa", "#fe4450", "#72f1b8", "#2ee2fa", "#f8f8f2", "#72f1b8", "#72f1b8", "#dd5500", "#fe4450" } },
-	{ id = "shades-of-purple", name = "Shades of Purple", kind = "dark", background = "#2d2b55", raised = "#393668", text = "#ffffff", muted = "#b8afea", faint = "#8d84c7", accent = "#fad000", danger = "#ec3a37", warning = "#fad000", success = "#3ad900", syntax = { "#b362ff", "#ff628c", "#fb94ff", "#fad000", "#fb94ff", "#fad000", "#fad000", "#9effff", "#fad000", "#fad000", "#ff9d00", "#ec3a37" } },
-	{ id = "cobalt2", name = "Cobalt2", kind = "dark", background = "#193549", raised = "#20455e", text = "#ffffff", muted = "#b7c9d3", faint = "#7da1b5", accent = "#ffc600", danger = "#ff628c", warning = "#ffc600", success = "#3ad900", syntax = { "#0088ff", "#ff9d00", "#ffee80", "#ffc600", "#ff68b8", "#ffc600", "#9effff", "#ffffff", "#ffee80", "#ffc600", "#ffb454", "#f44542" } },
-	{ id = "andromeda", name = "Andromeda", kind = "dark", background = "#23262e", raised = "#2d313b", text = "#d5ced9", muted = "#a6a0aa", faint = "#746f77", accent = "#00e8c6", danger = "#ee5d43", warning = "#ff9f2e", success = "#96e072", syntax = { "#a0a1a7", "#ee5d43", "#96e072", "#f39c12", "#ffe66d", "#ffe66d", "#d5ced9", "#f39c12", "#96e072", "#f92672", "#ee5d43", "#ee5d43" } },
-} :: { Palette }
-
 -- The design system's own: nothing to override.
 local OWN = { ["zeron-dark"] = true, ["zeron-light"] = true }
 
--- Your theme library, as the host publishes it (src/themes.rs): `{ state,
--- list = { Palette }, entries = { { id, name, status, variants } } }`.
--- (Made when first read, so this module needs no window to load.)
+-- Every theme, as the host publishes them (src/themes.rs): `{ state,
+-- list = { Palette }, entries = { { id, name, source, variants, … } },
+-- chosen = { light?, dark? } }`. (Made when first read, so this module
+-- needs no window to load, and a plugin lent it never reads the app's.)
 local library: State<any>? = nil
 function M.library(): State<any>
 	if library == nil then
@@ -109,18 +83,12 @@ function M.library(): State<any>
 	return library :: State<any>
 end
 
--- Your imported palettes (read tracked: they follow the library).
-function M.imported(): { Palette }
-	return (M.library():get().list or {}) :: { Palette }
-end
-
+-- One theme's palette by its id (read tracked: it follows the list).
 function M.find(id: string?): Palette?
-	for _, p in M.LIST do
-		if p.id == id then
-			return p
-		end
+	if type(id) ~= "string" then
+		return nil
 	end
-	for _, p in M.imported() do
+	for _, p in (M.library():get().list or {}) :: { Palette } do
 		if p.id == id then
 			return p
 		end
@@ -435,39 +403,70 @@ function M.tokens(p: Palette): ({ [string]: any }?, { Fix })
 	return out, fixes
 end
 
--- The themes each scheme wears now: Zeron's own, or a template's.
-M.scheme = { dark = "zeron-dark", light = "zeron-light" }
+-- The names of the window's two themes: one for each scheme, each over
+-- Zeron's own of its scheme (its glass, type and shape kept), worn whatever
+-- palette is in them, so a change of theme restyles in place.
+M.scheme = { dark = "theme-dark", light = "theme-light" }
 
--- A template's palettes (nil for Zeron's own) registered as the themes each
--- scheme wears, each over Zeron's own of its scheme (its glass, type and
--- shape kept), and their names (`palettes.scheme`). A family with one
--- palette wears it in either scheme. (Call after Zeron's themes load.)
-function M.wear(family: Family?): { dark: string, light: string }
-	local names = { dark = "zeron-dark", light = "zeron-light" }
-	if type(family) == "table" and (family.dark or family.light) then
-		for _, kind in { "dark", "light" } do
-			local p = (family :: any)[kind] :: Palette?
+-- What each scheme wears now: the theme chosen for it, if it's there and of
+-- its scheme; else `own`'s palette for it (the running template's theme);
+-- else nil, Zeron's. (Read tracked: it follows the host's list.)
+function M.slots(own: Family?): Slots
+	local chosen = M.library():get().chosen or {}
+	local out: { [string]: Palette? } = {}
+	for _, kind in { "light", "dark" } do
+		local p = M.find(chosen[kind])
+		if p and p.kind ~= kind then
+			p = nil
+		end
+		if not p and type(own) == "table" and type((own :: any)[kind]) == "table" then
+			p = (own :: any)[kind]
+		end
+		out[kind] = p
+	end
+	return out :: any
+end
+
+-- A palette, as words to tell a change by.
+local function signature(p: Palette?): string
+	if not p then
+		return ""
+	end
+	local parts = {}
+	for k, v in p :: any do
+		table.insert(parts, `{k}={if type(v) == "table" then table.concat(v, ",") else tostring(v)}`)
+	end
+	table.sort(parts)
+	return table.concat(parts, ";")
+end
+
+-- What each of the window's themes was last registered with.
+local worn: { [string]: string } = {}
+
+-- `slots` worn (nil: Zeron's in both): each scheme's theme registered again
+-- where its palette changed. Their names (`palettes.scheme`).
+function M.wear(slots: Slots?): { dark: string, light: string }
+	for _, kind: any in { "dark", "light" } do
+		local p = if slots then (slots :: any)[kind] :: Palette? else nil
+		local said = signature(p)
+		if worn[kind] ~= said then
+			worn[kind] = said
+			-- (No tokens at all for Zeron's: an empty table isn't an object.)
+			local tokens = nil
 			if p then
 				local own = table.clone(p)
 				own.kind = kind
-				local name = `template-{kind}`
-				ui.theme.register {
-					name = name,
-					type = kind,
-					extends = `zeron-{kind}`,
-					tokens = (M.tokens(own)) or {},
-				}
-				names[kind] = name
+				tokens = M.tokens(own)
 			end
-		end
-		if not family.dark then
-			names.dark = names.light
-		elseif not family.light then
-			names.light = names.dark
+			ui.theme.register {
+				name = (M.scheme :: any)[kind],
+				type = kind,
+				extends = `zeron-{kind}`,
+				tokens = tokens,
+			}
 		end
 	end
-	M.scheme.dark, M.scheme.light = names.dark, names.light
-	return names
+	return { dark = M.scheme.dark, light = M.scheme.light }
 end
 
 return M

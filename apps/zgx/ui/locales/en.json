@@ -1146,12 +1146,20 @@
       "pt": "{n} pt",
       "pt_default": "{n} pt (default)",
       "scheme": {
-        "label": "Theme",
+        "label": "Mode",
         "terms": "color scheme system light dark mode",
         "description": "Light, dark, or as the system is.",
         "system": "System",
         "light": "Light",
         "dark": "Dark"
+      },
+      "theme": {
+        "light": "Light theme",
+        "dark": "Dark theme",
+        "one": "Theme",
+        "terms": "theme colors colours palette vscode dracula",
+        "more": "All themes",
+        "more_description": "Browse every theme, or import one from VS Code."
       },
       "accent": {
         "label": "Accent color",
@@ -1758,33 +1766,10 @@
         "organization": "Organization",
         "workspace": "Workspace",
         "cloud": "Cloud",
+        "customize": "Customize",
         "plugins": "Plugins",
         "browser": "Browser"
       }
-    },
-    "theme_library": {
-      "built_in": "Built in",
-      "imported": "Imported",
-      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
-      "imported_body": "Choose it under Light theme or Dark theme.",
-      "skipped": "Some of its themes didn't import: {names}",
-      "choose_source": "Choose Theme Source",
-      "vscode_theme": "VS Code theme",
-      "more_for": "More for {name}",
-      "needs_look": "It needs another look.",
-      "dark": "Dark",
-      "light": "Light",
-      "rename": "Rename",
-      "remove": "Remove",
-      "section": "Imported themes",
-      "section_description": "VS Code colour themes: a theme's .json, or an extension's package.json.",
-      "import": "Import theme",
-      "import_failed": "This theme couldn't be imported",
-      "rename_title": "Rename theme",
-      "couldnt_rename": "Couldn't rename the theme",
-      "name": "Name",
-      "remove_title": "Remove this theme?",
-      "remove_body": "It's gone from your library. Where it's in use, Zeron's own takes its place."
     },
     "store": {
       "says": {
@@ -2328,7 +2313,9 @@
         "shell_palette": "Search",
         "shell_settings": "Settings",
         "shell_find": "Find",
-        "shell_close": "Close"
+        "shell_close": "Close",
+        "shell_reload": "Reload Zeron",
+        "shell_reload_interface": "Reload interface"
       },
       "group": {
         "sessions": "Sessions",
@@ -2352,9 +2339,11 @@
         "light": "Light",
         "dark": "Dark"
       },
-      "theme": "Theme",
+      "theme": "Mode",
       "use_template": "Use template: {name}",
       "templates": "Templates",
+      "use_theme": "Use theme: {name}",
+      "themes": "Themes",
       "use": "Use",
       "recent_files": "Recent files",
       "files": "Files",
@@ -2368,7 +2357,10 @@
       "settings_page": "Settings: {title}",
       "go_to": "Go to",
       "frosted_glass": "Frosted glass",
-      "search": "Search sessions, commands and files…"
+      "search": "Search sessions, commands and files…",
+      "app": "App",
+      "reload_zeron": "Reload Zeron",
+      "reload_interface": "Reload interface"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",
@@ -2875,6 +2867,7 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
+      "port_closed": "Closed",
       "previews_unavailable": "Local previews aren't available right now"
     }
   },
@@ -2888,8 +2881,7 @@
     "comment": {
       "placeholder": "Leave a comment",
       "submit": "Comment",
-      "you": "You",
-      "pending": "Pending"
+      "you": "You"
     },
     "unreachable": {
       "title": "Can't reach these files",
@@ -3038,7 +3030,7 @@
         },
         "notifications": {
           "title": "Send you notifications",
-          "detail": "As Zeron's own, under Settings → Notifications."
+          "detail": "Like any other notification, set in Settings → Notifications."
         },
         "links_open": {
           "title": "Open links",
@@ -3265,18 +3257,18 @@
       "review": "Review",
       "template_waiting_body": "A template from someone else.",
       "failed": "{name} stopped working",
-      "failed_body": "Zeron goes on without it until it's updated or edited.",
+      "failed_body": "Zeron keeps working without it until it's updated or fixed.",
       "show_folder": "Show folder",
       "template_failed": "Your template's {name} has an error",
-      "template_failed_body": "Zeron's own shows in its place until it's fixed and saved.",
+      "template_failed_body": "That part shows the default interface until it's fixed and saved.",
       "template_broken": "{name} can't run",
-      "template_broken_body": "Zeron's own interface is showing until the template is fixed and saved."
+      "template_broken_body": "The default interface shows until the template is fixed and saved."
     }
   },
   "templates": {
     "page": {
       "title": "Templates",
-      "description": "Whole interfaces Zeron can run in. Anything a template leaves out is Zeron's own.",
+      "description": "Whole interfaces for Zeron. Anything a template leaves out comes from the default interface.",
       "search": "Search templates",
       "tabs": "Templates",
       "installed": "Installed",
@@ -3289,8 +3281,8 @@
         "named": "by {name}"
       },
       "about": {
-        "broken": "Can't run, so Zeron's own shows: {error}",
-        "errors": "Some of it falls back to Zeron's own: {error}",
+        "broken": "Can't run, so the default interface shows: {error}",
+        "errors": "Some parts show the default interface: {error}",
         "out_of_date": "Made for Zeron {version}. Zeron has updated since.",
         "out_of_date_unversioned": "Made for an earlier Zeron. Zeron has updated since.",
         "no_description": "No description."
@@ -3315,13 +3307,13 @@
       "couldnt_use": "Couldn't use {name}",
       "in_use": "In use",
       "none_yours": "None of yours yet",
-      "none_body": "Ask an agent to make one, or start from a copy of Zeron's.",
+      "none_body": "Ask an agent to make one, or start from a copy of the default.",
       "show_templates_folder": "Show templates folder",
       "delete_title": "Delete this template?",
-      "delete_body": "It goes to the templates folder's removed items, in case you want it back. If it's in use, Zeron's own takes its place.",
+      "delete_body": "It's set aside in the templates folder, so you can get it back. If it's in use, Zeron switches to the default interface.",
       "couldnt_delete": "Couldn't delete the template",
       "new_title": "New template",
-      "new_body": "A copy of Zeron's own interface, yours to change. Ask an agent to change it, or edit its files yourself.",
+      "new_body": "A copy of the default interface for you to change. Ask an agent to change it, or edit its files yourself.",
       "make_it": "Make it",
       "couldnt_make": "Couldn't make the template",
       "name": "Name",
@@ -3358,18 +3350,71 @@
       "keep_files_detail": "If they change again, Zeron asks again.",
       "keep": "Keep",
       "trust": "Install it only if you trust {whom}",
-      "trust_body": "A template is Zeron's own code: it replaces Zeron's interface and runs with everything Zeron can do, with your chats, files, accounts and agents.",
+      "trust_body": "A template runs as part of Zeron: it replaces Zeron's interface and can do anything Zeron can, with your chats, files, accounts and agents.",
       "unknown_body": "Zeron can't tell whose key signed it. Install it only if you trust where it came from.",
       "signature": "Its signature checks out",
       "signature_detail": "Nothing in it changed since it was signed, by key {key}.",
       "files": "{n, plural, one {# file} other {# files}}",
       "files_made_for": "{n, plural, one {# file} other {# files}} · made for Zeron {version}",
       "left_out": "{n, plural, one {# file} other {# files}} left out",
-      "left_out_detail": "No template may replace these, so Zeron keeps its own: {files}",
+      "left_out_detail": "Templates can't replace these, so Zeron keeps its versions: {files}",
       "not_now": "Not now",
       "install": "Install",
       "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
       "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
+    }
+  },
+  "themes": {
+    "page": {
+      "title": "Themes",
+      "description": "Colours for Zeron. Your theme is worn with any template.",
+      "search": "Search themes",
+      "tabs": "Themes",
+      "all": "All",
+      "builtin": "Built in",
+      "from_templates": "From templates",
+      "yours": "Yours",
+      "import": "Import theme",
+      "hint": "A theme is only colours, so it works with any template, and it can't do anything else.",
+      "about": {
+        "default": "The default, light and dark",
+        "both": "Light and dark",
+        "light": "Light only",
+        "dark": "Dark only"
+      },
+      "byline": {
+        "builtin": "Built in",
+        "template": "From {name}",
+        "imported": "Imported"
+      },
+      "needs_fixing": "Something in this theme needs fixing.",
+      "in_use": "In use",
+      "for_light": "Light",
+      "for_dark": "Dark",
+      "use": "Use",
+      "couldnt_use": "Couldn't use the theme",
+      "use_light": "Use only for light",
+      "use_dark": "Use only for dark",
+      "show_template": "Show in Templates",
+      "more_for": "More for {name}",
+      "rename": "Rename",
+      "remove": "Remove",
+      "rename_title": "Rename theme",
+      "couldnt_rename": "Couldn't rename the theme",
+      "name": "Name",
+      "remove_title": "Remove this theme?",
+      "remove_body": "It's removed from Yours. Wherever it's in use, the default comes back.",
+      "none_yours": "None of yours yet",
+      "none_yours_body": "Import a VS Code colour theme: its .json file, or an extension's folder. You can drop one on this page too.",
+      "none_templates": "No template brings a theme",
+      "none_templates_body": "When a template has colours of its own, they show here, to use with any template.",
+      "choose_source": "Choose Theme",
+      "vscode_theme": "VS Code theme",
+      "drop": "Drop to import",
+      "import_failed": "This theme couldn't be imported",
+      "skipped": "Some of its themes didn't import: {names}",
+      "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
+      "imported_body": "It's under Yours."
     }
   }
 }

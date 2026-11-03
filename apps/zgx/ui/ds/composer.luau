@@ -2219,15 +2219,9 @@ return ui.component(function(props: Props): Node
 				-- its own anywhere: it is the pill's glass continued (the pill
 				-- keeps its edge). A rounded top, or a hairline, showed a second
 				-- curve against the pill's own.
-				-- (`corners`, not `rounded` with `rounded_tl`/`rounded_tr`: a
-				-- token `rounded` overrides those in zgx, rounding the top too.
-				-- It takes numbers: the trays' radius, read as the theme
-				-- changes.)
-				corners = function(): any
-					local _ = ui.theme.current:get()
-					local r = (ui.theme.get("zeron.composer.tray.radius") :: number?) or 16
-					return { tl = 0, tr = 0, br = r, bl = r }
-				end,
+				rounded = "$zeron.composer.tray.radius",
+				rounded_tl = 0,
+				rounded_tr = 0,
 				bg = function(): string
 					return if material.frosted:get() then "$zeron.composer.tint" else "$zeron.composer.solid"
 				end,

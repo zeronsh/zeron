@@ -4,8 +4,9 @@
 //!
 //! - its `ds/themes/zeron-{light,dark}.json`, where it has its own (a whole
 //!   file over Zeron's: what the window loads for that appearance);
-//! - its `theme.luau` (src/plugins/theme_templates.rs), a palette for an
-//!   appearance worn over that theme (ds/palettes).
+//! - its `theme.luau`, a palette for an appearance worn over that theme
+//!   (ds/palettes): the template's own theme, worn where you haven't chosen
+//!   one (src/themes.rs).
 //!
 //! An appearance with neither is Zeron's. A template that changes none shows
 //! Zeron's own (no look); one that changes one appearance shows that one
@@ -28,7 +29,10 @@ use std::{
 
 use serde_json::{Map, Value as Json, json};
 
-use super::{live, theme_templates};
+use super::live;
+
+/// The file a template's own theme is in, at its root.
+pub const THEME_FILE: &str = "theme.luau";
 
 const SCHEMES: [&str; 2] = ["light", "dark"];
 
@@ -53,6 +57,12 @@ impl Cache {
         (stamp, value)
     }
 
+    /// Template `id`'s own theme: its `theme.luau` read as data (`{ name?,
+    /// light?, dark? }`), or Null for none, or a file that isn't data.
+    pub fn theme_file(&self, templates: &Path, id: &str) -> Json {
+        self.read(&templates.join(id).join(THEME_FILE), luau_literal).1
+    }
+
     /// Template `id`'s look (Zeron's own for `live::BUILTIN`), or Null when
     /// it changes no colour of Zeron's.
     pub fn look(&self, templates: &Path, id: &str) -> Json {
@@ -60,7 +70,7 @@ impl Cache {
         let own = id == live::BUILTIN;
         let dir = if own { zeron.clone() } else { templates.join(id) };
         let mut stamps = Vec::new();
-        let (stamp, palettes) = if own { (String::new(), Json::Null) } else { self.read(&dir.join(theme_templates::FILE), luau_literal) };
+        let (stamp, palettes) = if own { (String::new(), Json::Null) } else { self.read(&dir.join(THEME_FILE), luau_literal) };
         stamps.push(stamp);
         let mut out = Map::new();
         for scheme in SCHEMES {
@@ -103,8 +113,8 @@ fn json5_theme(text: &str) -> Option<Json> {
 }
 
 /// A `theme.luau` read as data: `return` and a Luau table literal of
-/// strings, numbers, booleans and tables (what theme_templates writes, and
-/// a palette written by hand). Anything else (code) isn't a look: None.
+/// strings, numbers, booleans and tables (a palette, as a template's own
+/// theme is written). Anything else (code) isn't a look: None.
 pub fn luau_literal(text: &str) -> Option<Json> {
     let mut p = Parser { s: text.as_bytes(), at: 0 };
     p.space();
@@ -333,12 +343,15 @@ mod tests {
         assert!(cache.look(&t, "copy").is_null());
         write(&t, "bare/zeron-template.json", "{}");
         assert!(cache.look(&t, "bare").is_null());
-        // A palette (an official template's theme.luau, as written).
-        let id = theme_templates::install(&t, "tokyo-night").unwrap();
-        let tokyo = cache.look(&t, &id);
-        assert_eq!((tokyo["light"]["palette"]["background"].as_str(), tokyo["dark"]["palette"]["background"].as_str()), (Some("#d5d6db"), Some("#1a1b26")));
-        assert_eq!(tokyo["dark"]["palette"]["ansi"].as_array().unwrap().len(), 16);
-        assert!(tokyo["dark"].get("theme").is_none());
+        // A palette (a template's own theme.luau).
+        write(&t, "ink/zeron-template.json", "{}");
+        write(&t, "ink/theme.luau", "return {\n\tname = \"Ink\",\n\tlight = { background = \"#d5d6db\" },\n\tdark = { background = \"#1a1b26\", ansi = { \"#000000\", \"#111111\" } },\n}\n");
+        let ink = cache.look(&t, "ink");
+        assert_eq!((ink["light"]["palette"]["background"].as_str(), ink["dark"]["palette"]["background"].as_str()), (Some("#d5d6db"), Some("#1a1b26")));
+        assert_eq!(ink["dark"]["palette"]["ansi"].as_array().unwrap().len(), 2);
+        assert!(ink["dark"].get("theme").is_none());
+        assert_eq!(cache.theme_file(&t, "ink")["name"], "Ink");
+        assert!(cache.theme_file(&t, "copy").is_null());
     }
 
     #[test]

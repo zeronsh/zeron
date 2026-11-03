@@ -385,10 +385,10 @@ test("a palette section's title keeps to its row as a search moves it first", fu
 	-- Settings is a later section (its title taller; maybe below the fold,
 	-- as pages are added); a search for one of its rows makes it the first:
 	-- its title stands as the first's.
-	app:type('role:textbox "Search"', "Them")
+	app:type('role:textbox "Search"', "Mode")
 	app:frames(30)
 	local title_y, title_h = box(app, "#palette-list", 'text "Settings"')
-	local row_y = box(app, "#palette-list", 'option "Theme"')
+	local row_y = box(app, "#palette-list", 'option "Mode"')
 	expect(title_y).never.to_be_nil()
 	expect(`room {(row_y :: number) - (title_y :: number) - (title_h :: number)}`).to_be(`room {room}`)
 end)
@@ -890,14 +890,16 @@ test("the palette finds the session's files once typing pauses, under Files, and
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 300 })).to_be(false)
 	app:type('role:textbox "Search"', "e")
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 3000 })).to_be(true)
-	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- (A folder isn't something it opens.)
 	expect(node(app, "#palette-list", "option", "docs")).to_be_nil()
-	-- Its Files scope (⌘4, as Zeron's): the files alone.
+	-- Its Files scope (⌘4, as Zeron's): the files alone. (All of them
+	-- here: unscoped, commands matching "re", Reload Zeron among them,
+	-- come first and can push a file below the list's fold.)
 	app:key("cmd+4")
 	app:frames(20)
 	expect(node(app, "#palette-list", "option", "Ship the release")).to_be_nil()
 	expect(node(app, "#palette-list", "option", "README.md")).never.to_be_nil()
+	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- Enter: the file, in the session's panel.
 	app:key("Enter")
 	app:frames(40)

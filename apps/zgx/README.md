@@ -320,6 +320,12 @@ it opened on. From a fullscreen app it is covered and waits; zgx's
 - One is out of date when it was made for another version of Zeron: its manifest's `zeron_version` against this build's (the root workspace's version, which `build.rs` hands zgx as `ZERON_VERSION`). A save to Zeron's own while developing never makes one out of date; `template_status` still names the files whose Zeron original changed.
 - Agents make and change them through Zeron's MCP server: `list_templates`, `create_template`, `use_template`, `template_status`, `delete_template` and `describe_app`.
 
+**Themes are colours, apart from templates** (`src/themes.rs`, `ui/screens/themes/`, `ui/ds/palettes.luau`).
+- Settings → Themes lists Zeron's built-in themes (crates/theme: each family's light and dark together, any other variant alone), each template's own `theme.luau` (read as data), and VS Code themes you import (a `.json` or an extension's folder, by Import theme or dropped on the page; rename and remove). Settings → Appearance has a quick pick for each scheme.
+- You choose one theme for light and one for dark, kept in `<data>/theme-choice.json`. `ds/palettes` wears them as the window's two themes (`theme-light`, `theme-dark`) over whichever template runs. A scheme with nothing chosen wears the running template's own theme, else Zeron's.
+- A theme is data, so it needs no consent and can't run code.
+- Built-in themes were templates once (`theme-<key>`). Each launch moves anyone on one to the default template with that theme chosen, and deletes only the folders shaped exactly as Zeron wrote them (`src/plugins/retired_themes.rs`).
+
 **How the window runs one** (`src/plugins/live.rs`):
 - The main window always runs from `<data>/templates/.live/`: Zeron's own (`.zeron/`, copied from `ui/`) with the template in use laid over it.
 - Switching, or saving a template's file, rewrites only the files that differ, and the window reloads in place. A module's state is kept wherever both have the file.
