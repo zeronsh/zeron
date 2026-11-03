@@ -139,6 +139,14 @@ export type Props = {
 	-- The panel read bottom up (opening above its trigger): the head nearest
 	-- the trigger, the search, then the list.
 	bottom_up: boolean?,
+	-- Drawn behind the trigger's content, cut to its corners (the model
+	-- chip's plan usage: ds/plan_usage's wave); `hint`, a hover card the
+	-- trigger shows as the pointer rests on it (gone as it's pressed), and
+	-- `on_hint`, told as the pointer comes onto it.
+	fill: Node?,
+	hint: Node?,
+	hint_placement: { side: string?, align: string?, offset: number? }?,
+	on_hint: (() -> ())?,
 }
 
 -- A row of the panel: compact, full width. Actions wash under the pointer;
@@ -804,6 +812,35 @@ return ui.component(function(props: Props): Node
 		hover = trigger_props.hover,
 		active = trigger_props.active,
 		on_click = show_panel,
+		relative = if props.fill then true else nil,
+		-- (Not over its own open panel.)
+		tooltip = if props.hint
+			then ui.show(function(): boolean
+				return not open:get()
+			end, props.hint)
+			else nil,
+		tooltip_placement = props.hint_placement,
+		tooltip_delay = if props.hint then 300 else nil,
+		on_hover = if props.on_hint
+			then function(inside: boolean)
+				if inside then
+					(props.on_hint :: () -> ())()
+				end
+			end
+			else nil,
+		if props.fill
+			then ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				rounded = trigger_props.rounded,
+				overflow = "hidden",
+				pointer_events = "none",
+				props.fill,
+			}
+			else nil,
 		leading,
 		if props.fold
 			then ui.show(function()
