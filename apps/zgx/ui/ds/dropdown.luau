@@ -524,13 +524,19 @@ return ui.component(function(props: Props): Node
 		})
 		gliding[state] = anim
 	end
-	-- The list's height, and whether it was folded, as last laid out (nil:
-	-- not yet).
+	-- The list's height: folded, one row; opened out, one height whatever
+	-- the tab or the search shows (as tall as every item, up to the view,
+	-- and room for the empty list's message), a short list leaving room
+	-- under it. A popup that changes size is shown anew on Wayland (a new
+	-- `xdg_popup`, zgx-desktop popup_window/wayland.rs), which the
+	-- compositor fades in as the last fades out: a list easing to each
+	-- tab's height made the whole panel flicker see-through, two of it
+	-- overlapping, on every switch.
 	local function height_for(list: { Item }, now: boolean, i: number?): number
 		if now and i then
 			return list_h(1)
 		end
-		return if #list == 0 then EMPTY_H else math.min(VIEW, list_h(#list))
+		return math.min(VIEW, math.max(EMPTY_H, list_h(#items())))
 	end
 	local was_folded: boolean? = nil
 	if props.expanded then
@@ -1109,7 +1115,13 @@ return ui.component(function(props: Props): Node
 						return #shown:get() == 0
 					end, ui.column {
 						w_full = true,
-						h = EMPTY_H - INSET * 2,
+						-- (Opened out, the list's whole window: its message in
+						-- the middle of it.)
+						h = if props.expanded
+							then function(): number
+								return math.max(EMPTY_H, view_h:get()) - INSET * 2
+							end
+							else EMPTY_H - INSET * 2,
 						relative = true,
 						overflow = "hidden",
 						rounded = Menu.row_radius(),
