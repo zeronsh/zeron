@@ -6131,6 +6131,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-preview-label"
+version = "0.2.136"
+
+[[package]]
 name = "zeron-theme"
 version = "0.2.136"
 dependencies = [
@@ -6212,6 +6216,7 @@ dependencies = [
  "zeron-launch",
  "zeron-notify",
  "zeron-plugin-guard",
+ "zeron-preview-label",
  "zeron-theme",
  "zeron-update",
  "zeron-visual",

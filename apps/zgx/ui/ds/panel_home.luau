@@ -189,6 +189,8 @@ export type Lane = {
 	branch: string?,
 	-- A second line of its own, whatever the view (a port's address).
 	detail: string?,
+	-- Drawn faded: gone, kept a while (a port closed).
+	faded: boolean?,
 	-- (Its group, as the view makes it: the list's own.)
 	group: LaneGroup?,
 }
@@ -229,6 +231,8 @@ export type LanesProps = {
 	menu: ((lane: Lane) -> { any }?)?,
 	-- A glyph leading each lane instead of its harness's mark (a port's).
 	icon: ((lane: Lane) -> Icon.Name?)?,
+	-- Each lane's tooltip (a port's command line); nil, none.
+	tooltip: ((lane: Lane) -> string)?,
 }
 
 -- Whether a lane shows past the first few, and in a folded group: at
@@ -690,11 +694,23 @@ function M.Lanes(props: LanesProps): Node
 		local function lane(): Lane
 			return (now:get() :: Item).lane :: Lane
 		end
+		local tip = props.tooltip
 		return ui.div {
 			w_full = true,
 			h = function(): number
 				return item_h(now:get() :: Item)
 			end,
+			opacity = function(): number
+				return if lane().faded then 0.5 else 1
+			end,
+			tooltip = if tip
+				then Tooltip {
+					function(): string
+						return tip(lane())
+					end,
+				}
+				else nil,
+			tooltip_placement = if tip then require("@self/icon_button").placement("left") else nil,
 			SessionRow.Row {
 				compact = compact,
 				detail = function(): string
