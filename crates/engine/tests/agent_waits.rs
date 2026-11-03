@@ -336,19 +336,9 @@ async fn dismissing_tells_the_agent_and_cancelling_does_not() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(harness.runs().len(), 1, "a withdrawn question says nothing");
-    let statuses: Vec<_> = core
-        .workspace
-        .read_questions()
-        .into_iter()
-        .map(|q| q.status)
-        .collect();
-    assert_eq!(
-        statuses,
-        vec![
-            zeron_proto::QuestionStatus::Dismissed,
-            zeron_proto::QuestionStatus::Cancelled
-        ]
-    );
+    let status = |q: &Value| question(&core, q["id"].as_str().unwrap()).status;
+    assert_eq!(status(&first), zeron_proto::QuestionStatus::Dismissed);
+    assert_eq!(status(&second), zeron_proto::QuestionStatus::Cancelled);
     let _ = harness.finish.send(());
     core.shutdown().await;
 }
@@ -397,6 +387,58 @@ async fn an_agent_asks_and_watches_only_for_its_own_chat() {
     )
     .await;
     assert!(refused.is_err());
+    // Nor release it (and so deliver it), even naming the asking chat.
+    let as_target = |method: &'static str, params: Value| {
+        let service = service.clone();
+        with_caller(
+            Caller::Agent {
+                chat: Some(TARGET.into()),
+            },
+            async move { service.handle(method, params).await },
+        )
+    };
+    let released = as_target(
+        methods::RELEASE_QUESTION,
+        json!({ "questionId": asked["id"], "deliver": true, "chatId": ASKER }),
+    )
+    .await;
+    assert!(released.is_err(), "another chat's agent released it");
+    let cancelled = as_target(
+        methods::CANCEL_QUESTION,
+        json!({ "questionId": asked["id"], "chatId": ASKER }),
+    )
+    .await;
+    assert!(cancelled.is_err(), "another chat's agent cancelled it");
+    // An agent's notification goes to its own chat, whatever it names.
+    as_target(
+        methods::NOTIFY_TURN_END,
+        json!({ "chatId": ASKER, "watcherChatId": "chat-elsewhere", "expectTurn": true }),
+    )
+    .await
+    .unwrap();
+    let watches = core.agent_waits.turn_watches();
+    assert_eq!(watches.len(), 1);
+    assert_eq!(watches[0].watcher_chat_id, TARGET);
+    // The app acting for another chat can't either; the person can.
+    let wrong = client
+        .call(
+            methods::CANCEL_QUESTION,
+            json!({ "questionId": asked["id"], "chatId": TARGET }),
+        )
+        .await;
+    assert!(wrong.is_err());
+    assert_eq!(
+        question(&core, asked["id"].as_str().unwrap()).status,
+        zeron_proto::QuestionStatus::Pending
+    );
+    let answered = client
+        .call(
+            methods::ANSWER_QUESTION,
+            json!({ "questionId": asked["id"], "answer": "yes" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered["status"], "answered");
     // An agent with no chat has nowhere to hear back.
     let nowhere = with_caller(Caller::Agent { chat: None }, async {
         service
@@ -553,11 +595,14 @@ async fn a_watch_survives_a_restart() {
     .await;
     core.shutdown().await;
     drop(core);
-    // The turn died with the engine; the watch, kept on disk, still reports it.
+    // The shutdown cut the turn off, which is not the end the watcher waits
+    // for: the watch, kept on disk, resumes and reports the revived turn.
     let harness = Held::new();
     let core = assemble(&path, harness.clone());
     wait_for(
         || {
+            // Let the revived turn finish.
+            let _ = harness.finish.send(());
             harness
                 .runs()
                 .iter()

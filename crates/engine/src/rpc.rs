@@ -2428,6 +2428,10 @@ impl EngineRpc {
             question_id: String,
             #[serde(default)]
             deliver: bool,
+            /// The asking chat, when the caller acts for one: the question
+            /// must be that chat's.
+            #[serde(default)]
+            chat_id: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -2465,9 +2469,15 @@ impl EngineRpc {
             .agent_waits
             .as_ref()
             .ok_or_else(|| RpcError::Failed("questions aren't available on this engine".into()))?;
-        let agent_chat = match zeron_rpc::caller() {
-            zeron_rpc::Caller::Agent { chat } => Some(chat),
-            _ => None,
+        // Who may withdraw or release a question: an agent only its own
+        // chat's (from its token, whatever it names; none when its server
+        // speaks for no chat), the app any, unless it names the chat it
+        // acts for.
+        let owner = |named: Option<String>| -> Option<String> {
+            match zeron_rpc::caller() {
+                zeron_rpc::Caller::Agent { chat } => Some(chat.unwrap_or_default()),
+                _ => named,
+            }
         };
         let question = match method {
             methods::ASK_QUESTION => {
@@ -2487,13 +2497,13 @@ impl EngineRpc {
             }
             methods::CANCEL_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = agent_chat.as_ref().map(|c| c.as_deref().unwrap_or_default());
-                waits.cancel(&p.question_id, caller).map_err(failed)?
+                let caller = owner(p.chat_id);
+                waits.cancel(&p.question_id, caller.as_deref()).map_err(failed)?
             }
             methods::RELEASE_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = agent_chat.as_ref().map(|c| c.as_deref().unwrap_or_default());
-                waits.release(&p.question_id, caller, p.deliver).map_err(failed)?
+                let caller = owner(p.chat_id);
+                waits.release(&p.question_id, caller.as_deref(), p.deliver).map_err(failed)?
             }
             methods::NOTIFY_TURN_END => {
                 let p: Notify = parse_params(params)?;

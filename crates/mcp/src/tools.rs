@@ -831,11 +831,16 @@ fn question_result(q: &Value) -> Value {
 struct ReleaseOnDrop {
     zeron: Option<Arc<Zeron>>,
     id: String,
+    chat_id: String,
 }
 
 impl ReleaseOnDrop {
-    fn new(zeron: Arc<Zeron>, id: String) -> Self {
-        Self { zeron: Some(zeron), id }
+    fn new(zeron: Arc<Zeron>, id: String, chat_id: String) -> Self {
+        Self {
+            zeron: Some(zeron),
+            id,
+            chat_id,
+        }
     }
 
     fn disarm(&mut self) {
@@ -847,12 +852,13 @@ impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         let Some(zeron) = self.zeron.take() else { return };
         let id = std::mem::take(&mut self.id);
+        let chat_id = std::mem::take(&mut self.chat_id);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let released = zeron
                     .call(
                         zeron_rpc::methods::RELEASE_QUESTION,
-                        json!({ "questionId": id, "deliver": true }),
+                        json!({ "questionId": id, "deliver": true, "chatId": chat_id }),
                     )
                     .await;
                 if let Err(error) = released {
@@ -1776,7 +1782,7 @@ impl Tools {
                 "message": "Asked. The answer will arrive in this chat as a message (\"Answer to your question «…»\"); keep working on what doesn't depend on it.",
             }));
         }
-        let mut release = ReleaseOnDrop::new(self.zeron.clone(), id.clone());
+        let mut release = ReleaseOnDrop::new(self.zeron.clone(), id.clone(), chat_id.clone());
         let answered = self
             .await_question(&chat_id, &id, wait_duration(args.timeout_secs))
             .await?;
@@ -1789,7 +1795,7 @@ impl Tools {
                     .zeron
                     .call(
                         zeron_rpc::methods::RELEASE_QUESTION,
-                        json!({ "questionId": id, "deliver": false }),
+                        json!({ "questionId": id, "deliver": false, "chatId": chat_id }),
                     )
                     .await?;
                 release.disarm();
@@ -1894,7 +1900,9 @@ impl Tools {
             .zeron
             .call(
                 zeron_rpc::methods::CANCEL_QUESTION,
-                json!({ "questionId": args.question_id }),
+                // The engine takes an agent's chat from its token; named too
+                // for engines that serve one token to all.
+                json!({ "questionId": args.question_id, "chatId": self.zeron.origin().chat_id }),
             )
             .await?;
         Ok(question_result(&cancelled))

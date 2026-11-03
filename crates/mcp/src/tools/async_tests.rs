@@ -253,7 +253,7 @@ async fn a_blocking_question_times_out_and_lets_go_of_the_question() {
     let released = engine.writes(methods::RELEASE_QUESTION);
     assert_eq!(
         released,
-        vec![json!({ "questionId": "q-1", "deliver": false })]
+        vec![json!({ "questionId": "q-1", "deliver": false, "chatId": "chat-alpha-1" })]
     );
 }
 
@@ -283,7 +283,7 @@ async fn a_cancelled_blocking_question_is_released_for_delivery() {
     }
     assert_eq!(
         engine.writes(methods::RELEASE_QUESTION),
-        vec![json!({ "questionId": "q-1", "deliver": true })]
+        vec![json!({ "questionId": "q-1", "deliver": true, "chatId": "chat-alpha-1" })]
     );
 }
 

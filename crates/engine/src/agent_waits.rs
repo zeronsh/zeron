@@ -39,6 +39,8 @@ const WATCH_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const REPLY_GRACE: Duration = Duration::from_secs(15);
 /// Longest reply excerpt a notification carries.
 const EXCERPT_CHARS: usize = 1_500;
+/// How long a watched chat may be missing before the watch reports it gone.
+const MISSING_GRACE_MS: i64 = 60_000;
 /// Re-evaluation cadence besides session changes (expiry, stale rows).
 const SWEEP: Duration = Duration::from_secs(30);
 
@@ -80,8 +82,12 @@ struct Inner {
     watches: Mutex<Vec<TurnWatch>>,
     /// Watches settled and being delivered: not settled twice.
     delivering: Mutex<std::collections::HashSet<String>>,
+    /// When each watch's chat was first found missing.
+    missing: Mutex<std::collections::HashMap<String, i64>>,
     wake: Arc<Notify>,
     started: std::sync::Once,
+    /// The engine is shutting down: settle nothing more.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl AgentWaits {
@@ -105,8 +111,10 @@ impl AgentWaits {
                 path,
                 watches: Mutex::new(watches),
                 delivering: Mutex::default(),
+                missing: Mutex::default(),
                 wake: Arc::new(Notify::new()),
                 started: std::sync::Once::new(),
+                stopped: std::sync::atomic::AtomicBool::new(false),
             }),
         };
         if resume {
@@ -308,6 +316,15 @@ impl AgentWaits {
         Ok(id)
     }
 
+    /// Engine shutdown: stop settling watches (they stay on disk and resume
+    /// on the next boot).
+    pub fn shutdown(&self) {
+        self.inner
+            .stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.persist();
+    }
+
     /// The watches still waiting (tests, diagnostics).
     pub fn turn_watches(&self) -> Vec<TurnWatch> {
         lock(&self.inner.watches).clone()
@@ -331,6 +348,10 @@ fn status_word(status: QuestionStatus) -> &'static str {
 }
 
 impl Inner {
+    fn stopping(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn persist(&self) {
         let Some(path) = &self.path else { return };
         let watches = lock(&self.watches).clone();
@@ -348,12 +369,16 @@ impl Inner {
 
     /// Advance every watch on the current rows; returns the ones that settled.
     fn evaluate(&self, sessions: &[Session]) -> Vec<(TurnWatch, Option<Chat>)> {
+        if self.stopping() {
+            return Vec::new();
+        }
         let now = chrono::Utc::now();
         let mut settled = Vec::new();
         let mut changed = false;
         {
             let mut watches = lock(&self.watches);
             let mut delivering = lock(&self.delivering);
+            let mut missing = lock(&self.missing);
             for watch in watches.iter_mut() {
                 if delivering.contains(&watch.id) {
                     continue;
@@ -362,13 +387,21 @@ impl Inner {
                 if watch.settled.is_none() {
                     match &chat {
                         Some(chat) => {
+                            missing.remove(&watch.id);
                             let before = watch.progress.saw_working;
                             let session = session_for(sessions, chat);
                             watch.settled = watch.progress.observe(session.as_ref(), now);
                             changed |= before != watch.progress.saw_working;
                         }
-                        // Deleted under the watch: say so rather than wait.
-                        None => watch.settled = Some(TurnOutcome::Errored),
+                        // Deleted under the watch: say so rather than wait,
+                        // once it has stayed gone a while (a row can lag a
+                        // boot or a sync).
+                        None => {
+                            let since = *missing.entry(watch.id.clone()).or_insert_with(now_ms);
+                            if now_ms() - since > MISSING_GRACE_MS {
+                                watch.settled = Some(TurnOutcome::Errored);
+                            }
+                        }
                     }
                     if watch.settled.is_none() && now_ms() - watch.created_at_ms > WATCH_MAX_AGE_MS
                     {
@@ -394,6 +427,10 @@ impl Inner {
         let text = self.notification(&watch, chat.as_ref(), outcome).await;
         let label = chat_label(chat.as_ref(), &watch.target_chat_id);
         let text = zeron_proto::agent_messages::agent_message(&label, &watch.target_chat_id, &text);
+        if self.stopping() {
+            // Kept settled on disk: the next boot delivers it.
+            return;
+        }
         let result = self.doc_host.queue_command(
             &watch.watcher_chat_id,
             SessionCommandPayload::Steer {
