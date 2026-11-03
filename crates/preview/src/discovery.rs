@@ -390,6 +390,7 @@ pub fn listeners(origins: &mut Origins) -> Option<Vec<Listener>> {
                 zeron_owned: false,
                 origin: None,
                 chat_id: None,
+                signing_in: false,
             });
         }
     }
