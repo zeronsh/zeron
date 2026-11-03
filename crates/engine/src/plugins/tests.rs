@@ -122,7 +122,7 @@ async fn plugins_new_plugin_scaffolds_signs_and_is_on() {
         serde_json::json!({ "id": "zeron", "name": "Z" }),
     )
     .await;
-    assert_eq!(reserved.unwrap_err(), "That name is Zeron's own");
+    assert_eq!(reserved.unwrap_err(), "Zeron already uses that name");
     assert!(
         call(
             &f.plugins,
@@ -551,7 +551,7 @@ async fn plugins_list_is_sorted_and_reports_broken() {
     };
     assert_eq!(by_id("bad")["status"], "broken");
     assert!(by_id("bad")["error"].as_str().unwrap().contains("native"));
-    assert_eq!(by_id("app")["error"], "That name is Zeron's own");
+    assert_eq!(by_id("app")["error"], "Zeron already uses that name");
     #[cfg(unix)]
     assert_eq!(by_id("linky")["error"], files::LINK_ERROR);
     assert!(
@@ -1056,7 +1056,7 @@ async fn plugins_zeron_s_own_are_allowed_what_they_ask_turn_off_and_never_go() {
     let off = list["plugins"].as_array().unwrap().iter().find(|p| p["builtin"] == true).unwrap().clone();
     assert_eq!(off["status"], "off");
     let removed = call(&f.plugins, methods::REMOVE_PLUGIN, serde_json::json!({ "id": "github" })).await;
-    assert!(removed.unwrap_err().contains("turned off, not removed"));
+    assert!(removed.unwrap_err().contains("turned off, but not removed"));
     // A new version asking more is allowed it as it ships.
     write_plugin(&shipped, "github", serde_json::json!({ "name": "GitHub", "permissions": ["ui.add", "github", "panel.tabs"] }), None);
     call(&f.plugins, methods::SET_PLUGIN_OFF, serde_json::json!({ "id": "github", "off": false })).await.unwrap();

@@ -375,7 +375,7 @@ impl Plugins {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
         if entry.item.builtin {
-            return Err(failed("Zeron's own plugins update with Zeron"));
+            return Err(failed("Built-in plugins update when Zeron does"));
         }
         let mut found = install::found(&self.inner.plugins_dir, id, &entry.item.hash);
         if found.is_none() {
