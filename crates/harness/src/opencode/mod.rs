@@ -2611,6 +2611,7 @@ async fn run_session(session: Session) {
         }};
     }
 
+    turn_control.accept_tool_stops();
     'main: loop {
         // The stall watchdog only arms while a turn awaits its first sign of
         // life; a running tool's silence never trips it (events already
@@ -2670,6 +2671,32 @@ async fn run_session(session: Session) {
                         session_id: Some(session_id.clone()),
                     }).await;
                     done_sent = true;
+                }
+            }
+
+            // One subagent stopped alone: its child session is aborted, so
+            // the parent's `task` call returns and the turn goes on. (Not
+            // live-verified; a plain tool has no abort of its own.)
+            request = turn_control.tool_stop_requested(), if !interrupt_requested => {
+                match children
+                    .iter()
+                    .find(|(_, run)| run.parent_tool_use_id == request.call_id)
+                {
+                    Some((child, run)) if !run.done => {
+                        let handle = server.handle();
+                        let child = child.clone();
+                        let dir = directory.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle.abort_session(&child, dir.as_deref()).await {
+                                tracing::debug!(target: "zeron_harness::opencode", "subagent abort failed: {e}");
+                            }
+                        });
+                        request.answer(crate::ToolStop::Stopping);
+                    }
+                    Some(_) => request.answer(crate::ToolStop::NotRunning),
+                    None => request.answer(crate::ToolStop::Unsupported(
+                        "OpenCode can stop a subagent on its own, not this tool.".into(),
+                    )),
                 }
             }
 

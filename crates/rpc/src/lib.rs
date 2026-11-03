@@ -245,6 +245,12 @@ pub mod methods {
     // its host's runtime: `{chatId, taskId}`, relay-forwardable.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
     pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
+    /// One call of a chat's live turn stopped while the turn goes on — a
+    /// command, or the subagent a call spawned (`{chatId, callId}`, the
+    /// `ToolCall` id). Answers `{stopping, outcome, reason?}`; outcome is
+    /// `stopping`, `notRunning` or `unsupported` (this agent has no stop
+    /// for that call alone). Relay-forwardable, to the chat's host.
+    pub const STOP_TOOL_CALL: &str = "StopToolCall";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
