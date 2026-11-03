@@ -510,11 +510,12 @@ return ui.component(function(props: Props): Node
 	-- The list's height: folded, one row; opened out, one height whatever
 	-- the tab or the search shows (as tall as every item, up to the view,
 	-- and room for the empty list's message), a short list leaving room
-	-- under it. A popup that changes size is shown anew on Wayland (a new
-	-- `xdg_popup`, zgx-desktop popup_window/wayland.rs), which the
-	-- compositor fades in as the last fades out: a list easing to each
-	-- tab's height made the whole panel flicker see-through, two of it
-	-- overlapping, on every switch.
+	-- under it: switching tabs or searching never moves the panel's edge.
+	-- (It began as a fix: a popup that changed size was shown anew on
+	-- Wayland, a new `xdg_popup` the compositor faded in as the last faded
+	-- out, so a list easing to each tab's height flickered the panel
+	-- see-through. zgx moves and resizes a popup in place since 0e7cd810;
+	-- the one height stays, as the picker's look.)
 	local function height_for(list: { Item }, now: boolean, i: number?): number
 		if now and i then
 			return list_h(1)
