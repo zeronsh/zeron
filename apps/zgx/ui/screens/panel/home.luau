@@ -78,6 +78,9 @@ end
 local sidebar_view = ui.shared("sidebar.view", {} :: { [string]: any })
 -- Folded or not, per session and part (open unless folded).
 local folds = ui.persist("panel_home_folds", {} :: { [string]: boolean })
+-- Side chats and subagents at work above the rest (their parts' menus'
+-- "Working first"), kept across launches as the sidebar's view options are.
+local working_first = ui.persist("panel_home_working_first", false)
 -- Shown whole ("Show less") or not, per session and part (its first few
 -- unless shown whole), as the sidebar's groups keep theirs.
 local whole = ui.state("panel_home_whole", {} :: { [string]: boolean })
@@ -908,10 +911,51 @@ local function lanes(props: Props, sid: string): Node
 			sidebar.archive(l.id)
 		end
 	end
+	-- A part of lanes' own menu (side chats', subagents'; ds/panel_home
+	-- `options`): those at work first, a toggle kept for both; every
+	-- finished lane of the session not yet seen marked seen, at once.
+	local function unread(): { any }
+		local out = {}
+		for _, list in { side:get(), subs:get() } do
+			for _, l in list do
+				-- (Their state shows done or failed only while unseen.)
+				if l.status == "done" or l.status == "failed" then
+					table.insert(out, { id = l.id, at = l.at })
+				end
+			end
+		end
+		return out
+	end
+	local function lanes_options(): { any }
+		local waiting = unread()
+		return {
+			{
+				label = locale.s("panel.home.working_first"),
+				icon = "status-working",
+				checked = function(): boolean
+					return working_first:get()
+				end,
+				keep_open = true,
+				on_select = function()
+					working_first:set(not working_first:peek())
+				end,
+			},
+			{ separator = true },
+			{
+				label = locale.s("panel.home.mark_all_read"),
+				icon = "check-circle",
+				disabled = #waiting == 0,
+				on_select = function()
+					lanes_seen.mark_all(waiting)
+				end,
+			},
+		}
+	end
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
-	-- corner action.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?): Node
+	-- corner action. `lanes_part`: side chats' or subagents', with their
+	-- own menu.)
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, lanes_part: boolean?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -935,6 +979,12 @@ local function lanes(props: Props, sid: string): Node
 				items = items,
 				name = name,
 				on_open = on_open,
+				working_first = if lanes_part
+					then function(): boolean
+						return working_first:get()
+					end
+					else nil,
+				options = if lanes_part then lanes_options :: any else nil,
 			}
 		)
 	end
@@ -1031,7 +1081,7 @@ local function lanes(props: Props, sid: string): Node
 			if props.open_side then
 				props.open_side(sid, l.child)
 			end
-		end, side_menu, nil, false, side_archive),
+		end, side_menu, nil, false, side_archive, true),
 		part("panel-home-subagents", "panel-home-subagent-list", "panel.home.subagents", "subagents", function(): { any }
 			return subs:get()
 		end, function(l: any): string
@@ -1048,7 +1098,7 @@ local function lanes(props: Props, sid: string): Node
 					props.open_subagent(sid, l.sub)
 				end
 			end)
-		end, nil, true),
+		end, nil, true, nil, true),
 	}
 end
 

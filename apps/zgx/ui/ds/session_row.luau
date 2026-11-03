@@ -573,6 +573,11 @@ export type SectionProps = {
 	-- Its row's props, wrapped before it's made (the sidebar fades it
 	-- with its rail).
 	wrap: ((ContainerProps) -> ContainerProps)?,
+	-- At its end while `trail_shown` says (a section's "…" under the
+	-- pointer, as the sidebar's own sections have it), in the place of how
+	-- many it holds.
+	trail: Node?,
+	trail_shown: (() -> boolean)?,
 }
 
 -- A section's title, over its groups (Pinned, a section of yours, the
@@ -582,11 +587,16 @@ M.TITLE = 24
 function M.Section(props: SectionProps): Node
 	local open = props.open
 	local foldable = open ~= nil and props.on_toggle ~= nil
+	local trail, trail_shown = props.trail, props.trail_shown
+	local function trailing(): boolean
+		return trail ~= nil and trail_shown ~= nil and trail_shown()
+	end
 	local row: { [any]: any } = {
 		id = props.id,
 		h = M.TITLE,
 		pl = "$space.2",
-		pr = "$space.2",
+		-- (With a trail, a step in, as the sidebar's own section's "…".)
+		pr = if trail then "$space.1" else "$space.2",
 		items = "center",
 		color = "$text.tertiary",
 		cursor = if foldable then "pointer" else nil,
@@ -600,12 +610,15 @@ function M.Section(props: SectionProps): Node
 		},
 		if foldable and props.count
 			then ui.show(function(): boolean
-				return not (open :: () -> boolean)()
+				return not (open :: () -> boolean)() and not trailing()
 			end, M.hint(function(): string
 				return tostring((props.count :: () -> number)())
 			end))
 			else nil,
 	}
+	if trail then
+		table.insert(row, ui.show(trailing, trail))
+	end
 	for k, v in props.frame or { w_full = true } do
 		row[k] = v
 	end
