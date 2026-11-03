@@ -404,7 +404,7 @@ local function Composer(): Node
 		local marked = shared.stopping:get()
 		local out = {}
 		for i, t in list do
-			if marked[`task:{t.id}`] then
+			if shared.is_stopping(marked, `task:{t.id}`) then
 				local c = table.clone(t)
 				c.stopping = true
 				out[i] = c
