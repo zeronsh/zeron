@@ -43,8 +43,10 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+mod questions;
 mod sidebar_pins;
 mod sidebar_sections;
+pub use questions::KIND_QUESTIONS;
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";

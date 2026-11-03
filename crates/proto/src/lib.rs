@@ -19,6 +19,7 @@ pub mod plan_usage;
 pub mod preview;
 pub mod program_status;
 pub mod projectless;
+pub mod questions;
 pub mod providers;
 pub mod run_errors;
 pub mod sidebar_pins;
@@ -31,6 +32,7 @@ pub use cloud::*;
 pub use entities::*;
 pub use preview::*;
 pub use program_status::*;
+pub use questions::{AgentQuestion, QuestionStatus};
 pub use sidebar_pins::*;
 pub use workspace::*;
 

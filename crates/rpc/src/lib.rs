@@ -306,6 +306,31 @@ pub mod methods {
     /// Store an image file an agent shows and fold it into that chat's live
     /// turn as an image part (`show_image`). Local only, like `PublishVisual`.
     pub const PUBLISH_IMAGE: &str = "PublishImage";
+    /// Questions agents ask the person without stopping (`ask_question`),
+    /// kept as registry rows so every device shows them. Local only: an
+    /// agent asks for its own chat (the caller's), the person answers on
+    /// any device, and the answer reaches the agent as a message in its chat.
+    /// `{chatId, question, options?, context?, blocking?}` → `AgentQuestion`.
+    pub const ASK_QUESTION: &str = "AskQuestion";
+    /// Stream of `AgentQuestion[]` (all statuses, oldest first), `{chatId?}`.
+    pub const WATCH_QUESTIONS: &str = "WatchQuestions";
+    /// The person's answer, `{questionId, answer}` → `AgentQuestion`.
+    pub const ANSWER_QUESTION: &str = "AnswerQuestion";
+    /// The person closes a question unanswered, `{questionId}`.
+    pub const DISMISS_QUESTION: &str = "DismissQuestion";
+    /// The asking agent withdraws its question, `{questionId}`.
+    pub const CANCEL_QUESTION: &str = "CancelQuestion";
+    /// A blocking `ask_question` stopped waiting (timed out or was
+    /// cancelled): an answer from now on is delivered as a message.
+    /// `{questionId, deliver}` — with `deliver`, one that already arrived
+    /// is delivered now.
+    pub const RELEASE_QUESTION: &str = "ReleaseQuestion";
+    /// Tell the calling chat when another chat's turn ends (non-blocking
+    /// `wait_for_turn`, `send_message` with `notify`): `{chatId, baseline?,
+    /// expectTurn, startMessageIds?}` → `{watchId}`. The engine keeps the
+    /// watch across restarts and delivers "Chat «…» finished: …" as a
+    /// message in the caller's chat.
+    pub const NOTIFY_TURN_END: &str = "NotifyTurnEnd";
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
