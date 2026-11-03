@@ -1760,6 +1760,7 @@
         "organization": "Organization",
         "workspace": "Workspace",
         "cloud": "Cloud",
+        "customize": "Customize",
         "plugins": "Plugins",
         "browser": "Browser"
       }

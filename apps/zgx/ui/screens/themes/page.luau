@@ -341,7 +341,7 @@ local function none(which: string): Node
 		}
 	end
 	return ds.EmptyState {
-		icon = "palette-search",
+		icon = "palette",
 		title = ui.t("themes.page.none_yours"),
 		body = ui.t("themes.page.none_yours_body"),
 		size = "sm",
