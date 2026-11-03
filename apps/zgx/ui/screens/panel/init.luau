@@ -40,9 +40,6 @@
 --                                 of the session's panel (the one already
 --                                 showing it, else a new one); nil: an
 --                                 empty browser tab (screens/panel/browser)
---   Panel.open_notes(session)     a main chat's notes (screens/panel/notes):
---                                 their one tab, in front; nothing for a
---                                 side chat or a subagent
 --   Panel.toggle_files()          ⌘E: the panel's Files tab in front, or closed
 --   Panel.toggle_terminal()       ⌘J: the same for a terminal
 --   Panel.step_tab(by)            ⌃Tab/⌃⇧Tab while the panel has the keyboard
@@ -133,20 +130,6 @@ do
 		Browser = found
 	else
 		print(`zeron-zgx: the panel's browser didn't load: {found}`)
-	end
-end
-
--- A main chat's notes (screens/panel/notes), loaded the same way.
-type NotesModule = { Tab: (props: { chat: string }) -> Node, flush: (chat: string) -> (), focus: (chat: string) -> () }
-local Notes: NotesModule? = nil
-do
-	local ok, found = pcall(function(): NotesModule
-		return (require :: any)("@app/screens/panel/notes")
-	end)
-	if ok then
-		Notes = found
-	else
-		print(`zeron-zgx: the panel's notes didn't load: {found}`)
 	end
 end
 
@@ -532,59 +515,6 @@ function M.open_plugin_tab(session: any, tab: { [string]: any })
 	end
 end
 
--- Whether `session` is a main chat (a top-level one, not a side chat or a
--- subagent): only those have notes.
-function M.is_main_chat(session: string?): boolean
-	if type(session) ~= "string" or session == "" then
-		return false
-	end
-	local ok, sessions = pcall(function(): any
-		return (require :: any)("@account/sessions")
-	end)
-	if not ok or not sessions then
-		return false
-	end
-	local now = sessions.now:get()
-	for _, list in { now.chats, now.archived } do
-		for _, c in list or {} do
-			if c.id == session then
-				return true
-			end
-		end
-	end
-	return false
-end
-
--- A main chat's notes in its panel: their tab if it's open (one per chat),
--- else a new one, in front with the keyboard in it, and the panel open.
--- Side chats and subagents have none: nothing opens. Whether it opened.
-function M.open_notes(session: string): boolean
-	if not Notes or not M.is_main_chat(session) then
-		return false
-	end
-	local k = state.key(session, nil)
-	if not k then
-		return false
-	end
-	local found: string? = nil
-	for _, t in state.of(k).tabs do
-		if t.kind == "notes" then
-			found = t.id
-		end
-	end
-	if found then
-		state.activate(k, found)
-	else
-		state.open(k, "notes", { chat = session })
-	end
-	Notes.focus(session)
-	local set_files = (if shell_view then shell_view.set_files else nil) :: ((boolean) -> ())?
-	if set_files then
-		set_files(true)
-	end
-	return true
-end
-
 -- A lane (a side chat, a subagent) as a tab of `session`'s panel: the one
 -- already showing it, else a new one, and the panel open.
 function M.open_lane_tab(session: string, lane: { kind: string, id: string, title: string, data: any? })
@@ -633,9 +563,6 @@ local function title_of(tab: Tab): (string, boolean)
 	end
 	if tab.kind == "plugin" then
 		return tab.title or ui.t("panel.tab.plugin"):get(), false
-	end
-	if tab.kind == "notes" then
-		return ui.t("panel.tab.notes"):get(), false
 	end
 	if tab.kind == "browser" then
 		local t = if Browser then Browser.title(tab) else nil
@@ -717,9 +644,6 @@ M.Panel = ui.component(function(props: Props): Node
 			lanes_card.watch(tab.id, nil)
 		elseif tab and tab.kind == "files" then
 			Files.close_tab(id)
-		elseif tab and tab.kind == "notes" and tab.chat and Notes then
-			-- (What's unwritten lands, the tab gone.)
-			Notes.flush(tab.chat)
 		end
 		-- Its last tab gone, the panel closes for this session (as the
 		-- shipping app's `collapse_surfaces_if_empty`), leaving expanded with
@@ -807,7 +731,6 @@ M.Panel = ui.component(function(props: Props): Node
 					return ui.image { src = path, w = 14, h = 14, fit = "contain", rounded = "$radius.sm" }
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
-			elseif tab.kind == "notes" then Icon { name = "notebook", size = 14 }
 			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then Icon { name = Lanes.icon(tab) :: any, size = 14 }
 			else ui.presence(function(): string
 				-- (A file tab's file by its name; none yet, "": by the file,
@@ -1291,13 +1214,6 @@ M.Panel = ui.component(function(props: Props): Node
 			open_url = function(session_id: string, url: string)
 				M.open_url(session_id, url)
 			end,
-			-- Only a main chat's (side chats and subagents have none).
-			open_notes = if Notes
-				then function(session_id: string)
-					M.open_notes(session_id)
-				end
-				else nil,
-			is_main = M.is_main_chat,
 		}
 	end
 
@@ -1307,17 +1223,6 @@ M.Panel = ui.component(function(props: Props): Node
 	local function body(k: string, tab: Tab): Node
 		if (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then
 			return Lanes.Tab { tab = tab }
-		end
-		if tab.kind == "notes" then
-			if Notes and tab.chat then
-				return Notes.Tab { chat = tab.chat }
-			end
-			return ds.EmptyState {
-				icon = "notebook",
-				size = "sm",
-				fill = true,
-				title = ui.t("panel.tab.notes") :: any,
-			}
 		end
 		if tab.kind == "plugin" then
 			-- What its plugin fills, by selector (`.plugin-tab`): until then,

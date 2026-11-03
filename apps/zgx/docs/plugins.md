@@ -50,6 +50,7 @@ Your own plugins are signed as yours, and re-signed and reloaded each time you s
 | `network` | the internet: `ui.fetch`, and remote images (`ui.image { src = "https://…" }`) |
 | `clipboard`, `files`, `web`, `windows` | zgx's clipboard, file dialogs, web views, windows |
 | `tools` | tools for agents (the manifest's `tools`) |
+| `notes` | read and write the synced notes of the main chat it's shown in, and no other's (`zeron.notes`) |
 | `devices` | send data to itself on your other devices |
 | `native` | run a program of its own (the manifest's `mcp`) |
 | `commands` | run the programs its manifest's `commands` names, as you, on this Mac (`zeron.run`) |
@@ -195,6 +196,9 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 | `zeron.notify { title, body?, session? }` | a notification, as Zeron's own: under Settings → Notifications, a few a minute; a click opens `session`. A promise of `"posted"`, `"off"`, `"held"`, `"paced"` or `"unavailable"` | `notifications` |
 | `zeron.open_url(url)` | an http(s) link, where you open links (Settings → Links) | `links.open` |
 | `zeron.sessions()`, `zeron.projects()` | your sessions and projects by id, as they change | `sessions.read` |
+| `zeron.notes.chat()` | the chat whose notes it may open now: the session page's, if it's a main chat (never a side chat's or a subagent's), followed; else nil | `notes` |
+| `zeron.notes.watch(chat)` | in a build: that chat's synced notes watched while the node shows; a function reading `{ text, hash, epoch, seq }`, `{ unsupported = true }` (an engine from before notes), `{ error }`, or nil | `notes` |
+| `zeron.notes.set(chat, base_hash, text)` | compare-and-set on the hash of what it read: a promise of `{ kind = "applied", hash, epoch, seq }`, `{ kind = "conflict", current }` or `{ kind = "tooLarge", limit }`; refused `unsupported` or `not_allowed`. A chat stays open to it for the run once it asked while that chat's page showed, so a write lands after the person moves on. Zeron's own Notes (`plugins-builtin/notes`) is this, whole | `notes` |
 
 **Cost.** Zeron times each build of your nodes. Past 1 ms a build (a row's badge) or 8 ms of builds in one frame, your row in Settings → Plugins says so ("Slow: 4.2 ms per row"), and `plugin_status` gives the numbers. Do the work outside the build (in `zeron.every`, or once per id), and read what changes in reactive functions.
 

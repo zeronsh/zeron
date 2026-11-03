@@ -49,6 +49,7 @@ pub mod looks;
 pub mod template_consent;
 pub mod locales;
 pub mod plugin_menus;
+pub mod notes;
 
 use std::{
     cell::{Cell, RefCell},
@@ -252,6 +253,9 @@ pub struct Bridge {
     /// Each plugin's GitHub ("github", lent by proxy): what it hears of the
     /// sessions it shows, and the engine's watches of them (`github`).
     gh: RefCell<HashMap<String, Gh>>,
+    /// Each plugin's way to its chats' notes ("notes": only the one it's
+    /// shown in, `notes`).
+    notes: RefCell<Option<Rc<notes::Notes>>>,
     /// Each plugin's storage (`zeron.store`): its `plugin.<id>.store` and
     /// what it holds, kept in `<data>/plugins/.storage/<id>.json`.
     stores: RefCell<HashMap<String, Store>>,
@@ -346,6 +350,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         pages_shared: host.shared("plugins.pages", vlist(Vec::new())),
         view: RefCell::default(),
         gh: RefCell::default(),
+        notes: RefCell::default(),
         stores: RefCell::default(),
         settings: RefCell::new(settings::Book::new(settings::storage_dir())),
         settings_list: host.shared("plugins.settings", vlist(Vec::new())),
@@ -373,6 +378,14 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         }
     });
     *bridge.records_effect.borrow_mut() = Some(effect);
+
+    // Each plugin's way to the notes of the chat it's shown in ("notes").
+    let weak = Rc::downgrade(&bridge);
+    let engine: Rc<dyn notes::Engine> = Rc::new(notes::Live { tasks: cx.tasks.clone() });
+    let way = notes::Notes::new(host, &cx.ui.runtime, engine, move |id| {
+        weak.upgrade().and_then(|b| b.item(id)).is_some_and(|i| i.may(notes::PERMISSION))
+    });
+    *bridge.notes.borrow_mut() = Some(way);
 
     // Every script error, blamed on a template or a plugin when it's
     // theirs: that one makes way for Zeron's own (after this turn, never
@@ -418,6 +431,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             }
         }));
         *b.watches.borrow_mut() = watches;
+        // (Each chat's notes watched again on this connection.)
+        let way = b.notes.borrow().clone();
+        if let Some(way) = way {
+            way.reconnect();
+        }
         // Another device's, if Settings → Plugins shows one.
         remote::load(&b);
     });
@@ -960,6 +978,11 @@ impl Bridge {
         }
         *self.items.borrow_mut() = list;
         self.state.set("ready");
+        // (Turned off, or allowed "notes" no more: its notes go.)
+        let way = self.notes.borrow().clone();
+        if let Some(way) = way {
+            way.refresh_all();
+        }
         // `ZERON_ZGX_REVIEW=<id>` (development): that plugin's sheet at
         // launch, its window serving devtools (run without --inspect).
         if let Ok(id) = std::env::var("ZERON_ZGX_REVIEW")
@@ -1777,6 +1800,10 @@ impl Bridge {
         {
             let shared = host.shared(&format!("plugin.{id}.github"), Value::record(Vec::<(&str, Value)>::new()));
             self.gh.borrow_mut().entry(id.to_string()).or_default().shared = Some(shared);
+        }
+        let way = self.notes.borrow().clone();
+        if let Some(way) = way {
+            way.expose(host, id);
         }
         {
             let held = store::load(id);
@@ -2941,6 +2968,8 @@ mod tests {
 mod loading_tests;
 #[cfg(test)]
 mod examples_tests;
+#[cfg(test)]
+mod notes_tests;
 #[cfg(test)]
 mod markdown_tests;
 

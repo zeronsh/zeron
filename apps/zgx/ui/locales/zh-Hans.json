@@ -2717,8 +2717,7 @@
       "close_others": "关闭其他标签页",
       "close_left": "关闭左侧标签页",
       "close_right": "关闭右侧标签页",
-      "unsaved": "未保存的更改",
-      "notes": "笔记"
+      "unsaved": "未保存的更改"
     },
     "strip": {
       "label": "面板标签页",
@@ -2732,8 +2731,7 @@
       "terminal": "终端",
       "title": "打开标签页",
       "side_chat": "侧边对话",
-      "fork": "分叉对话",
-      "notes": "笔记"
+      "fork": "分叉对话"
     },
     "plugin_off": "其插件目前未启用。",
     "broken": {
@@ -2916,13 +2914,6 @@
       "port_closed": "已关闭",
       "previews_unavailable": "本地预览暂时不可用",
       "stop_subagent": "停止子代理 {title}"
-    },
-    "notes": {
-      "label": "会话笔记",
-      "placeholder": "这个会话的笔记。支持 Markdown。",
-      "local_only": "Zeron 更新后即可同步",
-      "save_failed": "无法保存笔记。正在重试…",
-      "too_large": "笔记最多 {kb} KB。最新的更改未保存。"
     }
   },
   "files": {
@@ -3086,6 +3077,10 @@
         "notifications": {
           "title": "向你发送通知",
           "detail": "以 Zeron 的名义发送，可在“设置”→“通知”中管理。"
+        },
+        "notes": {
+          "title": "读取和编辑当前对话的笔记",
+          "detail": "只限它所在的对话。笔记会同步到你的其他设备。"
         },
         "links_open": {
           "title": "打开链接",

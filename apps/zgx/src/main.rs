@@ -50,7 +50,6 @@ mod math;
 mod mermaid;
 mod plan_usage;
 mod plugins;
-mod notes;
 mod previews;
 mod projects;
 mod relaunch;
@@ -754,8 +753,6 @@ fn serve(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -
     favicons::install(&host);
     // The project's dev servers, for the browser tab's start page.
     previews::install(&host);
-    // A main chat's synced notes, for the panel's Notes tab.
-    notes::install(&host);
     let looks_up = host.shared("looks_up", false);
     let view = host.view();
     let handle = cx.render(component(move |cx| {

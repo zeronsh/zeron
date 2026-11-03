@@ -1,0 +1,14 @@
+{
+  "row": {
+    "label": "Notes"
+  },
+  "tab": {
+    "title": "Notes",
+    "label": "Session notes",
+    "placeholder": "Notes for this session. Markdown works here.",
+    "local_only": "Syncs once Zeron updates",
+    "save_failed": "Couldn't save the notes. Retrying…",
+    "too_large": "Notes are limited to {kb} KB. The latest changes aren't saved.",
+    "no_chat": "Notes belong to a chat. Open them from its panel."
+  }
+}
