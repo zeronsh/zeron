@@ -500,7 +500,8 @@
       "resize": "调整侧边栏大小",
       "show_less": "显示更少",
       "empty_projects_word": "空项目",
-      "empty_projects": "{n, plural, other {# 个空项目}}"
+      "empty_projects": "{n, plural, other {# 个空项目}}",
+      "questions_open": "{n, plural, other {# 个待回答问题}}"
     },
     "git": {
       "pull_request": "拉取请求",
@@ -794,7 +795,9 @@
       "approval": "批准",
       "close": "关闭而不回答",
       "close_esc": "关闭而不回答 · Esc",
-      "multi": "选择一个或多个选项。"
+      "multi": "选择一个或多个选项。",
+      "later": "稍后回答",
+      "later_esc": "稍后回答 · Esc"
     },
     "composer_cargo": {
       "remove": "移除 {name}",
@@ -2703,6 +2706,10 @@
       "not_running": "{name} 已经结束",
       "unsupported": "该代理无法单独停止此项",
       "failed": "无法停止 {name}"
+    },
+    "questions": {
+      "notice": "{n, plural, other {智能体问了 # 个问题}}",
+      "answer": "回答"
     }
   },
   "panel": {

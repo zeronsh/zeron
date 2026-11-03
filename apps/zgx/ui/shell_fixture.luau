@@ -1043,6 +1043,59 @@ ui.command { id = "fixture.project_icons", title = "Fixture: projects with icons
 	publish()
 end }
 
+-- What agents ask without stopping for it (@account/questions), as the
+-- engine's WatchQuestions would have it: none until a test asks
+-- (`questions_ask`: two on Fix the build, one on Write the docs). Answers
+-- and dismissals are noted in `calls` and settle the question.
+local questions = require("@account/questions")
+local asked: { any } = {}
+local function publish_questions()
+	local list = {}
+	for _, q in asked do
+		table.insert(list, table.clone(q))
+	end
+	questions.now:set({ state = "ready", list = list } :: any)
+end
+local function settle_question(id: string, status: string, answer: string?)
+	for _, q in asked do
+		if q.id == id then
+			q.status = status
+			q.answer = answer
+			q.resolved = os.time()
+		end
+	end
+	publish_questions()
+end
+local questions_stub = questions :: any
+questions_stub.answer = function(id: string, text: string)
+	note(`answer:{id}:{text}`)
+	settle_question(id, "answered", text)
+end
+questions_stub.dismiss = function(id: string)
+	note(`dismiss:{id}`)
+	settle_question(id, "dismissed", nil)
+end
+ui.command {
+	id = "questions_ask",
+	title = "Agents ask three questions",
+	run = function()
+		asked = {
+			{ id = "q1", chat = "a1", question = "Which **database** should the cache use?", options = { "Postgres", "SQLite" }, context = "The cache is read on every request.", status = "pending", created = NOW - 120 },
+			{ id = "q2", chat = "a1", question = "Keep the old flag?", options = {}, status = "pending", created = NOW - 60 },
+			{ id = "q3", chat = "a2", question = "Which docs site theme?", options = { "Light", "Dark" }, status = "pending", created = NOW - 30 },
+		}
+		publish_questions()
+	end,
+}
+ui.command {
+	id = "questions_answered_elsewhere",
+	title = "Fix the build's first question answered on another device",
+	run = function()
+		settle_question("q1", "answered", "Postgres")
+	end,
+}
+publish_questions()
+
 publish()
 
 -- Grouped by project (a view option; one list is the default): the tests

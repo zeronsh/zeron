@@ -11,6 +11,7 @@
 
 local ds = require("@ds")
 local sessions = require("@account/sessions")
+local questions = require("@account/questions")
 local project_calls = require("@account/projects")
 -- The project editor (screens/shell/project_editor, its emoji picker and
 -- the emoji's data): loaded as it's first opened, not with the window, and
@@ -414,6 +415,7 @@ end
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
 	local asked = asks:get()
+	local open_questions = questions.counts()
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
@@ -461,6 +463,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- (Its side chats working count as its subagents do, as its
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+			-- (Open questions: a pill of their own, the state left as it is.)
+			questions = open_questions[c.id],
 		}) :: any)
 	end
 	if #loose.sessions > 0 then

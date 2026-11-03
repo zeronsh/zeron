@@ -500,7 +500,8 @@
       "resize": "Resize sidebar",
       "show_less": "Show less",
       "empty_projects_word": "Empty",
-      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}",
+      "questions_open": "{n, plural, one {# open question} other {# open questions}}"
     },
     "git": {
       "pull_request": "Pull request",
@@ -794,7 +795,9 @@
       "approval": "Approval",
       "close": "Close without answering",
       "close_esc": "Close without answering · Esc",
-      "multi": "Select one or more options."
+      "multi": "Select one or more options.",
+      "later": "Answer later",
+      "later_esc": "Answer later · Esc"
     },
     "composer_cargo": {
       "remove": "Remove {name}",
@@ -2703,6 +2706,10 @@
       "not_running": "{name} had already finished",
       "unsupported": "This agent can't stop that on its own",
       "failed": "Couldn't stop {name}"
+    },
+    "questions": {
+      "notice": "{n, plural, one {The agent asked a question} other {The agent asked # questions}}",
+      "answer": "Answer"
     }
   },
   "panel": {

@@ -52,6 +52,7 @@ mod plan_usage;
 mod plugins;
 mod previews;
 mod projects;
+mod questions;
 mod relaunch;
 mod session_home;
 mod sessions;
@@ -593,6 +594,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         cloud::install(cx, &host);
         // The sessions behind the main window (src/sessions.rs).
         sessions::install(cx, &host);
+        // What agents ask without stopping for it (src/questions.rs).
+        questions::install(cx, &host);
         // Adding a project, removing one (src/projects.rs).
         projects::install(&host);
         // A session's files (src/files.rs): the files pane and editor.

@@ -35,6 +35,11 @@ export type Question = {
 	-- This page among the pages, from 1.
 	page: number?,
 	pages: number?,
+	-- A quieter line under it: what the agent adds for context.
+	detail: string?,
+	-- Closing it only puts it off (a question the agent asked without
+	-- stopping for it stays open): the × says "Answer later".
+	later: boolean?,
 }
 export type QuestionProps = {
 	question: Question,
@@ -61,7 +66,7 @@ export type ApprovalProps = { approval: Approval }
 -- stands for a question or an approval, as Zeron's panel has none), with
 -- its page among its pages and the × at the end.
 -- (`kind` the agent's header, or a function of the locale's word.)
-local function head(kind: string | () -> string, page: string?, on_close: (() -> ())?, close_hint: (() -> string)?): Node
+local function head(kind: string | () -> string, page: string?, on_close: (() -> ())?, close_hint: (() -> string)?, later: boolean?): Node
 	return ui.row {
 		h = 28,
 		items = "center",
@@ -81,7 +86,7 @@ local function head(kind: string | () -> string, page: string?, on_close: (() ->
 		if on_close
 			then IconButton {
 				icon = "close",
-				label = locale.t("ds.composer_ask.close"),
+				label = locale.t(if later then "ds.composer_ask.later" else "ds.composer_ask.close"),
 				-- (A tooltip is a string: read as the head is built.)
 				tooltip = if close_hint then close_hint() else locale.s("ds.composer_ask.close"),
 				size = "sm",
@@ -217,9 +222,13 @@ M.Question = ui.component(function(props: QuestionProps): Node
 			return locale.s("ds.composer_ask.question")
 		end, page, props.on_close, if props.closes_on_escape
 			then function()
-				return locale.s(if (props.closes_on_escape :: () -> boolean)() then "ds.composer_ask.close_esc" else "ds.composer_ask.close")
+				local esc = (props.closes_on_escape :: () -> boolean)()
+				if q.later then
+					return locale.s(if esc then "ds.composer_ask.later_esc" else "ds.composer_ask.later")
+				end
+				return locale.s(if esc then "ds.composer_ask.close_esc" else "ds.composer_ask.close")
 			end
-			else nil),
+			else nil, q.later),
 		ui.column {
 			pb = "$space.2",
 			gap = "$zeron.space.hair",
@@ -231,6 +240,15 @@ M.Question = ui.component(function(props: QuestionProps): Node
 				weight = "$font.weight.medium",
 				color = "$text.primary",
 			},
+			if q.detail
+				then ui.text {
+					q.detail,
+					wrap = true,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.tertiary",
+				}
+				else nil,
 			if q.multi
 				then ui.text { locale.t("ds.composer_ask.multi"), text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 				else nil,

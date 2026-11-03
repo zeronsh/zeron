@@ -39,6 +39,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 local Appshots = require("@app/screens/chat/appshots")
 local queued = require("@app/screens/chat/queued")
 local ReplyImages = require("@app/screens/chat/reply_images")
+local questions = require("@account/questions")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -376,9 +377,66 @@ local function Composer(): Node
 		local s = open()
 		return if s then s.ask else nil
 	end)
+	-- What the agent asked without stopping for it (@account/questions):
+	-- not a state the chat waits in, so the composer stays the person's
+	-- to type in. A line over it says how many are open, its Answer
+	-- turning the composer to the agent's own question mode (ds/composer_ask,
+	-- as a harness's questions are asked), one at a time, oldest first,
+	-- "2/3" in its head. Answered, the next shows; Back goes to the one
+	-- before; × or Escape puts them off, still open (the line stays).
+	-- A harness's own question comes first.
+	local open_questions = ui.computed(function(): { questions.Question }
+		local out: { questions.Question } = {}
+		for _, q in questions.of(session_id:get()) do
+			if q.status == "pending" then
+				table.insert(out, q)
+			end
+		end
+		return out
+	end)
+	-- The chat whose questions the composer is asking, and which of them.
+	local answering = ui.state("chat_questions_answering", nil :: string?)
+	local answering_at = ui.state("chat_questions_at", 1)
+	local mine = ui.computed(function(): any
+		local id = session_id:get()
+		if not id or answering:get() ~= id or ask:get() ~= nil then
+			return nil
+		end
+		local list = open_questions:get()
+		if #list == 0 then
+			return nil
+		end
+		local i = math.clamp(answering_at:get(), 1, #list)
+		local q = list[i]
+		local options = {}
+		for _, o in q.options do
+			table.insert(options, { value = o, label = o })
+		end
+		return {
+			id = q.id,
+			question = {
+				text = questions.plain(q.question),
+				detail = if q.context then questions.plain(q.context) else nil,
+				options = options,
+				page = i,
+				pages = #list,
+				later = true,
+			},
+		}
+	end)
+	ui.effect(function()
+		-- None left (answered here or elsewhere): the composer is the draft's.
+		if answering:get() ~= nil and #open_questions:get() == 0 then
+			answering:set(nil)
+		end
+	end)
 	local question = ui.computed(function(): any
 		local a = ask:get()
-		return if a and a.kind == "question" then a.question else nil
+		if a and a.kind == "question" then
+			return a.question
+		end
+		local m = mine:get()
+		return if m then m.question else nil
 	end)
 	local approval = ui.computed(function(): any
 		local a = ask:get()
@@ -389,7 +447,8 @@ local function Composer(): Node
 	local asked = ui.state("chat_asked", nil :: string?)
 	ui.effect(function()
 		local a = ask:get()
-		local r = if a then a.request else nil
+		local m = mine:get()
+		local r = if a then a.request elseif m then `question:{m.id}` else nil
 		if r ~= asked:peek() then
 			asked:set(r)
 			chosen:set({})
@@ -467,12 +526,27 @@ local function Composer(): Node
 				end
 			end
 		end
-		return LinkNotice.of {
+		local link = LinkNotice.of {
 			connection = now.connection,
 			host_unreachable = host_unreachable,
 			host = host,
 			intent = string.find(shared.text:get(), "%S") ~= nil or #shared.cargo:get() > 0 or #queue:get() > 0,
 		}
+		if link then
+			return link
+		end
+		-- Questions the agent asked without stopping for them, while the
+		-- composer isn't asking them: how many, and Answer.
+		local n = #open_questions:get()
+		if n > 0 and question:get() == nil then
+			return {
+				tone = "info",
+				text = ui.t("chat.questions.notice", { n = n }):get(),
+				action = ui.t("chat.questions.answer"):get(),
+				questions = true,
+			}
+		end
+		return nil
 	end)
 
 	-- The models looked up once: not again on each reload after a lookup
@@ -1289,16 +1363,35 @@ local function Composer(): Node
 				local id, a = session_id:peek(), ask:peek()
 				if id and a then
 					store.answer(id, a.request, answer)
+					return
+				end
+				local m = mine:peek()
+				if m then
+					-- The option picked, and the words typed with it, if any.
+					local said = table.concat(answer.values or {}, ", ")
+					local text = string.match(answer.text or "", "^%s*(.-)%s*$") or ""
+					if text ~= "" then
+						said = if said ~= "" then `{said}: {text}` else text
+					end
+					questions.answer(m.id, said)
 				end
 			end,
 			on_close_question = function()
 				local id, a = session_id:peek(), ask:peek()
 				if id and a then
 					store.deny(id, a.request)
+					return
 				end
+				-- Put off, not dismissed: still open, the line still there.
+				answering:set(nil)
 			end,
 			-- Back a page: it shows again with what was picked on it.
 			on_back = function()
+				local m = mine:peek()
+				if m and not ask:peek() then
+					answering_at:set(math.max(1, m.question.page - 1))
+					return
+				end
 				local id, a = session_id:peek(), ask:peek()
 				if id and a then
 					store.question_back(id, a.request):after(function(picked: any)
@@ -1326,6 +1419,14 @@ local function Composer(): Node
 				end
 			end,
 			notice = notice,
+			on_notice_action = function()
+				local n = notice:peek()
+				local id = session_id:peek()
+				if n and n.questions and id then
+					answering_at:set(1)
+					answering:set(id)
+				end
+			end,
 			on_dismiss_notice = function()
 				own_notice:set(nil)
 			end,
