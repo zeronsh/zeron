@@ -187,18 +187,28 @@ jobs:
             dist/*
             manifest.json
           generate_release_notes: true
+          # Releases are immutable once published, so their files can't be
+          # replaced. Keep the ones already there, so re-running this job
+          # after a failed R2 upload gets past this step.
+          overwrite_files: false
       - name: upload to R2 (zeron.sh/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
+          # The Cloudflare API returns the odd 502; retry each object.
+          put() {
+            for attempt in 1 2 3 4 5; do
+              npx wrangler@4 r2 object put "comet-native-releases/$1" --file "$2" --remote && return 0
+              echo "upload of $1 failed (attempt $attempt), retrying" >&2
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
           for f in dist/*; do
-            npx wrangler@4 r2 object put "comet-native-releases/$(basename "$f")" \
-              --file "$f" --remote
+            put "$(basename "$f")" "$f"
           done
           # manifest.json: version + per-artifact sha256 — the auto-updater
           # (crates/update) verifies downloads against it. Published before
           # latest.txt so no client ever sees a version without its checksums.
-          npx wrangler@4 r2 object put comet-native-releases/manifest.json \
-            --file manifest.json --remote
+          put manifest.json manifest.json
           printf '%s' "$VERSION" > latest.txt
-          npx wrangler@4 r2 object put comet-native-releases/latest.txt \
-            --file latest.txt --remote
+          put latest.txt latest.txt
