@@ -259,6 +259,10 @@ end
 -- chat shown's running turn, as Zeron's does (settings.rs
 -- `escape_stops_active_agent`). True if it did.
 function M.escape(): boolean
+	-- Files shown carried over the chat: Escape lets go of them first.
+	if shared.let_go() then
+		return true
+	end
 	if not prefs.escape_stops:peek() then
 		return false
 	end
