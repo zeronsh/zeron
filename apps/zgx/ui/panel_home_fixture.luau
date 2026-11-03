@@ -104,6 +104,11 @@ stub_store.send = function(req: any): any
 	note(`send:{req.session}:{req.text}`)
 	return settled(true, nil)
 end
+-- A running subagent stopped alone (its spawn's call), as its host would.
+stub_store.ask_stop = function(session: string, call: string): any
+	note(`stop_call:{session}:{call}`)
+	return settled(true, { outcome = "stopping" })
+end
 local stub_lanes = lanes :: any
 stub_lanes.watch = function(slot: string, id: string?, frozen: boolean?, _chat: string?)
 	note(`watch:{id or "none"}{if frozen then ":frozen" else ""}`)

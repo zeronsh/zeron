@@ -1270,6 +1270,59 @@ ui.command {
 
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
+-- A reply at work on a command that hangs, beside one that finished: the
+-- hung one's row has a stop. `tool_result` gives it its result (as its
+-- agent does once it's killed). The host's stop answers `STOP_ANSWER`
+-- (noted): `stop_unsupported` makes the next one refused.
+local STOP_ANSWER = ui.state("fixture_stop_answer", "stopping")
+stub.ask_stop = function(session: string, call: string): any
+	note(`stop_call:{session}:{call}`)
+	local outcome = STOP_ANSWER:peek()
+	STOP_ANSWER:set("stopping")
+	return settled(if outcome == "unsupported"
+		then { outcome = "unsupported", reason = "Not this tool." }
+		else { outcome = outcome })
+end
+ui.command {
+	id = "stop_unsupported",
+	title = "The next stop of a call is refused",
+	run = function()
+		STOP_ANSWER:set("unsupported")
+	end,
+}
+local function hung(done: boolean): { any }
+	return {
+		{ id = "h-read", kind = "read", verb = "Read", target = "server.ts" },
+		if done
+			then { id = "h-cmd", kind = "exec", verb = "Ran", target = "npm run serve", failed = true }
+			else { id = "h-cmd", kind = "exec", verb = "Ran", target = "npm run serve", running = true },
+	}
+end
+ui.command {
+	id = "tool_running",
+	title = "A reply waits on a hung command",
+	run = function()
+		store.messages:push {
+			id = "h1",
+			role = "assistant",
+			text = "",
+			model = "Opus",
+			streaming = true,
+			started = ui.now() / 1000,
+			blocks = { { id = "g:h-read", kind = "tools", summary = "Read 1 file · ran 1 command", live = true, tools = hung(false) } },
+		}
+	end,
+}
+ui.command {
+	id = "tool_result",
+	title = "The hung command returns killed",
+	run = function()
+		local list = store.messages:peek()
+		local n = #list
+		store.messages:set_key({ n, "blocks" }, { { id = "g:h-read", kind = "tools", summary = "Read 1 file · ran 1 command · 1 failed", live = true, tools = hung(true) } })
+	end,
+}
+
 return ui.overlay {
 	w_full = true,
 	h_full = true,
@@ -1289,6 +1342,8 @@ return ui.overlay {
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	},
 	chat.Composer(),
+	-- Toasts, as the shell hangs them (a call's stop says how it went).
+	ds.toast.Host {},
 	-- A link's context menu, as the shell hangs it (ds/menu_at).
 	require("@ds/menu_at").Host {},
 	-- In the title bar's strip, what a drag may come from: the files pane's
@@ -1318,3 +1373,4 @@ return ui.overlay {
 		},
 	},
 }
+

@@ -911,7 +911,7 @@ local function lanes(props: Props, sid: string): Node
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
 	-- corner action.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?): Node
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, stop: { on_stop: (any) -> (), stoppable: (any) -> boolean }?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -930,6 +930,8 @@ local function lanes(props: Props, sid: string): Node
 				view = view :: any,
 				flat = flat,
 				on_archive = archive,
+				on_stop = if stop then stop.on_stop else nil,
+				stoppable = if stop then stop.stoppable else nil,
 				icon = if extra then extra.icon :: any else nil,
 				menu = menu,
 				items = items,
@@ -1048,7 +1050,16 @@ local function lanes(props: Props, sid: string): Node
 					props.open_subagent(sid, l.sub)
 				end
 			end)
-		end, nil, true),
+		end, nil, true, nil, {
+			-- A running subagent stopped alone, by its spawn's call: its
+			-- session's turn goes on (screens/chat/store `stop_call`).
+			stoppable = M.subagent_stoppable,
+			on_stop = function(l: any)
+				if sid and l.sub and l.sub.call then
+					store.stop_call(sid, l.sub.call, l.title)
+				end
+			end,
+		}),
 	}
 end
 
@@ -1073,6 +1084,13 @@ function M.port_menu(url: string, open: () -> ()): { any }
 			end,
 		},
 	}
+end
+
+-- Whether a subagent's lane has a stop: it runs, and its spawn's call is
+-- known.
+function M.subagent_stoppable(l: any): boolean
+	local sub = l.sub
+	return sub ~= nil and sub.call ~= nil and sub.status == "running"
 end
 
 -- A subagent row's menu, on a secondary click: open it.
