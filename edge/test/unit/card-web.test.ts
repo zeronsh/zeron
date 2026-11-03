@@ -159,7 +159,7 @@ describe("the card's badges", async () => {
     expect(row[0]!.fill).toBeUndefined();
   });
 
-  it("draws Maintainer as a solid dark pill, first, as the edge serves it", () => {
+  it("draws Maintainer as a dark (ink) pill, first, as the edge serves it", () => {
     expect(BADGE_STYLES).toMatchObject({ maintainer: "ink" });
     const graham = mock.members.find((m) => m.username === "graham")!;
     const { row, labels } = pills({
@@ -167,8 +167,8 @@ describe("the card's badges", async () => {
       badges: [{ id: "maintainer", name: "Maintainer", icon: null }, ...graham.badges]
     });
     expect(labels).toEqual(["MAINTAINER", "CLOUD TESTER", "V3 BETA"]);
-    // Opaque ink, no border; the others stay outline pills.
-    expect(row[0]).toMatchObject({ fill: [0x16, 0x16, 0x16, 0xff] });
+    // The ink pill's fill, no border; the others stay outline pills.
+    expect(row[0]).toMatchObject({ fill: [0x16, 0x16, 0x16, 0x80] });
     expect(row[0]!.border).toBeUndefined();
     for (const pill of row.slice(1)) expect(pill).toMatchObject({ border: 1 });
   });

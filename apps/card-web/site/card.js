@@ -35,9 +35,6 @@ const TOKENS = {
   muted: "#55534e",
   light: "#ffffff",
   pill: [0x16, 0x16, 0x16, 0x80],
-  // An ink badge: solid, so it reads dark on the paper (the pill above is
-  // see-through, for the number and day over the art).
-  badgeInk: [0x16, 0x16, 0x16, 0xff],
   rule: [0x16, 0x16, 0x16, 0x33],
   edge: [0, 0, 0, 0x1f],
   shadow: { x: 0, y: 24, sigma: 24, color: [0, 0, 0, 0x4d] },
@@ -55,8 +52,8 @@ const FOIL_STOPS = [[0xc9, 0xd6, 0xff, 0xcc], [0xef, 0xd0, 0xf2, 0xcc], [0xff, 0
 
 // How the public read's badges map onto the card's pills. The read gives an
 // id, a name and a free-form icon; the card wants a style (ink, outline or
-// foil) and, if any, one of the intro's characters. Maintainer is a solid
-// dark (ink) pill; every other badge the server gives is an outline pill with
+// foil) and, if any, one of the intro's characters. Maintainer is a dark
+// (ink) pill; every other badge the server gives is an outline pill with
 // no glyph, as the native app draws a served card (zgx account/api.luau, which
 // keeps the same table); an id this table doesn't know is an outline pill too.
 // The read's order is the card's (maintainer first, then the order the badges
@@ -606,7 +603,7 @@ export function layoutCard(card) {
       for (const b of row) {
         const outline = b.style === "outline";
         const box = { x: b.x, y, w: b.w, h: 20, r: 9999 };
-        if (b.style === "ink") box.fill = TOKENS.badgeInk;
+        if (b.style === "ink") box.fill = TOKENS.pill;
         if (outline) { box.border = 1; box.borderColor = TOKENS.rule; }
         if (b.style === "foil") box.gradient = { angle: 120, stops: FOIL_STOPS };
         boxes.push(box);

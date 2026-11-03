@@ -250,9 +250,7 @@ local function badge(b: Badge): Node
 		gap = "$space.1",
 		items = "center",
 		rounded = "$radius.full",
-		-- Solid ink, so it reads dark on the paper (the number's and the
-		-- day's pill is see-through, over the art).
-		bg = if style == "ink" then "$zeron.card.ink" else nil,
+		bg = if style == "ink" then "$zeron.card.pill" else nil,
 		border = if style == "outline" then 1 else nil,
 		border_color = if style == "outline" then "$zeron.card.rule" else nil,
 		gradient = if style == "foil"
