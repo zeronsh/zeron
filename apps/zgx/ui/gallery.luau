@@ -1109,6 +1109,24 @@ local GROUPS: { Group } = {
 					end,
 				}
 			end)(),
+			-- A reply's subagent block (demos/subagents.luau), loaded on its
+			-- own so a slip there shows in its place.
+			(function(): Page
+				local ok, result = pcall(function()
+					return require("@demos/subagents")
+				end)
+				if ok then
+					return result
+				end
+				return {
+					id = "subagents",
+					title = "Subagents",
+					about = "This page didn't load.",
+					demo = function()
+						return ui.text { tostring(result), literal = true, wrap = true, font = "$font.mono", text_size = "$font.size.sm", color = "$danger" }
+					end,
+				}
+			end)(),
 			-- LaTeX math (demos/math.luau), loaded on its own so a slip there
 			-- shows in its place.
 			(function(): Page

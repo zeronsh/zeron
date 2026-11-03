@@ -21,6 +21,8 @@ local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
+-- Each reply's subagents, from every harness, as its block lists them.
+local Subagents = require("@app/screens/chat/subagents")
 local boundary = require("@app/screens/shell/boundary")
 
 -- The pictures replies show, read from the open chat's folder on its device.
@@ -88,6 +90,8 @@ end
 
 local function Session(id: Id?): Node
 	local which = resolve(id :: any)
+	-- Its replies' subagents: spawns and the chats its agent made, joined.
+	local subagents = Subagents.use(which)
 	-- A file a reply links or a prompt mentions: opened in the session's
 	-- panel (a link outside its folder stays as it is); a chat mentioned,
 	-- that chat.
@@ -278,6 +282,24 @@ local function Session(id: Id?): Node
 									lanes.open_subagent(s, sub)
 								end
 							end,
+							-- A running tool's stop: that call alone, on the
+							-- chat's host; the reply goes on.
+							on_stop_tool = function(tool: any, settle: (boolean) -> ())
+								local s = which()
+								if not s then
+									settle(false)
+									return
+								end
+								local name = if tool.target then `{tool.verb} {tool.target}` else tool.verb
+								store.stop_call(s, tool.id, name, settle)
+							end,
+							-- Each reply's subagent block: its spawns and the
+							-- chats its agent made as subagents; a row's Stop
+							-- (that call, or that chat's turn) and Open (its
+							-- lane in the panel).
+							subagents = subagents.items,
+							on_stop_subagent = subagents.stop,
+							on_open_subagent_row = subagents.open,
 							open_link = open_link,
 							-- Their context menus (screens/chat/link_menu).
 							link_menu = LinkMenu(open_link, function(): any

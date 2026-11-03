@@ -1270,6 +1270,178 @@ ui.command {
 
 -- The shell, as small as can hold the page: the route's page, and the
 -- composer over it.
+-- A reply at work on a command that hangs, beside one that finished: the
+-- hung one's row has a stop. `tool_result` gives it its result (as its
+-- agent does once it's killed). The host's stop answers `STOP_ANSWER`
+-- (noted): `stop_unsupported` makes the next one refused.
+local STOP_ANSWER = ui.state("fixture_stop_answer", "stopping")
+stub.ask_stop = function(session: string, call: string): any
+	note(`stop_call:{session}:{call}`)
+	local outcome = STOP_ANSWER:peek()
+	STOP_ANSWER:set("stopping")
+	return settled(if outcome == "unsupported"
+		then { outcome = "unsupported", reason = "Not this tool." }
+		else { outcome = outcome })
+end
+ui.command {
+	id = "stop_unsupported",
+	title = "The next stop of a call is refused",
+	run = function()
+		STOP_ANSWER:set("unsupported")
+	end,
+}
+local function hung(done: boolean): { any }
+	return {
+		{ id = "h-read", kind = "read", verb = "Read", target = "server.ts" },
+		if done
+			then { id = "h-cmd", kind = "exec", verb = "Ran", target = "npm run serve", failed = true }
+			else { id = "h-cmd", kind = "exec", verb = "Ran", target = "npm run serve", running = true },
+	}
+end
+ui.command {
+	id = "tool_running",
+	title = "A reply waits on a hung command",
+	run = function()
+		store.messages:push {
+			id = "h1",
+			role = "assistant",
+			text = "",
+			model = "Opus",
+			streaming = true,
+			started = ui.now() / 1000,
+			blocks = { { id = "g:h-read", kind = "tools", summary = "Read 1 file · ran 1 command", live = true, tools = hung(false) } },
+		}
+	end,
+}
+ui.command {
+	id = "tool_result",
+	title = "The hung command returns killed",
+	run = function()
+		local list = store.messages:peek()
+		local n = #list
+		store.messages:set_key({ n, "blocks" }, { { id = "g:h-read", kind = "tools", summary = "Read 1 file · ran 1 command · 1 failed", live = true, tools = hung(true) } })
+	end,
+}
+
+-- A reply that set subagents to work, from two harnesses: two Claude Code
+-- spawns (one whose doc is known, so it opens) and a chat its agent made
+-- through Zeron as a subagent, on Codex; its tool group holds that Zeron
+-- call beside a command. `subagent_step` moves the chat on; `subagents_done`
+-- settles them all; `subagent_joins` adds a third spawn while it works.
+-- Lanes opened are noted (`lane:<session>:<kind>:<id>`).
+local lanes = require("@app/screens/chat/lanes")
+local function note_lanes()
+	lanes.opener = function(session: string, lane: any)
+		note(`lane:{session}:{lane.kind}:{lane.id}`)
+	end
+end
+local SUB_START = os.time() - 40
+local function spawns(done: boolean, third: boolean?): { any }
+	local out = {
+		{ id = "sp1", ref = "s2--sub--1", status = if done then "done" else "running", title = "Map the parser", model = "haiku", type = "Explore", result = if done then "Found 3 callers of parse()." else nil },
+		{ id = "sp2", status = if done then "done" else "running", title = "Check the tests", result = if done then "All 42 pass." else nil },
+	}
+	if third then
+		table.insert(out, { id = "sp3", ref = "s2--sub--3", status = if done then "done" else "running", title = "Read the docs" })
+	end
+	return out
+end
+local function sub_chat(patch: { [string]: any }?): any
+	local c: { [string]: any } = {
+		id = "kid1",
+		parent = "s2",
+		title = "Review the API",
+		device = "mac",
+		status = "working",
+		created = SUB_START + 5,
+		updated = SUB_START + 5,
+		harness = "codex",
+		agent = "openai",
+		kind = "subagent",
+		model = "gpt-5.5",
+		preview = "Reading routes.ts",
+	}
+	-- (`"idle"`: no state, as the host gives an idle chat.)
+	for k, v in patch or {} do
+		c[k] = if v == "idle" then nil else v
+	end
+	return c
+end
+local function set_sub_chats(list: { any })
+	local now = table.clone(sessions.now:peek() :: any)
+	now.subagent_chats = { s2 = list }
+	sessions.now:set(now)
+end
+local SPAWN_GROUP = {
+	{ id = "g:sa-e1", kind = "tools", summary = "Ran 1 command · called 1 tool", summary_bare = "Ran 1 command", tools = {
+		{ id = "sa-e1", kind = "exec", verb = "Ran", target = "ls src" },
+		{ id = "sa-z1", kind = "exec", verb = "Used", target = "zeron.create_chats", zeron_spawn = true },
+	} },
+	{ id = "sa-t", kind = "text", text = "Three helpers are on it." },
+}
+local function sub_reply(): number?
+	for i, m in store.messages:peek() do
+		if m.id == "sa1" then
+			return i
+		end
+	end
+	return nil
+end
+ui.command {
+	id = "subagents_running",
+	title = "A reply sets subagents to work",
+	run = function()
+		note_lanes()
+		META.s2 = table.clone(META.s2)
+		META.s2.agent = "claude"
+		seed()
+		store.messages:push {
+			id = "sa1",
+			role = "assistant",
+			text = "",
+			model = "Opus",
+			streaming = true,
+			started = SUB_START,
+			subagents = spawns(false),
+			blocks = SPAWN_GROUP,
+		}
+		set_sub_chats({ sub_chat() })
+	end,
+}
+ui.command {
+	id = "subagent_step",
+	title = "The subagent chat moves on",
+	run = function()
+		set_sub_chats({ sub_chat({ preview = "Checking the auth middleware", updated = os.time() }) })
+	end,
+}
+ui.command {
+	id = "subagent_joins",
+	title = "A third subagent is spawned",
+	run = function()
+		local n = sub_reply()
+		if n then
+			store.messages:set_key({ n, "subagents" }, spawns(false, true))
+		end
+	end,
+}
+ui.command {
+	id = "subagents_done",
+	title = "The subagents all finish",
+	run = function()
+		local n = sub_reply()
+		if n then
+			local m = table.clone(store.messages:peek()[n])
+			m.subagents = spawns(true, #(m.subagents or {}) > 2)
+			m.streaming = false
+			m.worked = 60
+			m.at = "Sep 8, 4:20 PM"
+			store.messages:set_key({ n }, m)
+		end
+		set_sub_chats({ sub_chat({ status = "idle", preview = "The API looks fine.", updated = SUB_START + 50 }) })
+	end,
+}
+
 return ui.overlay {
 	w_full = true,
 	h_full = true,
@@ -1289,6 +1461,8 @@ return ui.overlay {
 		end, { w_full = true, grow = 1, min_h = 0 }),
 	},
 	chat.Composer(),
+	-- Toasts, as the shell hangs them (a call's stop says how it went).
+	ds.toast.Host {},
 	-- A link's context menu, as the shell hangs it (ds/menu_at).
 	require("@ds/menu_at").Host {},
 	-- In the title bar's strip, what a drag may come from: the files pane's
@@ -1318,3 +1492,4 @@ return ui.overlay {
 		},
 	},
 }
+
