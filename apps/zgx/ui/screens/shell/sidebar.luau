@@ -871,7 +871,12 @@ M.order = ui.state("shell_sidebar_order", {} :: { string })
 -- key pressed meanwhile is a shortcut (⌘C), not a look at them: they go
 -- until the modifiers held change again (`M.key_pressed`, from the shell's
 -- root and its commands).
+-- ⌘ is the key `cmd+1` is pressed with: Command on macOS, Ctrl elsewhere
+-- (zgx's `cmd`), where Super (`meta`) is just another modifier.
 local held = ui.modifiers
+local mac = string.find(ui.shortcut_text("cmd"), "⌘", 1, true) ~= nil
+local primary = if mac then held.meta else held.control
+local other = if mac then held.control else held.meta
 local pressed = ui.state("shell_jump_hints_pressed", false)
 ui.effect(function()
 	-- (Every change of what's held starts afresh, as the shipping app's.)
@@ -884,13 +889,13 @@ end)
 -- key equivalent never reaching `on_key`): the hints go, unless it's the
 -- ⌘1–9 they offer (`digit`).
 function M.key_pressed(digit: boolean?)
-	if held.meta:peek() and not digit and not pressed:peek() then
+	if primary:peek() and not digit and not pressed:peek() then
 		pressed:set(true)
 	end
 end
 M.jump_hints = ui.state("shell_jump_hints", false)
 ui.effect(function()
-	local alone = held.meta:get() and not (held.shift:get() or held.control:get() or held.alt:get())
+	local alone = primary:get() and not (held.shift:get() or other:get() or held.alt:get())
 	local show = alone
 		and not pressed:get()
 		and ui.window.active:get() ~= false

@@ -225,7 +225,7 @@
       "zoom_in": "放大",
       "zoom_out": "缩小",
       "fit_or_actual": "适合窗口或实际大小",
-      "fit_or_actual_tip": "适合窗口 ⌘0 · 实际大小 ⌘1",
+      "fit_or_actual_tip": "适合窗口 {fit} · 实际大小 {actual}",
       "preview_or_source": "预览或源代码",
       "show": "显示",
       "preview": "预览",
@@ -750,7 +750,7 @@
     "comment": {
       "reply_placeholder": "回复…",
       "reply": "回复",
-      "send_hint": "按 ⌘↵ 发送",
+      "send_hint": "按 {key} 发送",
       "comment": "评论",
       "resolved": "已解决",
       "resolve": "标记为已解决",
@@ -795,7 +795,7 @@
       "send_now_hint": "立即发送，打断当前轮次",
       "steer_hint": "引导：在当前轮次中向智能体传话",
       "send_next_hint": "在下一轮发送",
-      "hint_last": "{what} · ⌘↵",
+      "hint_last": "{what} · {key}",
       "save_to_queue": "保存到队列",
       "cancel": "取消",
       "edit": "编辑",
@@ -1115,7 +1115,7 @@
       "default_browser": "默认浏览器",
       "send_with": {
         "enter": "Enter",
-        "mod_enter": "⌘ Enter"
+        "mod_enter": "{key}"
       },
       "pull_requests": {
         "native": "拉取请求视图",
@@ -1307,7 +1307,7 @@
       "word_wrap": {
         "label": "自动换行",
         "terms": "自动换行 长行 编辑器 soft wrap long lines editor",
-        "description": "将长行折行以适应编辑器宽度。⌥Z 仍可切换单个文件的换行设置。"
+        "description": "将长行折行以适应编辑器宽度。{key} 仍可切换单个文件的换行设置。"
       },
       "show_all": {
         "label": "显示隐藏和已忽略的文件",
@@ -2066,7 +2066,7 @@
       },
       "default_zoom": {
         "label": "页面缩放",
-        "description": "用 ⌘+ 和 ⌘− 缩放某个网站，即可为它保留单独的缩放。",
+        "description": "用 {zoom_in} 和 {zoom_out} 缩放某个网站，即可为它保留单独的缩放。",
         "terms": "缩放 文字大小 放大 zoom"
       },
       "site_zoom": {
@@ -2292,7 +2292,7 @@
       "hide_details": "隐藏会话详情",
       "show_details": "显示会话详情",
       "panel": "面板",
-      "panel_tooltip": "面板  ⌘R"
+      "panel_tooltip": "面板  {key}"
     },
     "page": {
       "plugin": "插件",

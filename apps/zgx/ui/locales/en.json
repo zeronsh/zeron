@@ -225,7 +225,7 @@
       "zoom_in": "Zoom In",
       "zoom_out": "Zoom Out",
       "fit_or_actual": "Fit or actual size",
-      "fit_or_actual_tip": "Fit ⌘0 · Actual size ⌘1",
+      "fit_or_actual_tip": "Fit {fit} · Actual size {actual}",
       "preview_or_source": "Preview or Source",
       "show": "Show",
       "preview": "Preview",
@@ -750,7 +750,7 @@
     "comment": {
       "reply_placeholder": "Reply…",
       "reply": "Reply",
-      "send_hint": "⌘↵ to send",
+      "send_hint": "{key} to send",
       "comment": "Comment",
       "resolved": "Resolved",
       "resolve": "Resolve",
@@ -795,7 +795,7 @@
       "send_now_hint": "Send now, interrupting the turn",
       "steer_hint": "Steer: a word to the agent mid-turn",
       "send_next_hint": "Send at the next turn",
-      "hint_last": "{what} · ⌘↵",
+      "hint_last": "{what} · {key}",
       "save_to_queue": "Save to queue",
       "cancel": "Cancel",
       "edit": "Edit",
@@ -1115,7 +1115,7 @@
       "default_browser": "Default browser",
       "send_with": {
         "enter": "Enter",
-        "mod_enter": "⌘ Enter"
+        "mod_enter": "{key}"
       },
       "pull_requests": {
         "native": "Pull request view",
@@ -1307,7 +1307,7 @@
       "word_wrap": {
         "label": "Word wrap",
         "terms": "soft wrap long lines editor",
-        "description": "Wrap long lines to the editor's width. ⌥Z still turns it for one file."
+        "description": "Wrap long lines to the editor's width. {key} still turns it for one file."
       },
       "show_all": {
         "label": "Show hidden and ignored files",
@@ -2066,7 +2066,7 @@
       },
       "default_zoom": {
         "label": "Page zoom",
-        "description": "Zoom a site with ⌘+ and ⌘− to keep its own.",
+        "description": "Zoom a site with {zoom_in} and {zoom_out} to keep its own.",
         "terms": "zoom text size scale magnify"
       },
       "site_zoom": {
@@ -2292,7 +2292,7 @@
       "hide_details": "Hide session details",
       "show_details": "Show session details",
       "panel": "Panel",
-      "panel_tooltip": "Panel  ⌘R"
+      "panel_tooltip": "Panel  {key}"
     },
     "page": {
       "plugin": "Plugin",
