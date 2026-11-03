@@ -376,6 +376,11 @@ fn local_artwork(root: &Path) -> Option<PathBuf> {
 /// engine's `MAX_WORKSPACE_IMAGE_BYTES` and `WORKSPACE_IMAGE_CHUNK_BYTES`).
 const IMAGE_MAX: usize = 8 * 1024 * 1024;
 const IMAGE_CHUNK: usize = 384 * 1024;
+/// The chunks a sent or named picture comes in (`ReadAttachmentChunk` and
+/// `ReadChatImageChunk`: the engine's uploads.rs `READ_CHUNK_BYTES`), far
+/// smaller than a workspace image's: reads enough of them for `IMAGE_MAX`.
+const PICTURE_CHUNK: usize = 45_000;
+const PICTURE_READS: usize = IMAGE_MAX.div_ceil(PICTURE_CHUNK) + 1;
 
 /// Where images read from other devices are kept: the system's temporary
 /// folder, which it clears. (What's there a day old goes as the first is
@@ -830,7 +835,7 @@ impl Files {
         let mut bytes = Vec::new();
         let mut mime = String::new();
         let mut offset = 0u64;
-        for _ in 0..=IMAGE_MAX / IMAGE_CHUNK + 1 {
+        for _ in 0..PICTURE_READS {
             params.insert("offset".into(), json!(offset));
             let chunk = self.call(method, params.clone()).await?;
             let this_mime = chunk["mimeType"].as_str().unwrap_or("").to_owned();
@@ -1253,6 +1258,15 @@ fn make(root: &Path, relative: &str, dir: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::make;
+
+    /// A sent picture of a few megabytes is read whole, not called too large:
+    /// its 45 KB chunks are counted as such, up to `IMAGE_MAX`.
+    #[test]
+    fn a_picture_up_to_the_most_is_read_in_its_own_chunks() {
+        assert!((super::PICTURE_READS - 1) * super::PICTURE_CHUNK >= super::IMAGE_MAX);
+        // (A 1.7 MB screenshot takes 38 chunks.)
+        assert!(super::PICTURE_READS >= 1_700_000usize.div_ceil(super::PICTURE_CHUNK));
+    }
 
     /// A repository's artwork is found where the shipping app looks, from
     /// the work tree's root even for a project in a subfolder; one too big,
