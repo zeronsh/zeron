@@ -350,6 +350,10 @@ test("hundreds of lanes: the first five and those needing you, then Show N more;
 	app:frames(30)
 	app:click("#panel-home-subagents-head")
 	app:frames(30)
+	-- (Under the pointer its "…" stands in the count's place, as the
+	-- sidebar's own sections': the pointer elsewhere.)
+	app:hover("#panel-home-open")
+	app:frames(10)
 	expect(app:has('#panel-home-side-head >> "302"')).to_be(true)
 	expect(app:has('#panel-home-subagents-head >> "202"')).to_be(true)
 	app:click("#panel-home-subagents-head")
