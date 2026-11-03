@@ -1855,15 +1855,12 @@ impl View {
             p.alias = Some(whole.clone());
         }
         for item in &items {
-            let removed = engine::get()
-                .call("RemoveQueuedMessage", routed(json!({ "chatId": id, "id": item })))
-                .await;
-            if let Err(e) = removed {
-                eprintln!("zeron-zgx: chat: steer all: a queued row wasn't removed: {e}");
-                let _ = engine::get()
-                    .call("RemoveQueuedMessage", routed(json!({ "chatId": id, "id": whole })))
-                    .await;
-                return Err(engine::outcome(&e));
+            let params = routed(json!({ "chatId": id, "id": item }));
+            if let Err(why) = self.row_call(&id, item, "RemoveQueuedMessage", params, "removed").await {
+                eprintln!("zeron-zgx: chat: steer all: a queued row wasn't removed ({why})");
+                let params = routed(json!({ "chatId": id, "id": whole }));
+                let _ = self.row_call(&id, &whole, "RemoveQueuedMessage", params, "removed").await;
+                return Err(why);
             }
         }
         let harness = chat["config"]["harness"].as_str().unwrap_or_default();
@@ -1872,11 +1869,9 @@ impl View {
         } else {
             "SendQueuedMessageNow"
         };
-        engine::get()
-            .call(method, routed(json!({ "chatId": id, "id": whole })))
+        self.row_call(&id, &whole, method, routed(json!({ "chatId": id, "id": whole })), "sent")
             .await
             .map(|_| ())
-            .map_err(|e| engine::outcome(&e))
     }
 
     async fn queue_op(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
@@ -1930,11 +1925,47 @@ impl View {
             }
             _ => return Err("failed"),
         };
-        let answer = engine::get()
-            .call(method, params)
-            .await
-            .map_err(|e| engine::outcome(&e))?;
-        Ok(answer["sent"].as_bool() != Some(false))
+        if method == "MoveQueuedMessage" {
+            // (A move to where it is changes nothing: no answer to retry.)
+            engine::get()
+                .call(method, params)
+                .await
+                .map_err(|e| engine::outcome(&e))?;
+            return Ok(true);
+        }
+        let said = if method == "RemoveQueuedMessage" { "removed" } else { "sent" };
+        self.row_call(&id, &item, method, params, said).await
+    }
+
+    /// A call on a queued row, answered with whether the chat's host found
+    /// it (`said`: "sent", "removed"). A row queued here a moment ago (the
+    /// composer's, Steer all's) reaches the host as the chat's doc syncs:
+    /// one on another device can be asked of before it has the row, and
+    /// answers that it found none. Asked again, a while apart (100 ms,
+    /// doubling, some three seconds in all), while the row is still queued
+    /// here; refused if it never finds it.
+    async fn row_call(&self, chat: &str, item: &str, method: &str, params: Json, said: &str) -> Result<bool, Outcome> {
+        let mut wait = std::time::Duration::from_millis(100);
+        for _ in 0..6 {
+            let answer = engine::get()
+                .call(method, params.clone())
+                .await
+                .map_err(|e| engine::outcome(&e))?;
+            if answer[said].as_bool() != Some(false) {
+                return Ok(true);
+            }
+            let here = self.open.borrow().as_ref().is_some_and(|o| {
+                o.id == chat && o.queue.iter().any(|q| q["id"].as_str() == Some(item))
+            });
+            if !here {
+                // Gone meanwhile (sent at the turn's end, removed elsewhere).
+                return Ok(false);
+            }
+            zgx::timer::sleep(wait).await;
+            wait *= 2;
+        }
+        eprintln!("zeron-zgx: chat: {method} for {chat}: the host never found queued row {item}");
+        Err("failed")
     }
 }
 
