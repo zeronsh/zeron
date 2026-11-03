@@ -48,7 +48,7 @@ return function(zeron: any, watch: any)
 	ui.effect(function()
 		for id in zeron.sessions() do
 			if not watching[id] then
-				watching[id] = watch.pr(id)
+				watching[id] = watch.read(id)
 			end
 		end
 		local before = seen:peek() or {}

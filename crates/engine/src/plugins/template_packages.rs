@@ -17,7 +17,16 @@
 //! code, with all its powers: that's what the window asks you to allow.
 //!
 //! An installed one keeps its signed manifest and `.imported.json`
-//! (`{key, author, at, ignored}`): who signed it, as Zeron knew them then.
+//! (`{key, author, at, ignored, hash, version, source?}`): who signed it, as
+//! Zeron knew them then, the package it was, and where it came from.
+//!
+//! A package comes from a file, or a link (`origin`): one to a
+//! `.zeron-template`, or a GitHub repository's release carrying one (its
+//! latest, or a tag). Where it came from is checked for a new version as a
+//! plugin's is (`check`, by the engine every few hours and as Settings →
+//! Templates opens): a newer package signed by the same key is kept in
+//! `.updates/` until it's installed in place (`update`), with no asking
+//! again; one signed by anyone else is named, refused, and never kept.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +36,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use super::files::{MAX_BYTES, MAX_FILES};
+use super::install::{self, Found, Origin, Source};
 use super::signing::{self, FileHashes, SigCheck, SigningKey, TEMPLATE_PAYLOAD_PREFIX};
 use super::status::Author;
 use super::templates::{self, MANIFEST, PREVIEW, ZERON, inside, valid_id};
@@ -35,6 +45,8 @@ pub const FORMAT: &str = "zeron-template:v1";
 pub const EXTENSION: &str = "zeron-template";
 pub const PENDING: &str = ".pending";
 pub const IMPORTED: &str = ".imported.json";
+/// Updates found, waiting to be installed (`<id>.json`, `<id>.zeron-template`).
+pub const UPDATES: &str = ".updates";
 /// A package's largest size on disk: its files' limit, as base64, and room.
 const MAX_PACKAGE_BYTES: u64 = MAX_BYTES * 4 / 3 + 1024 * 1024;
 
@@ -76,6 +88,10 @@ impl Package {
 
     pub fn id(&self) -> String {
         self.text("id")
+    }
+
+    pub fn version(&self) -> String {
+        self.text("version")
     }
 
     pub fn name(&self) -> String {
@@ -192,7 +208,7 @@ pub fn read(path: &Path) -> Result<Package, String> {
     parse(raw)
 }
 
-fn parse(raw: Vec<u8>) -> Result<Package, String> {
+pub fn parse(raw: Vec<u8>) -> Result<Package, String> {
     let value: Value = serde_json::from_slice(&raw).map_err(|_| NOT_A_PACKAGE.to_string())?;
     if value["format"].as_str() != Some(FORMAT) {
         return Err(NOT_A_PACKAGE.into());
@@ -276,9 +292,20 @@ fn free_id(dir: &Path, want: &str) -> Result<String, String> {
 
 /// Writes the package's files as a new template; its id (`want`'s, or a
 /// free one beside it).
-fn install(dir: &Path, package: &Package, author: &Author) -> Result<String, String> {
+fn install(dir: &Path, package: &Package, author: &Author, source: Option<&Source>) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make the templates folder: {e}"))?;
     let id = free_id(dir, &package.id())?;
+    let tmp = write_folder(dir, &id, package, author, source)?;
+    if let Err(error) = std::fs::rename(&tmp, dir.join(&id)) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("Couldn't put the template in place: {error}"));
+    }
+    Ok(id)
+}
+
+/// The package written as template `id`'s folder, beside the templates
+/// (a dot folder, never listed): the caller puts it in place.
+fn write_folder(dir: &Path, id: &str, package: &Package, author: &Author, source: Option<&Source>) -> Result<PathBuf, String> {
     let tmp = dir.join(format!(".tmp-import-{id}-{}-{}", std::process::id(), super::now_secs()));
     let _ = std::fs::remove_dir_all(&tmp);
     let written = (|| -> Result<(), String> {
@@ -292,21 +319,25 @@ fn install(dir: &Path, package: &Package, author: &Author) -> Result<String, Str
         }
         std::fs::write(tmp.join(MANIFEST), signing::pretty(&package.manifest))
             .map_err(|e| format!("Couldn't write {MANIFEST}: {e}"))?;
-        let imported = json!({
+        let mut imported = json!({
             "key": package.key,
             "author": author,
             "at": super::now_secs(),
             "ignored": package.ignored,
+            "hash": package.hash,
+            "version": package.text("version"),
         });
+        if let Some(source) = source {
+            imported["source"] = json!(source);
+        }
         std::fs::write(tmp.join(IMPORTED), signing::pretty(&imported))
-            .map_err(|e| format!("Couldn't write {IMPORTED}: {e}"))?;
-        std::fs::rename(&tmp, dir.join(&id)).map_err(|e| format!("Couldn't put the template in place: {e}"))
+            .map_err(|e| format!("Couldn't write {IMPORTED}: {e}"))
     })();
     if let Err(error) = written {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(error);
     }
-    Ok(id)
+    Ok(tmp)
 }
 
 /// `ImportTemplate`: the package at `path`, verified. Yours installs now
@@ -314,9 +345,26 @@ fn install(dir: &Path, package: &Package, author: &Author) -> Result<String, Str
 /// Zeron (`{pending, …about, author, needs_consent: true}`).
 pub fn import(dir: &Path, path: &Path, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
     let package = read(path)?;
+    let shown = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let source = Source {
+        kind: "file".into(),
+        url: None,
+        path: Some(shown.display().to_string()),
+        git_ref: None,
+        commit: None,
+        version: package.text("version"),
+        installed_at: super::now_secs(),
+    };
+    let from = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    import_package(dir, package, &from, source, author_of)
+}
+
+/// A package read and verified (from a file, or a link: `source`), as
+/// `import` does with it: yours installs, anyone else's waits.
+pub fn import_package(dir: &Path, package: Package, from: &str, source: Source, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
     let author = author_of(&package.key);
     if author == Author::You {
-        let id = install(dir, &package, &author)?;
+        let id = install(dir, &package, &author, Some(&source))?;
         return Ok(json!({
             "installed": id,
             "name": package.name(),
@@ -324,7 +372,7 @@ pub fn import(dir: &Path, path: &Path, author_of: impl Fn(&str) -> Author) -> Re
             "ignored": package.ignored,
         }));
     }
-    let pending = stage(dir, &package, path)?;
+    let pending = stage(dir, &package, from, &source)?;
     let mut out = package.about();
     out["pending"] = json!(pending);
     out["author"] = json!(author);
@@ -341,7 +389,7 @@ fn valid_pending(name: &str) -> bool {
 
 /// Keeps the package (as read: it's checked again when allowed) and what
 /// to show of it, under `.pending/`.
-fn stage(dir: &Path, package: &Package, from: &Path) -> Result<String, String> {
+fn stage(dir: &Path, package: &Package, from: &str, source: &Source) -> Result<String, String> {
     let pending_dir = dir.join(PENDING);
     std::fs::create_dir_all(&pending_dir).map_err(|e| format!("Couldn't keep it for you to allow: {e}"))?;
     let stamp = super::now_secs();
@@ -355,7 +403,10 @@ fn stage(dir: &Path, package: &Package, from: &Path) -> Result<String, String> {
     let mut about = package.about();
     about["pending"] = json!(name);
     about["at"] = json!(stamp);
-    about["source"] = json!(from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    about["source"] = json!(from);
+    // (Where it came from, whole: carried to what's installed. Listed as
+    // `from`, never with a local path.)
+    about["origin"] = json!(source);
     templates::write_atomic(&pending_dir, &format!("{name}.json"), &signing::pretty(&about))?;
     Ok(name)
 }
@@ -376,7 +427,12 @@ pub fn pending(dir: &Path) -> Vec<Value> {
             if !valid_pending(name) || !templates::is_regular_file(&pending_dir.join(format!("{name}.{EXTENSION}"))) {
                 return None;
             }
-            let about: Value = serde_json::from_slice(&templates::read_regular(&e.path())?).ok()?;
+            let mut about: Value = serde_json::from_slice(&templates::read_regular(&e.path())?).ok()?;
+            if let Some(origin) = about.as_object_mut().and_then(|a| a.remove("origin"))
+                && let Ok(source) = serde_json::from_value::<Source>(origin)
+            {
+                about["from"] = source.shown();
+            }
             (about["pending"].as_str() == Some(name)).then_some(about)
         })
         .collect();
@@ -424,7 +480,8 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
         return Err("This template changed while it waited for you. Import it again to see what it is now.".into());
     }
     let author = author_of(&package.key);
-    let id = install(dir, &package, &author)?;
+    let source: Option<Source> = serde_json::from_value(about["origin"].clone()).ok();
+    let id = install(dir, &package, &author, source.as_ref())?;
     forget();
     Ok(json!({ "installed": id, "name": package.name(), "author": author }))
 }
@@ -433,6 +490,234 @@ pub fn decide(dir: &Path, pending: &str, allow: bool, hash: &str, author_of: imp
 pub fn imported(folder: &Path) -> Option<Value> {
     let value: Value = serde_json::from_slice(&templates::read_regular(&folder.join(IMPORTED))?).ok()?;
     value["key"].is_string().then_some(value)
+}
+
+// ── From a link ─────────────────────────────────────────────────────────────
+
+/// What `link` names, if a template can come from it: a link to a
+/// `.zeron-template`, or a GitHub repository (its latest release's, or its
+/// page) or release (`…/releases/latest`, `…/releases/tag/<tag>`) carrying
+/// one. A repository itself isn't a template: templates are shared signed.
+pub fn origin(link: &str) -> Result<Origin, String> {
+    let not_one = || {
+        "That link isn't a template: give a link to a .zeron-template file, or a GitHub repository or release with one".to_string()
+    };
+    let link = link.trim();
+    if link.is_empty() || link.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(not_one());
+    }
+    let Some(link) = install::https_link(link) else {
+        return Err("Templates come from https links".into());
+    };
+    let bare = link.split(['?', '#']).next().unwrap_or(&link).trim_end_matches('/');
+    if bare.ends_with(&format!(".{EXTENSION}")) {
+        return Ok(Origin::Link(link));
+    }
+    let Some(rest) = bare.strip_prefix("https://github.com/") else {
+        return Err(not_one());
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(not_one());
+    }
+    let repo = format!("{}/{}", parts[0], parts[1].trim_end_matches(".git"));
+    match &parts[2..] {
+        [] | ["releases"] | ["releases", "latest"] => Ok(Origin::Release { repo, tag: None }),
+        ["releases", "tag", tag] => Ok(Origin::Release { repo, tag: Some((*tag).to_owned()) }),
+        _ => Err(not_one()),
+    }
+}
+
+/// The package `origin` names, read and verified, and where it came from
+/// (its `Source`, without `version`/`installed_at`, which installing fills).
+pub async fn fetch(origin: &Origin) -> Result<(Package, Source), String> {
+    let (raw, source) = match origin {
+        Origin::Link(url) => (
+            install::download(url).await?,
+            Source { kind: "link".into(), url: Some(url.clone()), path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 },
+        ),
+        Origin::Release { repo, tag } => {
+            let asset = install::release_asset_of(repo, tag.as_deref(), EXTENSION).await.map_err(|error| {
+                // (A repository with no release yet, or none with a template.)
+                if tag.is_none() { "That repository has no release with a template in it".to_string() } else { error }
+            })?;
+            (
+                install::download(&asset).await?,
+                Source {
+                    kind: "release".into(),
+                    url: Some(format!("https://github.com/{repo}")),
+                    path: None,
+                    git_ref: tag.clone(),
+                    commit: None,
+                    version: String::new(),
+                    installed_at: 0,
+                },
+            )
+        }
+        Origin::Git { .. } => return Err("A template comes from a .zeron-template file or a release, not a repository's files".into()),
+    };
+    let package = tokio::task::spawn_blocking(move || parse(raw))
+        .await
+        .map_err(|_| "Couldn't read it".to_string())??;
+    Ok((package, source))
+}
+
+/// Where `source` is now, if it may have changed: `None` when it surely
+/// hasn't (a package file gone).
+pub async fn fetch_again(source: &Source) -> Result<Option<(Package, Source)>, String> {
+    match source.kind.as_str() {
+        "file" => {
+            let Some(path) = source.path.clone().map(PathBuf::from) else { return Ok(None) };
+            if !path.is_file() {
+                return Ok(None);
+            }
+            let package = tokio::task::spawn_blocking(move || read(&path))
+                .await
+                .map_err(|_| "Couldn't read it".to_string())??;
+            Ok(Some((package, source.clone())))
+        }
+        "link" => {
+            let url = source.url.clone().ok_or("It has no link")?;
+            fetch(&Origin::Link(url)).await.map(Some)
+        }
+        "release" => {
+            let url = source.url.as_deref().ok_or("It has no repository")?;
+            let repo = url.trim_start_matches("https://github.com/").to_owned();
+            fetch(&Origin::Release { repo, tag: source.git_ref.clone() }).await.map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+// ── Updates ─────────────────────────────────────────────────────────────────
+
+fn found_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(UPDATES).join(format!("{id}.json"))
+}
+
+fn found_package_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(UPDATES).join(format!("{id}.{EXTENSION}"))
+}
+
+/// The update found for template `id`, if it's still for the template as
+/// it is (installed from package `hash`).
+pub fn found(dir: &Path, id: &str, hash: &str) -> Option<Found> {
+    let found: Found = serde_json::from_slice(&templates::read_regular(&found_path(dir, id))?).ok()?;
+    (found.from == hash).then_some(found)
+}
+
+pub fn forget_found(dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(found_path(dir, id));
+    let _ = std::fs::remove_file(found_package_path(dir, id));
+}
+
+/// Keep `package` as `id`'s update (none: refused, only what was found).
+pub fn keep_found(dir: &Path, id: &str, found: &Found, package: Option<&Package>) -> Result<(), String> {
+    let updates = dir.join(UPDATES);
+    std::fs::create_dir_all(&updates).map_err(|_| "Couldn't keep the update".to_string())?;
+    match package {
+        Some(package) => templates::write_atomic(&updates, &format!("{id}.{EXTENSION}"), &package.raw)?,
+        None => {
+            let _ = std::fs::remove_file(found_package_path(dir, id));
+        }
+    }
+    templates::write_atomic(&updates, &format!("{id}.json"), &signing::pretty(&json!(found)))
+}
+
+/// What a check of template `id` (installed from package `hash`, signed by
+/// `key`) found in `fetched`: nothing new, or an update (refused when it's
+/// another template, or someone else signed it).
+pub fn compare(id: &str, key: &str, hash: &str, fetched: &Package, source: Source) -> Option<Found> {
+    if fetched.hash == hash {
+        return None;
+    }
+    let refused = if fetched.id() != id {
+        Some(format!("The new version is a different template ({})", fetched.id()))
+    } else if fetched.key != key {
+        Some("The new version is signed by someone else, so it won't be installed".to_string())
+    } else {
+        None
+    };
+    Some(Found {
+        from: hash.to_owned(),
+        version: fetched.text("version"),
+        hash: fetched.hash.clone(),
+        added: Vec::new(),
+        removed: Vec::new(),
+        refused,
+        source: Some(source),
+    })
+}
+
+/// The templates installed from a package that may have a newer version
+/// where they came from: each one's id, name, key, package hash and source.
+pub fn checkable(dir: &Path) -> Vec<(String, String, String, String, Source)> {
+    let Ok(list) = templates::list(dir) else { return Vec::new() };
+    list["templates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| {
+            let id = t["id"].as_str()?.to_owned();
+            let folder = templates::template_dir(dir, &id)?;
+            let imported = imported(&folder)?;
+            let source: Source = serde_json::from_value(imported["source"].clone()).ok()?;
+            Some((
+                id,
+                t["name"].as_str().unwrap_or("").to_owned(),
+                imported["key"].as_str()?.to_owned(),
+                imported["hash"].as_str()?.to_owned(),
+                source,
+            ))
+        })
+        .collect()
+}
+
+/// `UpdateTemplate`: the update found for `id` installed in its place (its
+/// id, its use and its look kept), checked again first: the same key as
+/// the one installed, the same package as was found. `{updated, name,
+/// version, from}`.
+pub fn update(dir: &Path, id: &str, author_of: impl Fn(&str) -> Author) -> Result<Value, String> {
+    let folder = templates::template_dir(dir, id).ok_or_else(|| format!("There's no template {id}"))?;
+    let imported = imported(&folder).ok_or("It wasn't installed from a package, so it has nothing to update from")?;
+    let hash = imported["hash"].as_str().unwrap_or("");
+    let found = found(dir, id, hash).ok_or("There's no update for it right now; check again")?;
+    if let Some(refused) = found.refused {
+        return Err(refused);
+    }
+    let package = read(&found_package_path(dir, id))?;
+    if package.hash != found.hash {
+        return Err("The update changed since it was found; check again".into());
+    }
+    if imported["key"].as_str() != Some(package.key.as_str()) {
+        return Err("The new version is signed by someone else, so it won't be installed".into());
+    }
+    let mut source: Option<Source> = found.source.clone().or_else(|| serde_json::from_value(imported["source"].clone()).ok());
+    if let Some(source) = &mut source {
+        source.version = package.text("version");
+        source.installed_at = super::now_secs();
+    }
+    let author = author_of(&package.key);
+    let tmp = write_folder(dir, id, &package, &author, source.as_ref())?;
+    // In its place: the old aside, the new in, then the old gone.
+    let old = dir.join(format!(".tmp-old-{id}-{}-{}", std::process::id(), super::now_secs()));
+    std::fs::rename(&folder, &old).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        format!("Couldn't update it: {e}")
+    })?;
+    if let Err(error) = std::fs::rename(&tmp, &folder) {
+        let _ = std::fs::rename(&old, &folder);
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("Couldn't update it: {error}"));
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    forget_found(dir, id);
+    Ok(json!({
+        "updated": id,
+        "name": package.name(),
+        "version": package.text("version"),
+        "from": imported["version"],
+    }))
 }
 
 #[cfg(test)]
@@ -693,5 +978,84 @@ mod tests {
         export(&d, "midnight", &out, &k).unwrap();
         export(&d, "midnight", &out, &k).unwrap();
         assert!(read(&out).is_ok());
+    }
+
+    #[test]
+    fn plugins_template_packages_links_name_a_package_or_a_release() {
+        let release = |repo: &str, tag: Option<&str>| Origin::Release { repo: repo.into(), tag: tag.map(Into::into) };
+        assert_eq!(origin("ada/midnight").unwrap(), release("ada/midnight", None));
+        assert_eq!(origin("github.com/ada/midnight").unwrap(), release("ada/midnight", None));
+        assert_eq!(origin("https://github.com/ada/midnight/releases/latest").unwrap(), release("ada/midnight", None));
+        assert_eq!(origin("https://github.com/ada/midnight/releases/tag/v2").unwrap(), release("ada/midnight", Some("v2")));
+        assert_eq!(
+            origin("example.com/t/midnight.zeron-template").unwrap(),
+            Origin::Link("https://example.com/t/midnight.zeron-template".into())
+        );
+        // Not a template: a repository's files, a page that isn't one, a
+        // plugin, plain http, nothing.
+        assert!(origin("https://github.com/ada/midnight/tree/main/t").unwrap_err().contains("isn't a template"));
+        assert!(origin("https://example.com/midnight").unwrap_err().contains("isn't a template"));
+        assert!(origin("example.com/x/focus.zeron-plugin").unwrap_err().contains("isn't a template"));
+        assert!(origin("http://example.com/m.zeron-template").unwrap_err().contains("https"));
+        assert!(origin("  ").is_err());
+    }
+
+    #[tokio::test]
+    async fn plugins_template_packages_update_in_place_from_where_it_came() {
+        let d = with_template("update");
+        let out = d.parent().unwrap().join("midnight.zeron-template");
+        let alice = key();
+        export(&d, "midnight", &out, &alice).unwrap();
+        // Alice's other device: installed at once, its source the file.
+        let other = dir("update-other").join("templates");
+        write(&other.join(templates::ZERON_DIR).join(MANIFEST), r#"{"zeron_version":"0.9.0"}"#);
+        assert_eq!(import(&other, &out, author_as(&alice)).unwrap()["installed"], "midnight");
+        let t = other.join("midnight");
+        let first = imported(&t).unwrap();
+        assert_eq!(first["source"]["kind"], "file");
+        assert_eq!(first["version"], "1.0.0");
+        let source: Source = serde_json::from_value(first["source"].clone()).unwrap();
+        let hash = first["hash"].as_str().unwrap().to_owned();
+        let listed = checkable(&other);
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].0.as_str(), listed[0].3.as_str()), ("midnight", hash.as_str()));
+
+        // Nothing new where it came from.
+        let (same, at) = fetch_again(&source).await.unwrap().unwrap();
+        assert!(compare("midnight", &alice.public(), &hash, &same, at).is_none());
+
+        // A new version, signed by the same key: found, kept, installed in
+        // its place with no asking.
+        write(&d.join("midnight/ds/tokens.luau"), "-- midnight tokens, v2");
+        write(
+            &d.join("midnight").join(MANIFEST),
+            r#"{"id":"midnight","name":"Midnight","version":"1.1.0","zeron_version":"0.9.0"}"#,
+        );
+        export(&d, "midnight", &out, &alice).unwrap();
+        let (newer, at) = fetch_again(&source).await.unwrap().unwrap();
+        let found_now = compare("midnight", &alice.public(), &hash, &newer, at).unwrap();
+        assert_eq!((found_now.version.as_str(), found_now.refused.as_deref()), ("1.1.0", None));
+        keep_found(&other, "midnight", &found_now, Some(&newer)).unwrap();
+        assert!(found(&other, "midnight", &hash).is_some());
+        let done = update(&other, "midnight", author_as(&alice)).unwrap();
+        assert_eq!((done["version"].as_str(), done["from"].as_str()), (Some("1.1.0"), Some("1.0.0")));
+        assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens, v2");
+        let after = imported(&t).unwrap();
+        assert_eq!(after["source"]["kind"], "file");
+        assert_ne!(after["hash"], json!(hash));
+        assert!(found(&other, "midnight", after["hash"].as_str().unwrap()).is_none());
+        assert!(update(&other, "midnight", author_as(&alice)).unwrap_err().contains("no update"));
+
+        // Signed by someone else: named, refused, its package never kept.
+        let eve = key();
+        export(&d, "midnight", &out, &eve).unwrap();
+        let installed = after["hash"].as_str().unwrap().to_owned();
+        let (theirs, at) = fetch_again(&source).await.unwrap().unwrap();
+        let refused = compare("midnight", &alice.public(), &installed, &theirs, at).unwrap();
+        assert!(refused.refused.as_deref().unwrap().contains("someone else"));
+        keep_found(&other, "midnight", &refused, None).unwrap();
+        assert!(!other.join(UPDATES).join(format!("midnight.{EXTENSION}")).exists());
+        assert!(update(&other, "midnight", author_as(&alice)).unwrap_err().contains("someone else"));
+        assert_eq!(std::fs::read_to_string(t.join("ds/tokens.luau")).unwrap(), "-- midnight tokens, v2");
     }
 }

@@ -110,6 +110,8 @@ local served: { [string]: { fn: (any, any) -> any, safe: boolean } } = {}
 local tools: { [string]: (any, any) -> any } = {}
 local timers: { { seconds: number, fn: (any) -> () } } = {}
 local stops: { () -> () } = {}
+-- `zeron.watch`es, by id: each one's folders and listener.
+local watches: { [number]: { folders: { string }, fn: (any) -> () } } = {}
 
 local function dispatch(kind: string, name: string, args: any, call: any, reply: number)
 	local fn
@@ -152,6 +154,22 @@ local function done(id: number, ok: boolean, value: any)
 	if p then
 		settle(p, ok, value)
 	end
+end
+
+-- A watch's burst, by folder's place: its paths, or `true` (anything).
+local function heard(id: number, changed: { [number]: any })
+	local w = watches[id]
+	if not w then
+		return
+	end
+	local by_folder = {}
+	for place, paths in changed do
+		local folder = w.folders[place]
+		if folder then
+			by_folder[folder] = paths
+		end
+	end
+	task(w.fn, nil, by_folder)
 end
 
 local function stopping()
@@ -211,6 +229,26 @@ local function service(id: string): any
 		table.insert(stops, fn)
 	end
 
+	-- Changes under `folders` on this device, each all the way down
+	-- ("files.read"): `fn(changed)` once a burst of them has been quiet for
+	-- `quiet` ms (250 unless said), `changed` by folder: the paths that
+	-- changed in it (relative, `/`-separated), or `true` when anything may
+	-- have (as the watch starts, and when changes were too many or lost).
+	-- Reads aren't changes. Returns a function that stops watching. A
+	-- watch lasts while the service runs (5 minutes after its last call).
+	function M.watch(folders: { string }, fn: (any) -> (), opts: { quiet: number? }?): () -> ()
+		assert(type(folders) == "table" and #folders > 0, "zeron.watch(folders, fn)")
+		assert(type(fn) == "function", "zeron.watch(folders, fn)")
+		local id = host.watch(folders, opts and opts.quiet)
+		watches[id] = { folders = table.clone(folders), fn = fn }
+		return function()
+			if watches[id] then
+				watches[id] = nil
+				host.unwatch(id)
+			end
+		end
+	end
+
 	-- To this plugin's windows (on this device, and those watching it from
 	-- others): `zeron.service(device):on(event, fn)`.
 	function M.emit(event: string, data: any)
@@ -264,4 +302,4 @@ local function service(id: string): any
 	return M
 end
 
-return service, dispatch, describe, done, stopping
+return service, dispatch, describe, done, stopping, heard

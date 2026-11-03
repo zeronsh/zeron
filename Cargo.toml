@@ -18,6 +18,8 @@ members = [
     "crates/engine",
     "crates/rpc",
     "crates/update",
+    "crates/cli",
+    "crates/launch",
     "crates/ui",
     "crates/notify",
     "crates/syntax",
@@ -55,6 +57,8 @@ zeron-harness = { path = "crates/harness" }
 zeron-engine = { path = "crates/engine" }
 zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
+zeron-cli = { path = "crates/cli" }
+zeron-launch = { path = "crates/launch" }
 zeron-ui = { path = "crates/ui" }
 zeron-notify = { path = "crates/notify" }
 zeron-syntax = { path = "crates/syntax" }

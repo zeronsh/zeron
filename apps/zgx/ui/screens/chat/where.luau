@@ -149,9 +149,23 @@ function M.bind(c: Choices)
 		end
 		return nil
 	end
+	-- A project that lives on Cloud alone (New project's Cloud: a
+	-- repository, on the account's Cloud device, no folder anywhere).
+	local function lives_on_cloud(p: sessions.Project?): boolean
+		return p ~= nil and string.sub(p.device, 1, 6) == "cloud-"
+	end
 	-- The repository Cloud would clone for a project, if Cloud can open it.
+	-- (One on Cloud runs there even before Cloud's repositories are read, as
+	-- the shipping app's does: the engine takes the repository from it.)
 	local function cloud_repo(p: sessions.Project?): cloud.Repo?
-		return if p then cloud.reaches(p.github) else nil
+		if not p then
+			return nil
+		end
+		local found = cloud.reaches(p.github)
+		if not found and lives_on_cloud(p) and p.github and cloud.on() then
+			return { name = p.github :: string, private = false, pushed = 0 }
+		end
+		return found
 	end
 	local function on_cloud(): boolean
 		return c.device:get() == M.CLOUD
@@ -248,6 +262,13 @@ function M.bind(c: Choices)
 			return
 		end
 		local p = project_row(c.project:get())
+		-- A project on Cloud alone runs on Cloud.
+		if lives_on_cloud(p) then
+			if cloud_repo(p) and c.device:peek() ~= M.CLOUD then
+				c.device:set(M.CLOUD)
+			end
+			return
+		end
 		-- (On Cloud, a project Cloud can open stays there.)
 		if c.device:peek() == M.CLOUD and cloud_repo(p) then
 			return

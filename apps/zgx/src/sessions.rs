@@ -249,10 +249,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     host.async_action("sessions.link", move |id| {
         let id = text(&id);
         async move {
-            let info = engine::get().call("EngineInfo", json!({})).await.map_err(|_| "not ready".to_string())?;
-            let scope = info["workspaceScope"].as_str().unwrap_or_default();
-            let device = info["deviceId"].as_str();
-            workspace_locator(scope, device, crate::auth::signed_in())
+            current_locator()
+                .await
                 .map(|w| Value::from(conversation_link(&id, &w).as_str()))
                 .ok_or_else(|| "not ready".to_string())
         }
@@ -371,6 +369,11 @@ impl Sessions {
                     ("id", Value::from(id)),
                     ("name", Value::from(d["name"].as_str().unwrap_or("Device"))),
                     ("platform", Value::from(d["platform"].as_str().unwrap_or(""))),
+                    // A Cloud device (the account's, or a session's machine), as
+                    // the shipping app tells one (`is_cloud_device`, the
+                    // `cloud-session`/`cloud-account` capabilities): never a
+                    // place to pick in a device list.
+                    ("cloud", Value::Bool(is_cloud(d))),
                     ("here", Value::Bool(here.as_deref() == Some(id))),
                     ("online", Value::Bool(online)),
                 ];
@@ -723,6 +726,18 @@ impl Sessions {
             me.publish();
         });
     }
+}
+
+/// A device row of Cloud's: the logical Cloud device or a session's machine
+/// (`zeron_proto::is_cloud_device` and the Cloud capabilities).
+fn is_cloud(d: &Json) -> bool {
+    let id = d["id"].as_str().unwrap_or_default();
+    let platform = d["platform"].as_str().unwrap_or_default();
+    platform == "cloud"
+        || id.starts_with("cloud-")
+        || d["capabilities"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|c| matches!(c.as_str(), Some("cloud-session" | "cloud-account"))))
 }
 
 /// An engine error as an outcome: offline, or failed.
@@ -1084,7 +1099,6 @@ fn connection(c: &Json) -> Option<&'static str> {
 /// signed in and in which organization ("personal" without one); local,
 /// this device. Not yet knowable (signed out while synced): none.
 fn workspace_locator(scope: &str, device: Option<&str>, signed_in: Option<(String, Option<String>)>) -> Option<String> {
-    use sha2::{Digest, Sha256};
     let (name, identity) = match scope {
         "synced" | "development" => {
             let (user, org) = signed_in?;
@@ -1094,28 +1108,20 @@ fn workspace_locator(scope: &str, device: Option<&str>, signed_in: Option<(Strin
         "local" => ("Local", format!("device:{}", device?)),
         _ => return None,
     };
-    let mut hash = Sha256::new();
-    hash.update(format!("{name}\0{identity}"));
-    Some(format!("{:x}", hash.finalize())[..16].to_string())
+    Some(zeron_notify::links::workspace_locator_of(name, &identity))
 }
 
-/// A string as a link's part (production's `encode_component`).
-fn encode_component(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
+/// The locator of the workspace the engine has open now (none until it's
+/// knowable): what a conversation link carries, and is checked against
+/// when one is opened (src/links.rs).
+pub(crate) async fn current_locator() -> Option<String> {
+    let info = engine::get().call("EngineInfo", json!({})).await.ok()?;
+    let scope = info["workspaceScope"].as_str().unwrap_or_default();
+    workspace_locator(scope, info["deviceId"].as_str(), crate::auth::signed_in())
 }
 
-/// A Zeron conversation link (production's `links::zeron_conversation_link`).
-fn conversation_link(chat_id: &str, workspace: &str) -> String {
-    format!("zeron://open/chat/{}?workspace={}", encode_component(chat_id), encode_component(workspace))
-}
+/// A Zeron conversation link (crates/notify, the shipping app's).
+use zeron_notify::links::conversation_link;
 
 pub(crate) fn new_id() -> String {
     use std::hash::{BuildHasher, Hasher};

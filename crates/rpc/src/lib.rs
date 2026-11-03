@@ -489,6 +489,11 @@ pub mod methods {
     /// (checked again; `hash` is the package as shown). Only Zeron's consent
     /// window calls it.
     pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
+    /// Each template installed from a link checked there for a newer
+    /// version (`{id?}`): `{updates, errors}`.
+    pub const CHECK_TEMPLATE_UPDATES: &str = "CheckTemplateUpdates";
+    /// The update found for a template, installed in its place (`{id}`).
+    pub const UPDATE_TEMPLATE: &str = "UpdateTemplate";
     /// `{}` → `{screens: [{module, file, title, description, elements}],
     /// map}`: each screen's named elements (`#id`, `.class`) from its source;
     /// `DescribeElements` is the live window's.
@@ -565,6 +570,8 @@ pub fn local_only(method: &str) -> bool {
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
             | methods::DECIDE_TEMPLATE
+            | methods::CHECK_TEMPLATE_UPDATES
+            | methods::UPDATE_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::SET_BUILTIN_PLUGINS
@@ -781,6 +788,8 @@ mod tests {
             methods::EXPORT_TEMPLATE,
             methods::IMPORT_TEMPLATE,
             methods::DECIDE_TEMPLATE,
+            methods::CHECK_TEMPLATE_UPDATES,
+            methods::UPDATE_TEMPLATE,
             methods::DESCRIBE_APP,
         ] {
             assert!(local_only(method), "{method}");

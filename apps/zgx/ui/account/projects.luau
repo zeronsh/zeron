@@ -57,8 +57,10 @@ end
 function M.clone(device: string, url: string, parent: string): any
 	return ui.call("projects.clone", with(device, { url = url, parent = parent }))
 end
-function M.create(device: string, path: string, git: boolean): any
-	return ui.call("projects.create", { device = device, path = path, git = git })
+-- (`repo`: a Cloud project's GitHub repository, `owner/name`: it has no
+-- folder to read one from.)
+function M.create(device: string, path: string, git: boolean, repo: string?): any
+	return ui.call("projects.create", { device = device, path = path, git = git, repo = repo })
 end
 function M.delete(id: string): any
 	return ui.call("projects.delete", id)

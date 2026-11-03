@@ -13604,6 +13604,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "zeron-cli",
  "zeron-engine",
  "zeron-mcp",
  "zeron-notify",
@@ -13622,6 +13623,22 @@ dependencies = [
  "thiserror 2.0.20",
  "webrtc-audio-processing",
  "zeron-proto",
+]
+
+[[package]]
+name = "zeron-cli"
+version = "0.2.134"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "zeron-launch",
+ "zeron-update",
 ]
 
 [[package]]
@@ -13711,6 +13728,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-doc",
  "zeron-harness",
+ "zeron-launch",
  "zeron-mcp",
  "zeron-notify",
  "zeron-preview",
@@ -13754,6 +13772,15 @@ dependencies = [
  "zeron-proto",
  "zeron-voice-media",
  "zip",
+]
+
+[[package]]
+name = "zeron-launch"
+version = "0.2.134"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13823,6 +13850,7 @@ name = "zeron-notify"
 version = "0.2.134"
 dependencies = [
  "objc",
+ "sha2",
  "tracing",
 ]
 

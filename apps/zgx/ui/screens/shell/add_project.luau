@@ -9,6 +9,16 @@
 -- window lands in a new chat in it; a folder that's a project already just
 -- opens it.
 --
+-- Cloud, while it's on, is the devices' last row (one for all of Cloud: its
+-- sessions' machines are never devices here): its page lists the GitHub
+-- repositories Cloud can open, by owner, newest push first, each saying if
+-- it's private or a project on a device already; one picked is a Cloud
+-- project (`createSpace` on Cloud's device, the repository named, as the
+-- shipping app's `add_space_create_cloud`), or the one Cloud has already,
+-- and the window lands in a new chat in it. Without GitHub, or without a
+-- repository, the page says so and leads to Settings → Cloud. A folder's
+-- search also offers those repositories (From GitHub), to clone there.
+--
 --   AddProject()            placed once in the window
 --   add_project.open()      ⌘⇧N, the palette's and the project filter's
 --                           "New project", the composer's
@@ -19,6 +29,7 @@ local toast = require("@ds/toast")
 local locale = require("@ds/locale")
 local sessions = require("@account/sessions")
 local projects = require("@account/projects")
+local cloud = require("@account/cloud")
 local route = require("@app/screens/shell/route")
 local view = require("@app/screens/shell/view")
 
@@ -79,14 +90,17 @@ ui.effect(function()
 end)
 
 -- A folder as a project on `device`: the one there already, else made.
-function M.add(device: string, path: string, git: boolean)
+-- (`repo`: a Cloud project's repository; Cloud's same repository is the
+-- same project.)
+function M.add(device: string, path: string, git: boolean, repo: string?)
 	for _, p in sessions.now:peek().projects do
-		if p.device == device and p.path == path then
+		local same_repo = repo ~= nil and p.github ~= nil and string.lower(p.github :: string) == string.lower(repo :: string)
+		if p.device == device and (p.path == path or same_repo) then
 			route.new_chat(p.id)
 			return
 		end
 	end
-	projects.create(device, path, git):after(function(id: any)
+	projects.create(device, path, git, repo):after(function(id: any)
 		if type(id) == "string" then
 			arriving:set(id)
 		end
@@ -341,6 +355,16 @@ local function offer(row: any): any
 		end,
 	}
 end
+-- Rows already known, as a promise of them.
+local function offer_all(rows: { any }): any
+	return {
+		after = function(_, ok: (any) -> ())
+			ok(rows)
+		end,
+	}
+end
+-- How many of your GitHub repositories a folder's search offers to clone.
+local CLONE_MATCHES = 5
 
 folder_page = function(device: string, path: string?, title: string, git: boolean, home: boolean): Page
 	local page: Page = {
@@ -550,8 +574,55 @@ folder_page = function(device: string, path: string?, title: string, git: boolea
 			end,
 		}
 	end
+	-- A repository cloned into this folder, then added.
+	local function clone_into(url: string, repo: string)
+		local parent = here
+		if not parent then
+			return
+		end
+		toast.show { title = locale.s("shell.add_project.cloning", { repo = repo }) }
+		projects.clone(device, url, parent :: string):after(function(cloned: any)
+			if type(cloned) == "table" and type(cloned.path) == "string" then
+				M.add(device, cloned.path, true)
+			end
+		end, function(err: any)
+			toast.show { title = locale.s("shell.add_project.couldnt_clone", { repo = repo }), body = says(err), tone = "danger" }
+		end)
+	end
+	-- Your GitHub repositories a name typed matches (Cloud's, GitHub
+	-- connected), a few, newest push first, to clone here (production's From
+	-- GitHub).
+	local function from_github(query: string): { Item }
+		local needle = string.lower(string.match(query, "^%s*(.-)%s*$") or "")
+		if needle == "" or string.find(needle, "^[/~%.]") then
+			return {}
+		end
+		local out: { Item } = {}
+		for _, r in cloud.now:peek().repos or {} do
+			if #out >= CLONE_MATCHES then
+				break
+			end
+			if r.clone_url and string.find(string.lower(r.name), needle, 1, true) then
+				local url, name = r.clone_url :: string, r.name
+				table.insert(out, {
+					id = `github:{name}`,
+					label = name,
+					section = locale.s("shell.add_project.from_github"),
+					icon = "git-branch",
+					keywords = query,
+					hint = if r.private then locale.s("shell.add_project.private") else nil,
+					verb = locale.s("shell.add_project.clone"),
+					run = function()
+						clone_into(url, name)
+					end,
+				})
+			end
+		end
+		return out
+	end
 	-- A git address typed here: cloned into this folder, then added (the
-	-- one thing offered); else, under Home, Home's folders.
+	-- one thing offered); else, under Home, Home's folders; and your GitHub
+	-- repositories it names, after them.
 	page.search = function(query: string): any
 		local repo = git_url(query)
 		if not repo then
@@ -559,7 +630,26 @@ folder_page = function(device: string, path: string?, title: string, git: boolea
 				asked += 1
 				return offer(go_to(device, query))
 			end
-			return if home then in_home(query) else nil
+			local github = from_github(query)
+			local found = if home then in_home(query) else nil
+			if not found then
+				return if #github > 0 then offer_all(github) else nil
+			end
+			-- (Told again as Home's come: theirs, then GitHub's.)
+			return {
+				after = function(_, ok: (any) -> ())
+					if #github > 0 then
+						ok(github)
+					end
+					found:after(function(list: any)
+						local all = table.clone(list or {})
+						for _, g in github do
+							table.insert(all, g)
+						end
+						ok(all)
+					end)
+				end,
+			}
 		end
 		asked += 1
 		local url = string.match(query, "^%s*(.-)%s*$") or query
@@ -573,18 +663,7 @@ folder_page = function(device: string, path: string?, title: string, git: boolea
 						icon = "git-branch",
 						verb = locale.s("shell.add_project.clone"),
 						run = function()
-							local parent = here
-							if not parent then
-								return
-							end
-							toast.show { title = locale.s("shell.add_project.cloning", { repo = repo }) }
-							projects.clone(device, url, parent :: string):after(function(cloned: any)
-								if type(cloned) == "table" and type(cloned.path) == "string" then
-									M.add(device, cloned.path, true)
-								end
-							end, function(err: any)
-								toast.show { title = locale.s("shell.add_project.couldnt_clone", { repo = repo }), body = says(err), tone = "danger" }
-							end)
+							clone_into(url, repo)
 						end,
 					},
 				})
@@ -654,11 +733,125 @@ local function locations_page(device: string, name: string): Page
 	return page
 end
 
--- Your devices, this Mac first.
+-- Cloud's page: the GitHub repositories Cloud can open, read afresh as it
+-- opens, each owner's together (the owners by their newest push, theirs
+-- newest first); one picked is a Cloud project. Without GitHub, or with no
+-- repository yet, the way to Settings → Cloud; a read that fails says why.
+local function cloud_page(): Page
+	local page: Page = {
+		id = "cloud-repos",
+		title = locale.s("shell.add_project.cloud_title"),
+		placeholder = locale.s("shell.add_project.search_repos"),
+		loading = { title = locale.s("shell.add_project.loading_repos") },
+		empty = { title = locale.s("shell.add_project.no_repos"), hint = locale.s("shell.add_project.no_repos_hint") },
+	}
+	local function to_settings(id: string, label: string, section: string): Item
+		return {
+			id = id,
+			label = label,
+			section = section,
+			icon = "arrow-up-right",
+			verb = locale.s("shell.add_project.open"),
+			run = function()
+				route.settings("cloud")
+			end,
+		}
+	end
+	page.load = function(done: ({ Item }) -> ())
+		cloud.load_repos(function()
+			local now = cloud.now:peek()
+			local why = now.repos_failure
+			if why == "github_not_connected" then
+				done({ to_settings("connect-github", locale.s("shell.add_project.connect_github"), locale.s("shell.add_project.github_not_connected")) })
+				return
+			elseif why and not now.repos then
+				page.empty = {
+					title = if why == "offline" then locale.s("shell.add_project.repos_offline") else locale.s("shell.add_project.repos_failed"),
+					hint = locale.s("shell.add_project.repos_failed_hint"),
+				}
+				done({})
+				return
+			end
+			local repos = table.clone(now.repos or {})
+			if #repos == 0 then
+				done({ to_settings("choose-repos", locale.s("shell.add_project.choose_repos"), locale.s("shell.add_project.no_repos_yet")) })
+				return
+			end
+			local function owner(r: cloud.Repo): string
+				return string.match(r.name, "^([^/]+)/") or r.name
+			end
+			-- Each owner's newest push, to order the owners by.
+			local newest: { [string]: number } = {}
+			for _, r in repos do
+				local o = owner(r)
+				newest[o] = math.max(newest[o] or 0, r.pushed or 0)
+			end
+			table.sort(repos, function(a, b)
+				local oa, ob = owner(a), owner(b)
+				if oa ~= ob then
+					if newest[oa] ~= newest[ob] then
+						return newest[oa] > newest[ob]
+					end
+					return string.lower(oa) < string.lower(ob)
+				end
+				if (a.pushed or 0) ~= (b.pushed or 0) then
+					return (a.pushed or 0) > (b.pushed or 0)
+				end
+				return string.lower(a.name) < string.lower(b.name)
+			end)
+			-- Already a project on one of your devices: where (production's
+			-- "On …"), so a Cloud one of it is a deliberate pick.
+			local snap = sessions.now:peek()
+			local names: { [string]: string } = {}
+			for _, d in snap.devices do
+				names[d.id] = d.name
+			end
+			local out: { Item } = {}
+			for _, r in repos do
+				local on: string? = nil
+				for _, p in snap.projects do
+					if p.github and string.lower(p.github :: string) == string.lower(r.name) and string.sub(p.device, 1, 6) ~= "cloud-" then
+						on = names[p.device]
+					end
+				end
+				local words = {}
+				if on then
+					table.insert(words, locale.s("shell.add_project.on_device", { device = on }))
+				end
+				if r.private then
+					table.insert(words, locale.s("shell.add_project.private"))
+				end
+				local name = r.name
+				table.insert(out, {
+					id = `repo:{name}`,
+					label = name,
+					section = owner(r),
+					icon = "git-branch",
+					hint = if #words > 0 then table.concat(words, " · ") else nil,
+					verb = locale.s("shell.add_project.add_cloud_project"),
+					run = function()
+						local at = cloud.device()
+						if not at then
+							return
+						end
+						-- Where a Cloud machine checks it out.
+						local short = string.match(name, "([^/]+)$") or name
+						M.add(at :: string, `/home/user/{short}`, true, name)
+					end,
+				})
+			end
+			done(out)
+		end)
+	end
+	return page
+end
+
+-- Your devices, this Mac first (never Cloud's machines: they're its
+-- sessions'); then Cloud, while it's on.
 local function devices(): { Item }
 	local now = sessions.now:get()
 	local out: { Item } = {}
-	for _, d in now.devices do
+	for _, d in sessions.computers(now.devices) do
 		local here = d.here or d.id == now.here
 		local item = {
 			id = `device:{d.id}`,
@@ -676,6 +869,17 @@ local function devices(): { Item }
 		else
 			table.insert(out, item)
 		end
+	end
+	if cloud.on() then
+		table.insert(out, {
+			id = "device:cloud",
+			label = locale.s("shell.add_project.cloud"),
+			section = locale.s("shell.add_project.devices"),
+			icon = "cloud",
+			hint = locale.s("shell.add_project.cloud_hint"),
+			verb = locale.s("shell.add_project.open"),
+			page = cloud_page,
+		})
 	end
 	return out
 end

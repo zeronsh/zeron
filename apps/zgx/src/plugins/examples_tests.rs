@@ -90,7 +90,7 @@ fn gh_answer(world: &serde_json::Value, asked: &serde_json::Value) -> Option<ser
     let text = |t: String| Some(json!({ "status": 0, "stdout": t, "stderr": "" }));
     let fail = |why: &str| Some(json!({ "status": 1, "stdout": "", "stderr": why }));
     let viewer = world["viewer"].clone();
-    if stdin.contains("HELD") {
+    if stdin.contains("HELD") || world["hold"] == true {
         return None;
     }
     if stdin.contains("REFUSED") {
@@ -100,10 +100,29 @@ fn gh_answer(world: &serde_json::Value, asked: &serde_json::Value) -> Option<ser
         return fail(why);
     }
     if args.first().map(String::as_str) == Some("repo") {
+        // (At scale, each folder its own: /work/r7 is o/r7.)
+        if world["repos_by_cwd"] == true {
+            let cwd = asked["cwd"].as_str().unwrap_or_default();
+            return match cwd.rsplit('/').next().filter(|n| n.starts_with('r')) {
+                Some(name) => text(format!("o/{name}\n")),
+                None => fail("no git remotes found"),
+            };
+        }
         return text(format!("{}\n", world["repository"].as_str().unwrap_or("zeronsh/zgx")));
     }
     if args.iter().any(|a| a.contains("v3.diff")) {
-        return text(world["diff"].as_str().unwrap_or_default().to_string());
+        let diff = world["diff"].as_str().unwrap_or_default().to_string();
+        // (`-i`: GitHub's status and headers first; its ETag, and a 304
+        // for one asked again with it unchanged.)
+        if args.iter().any(|a| a == "-i") {
+            let etag = world["diff_etag"].as_str().unwrap_or_default();
+            if !etag.is_empty() && args.iter().any(|a| a == &format!("If-None-Match: {etag}")) {
+                return text(format!("HTTP/2.0 304 Not Modified\r\nEtag: {etag}\r\n\r\n"));
+            }
+            let tag = if etag.is_empty() { String::new() } else { format!("Etag: {etag}\r\n") };
+            return text(format!("HTTP/2.0 200 OK\r\nContent-Type: text/plain\r\n{tag}\r\n{diff}"));
+        }
+        return text(diff);
     }
     if args.get(1).map(String::as_str) == Some("graphql") {
         let body: serde_json::Value = serde_json::from_str(stdin).unwrap_or_default();
@@ -129,6 +148,25 @@ fn gh_answer(world: &serde_json::Value, asked: &serde_json::Value) -> Option<ser
         }
         if query.contains("mergePullRequest") {
             return out(json!({ "data": { "mergePullRequest": { "pullRequest": { "merged": true } } } }));
+        }
+        // Many repositories at once: `r<n>` for repository `o<n>/n<n>`, its
+        // branches `b<n>_<k>`; and the quota, as `rateLimit` says it.
+        if query.contains("pullRequests(headRefName") && vars.get("o1").is_some() {
+            let mut data = serde_json::Map::new();
+            let vars = vars.as_object().cloned().unwrap_or_default();
+            for (k, branch) in &vars {
+                let Some((repo, _)) = k.strip_prefix('b').and_then(|rest| rest.split_once('_')) else { continue };
+                let alias = format!("r{repo}");
+                let pr = &world["branches"][branch.as_str().unwrap_or_default()];
+                let entry = data.entry(alias).or_insert_with(|| json!({}));
+                entry[k.as_str()] = json!({ "nodes": if pr.is_null() { json!([]) } else { json!([pr]) } });
+            }
+            data.insert("viewer".into(), json!({ "login": viewer }));
+            if query.contains("rateLimit") {
+                let remaining = world["rate_remaining"].as_u64().unwrap_or(4900);
+                data.insert("rateLimit".into(), json!({ "cost": 1, "remaining": remaining, "limit": 5000, "resetAt": world["rate_reset"].as_str().unwrap_or("2099-01-01T00:00:00Z") }));
+            }
+            return out(json!({ "data": data }));
         }
         if query.contains("pullRequests(headRefName") {
             let mut repository = serde_json::Map::new();
@@ -426,6 +464,255 @@ fn github_shows_each_session_s_pull_request_beside_its_title() {
     }
 }
 
+/// GitHub's watch at scale, measured (ignored: `cargo test --release
+/// github_scale -- --ignored --nocapture`; `GITHUB_SCALE_JSON=<path>` writes
+/// the numbers): 500 repositories on this Mac, 1,500 sessions in them
+/// (ui/shell_fixture's `scale`), gh played by a stub that counts what it's
+/// asked. Simulated time (frames at 60 a second): gh runs a minute idle and
+/// with one session working, and how long a visible session's new pull
+/// request takes to show. CPU: the window's time per simulated minute with
+/// the plugin, less the shell's own without it.
+#[test]
+#[ignore]
+fn github_scale() {
+    const MINUTE: usize = 60 * 60;
+    let kinds = |heard: &Heard, from: usize| -> serde_json::Value {
+        let all = runs(heard);
+        let new = &all[from.min(all.len())..];
+        let arg = |r: &serde_json::Value, i: usize| r["args"][i].as_str().unwrap_or_default().to_string();
+        let gh: Vec<&serde_json::Value> = new.iter().filter(|r| r["program"] == "gh").collect();
+        let graphql: Vec<&&serde_json::Value> = gh.iter().filter(|r| arg(r, 1) == "graphql").collect();
+        json!({
+            "gh": gh.len(),
+            "git": new.iter().filter(|r| r["program"] == "git").count(),
+            "repo_view": gh.iter().filter(|r| arg(r, 0) == "repo").count(),
+            "graphql": graphql.len(),
+            "search": graphql.iter().filter(|r| r["stdin"].as_str().unwrap_or_default().contains("search(")).count(),
+            "graphql_repositories": graphql.iter().map(|r| r["stdin"].as_str().unwrap_or_default().matches("repository(owner").count()).sum::<usize>(),
+        })
+    };
+    // (`GITHUB_SCALE_REAL_GAP`: seconds of real time after each simulated
+    // minute, for code that paces itself by the wall clock.)
+    let gap = std::env::var("GITHUB_SCALE_REAL_GAP").ok().and_then(|g| g.parse::<f64>().ok()).unwrap_or(0.);
+    let span = |app: &mut TestApp, minutes: usize| -> f64 {
+        let mut busy = 0.;
+        for _ in 0..minutes {
+            let t = std::time::Instant::now();
+            app.frames(MINUTE);
+            busy += t.elapsed().as_secs_f64();
+            if gap > 0. {
+                std::thread::sleep(std::time::Duration::from_secs_f64(gap));
+            }
+        }
+        busy * 1000. / minutes as f64
+    };
+    // The shell alone, as a floor.
+    let shell_ms = {
+        let (mut app, _) = shell_with(vec![], world(json!({ "viewer": "ada" })));
+        assert!(app.host.run_command("scale"));
+        app.frames(60);
+        span(&mut app, 2)
+    };
+    let items = vec![builtin("github")];
+    let github = world(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));
+    let (mut app, heard) = shell_with(items.clone(), github.clone());
+    assert!(app.host.run_command("scale"));
+    app.frames(10);
+    publish_records(&app, &items);
+    // The first five minutes: each repository found, then asked.
+    let start_ms = span(&mut app, 5);
+    let start = kinds(&heard, 0);
+    // Ten idle minutes.
+    let mark = runs(&heard).len();
+    let idle_ms = span(&mut app, 10);
+    let idle = kinds(&heard, mark);
+    // Ten minutes with an old session working.
+    assert!(app.host.run_command("scale_work"));
+    app.frames(10);
+    publish_records(&app, &items);
+    let mark = runs(&heard).len();
+    let active_ms = span(&mut app, 10);
+    let active = kinds(&heard, mark);
+    // A pull request opened for a session on screen: seconds until its
+    // badge shows.
+    let shown = |app: &mut TestApp| app.texts().iter().any(|t| t == "4242");
+    github.borrow_mut()["branches"]["r1-1"] = branch_pr(4242, "OPEN", json!({ "headRefName": "r1-1" }));
+    let mut frames = 0;
+    while !shown(&mut app) && frames < 10 * MINUTE {
+        app.frames(30);
+        frames += 30;
+        if gap > 0. && frames % MINUTE == 0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(gap));
+        }
+    }
+    let latency = if shown(&mut app) { json!(frames as f64 / 60.) } else { json!(null) };
+    let per_min = |v: &serde_json::Value, minutes: f64| v["gh"].as_f64().unwrap_or(0.) / minutes;
+    let numbers = json!({
+        "start_5min": start, "idle_10min": idle, "active_10min": active,
+        "gh_per_min_idle": per_min(&idle, 10.), "gh_per_min_active": per_min(&active, 10.),
+        "visible_pr_latency_s": latency,
+        "window_ms_per_sim_minute": { "shell_only": shell_ms, "start": start_ms, "idle": idle_ms, "active": active_ms },
+        "plugin_ms_per_minute_idle": idle_ms - shell_ms, "plugin_ms_per_minute_active": active_ms - shell_ms,
+    });
+    println!("{}", serde_json::to_string_pretty(&numbers).unwrap());
+    if let Ok(path) = std::env::var("GITHUB_SCALE_JSON") {
+        std::fs::write(path, numbers.to_string()).unwrap();
+    }
+    assert_eq!(app.error(), None);
+}
+
+/// The repositories a GraphQL ask covered (`o/r7` …), and its branches.
+fn asked_repositories(run: &serde_json::Value) -> (Vec<String>, usize) {
+    let body: serde_json::Value = serde_json::from_str(run["stdin"].as_str().unwrap_or_default()).unwrap_or_default();
+    let vars = body["variables"].as_object().cloned().unwrap_or_default();
+    let mut repos: Vec<String> = vars
+        .iter()
+        .filter(|(k, _)| k.starts_with('o') && k[1..].chars().all(|c| c.is_ascii_digit()))
+        .map(|(k, owner)| format!("{}/{}", owner.as_str().unwrap_or_default(), vars[&format!("n{}", &k[1..])].as_str().unwrap_or_default()))
+        .collect();
+    repos.sort();
+    let branches = vars.keys().filter(|k| k.starts_with('b') && k.contains('_')).count();
+    (repos, branches)
+}
+
+/// The shell at scale (500 repositories, 1,500 sessions), GitHub played by
+/// `world`, once every recent repository is found.
+fn github_at_scale(world_json: serde_json::Value) -> (TestApp, Heard, World) {
+    let items = vec![builtin("github")];
+    let github = world(world_json);
+    let (mut app, heard) = shell_with(items.clone(), github.clone());
+    assert!(app.host.run_command("scale"));
+    app.frames(10);
+    publish_records(&app, &items);
+    // (Each recent session's folder looked up, a few at a time.)
+    app.frames(60 * 60);
+    (app, heard, github)
+}
+
+/// How many GraphQL asks since `from` covered `repo`.
+fn asks_of(heard: &Heard, from: usize, repo: &str) -> usize {
+    runs(heard)[from..].iter().filter(|r| r["args"][1] == "graphql" && asked_repositories(r).0.iter().any(|x| x == repo)).count()
+}
+
+#[test]
+fn github_asks_many_repositories_at_once_and_only_as_often_as_they_matter() {
+    let (mut app, heard, _) = github_at_scale(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));
+    assert_eq!(app.error(), None);
+    let all = runs(&heard);
+    // Old sessions out of sight aren't looked up or asked about: r168 on.
+    let old: Vec<String> = all.iter().filter_map(|r| r["cwd"].as_str()).filter(|c| c.trim_start_matches("/work/r").parse::<usize>().is_ok_and(|n| n > 167)).map(str::to_string).collect();
+    assert!(old.is_empty(), "old sessions' folders were looked up: {old:?}\n{:?}", app.texts().iter().filter(|t| t.starts_with("Session") || t.starts_with("Repo")).collect::<Vec<_>>());
+    let graphql: Vec<&serde_json::Value> = all.iter().filter(|r| r["args"][1] == "graphql").collect();
+    // Batches: 50 repositories and 150 branches at most each, and every
+    // recent repository asked.
+    let mut covered = std::collections::BTreeSet::new();
+    for r in &graphql {
+        let (repos, branches) = asked_repositories(r);
+        assert!(repos.len() <= 50 && branches <= 150, "{} repositories, {branches} branches in one ask", repos.len());
+        covered.extend(repos);
+    }
+    assert!(covered.contains("o/r1") && covered.contains("o/r167"), "{covered:?}");
+    assert!(!covered.contains("o/r168") && !covered.contains("o/r300"), "an old repository was asked");
+    assert!(graphql.len() < 20, "{} asks for 167 repositories", graphql.len());
+    // Ten minutes: what's on screen every half minute; the rest of the
+    // recent ones, at most once; the old ones never.
+    let mark = runs(&heard).len();
+    app.frames(10 * 60 * 60);
+    let texts = app.texts();
+    let on_screen: Vec<usize> = (1..=500).filter(|i| texts.iter().any(|t| t == &format!("Repo {i}") || t == &format!("Session {}", (i - 1) * 3 + 1))).collect();
+    let hot = on_screen.iter().map(|i| asks_of(&heard, mark, &format!("o/r{i}"))).max().unwrap_or(0);
+    assert!(hot >= 15, "a repository on screen ({on_screen:?}) was asked {hot} times in ten minutes");
+    let quiet = (150..=167).find(|i| !on_screen.contains(i)).unwrap();
+    assert!(asks_of(&heard, mark, &format!("o/r{quiet}")) <= 1, "a recent repository out of sight was asked often");
+    assert_eq!(asks_of(&heard, mark, "o/r300"), 0);
+    // An old one starts working: asked within the half minute, and often.
+    assert!(app.host.run_command("scale_work"));
+    app.frames(10);
+    publish_records(&app, &[builtin("github")]);
+    let mark = runs(&heard).len();
+    app.frames(31 * 60);
+    assert!(app.wait_until(|_| asks_of(&heard, mark, "o/r300") >= 1), "the working session's repository wasn't asked");
+    app.frames(3 * 60 * 60);
+    assert!(asks_of(&heard, mark, "o/r300") >= 5, "{}", asks_of(&heard, mark, "o/r300"));
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn github_runs_two_gh_at_once_at_most() {
+    let (mut app, heard, github) = github_at_scale(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));
+    github.borrow_mut()["hold"] = json!(true);
+    let mark = runs(&heard).len();
+    assert!(app.host.run_command("github/refresh"));
+    app.frames(5 * 60);
+    assert_eq!(runs(&heard).len() - mark, 2, "gh runs at once: {}", runs(&heard).len() - mark);
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn github_asks_less_as_its_quota_runs_low_and_not_at_all_near_its_end() {
+    let (mut app, heard, github) = github_at_scale(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));
+    let count = |from: usize| runs(&heard)[from..].iter().filter(|r| r["args"][1] == "graphql").count();
+    let mark = runs(&heard).len();
+    app.frames(10 * 60 * 60);
+    let full = count(mark);
+    // A fifth left: a quarter as often.
+    github.borrow_mut()["rate_remaining"] = json!(1000);
+    app.frames(60 * 60);
+    let mark = runs(&heard).len();
+    app.frames(10 * 60 * 60);
+    let low = count(mark);
+    assert!(low * 2 <= full, "with a fifth of the quota left: {low} asks, {full} with all of it");
+    // One percent left, resetting in ten minutes: nothing until it does.
+    let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+    let iso = {
+        let days = (reset / 86400) as i64;
+        let (z, secs) = (days + 719468, reset % 86400);
+        let era = z.div_euclid(146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
+    };
+    github.borrow_mut()["rate_remaining"] = json!(40);
+    github.borrow_mut()["rate_reset"] = json!(iso);
+    app.frames(2 * 60 * 60);
+    let mark = runs(&heard).len();
+    app.frames(7 * 60 * 60);
+    assert_eq!(count(mark), 0, "asked with the quota nearly spent");
+    // Reset: asked again.
+    github.borrow_mut()["rate_remaining"] = json!(4900);
+    app.frames(5 * 60 * 60);
+    assert!(count(mark) > 0, "never asked again after the reset");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn github_leaves_what_the_engine_watches_to_the_engine() {
+    let items = vec![builtin("github")];
+    let github = world(json!({ "viewer": "ada", "repository": "zeronsh/zgx", "branches": {} }));
+    let (mut app, heard) = shell_with(items.clone(), github.clone());
+    publish_records(&app, &items);
+    assert!(app.wait_until(|_| runs(&heard).iter().any(|r| ran(r, &["pullRequests(headRefName", "fix/build"]))), "{:?}", runs(&heard));
+    // The sessions on screen are watched by the engine too.
+    let watched = |heard: &Heard| heard.borrow().iter().rev().find(|(k, _)| k == "plugin.github.github_watch").map(|(_, v)| v.clone()).unwrap_or_default();
+    assert!(watched(&heard).contains("\"a1\""), "{}", watched(&heard));
+    // The engine says a1's: shown, from there; and gh asks of it no more
+    // at a half minute's pace.
+    app.host.shared("plugin.github.github", json_value(&json!({}))).set(json_value(&json!({ "a1": {
+        "number": 77, "title": "From the engine", "url": "https://github.com/zeronsh/zgx/pull/77", "state": "open", "base": "main", "head": "fix/build", "ci": "failed", "review": "unknown",
+    } })));
+    assert!(app.wait_until(|app| app.texts().iter().any(|t| t == "77")), "{}", app.tree());
+    let mark = runs(&heard).len();
+    app.frames(5 * 60 * 60);
+    let fix = runs(&heard)[mark..].iter().filter(|r| ran(r, &["pullRequests(headRefName", "fix/build"])).count();
+    assert!(fix <= 1, "a1's branch asked {fix} times in five minutes, the engine watching it");
+    assert_eq!(app.error(), None);
+}
+
 #[test]
 fn github_finds_a_session_s_pull_request_on_github_when_its_folder_isn_t_here() {
     let items = vec![builtin("github")];
@@ -637,6 +924,30 @@ fn github_s_viewer_shows_each_file_s_diff_in_code() {
     app.frames(10);
     let tree = app.tree();
     assert!(!tree.contains("\"+new a\"") && tree.contains("\"+one b\""), "{tree}");
+}
+
+#[test]
+fn github_s_viewer_asks_for_a_diff_again_only_if_it_changed() {
+    // (No revisions to key it by: asked of GitHub each time it opens.)
+    let detail = json!({
+        "title": "T", "body": "", "url": "https://github.com/zeronsh/zgx/pull/1264", "number": 1264, "state": "OPEN",
+        "files": [ { "path": "src/a.rs", "additions": 1, "deletions": 1, "changeType": "MODIFIED" } ],
+    });
+    let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old a\n+new a\n";
+    let (mut app, asked) = viewer_with(json!({ "viewer": "ada", "pr": detail, "diff": diff, "diff_etag": "\"d1\"" }));
+    let diffs = |asked: &Heard| runs(asked).into_iter().filter(|r| ran(r, &["v3.diff"])).collect::<Vec<_>>();
+    app.click("#github-pr-tabs >> role:tab \"Code\"");
+    assert!(app.wait_until(|app| app.tree().contains("\"+new a\"")), "{}", app.tree());
+    assert_eq!(diffs(&asked).len(), 1);
+    // Opened again (drawn anew): asked with its ETag, GitHub's 304, the
+    // diff kept.
+    app.host.set_state("github_fixture.width", zgx_script::Value::from(420.)).unwrap();
+    app.frames(10);
+    app.click("#github-pr-tabs >> role:tab \"Code\"");
+    assert!(app.wait_until(|_| diffs(&asked).len() == 2));
+    assert!(diffs(&asked)[1]["args"].to_string().contains("If-None-Match: \\\"d1\\\""), "{}", diffs(&asked)[1]);
+    assert!(app.wait_until(|app| app.tree().contains("\"+new a\"")), "{}", app.tree());
+    assert_eq!(app.error(), None);
 }
 
 #[test]
@@ -2205,6 +2516,28 @@ fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value,
     (app, heard, service)
 }
 
+/// The Git service on "box" says `data` (`zeron.emit("changed", data)`), as
+/// the host's inbox brings another device's events.
+fn tell_git(app: &mut TestApp, data: serde_json::Value) {
+    tell_git_n(app, data, 1);
+}
+
+/// `data` said `n` times at once (before the window draws again).
+fn tell_git_n(app: &mut TestApp, data: serde_json::Value, n: usize) {
+    let inbox = app.host.shared("plugin.git.inbox", json_value(&json!([])));
+    let mut now: serde_json::Value = serde_json::from_str(&inbox.signal().with_untracked(zgx_script::Value::clone).to_json()).unwrap_or(json!([]));
+    if !now.is_array() {
+        now = json!([]);
+    }
+    let list = now.as_array_mut().unwrap();
+    for _ in 0..n {
+        let seq = list.len() + 1;
+        list.push(json!({ "seq": seq, "from": { "id": "box", "name": "box" }, "event": "changed", "here": false, "data": data, "at": 0 }));
+    }
+    inbox.set(json_value(&now));
+    app.frames(2);
+}
+
 fn git_fixture(app: &mut TestApp, name: &str, value: zgx_script::Value) {
     app.host.set_state(&format!("git_fixture.{name}"), value).unwrap();
     app.frames(10);
@@ -2237,10 +2570,75 @@ fn git_s_changes_show_a_session_s_work_tree_on_its_device() {
     let diff = &asked_service(&heard, "diff")[0];
     assert_eq!((diff["args"]["b"].as_str(), diff["args"]["path"].as_str()), (Some("t1"), Some("src/graph.rs")), "{diff}");
     assert!(app.wait_until(|app| app.tree().contains("fn rows(n: usize) {}")), "{}", app.tree());
-    // Nothing moved: asked again, the files aren't.
-    let before = asked_service(&heard, "changes").len();
-    app.wait_until(|_| asked_service(&heard, "status").len() >= 3);
+    // Its device says it changed, and nothing moved: its status is asked
+    // again, the files aren't.
+    let (before, asked) = (asked_service(&heard, "changes").len(), asked_service(&heard, "status").len());
+    tell_git(&mut app, json!({ "root": "/work/atlas", "cwds": ["/work/atlas"] }));
+    assert!(app.wait_until(|_| asked_service(&heard, "status").len() > asked));
+    app.frames(10);
     assert_eq!(asked_service(&heard, "changes").len(), before, "the files are asked again only as they move");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn git_asks_again_only_as_its_device_says_and_while_it_shows() {
+    let (mut app, heard, _) = git_tab(git_world(), None);
+    assert!(app.wait_until(|app| app.find("role:checkbox \"src/graph.rs\"").is_some()), "{}", app.tree());
+    // Asked with its device keeping watch, and listening for what it says.
+    assert_eq!(asked_service(&heard, "status")[0]["args"]["watch"], json!(true));
+    assert!(!asked_service(&heard, "@watch").is_empty(), "{:?}", service_calls(&heard));
+    let status = || asked_service(&heard, "status").len();
+    app.frames(30);
+    let quiet = status();
+    // Nothing heard: nothing asked (no loop on its own answers), for half
+    // a minute.
+    app.frames(30 * 60);
+    assert_eq!(status(), quiet, "asked with nothing heard");
+    // A change said: asked once.
+    tell_git(&mut app, json!({ "root": "/work/atlas", "cwds": ["/work/atlas"] }));
+    assert!(app.wait_until(|_| status() == quiet + 1));
+    app.frames(120);
+    assert_eq!(status(), quiet + 1, "one change, one ask");
+    // Another checkout's change: nothing.
+    tell_git(&mut app, json!({ "root": "/work/other", "cwds": ["/work/other"] }));
+    app.frames(120);
+    assert_eq!(status(), quiet + 1, "asked for another checkout's change");
+    // Changes said while it's asking: once more after, not once each.
+    tell_git_n(&mut app, json!({ "root": "/work/atlas", "cwds": ["/work/atlas"] }), 5);
+    assert!(app.wait_until(|_| status() >= quiet + 2));
+    app.frames(120);
+    assert_eq!(status(), quiet + 3, "five said at once: asked, then once more");
+    let shown = status();
+    // The window hidden: a change is kept, not asked.
+    let window = app.host.shared("zgx.window.shown", zgx_script::Value::Bool(true));
+    window.set(zgx_script::Value::Bool(false));
+    app.frames(5);
+    tell_git(&mut app, json!({ "root": "/work/atlas", "cwds": ["/work/atlas"] }));
+    app.frames(120);
+    assert_eq!(status(), shown, "asked while the window is hidden");
+    // Shown again: asked once, for what changed meanwhile.
+    window.set(zgx_script::Value::Bool(true));
+    assert!(app.wait_until(|_| status() == shown + 1));
+    app.frames(120);
+    assert_eq!(status(), shown + 1);
+    // A minute with nothing heard: asked once, the net under a missed one.
+    app.frames(61 * 60);
+    assert_eq!(status(), shown + 2, "the minute's safety ask");
+    // Another app in front, then this one again: asked once as it comes back.
+    let front = app.host.shared("zgx.window.active", zgx_script::Value::Bool(true));
+    front.set(zgx_script::Value::Bool(false));
+    app.frames(30);
+    assert_eq!(status(), shown + 2, "asked as it went behind");
+    front.set(zgx_script::Value::Bool(true));
+    assert!(app.wait_until(|_| status() == shown + 3));
+    app.frames(120);
+    assert_eq!(status(), shown + 3);
+    // The tab closed: nothing more, a minute on.
+    git_fixture(&mut app, "mode", zgx_script::Value::from("empty"));
+    let closed = status();
+    tell_git(&mut app, json!({ "root": "/work/atlas", "cwds": ["/work/atlas"] }));
+    app.frames(61 * 60);
+    assert_eq!(status(), closed, "asked with no tab showing it");
     assert_eq!(app.error(), None);
 }
 

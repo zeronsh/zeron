@@ -271,7 +271,43 @@ function M.author(item: any): string
 	elseif a.kind == "verified" and a.username then
 		return s("plugins.words.author.verified", { username = a.username })
 	end
-	return s("plugins.words.author.unknown")
+	-- (Who made it can't be told: where it came from instead, beside the
+	-- Unverified badge.)
+	return M.from(item.source) or s("plugins.words.author.unknown")
+end
+
+-- Whether Zeron can't vouch for who made it: someone else's, signed by no
+-- one Zeron knows (Zeron's own and yours never). A template's item is its
+-- `imported`'s author, as a plugin's is its own.
+function M.unverified(item: any): boolean
+	if type(item) ~= "table" or item.builtin or item.own then
+		return false
+	end
+	local a = item.author
+	return type(a) == "table" and a.kind == "unknown"
+end
+
+-- Where someone else's came from, as a person reads a link
+-- ("github.com/ada/clock"), or nil.
+function M.where(source: any): string?
+	if type(source) ~= "table" or type(source.url) ~= "string" or source.url == "" then
+		return nil
+	end
+	local w = string.gsub(source.url, "^https?://", "")
+	w = string.gsub(w, "%.git$", "")
+	w = string.gsub(w, "/$", "")
+	return w
+end
+
+-- "From github.com/ada/clock", "From a file", or nil.
+function M.from(source: any): string?
+	local w = M.where(source)
+	if w then
+		return s("plugins.words.from", { where = w })
+	elseif type(source) == "table" and source.kind == "file" then
+		return s("plugins.words.from_file")
+	end
+	return nil
 end
 
 -- What a plugin's row says under its name.

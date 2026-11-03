@@ -127,20 +127,20 @@ return function(props: Props): Node
 	end
 	p.relative = true
 	p[1] = ui.row(label)
-	p[2] = ui.show(
-		busy,
-		ui.row {
-			absolute = true,
-			left = 0,
-			right = 0,
-			top = 0,
-			bottom = 0,
-			items = "center",
-			justify = "center",
-			pointer_events = "none",
-			status.Spinner { size = SPIN[props.size or "md"], ink = INK[props.tone or "primary"] },
-		}
-	)
+	-- (Its box always there, out of the flow, the spinner shown in it: a
+	-- shown-or-not beside the label counted a gap in the button's width as
+	-- what it's in measured it, 8 points past its box.)
+	p[2] = ui.row {
+		absolute = true,
+		left = 0,
+		right = 0,
+		top = 0,
+		bottom = 0,
+		items = "center",
+		justify = "center",
+		pointer_events = "none",
+		ui.show(busy, status.Spinner { size = SPIN[props.size or "md"], ink = INK[props.tone or "primary"] }),
+	}
 	local click = props.on_click
 	if click then
 		p.on_click = function(...)

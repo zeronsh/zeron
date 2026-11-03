@@ -24,7 +24,8 @@ end
 
 local M = {}
 
--- Adds the glass to `props` (changed in place, and returned).
+-- Adds the glass to `props` (changed in place, and returned). (A modal
+-- opening closes every popup open outside it: zgx's own, since #1419.)
 function M.style(props: { [any]: any }, kind: Kind?): { [any]: any }
 	if kind == "island" then
 		props.rounded = props.rounded or "$zeron.island.radius"

@@ -41,6 +41,43 @@ pub fn watch_key(params: &Json) -> String {
     )
 }
 
+/// How long before a session's pull request watch that ended is started
+/// again: 2 s, doubling to a minute while it keeps ending, and back to 2 s
+/// once it's heard (as the shipping app's sidebar retries, #1128). Without
+/// it, a watch that failed once (the engine restarting, the device away)
+/// left the chat's badge missing until its branch changed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Retry {
+    next: std::time::Duration,
+}
+
+impl Retry {
+    pub const FIRST: std::time::Duration = std::time::Duration::from_secs(2);
+    pub const MOST: std::time::Duration = std::time::Duration::from_secs(60);
+
+    pub fn new() -> Self {
+        Self { next: Self::FIRST }
+    }
+
+    /// It ended: how long to wait before starting it again.
+    pub fn ended(&mut self) -> std::time::Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(Self::MOST);
+        wait
+    }
+
+    /// It was heard: the next end waits the least again.
+    pub fn heard(&mut self) {
+        self.next = Self::FIRST;
+    }
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// What a plugin asked of GitHub (`zeron.github.pr(url)`, `.diff(url)`), as
 /// the engine's call that answers it, or why it may not: reading needs
 /// "github"; and only a pull request's own address on GitHub is asked about.
@@ -217,6 +254,17 @@ mod tests {
         // Not stamped yet: the one it was made on.
         let s = json!({ "cwd": "/w/atlas", "branch": "main", "device": "mac" });
         assert_eq!(watch_params(&s).unwrap()["branch"], json!("main"));
+    }
+
+    #[test]
+    fn a_watch_that_keeps_ending_waits_longer_each_time_and_heard_starts_over() {
+        use std::time::Duration;
+        let mut retry = Retry::new();
+        let waits: Vec<u64> = (0..7).map(|_| retry.ended().as_secs()).collect();
+        assert_eq!(waits, vec![2, 4, 8, 16, 32, 60, 60]);
+        retry.heard();
+        assert_eq!(retry.ended(), Duration::from_secs(2));
+        assert_eq!(retry.ended(), Duration::from_secs(4));
     }
 
     #[test]

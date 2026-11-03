@@ -43,6 +43,7 @@ mod github;
 mod haptics;
 mod heap;
 mod images;
+mod links;
 mod pasted;
 mod math;
 mod plugins;
@@ -74,6 +75,10 @@ mod focus_tests;
 #[cfg(test)]
 mod palette_focus_tests;
 #[cfg(test)]
+mod popups_tests;
+#[cfg(test)]
+mod placement_tests;
+#[cfg(test)]
 mod gif_tests;
 #[cfg(test)]
 mod picture_aspect_tests;
@@ -99,9 +104,9 @@ use zgx_desktop::{
 };
 use zgx_script::{ScriptHost, Shared, Value};
 
-/// Where `ui.persist` keeps its files, apart from the shipping app's data
-/// (and Zeron Preview's apart from development builds', which are staging's).
-const APP_ID: &str = if cfg!(feature = "preview") { "zeron-preview" } else { "zeron-zgx" };
+/// Where `ui.persist` keeps its files: the Zeron app's (the beta), apart from
+/// development builds', which are staging's.
+const APP_ID: &str = if cfg!(feature = "beta") { "zeron" } else { "zeron-zgx" };
 
 /// Setup's window, in points: room for a step and its footer, no more.
 const ONBOARDING_SIZE: (f64, f64) = (680., 500.);
@@ -132,10 +137,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: first thing in main, before any thread is started.
         unsafe { std::env::set_var("ZGX_CHECK", "0") };
     }
+    // `zeron`'s command line (crates/cli), as the Zeron app's: help,
+    // `--version`, `update`, `daemon` here; `headless`, `login`, `status`,
+    // `plugin` and the engine's other subcommands in the engine helper beside
+    // this app (which doesn't link the engine), with the same arguments. A
+    // development build keeps its own launch words (intro, gallery, a
+    // fixture, --inspect) and its bare launch, which would otherwise log as
+    // the Zeron app does (in ~/.zeron).
+    let mut open_url = None;
+    // (This app's own version for crates/update, before `zeron update` or
+    // the app's updater compares releases with it: a beta's isn't the
+    // workspace's.)
+    zeron_update::set_app_version(about::APP_VERSION);
+    if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
+        match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
+            zeron_cli::Launch::Done(result) => {
+                // (As a `main` returning it would: the error, exit status 1.)
+                if let Err(error) = result {
+                    eprintln!("Error: {error:?}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            zeron_cli::Launch::Window { open_url: url } => open_url = url,
+            zeron_cli::Launch::Engine(_) => unreachable!("the helper runs the engine's commands"),
+            #[cfg(target_os = "linux")]
+            zeron_cli::Launch::Appshot => return Err("Appshots from the command line aren't in this app yet".into()),
+        }
+    }
     let mut screen = Screen::Intro;
     let mut asked_for_intro = false;
     let mut inspect = false;
-    for arg in std::env::args().skip(1) {
+    for arg in std::env::args().skip(1).filter(|_| !cfg!(feature = "beta") && open_url.is_none()) {
         match arg.as_str() {
             "intro" => {
                 screen = Screen::Intro;
@@ -195,20 +228,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for font in fonts() {
         application = application.font(font?);
     }
+    // The Zeron app's links (`zeron://`: a clicked banner, a chat's link),
+    // delivered to the app as Zeron.app's are (src/links.rs).
+    if cfg!(feature = "beta") {
+        application = application
+            .application_id("sh.zeron.app")?
+            .on_application_event(|event, _| {
+                if let zgx_desktop::ApplicationEvent::OpenUrls(urls) = event {
+                    for url in urls {
+                        links::open(&url);
+                    }
+                }
+            });
+    }
     let options = match screen {
         Screen::Intro => intro_window(),
         Screen::Onboarding => onboarding_window(),
         Screen::Main => main_window(),
         Screen::Gallery | Screen::Fixture(_) => gallery_window(),
     };
-    application.window(options).run(move |cx| match &screen {
-        Screen::Intro => intro(cx, inspect),
-        Screen::Onboarding => open(cx, "app.luau", inspect),
-        Screen::Main => open_main(cx, inspect),
-        Screen::Gallery => open(cx, "gallery.luau", inspect),
-        Screen::Fixture(entry) => open(cx, entry, inspect),
+    application.window(options).run(move |cx| {
+        match &screen {
+            Screen::Intro => intro(cx, inspect),
+            Screen::Onboarding => open(cx, "app.luau", inspect),
+            Screen::Main => open_main(cx, inspect),
+            Screen::Gallery => open(cx, "gallery.luau", inspect),
+            Screen::Fixture(entry) => open(cx, entry, inspect),
+        }
+        // Launched on a link (`zeron <url>`).
+        if let Some(url) = &open_url {
+            links::open(url);
+        }
     })?;
+    // Quitting: an update downloaded and never restarted for installs now,
+    // so the next launch is on it (src/about.rs).
+    about::install_on_quit();
     Ok(())
+}
+
+/// Whether `args` are a development launch's own words (a screen, a
+/// fixture, devtools), or none: not `zeron`'s command line.
+fn dev_launch(args: &[String]) -> bool {
+    args.iter().all(|arg| {
+        matches!(arg.as_str(), "intro" | "onboarding" | "main" | "gallery" | "--inspect" | "--zeron-template")
+            || (arg.starts_with("fixture=") && arg.ends_with(".luau"))
+    })
 }
 
 /// What `screen` loads first, compiled ahead with the design system it
@@ -373,7 +437,18 @@ fn onboarded_marker() -> Option<PathBuf> {
 }
 
 fn onboarded() -> bool {
-    onboarded_marker().is_some_and(|path| path.is_file())
+    onboarded_marker().is_some_and(|path| path.is_file()) || (cfg!(feature = "beta") && finished_in_zeron_app())
+}
+
+/// Whether setup was finished in the Zeron app's own interface before this
+/// one replaced it (its `onboardingCompleted` in the data dir's
+/// ui-settings.json, crates/ui settings.rs): someone who has used Zeron isn't
+/// walked through it again.
+fn finished_in_zeron_app() -> bool {
+    engine::data_dir()
+        .and_then(|dir| std::fs::read(dir.join("ui-settings.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|settings| settings["onboardingCompleted"].as_bool() == Some(true))
 }
 
 /// A host for the script `entry` under `ui/`, with what every window gives
@@ -511,6 +586,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         // Settings → About & updates: versions and the engine's updater
         // (src/about.rs).
         about::install(cx, &host);
+        // `zeron://` links the system handed the app (src/links.rs).
+        links::install(&host);
         // Your imported VS Code themes (src/themes.rs).
         themes::install(cx, &host);
     }
@@ -922,7 +999,7 @@ fn gallery_window() -> WindowOptions {
 
 /// The scripts: this folder's `ui/`, or `ZERON_ZGX_UI` (scripts/smoke.sh's
 /// frozen copy, which other saves under ui/ can't reload mid-run), or, in
-/// an app bundle (Zeron Preview), the copy in its `Contents/Resources/ui`
+/// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
 /// (with `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
     match std::env::var_os("ZERON_ZGX_UI") {

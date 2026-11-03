@@ -4,7 +4,7 @@ Every open ask from Zeron's zgx app, one folder per topic: an `ASK.md` (who
 needs it, what fails today, the ask) and, where one exists, a minimal repro
 (`zgx run <folder>/repro` or `zgx test <folder>`, with `ZGX_CHECK=0`). Most
 were seen on zgx `b3371f8` on macOS, unless the folder says otherwise; Zeron's
-pin is now zgx main `a2c9cf1e6` (#1417). Each open ask is assigned to a zgx lane,
+pin is now zgx main `f81d5e99` (#1420). Each open ask is assigned to a zgx lane,
 which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 ## High: users see it
@@ -13,7 +13,6 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 |---|---|
 | [shader-compile-first-draw](shader-compile-first-draw/ASK.md) | The window freezes 70-360 ms when the first session of a launch starts working (its status ring's shader compiles in the frame). |
 | [inline-node](inline-node/ASK.md) | Inline math (and inline chips, emoji images) can't sit in a paragraph's line. |
-| [menu-keeps-selection](menu-keeps-selection/ASK.md) | Right-click inside a selection in the composer (any field): the highlight vanishes while the menu is open (the menu takes the focus; a blurred field hides its selection). Zeron's actions still act on it. |
 
 ## Medium: users meet it now and then, or a feature waits on it
 
@@ -24,7 +23,6 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 | [atomic-selection](atomic-selection/ASK.md) | A selection that starts inside a formula copies half its TeX. |
 | [web-snapshot](web-snapshot/ASK.md) | The browser panel can't attach a picture of the page. |
 | [markdown-offsets](markdown-offsets/ASK.md) | Review comments on a Markdown preview can't anchor to the block that holds their line. |
-| [look-up-line-editor](look-up-line-editor/ASK.md) | `EditorHandle::look_up` gives up in an editor shown a line at a time (the composer's): Look Up did nothing there. Zeron anchors it itself meanwhile (`look_up_by_lines`). |
 
 ## Developers of Zeron (and of any zgx app)
 
@@ -44,6 +42,10 @@ which reports its SHA when it lands. Ranked by what users of Zeron would notice.
 
 | Ask | |
 |---|---|
+| [modal-over-popups](modal-over-popups/ASK.md) | A modal opening closes every anchored popup outside it, popup windows included (#1419, `fbc62abe`). In the pin `f81d5e99`; adopted: ds/popups is gone (glass's `Popups.track`, the `Popups.modal` wrapping in the command palette, dialog and lightbox, the `popups.dismiss` host action); src/popups_tests.rs stays as the guard. |
+| [menu-keeps-selection](menu-keeps-selection/ASK.md) | An editor keeps drawing its selection, inactive, while a context menu that took its focus shows (#1418, `00597c48`). In the pin `f81d5e99`; nothing to change in Zeron (src/editor_menu.rs's `ready()` still puts the menu's selection back for its actions). |
+| [look-up-line-editor](look-up-line-editor/ASK.md) | `EditorHandle::look_up` works in an editor shown a line at a time (#1418, `6f8ad524`). In the pin `f81d5e99`; adopted: src/editor_menu.rs's `look_up_by_lines` is gone, Look Up calls zgx's own (editor_menu::tests looks up "world" over the word). |
+| [popup-window-zoom](popup-window-zoom/ASK.md) | Popup windows open at their trigger, sized and hit right, in a zoomed window, a zoom set at launch too (#1420, `f81d5e99`). In the pin; no Zeron workaround; src/placement_tests is the scene-level guard (a live check at 90%: a right-click in the composer opens its menu at the click). |
 | [popup-layer-shadow](popup-layer-shadow/ASK.md) | A popup finds its card through clear layers: a card with its own shadow turns the window server's off, a translucent one gets AppKit's material cut to its corners (#1390, `b75d8e74f`). In the pin `0d42292ef`; adopted: ds/hover_card frames every node tooltip (the context card, ds.Tooltip) in the menus' own glass (`glass.style(…, "menu")`), and tests/hover_cards.rs requires it. A dismissed hover card leaves no empty glass (`dda319ccd`). |
 | [chip-span](chip-span/ASK.md) | Real chip spans (`d6582b326`, `972b05d8f`). In the pin `dda319ccd`; adopted: ds/markdown `mention_chip` is a chip span (no transparent underline, no thin spaces), so a copied message has the names alone (src/chip_copy_tests). |
 | [list-in-easing-height](list-in-easing-height/ASK.md) | A `ui.list` in a box whose height eases lays out (`78dcac2a4`). In the pin `dda319ccd`; adopted: ds/session_row `Fold` eases the box with the list straight in it, the held full-height inner box gone. |

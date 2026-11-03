@@ -42,9 +42,28 @@ use tokio::sync::watch;
 #[cfg(windows)]
 pub mod windows;
 
+pub mod channel;
+pub mod desktop;
+pub use channel::Channel;
+
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The app's own version when it isn't this crate's: a beta interface built
+/// apart from the workspace (`0.2.136-beta.1`). Set once, before the desktop
+/// checker starts.
+pub fn set_app_version(version: &str) {
+    let _ = APP_VERSION.set(version.trim().to_owned());
+}
+
+/// The version the desktop app compares releases with: [`set_app_version`]'s,
+/// or [`current_version`].
+pub fn app_version() -> &'static str {
+    APP_VERSION.get().map(String::as_str).unwrap_or(current_version())
 }
 
 /// Successful checks repeat this often. The feed is a sub-kilobyte,
@@ -90,6 +109,17 @@ pub struct Manifest {
     /// via `latest.txt` — downloads then skip checksum verification (with a log).
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
+    /// The engine inside the release's app, when it isn't `version`'s own (a
+    /// beta app carries the stable engine).
+    #[serde(default, rename = "engineVersion", skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
+    /// The oldest macOS the release's app runs on, when it's newer than the
+    /// stable app's (beta: [`channel::BETA_MINIMUM_MACOS`]).
+    #[serde(default, rename = "minimumMacOS", skip_serializing_if = "Option::is_none")]
+    pub minimum_macos: Option<String>,
+    /// The channel this manifest was fetched from: where its files are.
+    #[serde(skip)]
+    pub channel: Channel,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -145,17 +175,78 @@ pub fn mac_app_artifact(version: &str) -> String {
     format!("zeron-{version}-macos-{arch}-app.tar.gz")
 }
 
-fn parse_version(v: &str) -> Option<Vec<u64>> {
-    let nums: Vec<u64> = v
-        .trim()
-        .trim_start_matches('v')
+/// A release version: dotted numbers and, for a prerelease, its semver
+/// identifiers (`0.2.136-beta.2` → `[0, 2, 136]`, `["beta", "2"]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Version {
+    core: Vec<u64>,
+    pre: Vec<PreId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PreId {
+    // Numeric identifiers sort below alphanumeric ones (semver 11.4.3).
+    Num(u64),
+    Text(String),
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        self.core.cmp(&other.core).then_with(|| {
+            match (self.pre.is_empty(), other.pre.is_empty()) {
+                // A release outranks its prereleases.
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                // Identifier by identifier; a shorter prefix is lower.
+                (false, false) => self.pre.cmp(&other.pre),
+            }
+        })
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Dotted numbers with an optional leading `v` and an optional `-prerelease`
+/// (`0.2.136-beta.1`). Build metadata (`+…`) and anything else is rejected.
+fn parse_version(v: &str) -> Option<Version> {
+    let v = v.trim().trim_start_matches('v');
+    let (core, pre) = match v.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (v, None),
+    };
+    let core: Vec<u64> = core
         .split('.')
         .map(|p| p.parse().ok())
         .collect::<Option<_>>()?;
-    (!nums.is_empty()).then_some(nums)
+    if core.is_empty() {
+        return None;
+    }
+    let pre = match pre {
+        None => Vec::new(),
+        Some(pre) => pre
+            .split('.')
+            .map(|id| {
+                if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    None
+                } else if id.chars().all(|c| c.is_ascii_digit()) {
+                    id.parse().ok().map(PreId::Num)
+                } else {
+                    Some(PreId::Text(id.to_ascii_lowercase()))
+                }
+            })
+            .collect::<Option<_>>()?,
+    };
+    Some(Version { core, pre })
 }
 
-/// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
+/// Strictly-newer compare (`0.1.10` > `0.1.9` > `0.1`), semver's for
+/// prereleases: `0.2.135` < `0.2.136-beta.1` < `0.2.136-beta.2` < `0.2.136`.
 /// Unparseable versions never count as newer — a garbage `latest.txt` must not
 /// trigger an update loop.
 pub fn version_newer(latest: &str, current: &str) -> bool {
@@ -165,10 +256,91 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+/// What a release means for the build that's running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offer {
+    /// Nothing to install.
+    Current,
+    /// A newer release on the build's own channel (or a newer beta for a
+    /// stable build that chose beta).
+    Newer,
+    /// The chosen channel's release replaces this build of the other
+    /// channel even though it isn't newer: leaving beta for stable.
+    Switch,
+    /// Not installable here, and why (in words for the person).
+    Held(String),
+}
+
+impl Offer {
+    pub fn installs(&self) -> bool {
+        matches!(self, Self::Newer | Self::Switch)
+    }
+}
+
+/// What `manifest` (the `selected` channel's) offers a build of `running`
+/// whose bundle carries the engine `running_engine`, on macOS `macos`.
+///
+/// - Its channel's release installs when newer.
+/// - Choosing beta on a stable build installs a beta only when it's newer:
+///   a stable that moved past the last beta waits for the next one.
+/// - Choosing stable on a beta build installs stable even when older, unless
+///   stable's engine is older than the one the beta brought (it would run on
+///   data a newer engine wrote): then it waits until stable catches up.
+/// - A release needing a newer macOS than this one is held.
+pub fn offer(
+    manifest: &Manifest,
+    running: &str,
+    selected: Channel,
+    running_engine: Option<&str>,
+    macos: Option<&str>,
+) -> Offer {
+    let latest = manifest.version.as_str();
+    if parse_version(latest).is_none() || latest.trim() == running.trim() {
+        return Offer::Current;
+    }
+    let leaving_beta = Channel::of_version(running) == Channel::Beta && selected == Channel::Stable;
+    if !leaving_beta && !version_newer(latest, running) {
+        return Offer::Current;
+    }
+    if let (Some(minimum), Some(system)) = (manifest.minimum_macos.as_deref(), macos)
+        && !channel::macos_at_least(system, minimum)
+    {
+        return Offer::Held(format!(
+            "Zeron {latest} needs macOS {minimum} or later. This Mac has macOS {system}."
+        ));
+    }
+    if !leaving_beta {
+        return Offer::Newer;
+    }
+    let target_engine = manifest.engine_version.as_deref().unwrap_or(latest);
+    if let Some(engine) = running_engine
+        && version_newer(engine, target_engine)
+    {
+        return Offer::Held(format!(
+            "This beta's engine ({engine}) is newer than Zeron {latest}'s. You'll move to Stable once it catches up."
+        ));
+    }
+    if version_newer(latest, running) {
+        Offer::Newer
+    } else {
+        Offer::Switch
+    }
+}
+
 /// Fetch the newest release metadata: `manifest.json`, falling back to
 /// `latest.txt` (version only, no checksums) for pre-manifest releases.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
-    let base = release_base(edge_url)?;
+    fetch_latest_on(edge_url, channel::selected()).await
+}
+
+/// [`fetch_latest`] from `channel`'s feed.
+pub async fn fetch_latest_on(edge_url: &str, channel: Channel) -> anyhow::Result<Manifest> {
+    let mut manifest = fetch_latest_from(&channel.base(&release_base(edge_url)?)).await?;
+    manifest.channel = channel;
+    Ok(manifest)
+}
+
+async fn fetch_latest_from(base: &str) -> anyhow::Result<Manifest> {
     let client = http_client()?;
     let manifest_url = format!("{base}/manifest.json");
     match fetch_release_metadata(&client, &manifest_url).await {
@@ -203,7 +375,7 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     }
     Ok(Manifest {
         version,
-        files: BTreeMap::new(),
+        ..Manifest::default()
     })
 }
 
@@ -573,9 +745,7 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
             .file_name()?
             .to_str()?
             .to_owned(),
-        InstallKind::MacApp { bundle } => bundle_short_version(
-            &std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?,
-        )?,
+        InstallKind::MacApp { bundle } => bundle_engine_version(bundle)?,
         #[cfg(windows)]
         InstallKind::WindowsPortable { directory } => windows::installed_version(directory)?,
         _ => return None,
@@ -583,15 +753,24 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
     parse_version(&version).map(|_| version)
 }
 
-/// `CFBundleShortVersionString` from an XML property list (the packaging
-/// template; codesign leaves the format alone).
-fn bundle_short_version(plist: &str) -> Option<String> {
-    let after_key = plist
-        .split("<key>CFBundleShortVersionString</key>")
-        .nth(1)?;
+/// The engine a macOS app bundle carries: its Info.plist's `ZeronEngineVersion`
+/// (packaging writes it; a beta app's engine is stable's, older than the app),
+/// else `CFBundleShortVersionString` (bundles from before the key, whose
+/// engine was always the app's own version). An engine compares this with
+/// its own to restart into a newer one; comparing the app's version would
+/// restart a beta's engine forever.
+pub fn bundle_engine_version(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?;
+    plist_string(&plist, "ZeronEngineVersion").or_else(|| plist_string(&plist, "CFBundleShortVersionString"))
+}
+
+/// A string value from an XML property list (the packaging template;
+/// codesign leaves the format alone).
+fn plist_string(plist: &str, key: &str) -> Option<String> {
+    let after_key = plist.split(&format!("<key>{key}</key>")).nth(1)?;
     let value = after_key.trim_start().strip_prefix("<string>")?;
     let end = value.find("</string>")?;
-    Some(value[..end].trim().to_owned())
+    Some(value[..end].trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +786,8 @@ pub async fn download_release_file(
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let url = format!("{}/{file}", release_base(edge_url)?);
+    // From the feed the manifest came from: a beta's files are beta's.
+    let url = format!("{}/{file}", manifest.channel.base(&release_base(edge_url)?));
     let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
     if expected.is_none() {
         tracing::warn!(
@@ -1011,16 +1191,30 @@ pub struct UpdateStatus {
     pub checked_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The channel the check followed (`stable` | `beta`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// `latest_version` exists but can't be installed here, and why (an
+    /// older macOS; a beta's engine newer than stable's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
+    /// Installing `latest_version` leaves this build's channel and may go
+    /// back a version (beta → stable).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub switch: bool,
 }
 
 impl UpdateStatus {
-    fn initial() -> Self {
+    fn initial(version: &str) -> Self {
         Self {
-            current_version: current_version().to_string(),
+            current_version: version.to_string(),
             latest_version: None,
             update_available: false,
             checked_at: None,
             error: None,
+            channel: None,
+            held: None,
+            switch: false,
         }
     }
 }
@@ -1064,6 +1258,9 @@ enum Role {
 pub struct Updater {
     edge_url: String,
     role: Arc<Role>,
+    /// The version releases are compared with: the engine's own, or the app's
+    /// ([`app_version`]).
+    version: Arc<str>,
     status_tx: Arc<watch::Sender<UpdateStatus>>,
     /// Wakes the loop; `forced` says whether the wake demands a check or only
     /// a fresh look at the wall clock.
@@ -1095,12 +1292,17 @@ impl Updater {
             Role::Engine { .. } => ENGINE_INITIAL_DELAY,
             Role::Desktop => DESKTOP_INITIAL_DELAY,
         };
-        let (status_tx, _) = watch::channel(UpdateStatus::initial());
+        let version: Arc<str> = match role {
+            Role::Engine { .. } => current_version().into(),
+            Role::Desktop => app_version().into(),
+        };
+        let (status_tx, _) = watch::channel(UpdateStatus::initial(&version));
         let (wake_tx, _) = watch::channel(0);
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
             edge_url,
             role: Arc::new(role),
+            version,
             status_tx: Arc::new(status_tx),
             wake_tx: Arc::new(wake_tx),
             forced: Arc::new(AtomicBool::new(false)),
@@ -1283,12 +1485,31 @@ impl Updater {
     }
 
     fn publish(&self, manifest: Manifest) {
+        // The desktop app's bundle carries the engine a switch must not go
+        // below; the engine's own report has no bundle of its own to weigh.
+        let running_engine = match (&*self.role, detect_install()) {
+            (Role::Desktop, InstallKind::MacApp { bundle }) => bundle_engine_version(&bundle),
+            _ => None,
+        };
+        let offer = offer(
+            &manifest,
+            &self.version,
+            manifest.channel,
+            running_engine.as_deref(),
+            channel::macos_version(),
+        );
         let status = UpdateStatus {
-            current_version: current_version().to_string(),
-            update_available: version_newer(&manifest.version, current_version()),
-            latest_version: Some(manifest.version),
+            current_version: self.version.to_string(),
+            update_available: offer.installs(),
+            latest_version: Some(manifest.version.clone()),
             checked_at: Some(now_ms()),
             error: None,
+            channel: Some(manifest.channel.as_str().to_owned()),
+            held: match &offer {
+                Offer::Held(why) => Some(why.clone()),
+                _ => None,
+            },
+            switch: offer == Offer::Switch,
         };
         if status.update_available {
             tracing::info!(
@@ -1741,7 +1962,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = Manifest {
             version: "9.9.9".into(),
-            files: BTreeMap::new(),
+            ..Manifest::default()
         };
         let app_root = tmp.path().join("app");
         let data_dir = tmp.path().join("data");
@@ -1896,8 +2117,119 @@ mod tests {
     fn bundle_version_reads_the_packaged_plist() {
         let template = include_str!("../../../dist/macos/Info.plist");
         let plist = template.replace("__VERSION__", "0.3.1");
-        assert_eq!(bundle_short_version(&plist).as_deref(), Some("0.3.1"));
-        assert_eq!(bundle_short_version("<plist></plist>"), None);
+        assert_eq!(plist_string(&plist, "CFBundleShortVersionString").as_deref(), Some("0.3.1"));
+        // Packaging names the engine it bundles.
+        assert_eq!(plist_string(&plist, "ZeronEngineVersion").as_deref(), Some("0.3.1"));
+        assert_eq!(plist_string("<plist></plist>", "CFBundleShortVersionString"), None);
+    }
+
+    #[test]
+    fn a_bundle_s_engine_version_is_its_key_else_the_app_s() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("Zeron.app");
+        std::fs::create_dir_all(bundle.join("Contents")).unwrap();
+        let write = |body: &str| std::fs::write(bundle.join("Contents/Info.plist"), body).unwrap();
+        // A beta: the app is 0.2.136-beta.1, its engine stable's 0.2.135. An
+        // engine weighing the app's version would restart forever.
+        write(
+            "<plist><dict><key>CFBundleShortVersionString</key><string>0.2.136</string>\
+             <key>ZeronEngineVersion</key><string>0.2.135</string></dict></plist>",
+        );
+        assert_eq!(bundle_engine_version(&bundle).as_deref(), Some("0.2.135"));
+        let mac = InstallKind::MacApp { bundle: bundle.clone() };
+        assert_eq!(installed_version(&mac).as_deref(), Some("0.2.135"));
+        // A bundle from before the key.
+        write("<plist><dict><key>CFBundleShortVersionString</key><string>0.2.134</string></dict></plist>");
+        assert_eq!(bundle_engine_version(&bundle).as_deref(), Some("0.2.134"));
+    }
+
+    #[test]
+    fn prereleases_sort_as_semver_says() {
+        let ordered = ["0.2.134", "0.2.135", "0.2.136-beta.1", "0.2.136-beta.2", "0.2.136-beta.10", "0.2.136", "0.2.137-beta.1"];
+        for pair in ordered.windows(2) {
+            assert!(version_newer(pair[1], pair[0]), "{} > {}", pair[1], pair[0]);
+            assert!(!version_newer(pair[0], pair[1]), "{} < {}", pair[0], pair[1]);
+        }
+        assert!(!version_newer("0.2.136-beta.1", "0.2.136-beta.1"));
+        assert!(version_newer("v0.2.136-beta.1", "0.2.135"));
+        // Garbage never counts as newer.
+        for bad in ["0.2.136-", "0.2.136-beta..1", "0.2.136+build", "beta", ""] {
+            assert!(!version_newer(bad, "0.0.1"), "{bad}");
+            assert!(parse_version(bad).is_none(), "{bad}");
+        }
+        // The numeric compare is unchanged.
+        assert!(version_newer("0.1.10", "0.1.9") && version_newer("0.1.0", "0.1"));
+    }
+
+    fn manifest_of(version: &str, channel: Channel) -> Manifest {
+        Manifest {
+            version: version.into(),
+            channel,
+            ..Manifest::default()
+        }
+    }
+
+    #[test]
+    fn a_build_takes_newer_releases_of_its_channel() {
+        let stable = manifest_of("0.2.136", Channel::Stable);
+        assert_eq!(offer(&stable, "0.2.135", Channel::Stable, None, None), Offer::Newer);
+        assert_eq!(offer(&stable, "0.2.136", Channel::Stable, None, None), Offer::Current);
+        assert_eq!(offer(&stable, "0.2.137", Channel::Stable, None, None), Offer::Current);
+        let beta = manifest_of("0.2.136-beta.2", Channel::Beta);
+        assert_eq!(offer(&beta, "0.2.136-beta.1", Channel::Beta, Some("0.2.135"), None), Offer::Newer);
+        assert_eq!(offer(&beta, "0.2.136-beta.2", Channel::Beta, Some("0.2.135"), None), Offer::Current);
+    }
+
+    #[test]
+    fn choosing_beta_on_stable_takes_only_a_newer_beta() {
+        let beta = manifest_of("0.2.136-beta.1", Channel::Beta);
+        assert_eq!(offer(&beta, "0.2.135", Channel::Beta, None, None), Offer::Newer);
+        // Stable moved past the last beta: wait for the next one.
+        assert_eq!(offer(&beta, "0.2.136", Channel::Beta, None, None), Offer::Current);
+    }
+
+    #[test]
+    fn leaving_beta_installs_stable_even_when_older() {
+        let stable = manifest_of("0.2.135", Channel::Stable);
+        assert_eq!(offer(&stable, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Switch);
+        // A stable that caught up is simply newer.
+        let caught_up = manifest_of("0.2.136", Channel::Stable);
+        assert_eq!(offer(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Newer);
+    }
+
+    #[test]
+    fn leaving_beta_waits_when_stable_s_engine_is_older_than_the_beta_s() {
+        let stable = manifest_of("0.2.135", Channel::Stable);
+        let held = offer(&stable, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None);
+        assert!(matches!(&held, Offer::Held(why) if why.contains("catches up")), "{held:?}");
+        // A manifest naming its engine is weighed by that.
+        let named = Manifest { engine_version: Some("0.2.136".into()), ..stable };
+        assert_eq!(offer(&named, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None), Offer::Switch);
+    }
+
+    #[test]
+    fn a_release_for_a_newer_macos_is_held() {
+        let beta = Manifest {
+            minimum_macos: Some("14.0".into()),
+            ..manifest_of("0.2.136-beta.1", Channel::Beta)
+        };
+        let held = offer(&beta, "0.2.135", Channel::Beta, None, Some("13.6"));
+        assert!(matches!(&held, Offer::Held(why) if why.contains("macOS 14.0")), "{held:?}");
+        assert_eq!(offer(&beta, "0.2.135", Channel::Beta, None, Some("14.1")), Offer::Newer);
+        assert!(!held.installs());
+    }
+
+    #[test]
+    fn a_beta_manifest_reads_its_extra_fields() {
+        let manifest: Manifest = serde_json::from_str(
+            r#"{"version":"0.2.136-beta.1","engineVersion":"0.2.135","minimumMacOS":"14.0","files":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.engine_version.as_deref(), Some("0.2.135"));
+        assert_eq!(manifest.minimum_macos.as_deref(), Some("14.0"));
+        // A stable manifest has neither.
+        let stable: Manifest = serde_json::from_str(r#"{"version":"0.2.135","files":{}}"#).unwrap();
+        assert_eq!((stable.engine_version, stable.minimum_macos), (None, None));
     }
 
     #[cfg(unix)]
@@ -2045,6 +2377,7 @@ mod tests {
                 },
             )]
             .into(),
+            ..Manifest::default()
         };
 
         let wrong = fake_headless_tarball(&tmp.path().join("wrong"), "1.0.0");

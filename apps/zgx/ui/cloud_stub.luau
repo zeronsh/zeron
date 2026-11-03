@@ -10,6 +10,8 @@
 --   cloud_stub.offer           the account has Cloud, on, GitHub connected,
 --                              acme/atlas and two more repositories reachable
 --   cloud_stub.reload          Cloud's status read again
+--   cloud_stub.no_repos        GitHub connected, no repositories chosen
+--   cloud_stub.repos_fail      the next repositories read fails
 --   cloud_stub.last_7_days     Settings → Cloud's usage over the last 7 days
 --   cloud_stub.no_github       GitHub not connected (no repositories)
 --   cloud_stub.purchase_lands  a Stripe page's purchase lands: 12,000 extra
@@ -68,10 +70,13 @@ local function status(): cloud.Status
 end
 
 local REPOS: { cloud.Repo } = {
-	{ name = "acme/atlas", private = true, branch = "main", pushed = 3000 },
-	{ name = "acme/site", private = false, branch = "main", pushed = 2000 },
-	{ name = "octo/tools", private = false, branch = "trunk", pushed = 1000 },
+	{ name = "acme/atlas", private = true, branch = "main", clone_url = "https://github.com/acme/atlas.git", pushed = 3000 },
+	{ name = "acme/site", private = false, branch = "main", clone_url = "https://github.com/acme/site.git", pushed = 2000 },
+	{ name = "octo/tools", private = false, branch = "trunk", clone_url = "https://github.com/octo/tools.git", pushed = 2500 },
 }
+-- What the next repositories read answers: "ok", "none" (connected, none
+-- chosen), "fail" (the edge out of reach).
+local repos_next = ui.state("cloud_stub_repos_next", "ok")
 
 local c = cloud :: any
 c.load = function()
@@ -83,12 +88,24 @@ c.load = function()
 		cloud.now:set { phase = "failed", repos_loading = false, failure = e.message }
 	end)
 end
-c.load_repos = function()
+c.load_repos = function(done: (() -> ())?)
 	log("cloud.repos")
 	local now = table.clone(cloud.now:peek()) :: any
-	now.repos = if connected:peek() then table.clone(REPOS) else {}
 	now.repos_loading = false
+	now.repos_failure = nil
+	if not connected:peek() then
+		now.repos, now.repos_failure = {}, "github_not_connected"
+	elseif repos_next:peek() == "none" then
+		now.repos = {}
+	elseif repos_next:peek() == "fail" then
+		now.repos, now.repos_failure = nil, "failed"
+	else
+		now.repos = table.clone(REPOS)
+	end
 	cloud.now:set(now)
+	if done then
+		done()
+	end
 end
 c.usage = function(from: string, to: string): any
 	log(`cloud.usage:{from}:{to}`)
@@ -196,6 +213,20 @@ ui.command {
 		end
 		cloud.load()
 		publish_github()
+	end,
+}
+ui.command {
+	id = "cloud_stub.no_repos",
+	title = "GitHub connected, no repositories chosen for Cloud",
+	run = function()
+		repos_next:set("none")
+	end,
+}
+ui.command {
+	id = "cloud_stub.repos_fail",
+	title = "The next repositories read fails",
+	run = function()
+		repos_next:set("fail")
 	end,
 }
 ui.command {

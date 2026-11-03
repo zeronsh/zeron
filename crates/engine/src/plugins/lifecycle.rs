@@ -17,6 +17,7 @@ use zeron_rpc::{RpcError, RpcReply, methods, parse_params};
 
 use super::install::{self, Package, Source};
 use super::package;
+use super::template_packages;
 use super::status::{Author, Decision, Status};
 use super::{Plugins, failed, lock, now_secs};
 
@@ -272,6 +273,39 @@ impl Plugins {
         json!({ "updates": updates, "errors": errors })
     }
 
+    /// Check each template installed from a package where it came from (or
+    /// `only`'s) for a new version, as plugins' are.
+    pub(super) async fn check_template_updates(&self, only: Option<&str>) -> Value {
+        let dir = self.inner.data_dir.join(super::TEMPLATES_DIR);
+        let listed = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || template_packages::checkable(&dir)).await.unwrap_or_default()
+        };
+        let mut updates = Vec::new();
+        let mut errors = Vec::new();
+        for (id, name, key, hash, source) in listed.into_iter().filter(|c| only.is_none_or(|o| o == c.0)) {
+            match template_packages::fetch_again(&source).await {
+                Ok(Some((fetched, source))) => match template_packages::compare(&id, &key, &hash, &fetched, source) {
+                    Some(found) => {
+                        let keep = found.refused.is_none().then_some(&fetched);
+                        if let Err(error) = template_packages::keep_found(&dir, &id, &found, keep) {
+                            errors.push(json!({ "id": id, "name": name, "error": error }));
+                            continue;
+                        }
+                        let mut shown = found.shown();
+                        shown["id"] = json!(id);
+                        shown["name"] = json!(name);
+                        updates.push(shown);
+                    }
+                    None => template_packages::forget_found(&dir, &id),
+                },
+                Ok(None) => template_packages::forget_found(&dir, &id),
+                Err(error) => errors.push(json!({ "id": id, "name": name, "error": error })),
+            }
+        }
+        json!({ "updates": updates, "errors": errors })
+    }
+
     async fn update(&self, id: &str) -> Result<RpcReply, RpcError> {
         self.rescan().await;
         let entry = self.entry(id).ok_or_else(|| failed(format!("There's no plugin {id}")))?;
@@ -318,6 +352,10 @@ impl Plugins {
                 let checked = plugins.check_updates(None).await;
                 if let Some(n) = checked["updates"].as_array().map(Vec::len).filter(|n| *n > 0) {
                     tracing::info!(updates = n, "plugins: updates found");
+                }
+                let checked = plugins.check_template_updates(None).await;
+                if let Some(n) = checked["updates"].as_array().map(Vec::len).filter(|n| *n > 0) {
+                    tracing::info!(updates = n, "templates: updates found");
                 }
                 drop(plugins);
                 tokio::time::sleep(CHECK_EVERY).await;

@@ -107,6 +107,95 @@ stub.review = function(name: string)
 	note(`review:{name}`)
 end
 
+-- Installing and updating take a while, as from a link: each answers a
+-- promise the commands below settle (`settled_*`), so the page's busy
+-- dialog and row show meanwhile.
+local open_promise: any = nil
+local function later(): any
+	return {
+		after = function(_self: any, ok: (any) -> (), err: (any) -> ())
+			open_promise = { ok = ok, err = err }
+		end,
+	}
+end
+local function settle(ok: boolean, value: any)
+	local p = open_promise
+	open_promise = nil
+	if p then
+		if ok then
+			p.ok(value)
+		else
+			p.err(value)
+		end
+	end
+end
+stub.import = function(from: any)
+	note(`import:{if type(from) == "table" then (from.url or from.path or "") else tostring(from)}`)
+	return later()
+end
+stub.check_updates = function()
+	note("check")
+	return nil
+end
+stub.update = function(id: string)
+	note(`update:{id}`)
+	return later()
+end
+ui.command {
+	id = "installed_yours",
+	title = "The install finishes: one of yours",
+	run = function()
+		table.insert(model, { id = "dusk", name = "Dusk", author = "you", version = "1.0.0", builtin = false, active = false, status = "ok" })
+		publish()
+		settle(true, { installed = "dusk", name = "Dusk" })
+	end,
+}
+ui.command {
+	id = "installed_theirs",
+	title = "The install finishes: someone else's, waiting",
+	run = function()
+		table.insert(waiting, { pending = "ledger-1700000001", name = "Ledger", source = "ledger.zeron-template" })
+		publish()
+		settle(true, { pending = "ledger-1700000001", name = "Ledger", needs_consent = true })
+	end,
+}
+ui.command {
+	id = "install_failed",
+	title = "The install fails",
+	run = function()
+		settle(false, { message = "That repository has no release with a template in it" })
+	end,
+}
+ui.command {
+	id = "update_found",
+	title = "A newer Ledger is found where it came from",
+	run = function()
+		local t: any = find("ledger")
+		t.update = { version = "2.1.0" }
+		publish()
+	end,
+}
+ui.command {
+	id = "update_refused",
+	title = "A newer Ledger is found, signed by someone else",
+	run = function()
+		local t: any = find("ledger")
+		t.update = { version = "6.6.6", refused = "The new version is signed by someone else, so it won't be installed" }
+		publish()
+	end,
+}
+ui.command {
+	id = "updated_ledger",
+	title = "Ledger's update finishes",
+	run = function()
+		local t: any = find("ledger")
+		t.version = "2.1.0"
+		t.update = nil
+		publish()
+		settle(true, { updated = "ledger", name = "Ledger", version = "2.1.0", from = "2.0.0" })
+	end,
+}
+
 ui.command {
 	id = "made",
 	title = "An agent makes a template",
@@ -155,7 +244,7 @@ ui.command {
 			builtin = false,
 			active = false,
 			status = "ok",
-			imported = { key = "k-who", author = { kind = "unknown" } },
+			imported = { key = "k-who", author = { kind = "unknown" }, source = { kind = "release", url = "https://github.com/eve/mystery" } },
 		})
 		table.insert(model, {
 			id = "mine-again",

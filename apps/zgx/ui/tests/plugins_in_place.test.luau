@@ -263,7 +263,7 @@ test("an update signed by someone else says so and offers nothing to press", fun
 	expect(app:has('role:button "Update"')).to_be(false)
 end)
 
-test("Install… takes a link and the plugin arrives waiting for Review", function()
+test("Install takes a link and the plugin arrives waiting for Review", function()
 	local app = open()
 	app:click('role:button "Install"')
 	app:frames(20)
@@ -273,5 +273,50 @@ test("Install… takes a link and the plugin arrives waiting for Review", functi
 	app:click('role:dialog >> role:button "Install"')
 	app:frames(20)
 	expect(app:state("calls")).to_contain("install:ada/clock")
+	-- On its way: the dialog stays, its Install working.
+	expect(app:state("plugins_installing")).to_be(true)
+	expect(app:state("plugins_install_busy")).to_be(true)
+	app:command("installed")
+	app:frames(20)
+	expect(app:state("plugins_installing")).to_be(false)
 	expect(app:has('role:button "Review"')).to_be(true)
 end)
+
+test("an install that fails keeps the dialog, to try again", function()
+	local app = open()
+	app:click('role:button "Install"')
+	app:frames(20)
+	app:type('role:textbox "Link"', "ada/nothing")
+	app:click('role:dialog >> role:button "Install"')
+	app:frames(10)
+	app:command("install_failed")
+	app:frames(20)
+	-- (Why, in a toast; the dialog kept, its link as typed.)
+	expect(app:state("plugins_installing")).to_be(true)
+	expect(app:state("plugins_install_busy")).to_be(false)
+	expect(app:has('role:dialog >> role:button "Install"')).to_be(true)
+end)
+
+test("one Zeron can't vouch for says Unverified by its version, and where it came from", function()
+	local app = open()
+	local function badges(): number
+		local _, n = string.gsub(app:tree(), '"Unverified"', "")
+		return n
+	end
+	-- Zeron's own, yours and a verified author's: never.
+	app:command("builtin")
+	app:frames(20)
+	expect(badges()).to_be(0)
+	-- Someone Zeron can't vouch for: one badge, theirs.
+	app:command("arrive")
+	app:frames(20)
+	expect(badges()).to_be(1)
+	expect(app:tree()).to_contain("Unknown author")
+	-- Where it came from, once known, in place of "Unknown author".
+	app:command("ping_from_github")
+	app:frames(20)
+	expect(app:tree()).to_contain("From github.com/eve/ping")
+	expect(app:tree()).never.to_contain("Unknown author")
+	expect(badges()).to_be(1)
+end)
+

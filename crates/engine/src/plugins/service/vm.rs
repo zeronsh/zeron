@@ -110,7 +110,39 @@ pub trait Ops: Send + Sync + 'static {
     fn emit(&self, event: &str, data: Json);
     /// `print`, and what failed with nobody to tell.
     fn log(&self, line: &str);
+    /// `zeron.watch`: changes under `folders` (each all the way down) told
+    /// to `heard` as they happen, from any thread, until the handle drops.
+    /// A refusal is `Err(why)`.
+    fn watch(&self, folders: Vec<PathBuf>, heard: Heard) -> Result<Box<dyn Send>, String> {
+        let _ = (folders, heard);
+        Err("zeron.watch isn't something this service can do".into())
+    }
 }
+
+/// What a watch heard: in which of its folders (by place), and where in it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Seen {
+    /// This path (relative to the folder, `/`-separated) changed.
+    Path(usize, String),
+    /// Anything in this folder may have changed (events were lost, or the
+    /// watch just went live).
+    All(usize),
+}
+
+/// Where a watch tells what it heard.
+pub type Heard = Box<dyn Fn(Seen) + Send + Sync>;
+
+/// A watch's changes, a burst at a time: told `quiet` after its last.
+struct Watching {
+    _handle: Box<dyn Send>,
+    quiet: Duration,
+    /// Each folder's changed paths since last told (`None`: anything).
+    pending: BTreeMap<usize, Option<std::collections::BTreeSet<String>>>,
+    due: Option<Instant>,
+}
+
+/// A burst's paths in one folder, at most: past them, it's "anything".
+const MAX_WATCH_PATHS: usize = 256;
 
 /// What a service serves, as it said while loading.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -171,6 +203,10 @@ enum ToVm {
     Done {
         op: u64,
         result: Result<Json, String>,
+    },
+    Heard {
+        watch: u64,
+        seen: Seen,
     },
     Stop,
 }
@@ -257,9 +293,49 @@ struct State {
     /// Out of memory: it ends, and what it hadn't answered is dropped.
     dead: Cell<bool>,
     status: Arc<Status>,
+    /// `zeron.watch`es, by id.
+    watches: RefCell<HashMap<u64, Watching>>,
+    next_watch: Cell<u64>,
 }
 
 impl State {
+    /// A change a watch heard, kept for its burst's end.
+    fn heard(&self, watch: u64, seen: Seen) {
+        let mut watches = self.watches.borrow_mut();
+        let Some(w) = watches.get_mut(&watch) else { return };
+        let (place, path) = match seen {
+            Seen::Path(place, path) => (place, Some(path)),
+            Seen::All(place) => (place, None),
+        };
+        let entry = w.pending.entry(place).or_insert_with(|| Some(Default::default()));
+        match (entry.as_mut(), path) {
+            (Some(paths), Some(path)) if paths.len() < MAX_WATCH_PATHS || paths.contains(&path) => {
+                paths.insert(path);
+            }
+            (Some(_), _) => *entry = None,
+            (None, _) => {}
+        }
+        w.due = Some(Instant::now() + w.quiet);
+    }
+
+    /// The soonest a watch's burst ends.
+    fn watch_due(&self) -> Option<Instant> {
+        self.watches.borrow().values().filter_map(|w| w.due).min()
+    }
+
+    /// The watches whose bursts ended, each with what it heard.
+    fn watches_due(&self) -> Vec<(u64, BTreeMap<usize, Option<std::collections::BTreeSet<String>>>)> {
+        let now = Instant::now();
+        let mut out = Vec::new();
+        for (id, w) in self.watches.borrow_mut().iter_mut() {
+            if w.due.is_some_and(|at| at <= now) {
+                w.due = None;
+                out.push((*id, std::mem::take(&mut w.pending)));
+            }
+        }
+        out
+    }
+
     fn answer(&self, id: u64, reply: Reply) {
         if let Some(tx) = self.replies.borrow_mut().remove(&id) {
             self.status.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -302,6 +378,8 @@ fn run(
         store: RefCell::default(),
         dead: Cell::new(false),
         status: status.clone(),
+        watches: RefCell::default(),
+        next_watch: Cell::new(1),
     });
     let deadline: Rc<Cell<Option<Instant>>> = Rc::default();
     let (lua, entry) = match setup(&spec, &ops, &tx, &state, &deadline) {
@@ -358,6 +436,9 @@ fn run(
             break;
         }
         let mut wake = state.sleepers.borrow().peek().map(|Reverse((at, _))| *at);
+        if let Some(at) = state.watch_due() {
+            wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
         if let Some(until) = stopping {
             wake = Some(wake.map_or(until, |at| at.min(until)));
         }
@@ -408,10 +489,31 @@ fn run(
                     ops.log(&format!("a task failed: {}", lua_message(&error)));
                 }
             }
+            Some(ToVm::Heard { watch, seen }) => state.heard(watch, seen),
             Some(ToVm::Stop) => {
                 stopping.get_or_insert(Instant::now() + limits.drain);
+                // (Nothing more is heard: it's going.)
+                state.watches.borrow_mut().clear();
             }
             None => {}
+        }
+        // Watches whose bursts ended: what each heard, by folder (its
+        // paths, or `true`: anything).
+        for (watch, pending) in state.watches_due() {
+            let outcome = enter(&|| {
+                let changed = lua.create_table()?;
+                for (place, paths) in &pending {
+                    let value = match paths {
+                        Some(paths) => Value::Table(lua.create_sequence_from(paths.iter().map(String::as_str))?),
+                        None => Value::Boolean(true),
+                    };
+                    changed.raw_set(place + 1, value)?;
+                }
+                entry.heard.call::<()>((watch, changed))
+            });
+            if let Err(error) = outcome {
+                ops.log(&format!("a watch failed: {}", lua_message(&error)));
+            }
         }
         // Sleeps that are due.
         loop {
@@ -441,6 +543,7 @@ struct Entry {
     describe: Function,
     done: Function,
     stopping: Function,
+    heard: Function,
 }
 
 fn setup(
@@ -496,7 +599,7 @@ fn setup(
     install_require(&lua, &spec.dir).map_err(fail)?;
 
     let host = natives(&lua, spec, ops, tx, state).map_err(fail)?;
-    let (service, dispatch, describe, done, stopping): (Function, Function, Function, Function, Function) =
+    let (service, dispatch, describe, done, stopping, heard): (Function, Function, Function, Function, Function, Function) =
         lua.load(PRELUDE).set_name("=zeron").call(host).map_err(fail)?;
     globals.raw_set("zeron_service", service).map_err(fail)?;
     lua.sandbox(true).map_err(fail)?;
@@ -507,6 +610,7 @@ fn setup(
             describe,
             done,
             stopping,
+            heard,
         },
     ))
 }
@@ -613,6 +717,46 @@ fn natives(
         lua.create_function(move |_, (event, data): (String, Value)| {
             let data = to_json(&data, 0).map_err(mlua::Error::runtime)?;
             emit_ops.emit(&event, data);
+            Ok(())
+        })?,
+    )?;
+
+    // `zeron.watch`: the folders, and how long a burst is quiet before it's
+    // told (ms); its id, or an error.
+    let (watch_state, watch_ops, watch_tx) = (state.clone(), ops.clone(), tx.clone());
+    host.set(
+        "watch",
+        lua.create_function(move |_, (folders, quiet): (Vec<String>, Option<f64>)| {
+            if folders.is_empty() || folders.iter().any(|f| f.trim().is_empty()) {
+                return Err(mlua::Error::runtime("zeron.watch: the folders to watch"));
+            }
+            let id = watch_state.next_watch.get();
+            watch_state.next_watch.set(id + 1);
+            let tx = watch_tx.clone();
+            let heard: Heard = Box::new(move |seen| {
+                let _ = tx.send(ToVm::Heard { watch: id, seen });
+            });
+            let handle = watch_ops
+                .watch(folders.into_iter().map(PathBuf::from).collect(), heard)
+                .map_err(mlua::Error::runtime)?;
+            let quiet = Duration::from_secs_f64(quiet.unwrap_or(250.0).clamp(0.0, 60_000.0) / 1000.0);
+            watch_state.watches.borrow_mut().insert(
+                id,
+                Watching {
+                    _handle: handle,
+                    quiet,
+                    pending: BTreeMap::new(),
+                    due: None,
+                },
+            );
+            Ok(id)
+        })?,
+    )?;
+    let unwatch_state = state.clone();
+    host.set(
+        "unwatch",
+        lua.create_function(move |_, id: u64| {
+            unwatch_state.watches.borrow_mut().remove(&id);
             Ok(())
         })?,
     )?;

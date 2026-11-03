@@ -48,6 +48,9 @@ local naming = ui.state("plugins_naming", false)
 local new_name = ui.state("plugins_new_name", "")
 local installing = ui.state("plugins_installing", false)
 local install_link = ui.state("plugins_install_link", "")
+-- An install on its way: the dialog stays open, its Install spinning,
+-- until it's done (closed) or fails (kept, to try again).
+local install_busy = ui.state("plugins_install_busy", false)
 local updating = ui.state("plugins_updating", nil :: string?)
 -- When each device last had its sources checked (by its id; "" this one):
 -- at most every ten minutes, so reloads, quick visits and switching back
@@ -145,14 +148,28 @@ end
 
 local function install(from: { path: string?, url: string?, device: string? })
 	local p: any = state.install(from)
-	if p ~= nil then
-		p:after(settled("plugins.page.installed_toast", "plugins.page.installed_toast_version"), failed(ui.t("plugins.page.couldnt_install")))
+	if p == nil then
+		installing:set(false)
+		return
 	end
+	install_busy:set(true)
+	p:after(function(done: any)
+		install_busy:set(false)
+		installing:set(false)
+		install_link:set("")
+		settled("plugins.page.installed_toast", "plugins.page.installed_toast_version")(done)
+	end, function(err: any)
+		install_busy:set(false)
+		failed(ui.t("plugins.page.couldnt_install"))(err)
+	end)
 end
 
--- Install…'s file: a .zeron-plugin (this device's alone).
+-- Install's file: a .zeron-plugin (this device's alone), installed with
+-- the dialog open as a link is.
 local function choose_file()
-	installing:set(false)
+	if install_busy:peek() then
+		return
+	end
 	ui.task(function()
 		local files = ui.open_files({ title = ui.t("plugins.page.install_title"):get(), filters = package_filter() }):await()
 		local file = files and files[1]
@@ -437,10 +454,14 @@ local function row(p: state.Item, _i: number, now: State<any>): Node
 		end,
 		detail_action = UpdateLink { now = now },
 		truncate = true,
-		-- Its version, centred on the row beside its controls.
+		-- Its version, centred on the row beside its controls; before it,
+		-- Unverified for one whose maker Zeron can't vouch for.
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
+			ui.show(function(): boolean
+				return words.unverified(now:get())
+			end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
 			ds.Badge {
 				function(): string
 					return now:get().version
@@ -571,6 +592,10 @@ local function dialogs(): { Node }
 			size = "sm",
 			confirm = {
 				label = ui.t("plugins.page.install"),
+				keep_open = true,
+				busy = function(): boolean
+					return install_busy:get()
+				end,
 				on_click = function()
 					local link = string.match(install_link:peek(), "^%s*(.-)%s*$") or ""
 					if link ~= "" then
@@ -587,7 +612,16 @@ local function dialogs(): { Node }
 			},
 			ui.show(function(): boolean
 				return device() == nil
-			end, ds.Button { id = "plugins-choose-file", tone = "secondary", size = "sm", on_click = choose_file, ui.t("plugins.page.choose_file") }),
+			end, ds.Button {
+				id = "plugins-choose-file",
+				tone = "secondary",
+				size = "sm",
+				disabled = function(): boolean
+					return install_busy:get()
+				end,
+				on_click = choose_file,
+				ui.t("plugins.page.choose_file"),
+			}),
 			ui.show(function(): boolean
 				return device() ~= nil
 			end, ui.text {

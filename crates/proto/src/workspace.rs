@@ -35,6 +35,12 @@ pub mod capabilities {
     /// rows and answers `StopBackgroundTask` / `ReadBackgroundTaskOutput`
     /// (forwarding them, for a chat another device hosts).
     pub const BACKGROUND_TASKS_V1: &str = "background-tasks-v1";
+    /// The host serves the zgx interface (Zeron.app's beta): `AccessToken`,
+    /// plugins and templates, the ACP registry, `setSpaceIcon`,
+    /// `PostNotification`, `TerminalStatus` and change-request threads. The
+    /// interface asks for it on connect and offers Stable on an engine
+    /// without it.
+    pub const ZGX_INTERFACE_V1: &str = "zgx-interface-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -48,6 +54,7 @@ pub mod capabilities {
         SIDEBAR_SECTION_ORDER_V1,
         PROVIDER_SWITCH_V1,
         BACKGROUND_TASKS_V1,
+        ZGX_INTERFACE_V1,
         crate::voice::remote::CAPABILITY,
     ];
 

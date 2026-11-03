@@ -37,7 +37,10 @@ local material = require("@self/material")
 local M = {}
 
 -- (Its words may be messages, `ui.t`, drawn as they are.)
-export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean? }
+-- `keep_open`: the confirm leaves it open (the caller closes it once its
+-- work is done); `busy`, while true, the confirm spins in its label's
+-- place and takes no click (an install on its way).
+export type Action = { label: string | Message | () -> string, on_click: (() -> ())?, keep_open: boolean?, busy: (() -> boolean)? }
 export type DialogProps = {
 	open: State<boolean>,
 	title: string | Message | () -> string,
@@ -150,6 +153,10 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 			return
 		end
 		local confirm = props.confirm
+		-- (Working: Enter, as a click, waits for it.)
+		if confirm and confirm.busy and confirm.busy() then
+			return
+		end
 		if confirm and not confirm.keep_open then
 			close()
 		end
@@ -236,6 +243,7 @@ local DialogBody = ui.component(function(args: { props: DialogProps, close: () -
 				then Button {
 					props.confirm.label,
 					tone = if danger then "danger" else "primary",
+					busy = props.confirm.busy,
 					disabled = function()
 						return not ready()
 					end,

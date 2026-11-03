@@ -23,7 +23,7 @@
 //! The engine's edge, sign-in client and loopback port come from here (the
 //! engine this app starts is given them, src/engine/manager.rs).
 //!
-//! Zeron Preview (the `preview` feature) is production's only: edge.zeron.sh,
+//! Zeron.app's beta (the `beta` feature) is production's only: edge.zeron.sh,
 //! its client and port 27641 (the only loopback production's WorkOS client
 //! accepts, shared with Zeron.app). It has no staging built in, and the
 //! variables below do nothing in it.
@@ -81,8 +81,8 @@ use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::engine::{self, rpc::Watch};
 
-/// Development builds' only: a Zeron Preview build has none of it.
-#[cfg(not(feature = "preview"))]
+/// Development builds' only: a beta build has none of it.
+#[cfg(not(feature = "beta"))]
 const STAGING: Env = Env {
     name: "staging",
     edge: "https://staging.zeron.sh",
@@ -128,16 +128,16 @@ pub fn endpoint() -> Endpoint {
     endpoint_with(|key| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty()))
 }
 
-/// Zeron Preview's: production's, whatever the environment says. Nothing
+/// The beta's: production's, whatever the environment says. Nothing
 /// of staging's is built into it (`STAGING` isn't), and no variable reaches
 /// another edge, client or port.
-#[cfg(feature = "preview")]
+#[cfg(feature = "beta")]
 fn endpoint_with(_var: impl Fn(&str) -> Option<String>) -> Endpoint {
     production()
 }
 
 /// A development build's: staging's by default, or as the variables say.
-#[cfg(not(feature = "preview"))]
+#[cfg(not(feature = "beta"))]
 fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
     let base = match var("ZERON_ZGX_ENV").as_deref() {
         Some("production" | "prod") => &PRODUCTION,
@@ -156,7 +156,6 @@ fn endpoint_with(var: impl Fn(&str) -> Option<String>) -> Endpoint {
 }
 
 /// Production's edge, sign-in client and loopback port.
-#[cfg_attr(not(feature = "preview"), allow(dead_code))]
 pub fn production() -> Endpoint {
     Endpoint {
         name: PRODUCTION.name,
@@ -181,9 +180,9 @@ mod endpoint_tests {
         }
     }
 
-    #[cfg(feature = "preview")]
+    #[cfg(feature = "beta")]
     #[test]
-    fn a_preview_build_is_production_only() {
+    fn a_beta_build_is_production_only() {
         for vars in [staging_vars as fn(&str) -> Option<String>, |_: &str| None] {
             let at = endpoint_with(vars);
             assert_eq!(
@@ -194,7 +193,7 @@ mod endpoint_tests {
         assert_eq!(endpoint().edge, "https://edge.zeron.sh");
     }
 
-    #[cfg(not(feature = "preview"))]
+    #[cfg(not(feature = "beta"))]
     #[test]
     fn a_development_build_is_staging_unless_told() {
         let at = endpoint_with(|_| None);

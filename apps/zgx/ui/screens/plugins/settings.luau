@@ -501,8 +501,23 @@ local function view(plugin: string): Node
 		local e = M.of(plugin)
 		return if e then e.name else plugin
 	end
+	-- Its item as the page lists it (who made it).
+	local function item(): any
+		for _, p in require("@app/screens/plugins/state").now:get().list or {} do
+			if p.id == plugin then
+				return p
+			end
+		end
+		return nil
+	end
 	return ds.Settings.Page {
 		title = name,
+		-- Unverified, at the top right, for one whose maker Zeron can't
+		-- vouch for (as its row says).
+		trail = ui.show(function(): boolean
+			return words.unverified(item())
+		end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "plugin-unverified" }),
+		trail_top = true,
 		description = function(): string
 			local e = M.of(plugin)
 			if e and type(e.description) == "string" and e.description ~= "" then

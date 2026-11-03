@@ -346,7 +346,10 @@ return function(zeron: any, Repo: any, words: any)
 			return EmptyState { icon = "git-branch", title = zeron.s("tab.no_session_title"), body = zeron.s("tab.no_session_body"), fill = true }
 		end
 		local m = Repo.get(id)
-		m.watch()
+		-- (Asked again as its device says it changed, while the tab is on
+		-- screen: `on_visible` below.)
+		local shows = ui.use_state(false)
+		m.watch(shows)
 		-- What it shows: its tab's own, Changes or History, for good (another
 		-- is another tab).
 		local view = props.view
@@ -483,6 +486,11 @@ return function(zeron: any, Repo: any, words: any)
 			class = "git-tab",
 			w_full = true,
 			h_full = true,
+			on_visible = function(now: boolean)
+				if shows:peek() ~= now then
+					shows:set(now)
+				end
+			end,
 			-- (Its sides the tab strip's and the browser bar's: the first
 			-- control under the first tab, the last under the strip's end.)
 			px = "$space.2",

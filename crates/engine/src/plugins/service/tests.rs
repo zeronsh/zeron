@@ -314,3 +314,81 @@ async fn a_timer_starts_a_stopped_service() {
     })
     .await;
 }
+
+const WATCHER: &str = r#"
+local zeron = require("./zeron")("svc")
+local stop: (() -> ())? = nil
+zeron.serve("watch", function(args)
+	stop = zeron.watch({ args.folder }, function(changed)
+		local paths = changed[args.folder]
+		zeron.emit("changed", { all = paths == true, paths = if paths == true then {} else paths })
+	end, { quiet = args.quiet })
+	return true
+end)
+zeron.serve("unwatch", function()
+	if stop then stop() end
+	return true
+end)
+"#;
+
+/// What the service told windows of the folder, past the watch going live
+/// (its first "anything may have changed").
+fn told(r: &Rig) -> Vec<Json> {
+    lock(&r.hooks.emitted)
+        .iter()
+        .filter(|(_, event, _)| event == "changed")
+        .map(|(_, _, data)| data.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_watch_tells_a_burst_of_changes_once_and_reads_are_not_changes() {
+    let r = rig(Config::default());
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(folder.path().join("src")).unwrap();
+    std::fs::write(folder.path().join("src/a.rs"), "a").unwrap();
+    let plan = r.plan("1.0.0", WATCHER, &["service", "files.read"]);
+    let path = folder.path().display().to_string();
+    assert_eq!(r.ask(&plan, "watch", json!({ "folder": path, "quiet": 150 })).await.unwrap(), json!(true));
+    // As it goes live: anything may have changed, once.
+    until("live", || told(&r).len() == 1).await;
+    assert_eq!(told(&r)[0]["all"], json!(true));
+    // A burst of writes: told once, after it's quiet, with each path.
+    for i in 0..5 {
+        std::fs::write(folder.path().join("src/a.rs"), format!("a{i}")).unwrap();
+        std::fs::write(folder.path().join(format!("b{i}.txt")), "b").unwrap();
+    }
+    until("the burst", || told(&r).len() == 2).await;
+    let paths = told(&r)[1]["paths"].clone();
+    let paths: Vec<&str> = paths.as_array().unwrap().iter().filter_map(|p| p.as_str()).collect();
+    assert!(paths.contains(&"src/a.rs") && paths.contains(&"b4.txt"), "{paths:?}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(told(&r).len(), 2, "one burst, told once: {:?}", told(&r));
+    // Reads (as `git status` reads the tree) aren't changes.
+    for _ in 0..5 {
+        let _ = std::fs::read_to_string(folder.path().join("src/a.rs")).unwrap();
+        let _ = std::fs::read_dir(folder.path().join("src")).unwrap().count();
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(told(&r).len(), 2, "reads were told as changes: {:?}", told(&r));
+    // Stopped: nothing more.
+    r.ask(&plan, "unwatch", json!({})).await.unwrap();
+    std::fs::write(folder.path().join("src/a.rs"), "after").unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(told(&r).len(), 2, "heard after it stopped: {:?}", told(&r));
+}
+
+#[tokio::test]
+async fn a_watch_needs_files_read_and_a_folder() {
+    let r = rig(Config::default());
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().display().to_string();
+    let plan = r.plan("1.0.0", WATCHER, &["service"]);
+    let refused = r.ask(&plan, "watch", json!({ "folder": path })).await.unwrap_err();
+    assert!(refused.message.contains("wasn't allowed to read files"), "{refused:?}");
+    let r = rig(Config::default());
+    let plan = r.plan("1.0.0", WATCHER, &["service", "files.read"]);
+    let missing = folder.path().join("nope").display().to_string();
+    let refused = r.ask(&plan, "watch", json!({ "folder": missing })).await.unwrap_err();
+    assert!(refused.message.contains("no folder"), "{refused:?}");
+}

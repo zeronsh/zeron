@@ -15,9 +15,16 @@
 --   state.yours(t)           whether you (or your agents) made it
 --   state.export(id, path)   a promise of `{ path, files }`: it, signed as
 --                            yours, as one .zeron-template file
---   state.import(path)       a promise of `{ installed = id }` (yours), or
+--   state.import(from)       from a file (`path`, or `{ path }`) or a link
+--                            (`{ url }`: a .zeron-template's, or a GitHub
+--                            repository or release with one): a promise of
+--                            `{ installed = id, name }` (yours), or
 --                            `{ pending = name }` (someone else's: the host
 --                            opens Zeron's consent window for it)
+--   state.check_updates()    a promise: each one from a package checked
+--                            where it came from for a newer version
+--   state.update(id)         a promise of `{ updated, name, version, from }`:
+--                            the update found for it, in its place
 --   state.review(name)       a waiting package's consent window
 --   state.pending:get()      packages waiting for you to allow them
 
@@ -42,7 +49,10 @@ export type Template = {
 	error: string?,
 	-- Installed from someone's package: who signed it (`author.kind` "you",
 	-- "verified" with `username`, or "unknown" with `reason`).
-	imported: { key: string, author: any }?,
+	-- `source`: where it came from (`{ kind, url?, ref? }`).
+	imported: { key: string, author: any, source: any? }?,
+	-- A newer version found where it came from (`{ version, refused? }`).
+	update: { version: string, refused: string? }?,
 	-- One of Zeron's official templates that recolours it (its built-in
 	-- theme's key).
 	theme: string?,
@@ -158,8 +168,16 @@ function M.export(id: string, path: string): any
 	return ui.call("templates.export", { id = id, path = path })
 end
 
-function M.import(path: string): any
-	return ui.call("templates.import", path)
+function M.import(from: string | { path: string?, url: string? }): any
+	return ui.call("templates.import", from)
+end
+
+function M.check_updates(): any
+	return ui.call("templates.check_updates", nil)
+end
+
+function M.update(id: string): any
+	return ui.call("templates.update", id)
 end
 
 function M.review(name: string)

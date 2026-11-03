@@ -7,7 +7,9 @@ pub fn data_dir() -> PathBuf {
     resolve_data_dir(|name| std::env::var_os(name))
 }
 
-fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
+/// [`data_dir`] from `env` (`ZERON_DATA_DIR`, `HOME`, and on Windows
+/// `LOCALAPPDATA`/`USERPROFILE`): for an app resolving it as Zeron does.
+pub fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
     if let Some(dir) = env("ZERON_DATA_DIR") {
         return PathBuf::from(dir);
     }

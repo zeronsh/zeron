@@ -2,54 +2,9 @@
 //! Zeron (the same local connection `zeron mcp` uses). `zeron template …`
 //! does the same for templates (whole replacements of Zeron's interface).
 
-use clap::Subcommand;
 use serde_json::{Value, json};
+use zeron_cli::{PluginCommand, TemplateCommand};
 use zeron_rpc::methods;
-
-#[derive(Subcommand)]
-pub enum PluginCommand {
-    /// Make a new plugin in Zeron's plugins folder, signed as you.
-    New {
-        /// Its id: lowercase letters, digits and dashes.
-        id: String,
-        /// Its name (defaults to the id).
-        #[arg(long)]
-        name: Option<String>,
-        /// A permission it asks for (repeat for more).
-        #[arg(long = "permission", value_name = "P")]
-        permissions: Vec<String>,
-    },
-    /// Sign a plugin as you: an id in the plugins folder, or a folder's path.
-    Sign { target: String },
-    /// Check a plugin folder's signature and who made it.
-    Verify { path: String },
-    /// List the plugins Zeron knows.
-    List,
-}
-
-#[derive(Subcommand)]
-pub enum TemplateCommand {
-    /// List the templates on this device, Zeron's own first.
-    List,
-    /// Run Zeron's window with a template. `zeron template use zeron` puts
-    /// Zeron's own back, even with Zeron closed.
-    Use { id: String },
-    /// Make a new template: a full copy of Zeron's interface to rewrite.
-    Create {
-        /// Its id: lowercase letters, digits and dashes.
-        id: String,
-        /// Its name (defaults to the id).
-        #[arg(long)]
-        name: Option<String>,
-        /// A template to start from (defaults to Zeron's own).
-        #[arg(long)]
-        from: Option<String>,
-    },
-    /// Show a template's errors, out-of-date files and what it inherits.
-    Status { id: String },
-    /// Delete a template (it's set aside in the templates folder's .removed).
-    Delete { id: String },
-}
 
 async fn connect(
     ipc_port: u16,

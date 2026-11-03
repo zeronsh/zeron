@@ -714,6 +714,49 @@ impl Ops for PluginOps {
         }
     }
 
+    fn watch(&self, folders: Vec<PathBuf>, heard: vm::Heard) -> Result<Box<dyn Send>, String> {
+        if !self.plan.allows("files.read") {
+            return Err(format!("{} wasn't allowed to read files on this device", self.plan.name));
+        }
+        let heard = Arc::new(heard);
+        let mut handles = Vec::new();
+        for (place, folder) in folders.into_iter().enumerate() {
+            if !folder.is_absolute() {
+                return Err(format!("zeron.watch: \"{}\" isn't a whole path", folder.display()));
+            }
+            if !folder.is_dir() {
+                return Err(format!("zeron.watch: there's no folder at \"{}\"", folder.display()));
+            }
+            // (Events name the folder as the system knows it: /private/tmp
+            // for /tmp.)
+            let root = std::fs::canonicalize(&folder).unwrap_or(folder.clone());
+            let heard = heard.clone();
+            handles.push(crate::fs_watch::FsWatchHub::global().watch(
+                &folder,
+                notify::RecursiveMode::Recursive,
+                move |event: &notify::Event| {
+                    if !crate::plugins::is_change(event) {
+                        return;
+                    }
+                    if event.need_rescan() || event.paths.is_empty() {
+                        return heard(vm::Seen::All(place));
+                    }
+                    for path in &event.paths {
+                        match path.strip_prefix(&root) {
+                            Ok(rest) => {
+                                let parts: Vec<String> =
+                                    rest.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+                                heard(vm::Seen::Path(place, parts.join("/")));
+                            }
+                            Err(_) => heard(vm::Seen::All(place)),
+                        }
+                    }
+                },
+            ));
+        }
+        Ok(Box::new(handles))
+    }
+
     fn emit(&self, event: &str, data: Json) {
         let size = serde_json::to_vec(&data).map(|b| b.len()).unwrap_or(usize::MAX);
         if event.is_empty() || size > MAX_EMIT_BYTES {

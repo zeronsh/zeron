@@ -469,7 +469,20 @@ pub fn pending(templates: &Path) -> Vec<serde_json::Value> {
             if !plain(&name) || !dir.join(format!("{name}.zeron-template")).is_file() {
                 return None;
             }
-            let about = read_json(&e.path());
+            let mut about = read_json(&e.path());
+            // Where it came from, as the window may show it (never a local
+            // path): `from`.
+            if let Some(origin) = about.as_object_mut().and_then(|a| a.remove("origin"))
+                && let Some(kind) = origin["kind"].as_str()
+            {
+                let mut from = serde_json::json!({ "kind": kind });
+                for key in ["url", "ref"] {
+                    if let Some(v) = origin[key].as_str() {
+                        from[key] = serde_json::json!(v);
+                    }
+                }
+                about["from"] = from;
+            }
             (about["pending"].as_str() == Some(name.as_str())).then_some(about)
         })
         .collect();

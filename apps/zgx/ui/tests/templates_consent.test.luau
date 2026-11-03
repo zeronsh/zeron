@@ -24,7 +24,7 @@ test("it says what a template can do, who signed it, and what's left out", funct
 	expect(tree).to_contain("42 files")
 	expect(tree).to_contain("2 files left out")
 	expect(tree).to_contain("No template may replace these")
-	expect(tree).never.to_contain("Unknown author")
+	expect(tree).never.to_contain("Unverified")
 end)
 
 test("Install and Not now answer with what was shown", function()
@@ -45,7 +45,7 @@ test("an unknown signer is named so, and the sheet follows once they're found", 
 	app:command("mystery")
 	app:frames(20)
 	local tree = app:tree("#template-consent")
-	expect(tree).to_contain("Unknown author")
+	expect(tree).to_contain("Unverified")
 	expect(tree).to_contain("Checking who made it")
 	expect(tree).to_contain("Install it only if you trust whoever sent it")
 	expect(tree).to_contain("1 file")
@@ -55,7 +55,7 @@ test("an unknown signer is named so, and the sheet follows once they're found", 
 	tree = app:tree("#template-consent")
 	expect(tree).to_contain("Made by @grace")
 	expect(tree).to_contain("trust @grace")
-	expect(tree).never.to_contain("Unknown author")
+	expect(tree).never.to_contain("Unverified")
 end)
 
 test("while it's being fetched, nothing can be answered", function()

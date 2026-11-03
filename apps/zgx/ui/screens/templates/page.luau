@@ -10,9 +10,15 @@
 -- a swatch of each appearance it changes, or Zeron's own.
 --
 -- Templates are shared as signed .zeron-template files: Export… (a row's
--- ⋯) signs one as yours; Import… brings one in. Someone else's waits, named
--- above the rows, until you allow it in Zeron's consent window (its own
--- window: nothing here can allow it).
+-- ⋯) signs one as yours; Install brings one in, as Plugins' does: from a
+-- link (a .zeron-template's, or a GitHub repository or release with one)
+-- or a file, the dialog open and its Install spinning until it's done.
+-- Someone else's waits, named above the rows, until you allow it in
+-- Zeron's consent window (its own window: nothing here can allow it). One
+-- from a package is checked where it came from for a newer version as the
+-- page opens (the engine checks every few hours too); a row with one says
+-- so and has Update. One whose maker Zeron can't vouch for says
+-- Unverified beside its version, and where it came from under its name.
 --
 -- Each row is its template's as the list changes: its colours' preview, its
 -- name and version, who made it and how it stands (in use, broken with why,
@@ -27,6 +33,7 @@ local ds = require("@ds")
 local Menu = require("@ds/menu")
 local control = require("@ds/control")
 local state = require("@app/screens/templates/state")
+local words = require("@app/screens/plugins/words")
 
 local M = {}
 
@@ -41,6 +48,21 @@ local deleting = ui.state("templates_deleting", nil :: string?)
 local deleting_open = ui.state("templates_deleting_open", false)
 local naming = ui.state("templates_naming", false)
 local new_name = ui.state("templates_new_name", "")
+-- Install's dialog, its link, and an install on its way (the dialog stays
+-- open, its Install spinning, until it's done or fails).
+local installing = ui.state("templates_installing", false)
+local install_link = ui.state("templates_install_link", "")
+local install_busy = ui.state("templates_install_busy", false)
+-- The template being updated, and when the page last had sources checked
+-- (at most every ten minutes).
+local updating = ui.state("templates_updating", nil :: string?)
+local checked_at = ui.state("templates_checked_at", 0)
+
+-- Its maker can't be vouched for: someone else's, signed by a key Zeron
+-- doesn't know (as a plugin's: words.unverified).
+local function unverified(t: any): boolean
+	return not t.builtin and t.imported ~= nil and words.unverified(t.imported)
+end
 
 local function author(t: state.Template): string
 	if t.builtin then
@@ -52,7 +74,7 @@ local function author(t: state.Template): string
 	if signed then
 		return if signed.kind == "verified" and signed.username
 			then ui.t("templates.page.author.verified", { username = signed.username }):get()
-			else ui.t("templates.page.author.unknown"):get()
+			else words.from(t.imported and t.imported.source) or ui.t("templates.page.author.unknown"):get()
 	end
 	return ui.t("templates.page.author.named", { name = tostring(t.author) }):get()
 end
@@ -156,23 +178,104 @@ local function export_file(id: string, name: string)
 	end)
 end
 
--- Import…: a .zeron-template file. Yours installs; someone else's opens
--- Zeron's consent window (the host's).
-local function import_file()
-	ui.task(function()
-		local files = ui.open_files({ title = ui.t("templates.page.import_title"):get(), filters = package_filter() }):await()
-		local file = files and files[1]
-		if not file then
-			return
+-- Install: a link or a .zeron-template file. Yours installs; someone
+-- else's opens Zeron's consent window (the host's), and waits above the
+-- rows. The dialog closes once it's done; failing, it stays, to try again.
+local function install(from: { path: string?, url: string? })
+	local p: any = state.import(from)
+	if p == nil then
+		installing:set(false)
+		return
+	end
+	install_busy:set(true)
+	p:after(function(done: any)
+		install_busy:set(false)
+		installing:set(false)
+		install_link:set("")
+		if type(done) == "table" and done.installed then
+			tab:set("installed")
+			ds.toast.show { title = ui.t("templates.page.installed_toast", { name = tostring(done.name or done.installed) }), tone = "success" }
 		end
-		settle(state.import(file.path), ui.t("templates.page.couldnt_import"), function(done: any)
-			if type(done) == "table" and done.installed then
-				tab:set("installed")
-				ds.toast.show { title = ui.t("templates.page.installed_toast", { name = tostring(done.name or done.installed) }), tone = "success" }
-			end
-		end)
+	end, function(err: any)
+		install_busy:set(false)
+		failed(ui.t("templates.page.couldnt_install"))(err)
 	end)
 end
+
+local function choose_file()
+	if install_busy:peek() then
+		return
+	end
+	ui.task(function()
+		local files = ui.open_files({ title = ui.t("templates.page.install_title"):get(), filters = package_filter() }):await()
+		local file = files and files[1]
+		if file then
+			install { path = file.path }
+		end
+	end)
+end
+
+-- The update found for it, installed in its place.
+local function update(id: string, name: string)
+	updating:set(id)
+	local p: any = state.update(id)
+	if p == nil then
+		updating:set(nil)
+		return
+	end
+	p:after(function(done: any)
+		updating:set(nil)
+		local version = if type(done) == "table" and type(done.version) == "string" and done.version ~= "" then done.version else nil
+		ds.toast.show {
+			title = if version
+				then ui.t("templates.page.updated_toast_version", { name = name, version = version })
+				else ui.t("templates.page.updated_toast", { name = name }),
+			tone = "success",
+		}
+	end, function(err: any)
+		updating:set(nil)
+		failed(ui.t("templates.page.couldnt_update", { name = name }))(err)
+	end)
+end
+
+-- Update, at the end of the line saying a newer version was found:
+-- link-like, as Plugins' is.
+local UpdateLink = ui.component(function(props: { now: State<any> }): Node
+	local now = props.now
+	local function busy(): boolean
+		return updating:get() == now:get().id
+	end
+	return ui.show(function(): boolean
+		local it: any = now:get()
+		return type(it.update) == "table" and it.update.refused == nil and not it.builtin
+	end, ui.row {
+		role = "button",
+		label = ui.t("templates.page.update"),
+		focusable = function(): boolean
+			return not busy()
+		end,
+		disabled = busy,
+		shrink = 0,
+		cursor = "pointer",
+		color = "$text.primary",
+		hover = { color = "$accent" },
+		on_click = function()
+			if not busy() then
+				update(now:peek().id, now:peek().name)
+			end
+		end,
+		ui.text {
+			function(): string
+				return if busy() then ui.t("templates.page.updating"):get() else ui.t("templates.page.update"):get()
+			end,
+			text_size = "$font.size.sm",
+			line_height = "$font.line.sm",
+			weight = "$font.weight.medium",
+			underline = true,
+			underline_offset = 4,
+		},
+	})
+end)
 
 -- Someone else's packages, waiting for you: each with Review (its consent
 -- window). Nothing when none waits.
@@ -362,6 +465,11 @@ local function controls(t: state.Template, now: State<any>): Node
 	return ui.row {
 		gap = "$space.2",
 		items = "center",
+		-- Unverified, before its version, for one whose maker Zeron can't
+		-- vouch for.
+		ui.show(function(): boolean
+			return unverified(now:get())
+		end, ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", class = "template-unverified" }),
 		-- Its version, centred on the row.
 		ui.show(function(): boolean
 			local v = now:get().version
@@ -414,6 +522,12 @@ local function row(t: state.Template, _i: number, now: State<any>): Node
 			badge = ui.show(function(): boolean
 				return now:get().active == true
 			end, ds.Badge { ui.t("templates.page.in_use"), tone = "accent", class = "template-in-use" }),
+			-- A newer version found where it came from.
+			detail = function(): string?
+				local it: any = now:get()
+				return if it.builtin then nil else words.update(it)
+			end,
+			detail_action = UpdateLink { now = now },
 			truncate = true,
 			control = controls(t, now),
 		},
@@ -438,6 +552,42 @@ end
 
 local function dialogs(): { Node }
 	return {
+		ds.Dialog {
+			open = installing,
+			title = ui.t("templates.page.install_dialog_title"),
+			body = ui.t("templates.page.install_dialog_body"),
+			size = "sm",
+			confirm = {
+				label = ui.t("templates.page.install"),
+				keep_open = true,
+				busy = function(): boolean
+					return install_busy:get()
+				end,
+				on_click = function()
+					local link = string.match(install_link:peek(), "^%s*(.-)%s*$") or ""
+					if link ~= "" then
+						install { url = link }
+					end
+				end,
+			},
+			ds.TextField {
+				value = install_link,
+				label = ui.t("templates.page.link"),
+				placeholder = "github.com/owner/template",
+				select_on_focus = true,
+				w_full = true,
+			},
+			ds.Button {
+				id = "templates-choose-file",
+				tone = "secondary",
+				size = "sm",
+				disabled = function(): boolean
+					return install_busy:get()
+				end,
+				on_click = choose_file,
+				ui.t("templates.page.choose_file"),
+			},
+		},
 		ds.Dialog {
 			open = deleting_open,
 			title = ui.t("templates.page.delete_title"),
@@ -481,6 +631,14 @@ local function dialogs(): { Node }
 end
 
 function M.View(): Node
+	-- As it opens: each one from a package checked where it came from.
+	if os.time() - checked_at:peek() > 600 then
+		checked_at:set(os.time())
+		local p: any = state.check_updates()
+		if p ~= nil then
+			p:after(function(_: any) end, function(_: any) end)
+		end
+	end
 	return ds.Settings.Catalog {
 		title = ui.t("templates.page.title"),
 		description = ui.t("templates.page.description"),
@@ -493,8 +651,14 @@ function M.View(): Node
 				{ value = "yours", label = ui.t("templates.page.yours"), count = count("yours") },
 			},
 		},
-		-- (No New or Import… for now: templates arrive by an agent or as a
-		-- copy of Zeron's.)
+		-- (No New for now: templates of yours arrive by an agent or as a
+		-- copy of Zeron's. Install brings in someone else's, as Plugins'.)
+		import = {
+			label = ui.t("templates.page.install_more"),
+			on_click = function()
+				installing:set(true)
+			end,
+		},
 		notice = waiting,
 		-- (Only while one waits: none, it takes no room over the card.)
 		notice_when = function(): boolean

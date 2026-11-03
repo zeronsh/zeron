@@ -436,7 +436,7 @@ return function(): Node
 			open = view.palette,
 			recent = recent,
 			-- (Its placeholder read as it's drawn: the locale shown then.)
-			root = setmetatable({ id = "root", title = "Zeron", items = root, search = search_files }, {
+			root = setmetatable({ id = "root", title = "Zeron", items = root, search = search_files, scopes = true }, {
 				__index = function(_, field: string): any
 					return if field == "placeholder" then locale.s("shell.palette.search") else nil
 				end,

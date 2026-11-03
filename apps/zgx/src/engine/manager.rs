@@ -1,15 +1,29 @@
 //! Which engine this app works through, and keeping it running: the one
-//! place that starts, restarts and refuses engines, so it can grow into the
-//! engine's manager the shipping app has (crates/engine/src/managed.rs).
+//! place that starts, restarts and refuses engines.
 //!
-//! For now it is a staging engine: the one at `ZERON_ZGX_ENGINE_PORT`
-//! (27871) with its data in `ZERON_ZGX_ENGINE_DATA` (~/.zeron-staging),
-//! scripts/staging-app.sh's. One already serving that port is used as it
-//! is; otherwise this app starts `zeron-engine` (`ZERON_ZGX_ENGINE_BIN`, or
-//! this checkout's `target/debug/zeron-engine`: `cargo build -p zeron
-//! --bin zeron-engine` at the repository's root) against the same edge and
-//! sign-in client as `src/auth.rs`'s, detached, so it outlives the app as
-//! the shipping app's engine does.
+//! **Zeron.app's beta** (the `beta` feature: this interface as the Zeron app
+//! itself, scripts/package-zgx-beta.sh) manages Zeron.app's own engine, as
+//! the shipping app does (crates/engine/src/managed.rs, through the same
+//! crates/launch): the bundle's `Contents/MacOS/Zeron Engine`, started
+//! detached with `ZERON_MANAGED_ENGINE` and the bundle as `ZERON_APP`, its
+//! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
+//! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
+//! (the shipping app's, before this one was installed). It signs in against
+//! production only (src/auth.rs), and a staging engine (port 27871,
+//! ~/.zeron-staging) or any other edge is refused. No more devices, no other
+//! data: the same engine as before the beta. When the bundle is replaced by a
+//! newer one, the engine restarts into it by itself once nothing runs
+//! (crates/update `SupersededRestart`, weighing the bundle's
+//! `ZeronEngineVersion`).
+//!
+//! **Development builds** work through a staging engine: the one at
+//! `ZERON_ZGX_ENGINE_PORT` (27871) with its data in `ZERON_ZGX_ENGINE_DATA`
+//! (~/.zeron-staging), scripts/staging-app.sh's. One already serving that port
+//! is used as it is; otherwise this app starts `zeron-engine`
+//! (`ZERON_ZGX_ENGINE_BIN`, or this checkout's `target/debug/zeron-engine`:
+//! `cargo build -p zeron --bin zeron-engine` at the repository's root)
+//! against the same edge and sign-in client as `src/auth.rs`'s, detached, so
+//! it outlives the app as the shipping app's engine does.
 //!
 //!   ZERON_ZGX_ENGINE_PORT=<n>     the engine's IPC port (27871)
 //!   ZERON_ZGX_ENGINE_DATA=<dir>   its data dir (~/.zeron-staging)
@@ -21,26 +35,9 @@
 //!                                 sign-ins with throwaway state
 //!   ZERON_ZGX_ENGINE_SPAWN=0      never start one; only use one that runs
 //!
-//! Never the production engine: port 27654 and ~/.comet-native are refused,
-//! whatever the variables say.
-//!
-//! Zeron Preview (the `preview` feature: the app in its own bundle beside
-//! Zeron.app, scripts/package-zgx-preview.sh) is production's only: its
-//! edge and sign-in are production's whatever the variables say
-//! (src/auth.rs), and staging's engine (port 27871, ~/.zeron-staging) is
-//! refused as production's is. It has an engine of its own instead, the
-//! engine variables above still moving it (port, data, binary, home):
-//!   - the one in its bundle (`Contents/MacOS/zeron-engine`, beside this
-//!     app's executable), on port 27664 with its data in ~/.zeron-preview;
-//!   - named "<this Mac's name> · Preview" in the account
-//!     (`ZERON_DEVICE_NAME`; `ZERON_ZGX_DEVICE_NAME` names it otherwise);
-//!   - its updater reading the preview channel (`{edge}/releases/preview`,
-//!     `ZERON_RELEASES_URL`), never the Zeron app's manifest: it only
-//!     reports there anyway (an engine in an app bundle never swaps it), and
-//!     About shows that channel's;
-//!   - given its bundle as `ZERON_APP`, so its banners are Zeron Preview's
-//!     and open it, and it restarts into a newer bundle copied over this one
-//!     once nothing runs and the app is up (crates/engine/src/managed.rs).
+//! A development build never uses the production engine: port 27654 and
+//! ~/.zeron (and the pre-0.2.0 ~/.comet-native) are refused, whatever the
+//! variables say.
 //!
 //! A signed-out engine opens a local workspace and keeps it; signing in
 //! takes a new one (the shipping app's sync switch). So once the engine's
@@ -51,21 +48,14 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The production engine's port and data dir, refused outright.
-const PRODUCTION_PORT: u16 = 27654;
-const PRODUCTION_DATA: &str = ".comet-native";
+/// The production engine's data dirs, relative to home: today's and the one
+/// it was renamed from in 0.2.0.
+const PRODUCTION_DATA: &[&str] = &[".zeron", ".comet-native"];
 
 const STAGING_PORT: u16 = 27871;
 const STAGING_DATA: &str = ".zeron-staging";
 
-/// Zeron Preview's engine: a port and data dir of its own, beside both.
-const PREVIEW_PORT: u16 = 27664;
-const PREVIEW_DATA: &str = ".zeron-preview";
-/// The engine's executable in Zeron Preview's bundle, beside this app's
-/// (a name crates/engine's managed.rs knows as an engine's, not the app's).
-const PREVIEW_ENGINE: &str = "zeron-engine";
-
-const PREVIEW: bool = cfg!(feature = "preview");
+const BETA: bool = cfg!(feature = "beta");
 
 /// The soonest a second engine is started after the first.
 const SPAWN_SPACING: Duration = Duration::from_secs(10);
@@ -80,11 +70,10 @@ pub struct Config {
     edge: String,
     client: String,
     callback_port: u16,
-    /// Zeron Preview's: its device's name in the account (none: the
-    /// engine's own, this Mac's name).
-    device_name: Option<String>,
-    /// Zeron Preview's: the bundle its banners open (`ZERON_APP`).
-    app: Option<PathBuf>,
+    /// Zeron.app's engine, managed as Zeron.app manages it (the beta): its
+    /// bundle's, started through crates/launch; it restarts into a newer
+    /// bundle by itself.
+    managed: bool,
 }
 
 /// Why no engine can be used.
@@ -99,6 +88,12 @@ impl Config {
     /// The engine this app would start now, if it may start one.
     pub fn startable(&self) -> Option<&Path> {
         if self.spawn { self.bin.as_deref() } else { None }
+    }
+
+    /// Whether this is Zeron.app's engine, which follows its bundle by
+    /// itself (no "older than the one on disk" of this app's to judge).
+    pub fn follows_bundle(&self) -> bool {
+        self.managed
     }
 }
 
@@ -128,10 +123,64 @@ impl Config {
     pub fn from_env(edge: &str, client: &str, callback_port: u16) -> Result<Self, Refusal> {
         let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        Self::from_vars(var, &home, edge, client, callback_port)
+        let exe = std::env::current_exe().ok();
+        Self::from_vars(var, &home, exe.as_deref(), edge, client, callback_port)
     }
 
     fn from_vars(
+        var: impl Fn(&str) -> Option<String>,
+        home: &Path,
+        exe: Option<&Path>,
+        edge: &str,
+        client: &str,
+        callback_port: u16,
+    ) -> Result<Self, Refusal> {
+        if BETA {
+            Self::zeron_app(var, home, exe, edge, client, callback_port)
+        } else {
+            Self::staging(var, home, edge, client, callback_port)
+        }
+    }
+
+    /// The beta's: Zeron.app's engine, resolved as Zeron.app resolves it.
+    fn zeron_app(
+        var: impl Fn(&str) -> Option<String>,
+        home: &Path,
+        exe: Option<&Path>,
+        edge: &str,
+        client: &str,
+        callback_port: u16,
+    ) -> Result<Self, Refusal> {
+        let production = crate::auth::production();
+        if (edge, client, callback_port) != (production.edge.as_str(), production.client.as_str(), production.port) {
+            return Err(format!("{edge} isn't production's edge and sign-in"));
+        }
+        let port = zeron_cli::ipc_port_from(var("ZERON_IPC_PORT").as_deref());
+        let data_dir = zeron_cli::paths::resolve_data_dir(|key| match key {
+            "HOME" => Some(home.as_os_str().to_owned()),
+            key => var(key).map(Into::into),
+        });
+        if port == STAGING_PORT {
+            return Err(format!("port {STAGING_PORT} is the staging engine's"));
+        }
+        if same_dir(&data_dir, &home.join(STAGING_DATA)) {
+            return Err(format!("~/{STAGING_DATA} is the staging engine's"));
+        }
+        Ok(Self {
+            port,
+            data_dir,
+            bin: exe.and_then(zeron_launch::engine_executable),
+            home: None,
+            spawn: true,
+            edge: edge.into(),
+            client: client.into(),
+            callback_port,
+            managed: true,
+        })
+    }
+
+    /// A development build's: a staging engine, never production's.
+    fn staging(
         var: impl Fn(&str) -> Option<String>,
         home: &Path,
         edge: &str,
@@ -143,47 +192,22 @@ impl Config {
                 .trim()
                 .parse()
                 .map_err(|_| format!("ZERON_ZGX_ENGINE_PORT `{raw}` isn't a port"))?,
-            None if PREVIEW => PREVIEW_PORT,
             None => STAGING_PORT,
         };
         let data_dir = var("ZERON_ZGX_ENGINE_DATA")
             .map(|dir| expand(&dir, home))
-            .unwrap_or_else(|| home.join(if PREVIEW { PREVIEW_DATA } else { STAGING_DATA }));
-        if port == PRODUCTION_PORT {
-            return Err(format!("port {PRODUCTION_PORT} is the production engine's"));
+            .unwrap_or_else(|| home.join(STAGING_DATA));
+        if port == zeron_cli::DEFAULT_IPC_PORT {
+            return Err(format!("port {} is the production engine's", zeron_cli::DEFAULT_IPC_PORT));
         }
-        if same_dir(&data_dir, &home.join(PRODUCTION_DATA)) {
-            return Err(format!("~/{PRODUCTION_DATA} is the production engine's"));
+        if let Some(dir) = PRODUCTION_DATA.iter().find(|dir| same_dir(&data_dir, &home.join(dir))) {
+            return Err(format!("~/{dir} is the production engine's"));
         }
-        // Zeron Preview is production's only: never staging's engine (signed
-        // into staging), nor any edge but production's.
-        if PREVIEW {
-            if port == STAGING_PORT {
-                return Err(format!("port {STAGING_PORT} is the staging engine's"));
-            }
-            if same_dir(&data_dir, &home.join(STAGING_DATA)) {
-                return Err(format!("~/{STAGING_DATA} is the staging engine's"));
-            }
-            let production = crate::auth::production();
-            if (edge, client, callback_port) != (production.edge.as_str(), production.client.as_str(), production.port) {
-                return Err(format!("{edge} isn't production's edge and sign-in"));
-            }
-        }
-        let exe = std::env::current_exe().ok();
         let bin = var("ZERON_ZGX_ENGINE_BIN").map(|p| expand(&p, home)).or_else(|| {
-            let built = if PREVIEW {
-                // The bundle's, beside this app's executable.
-                exe.as_deref()?.parent()?.join(PREVIEW_ENGINE)
-            } else {
-                // This checkout's: apps/zgx is two below the repository's root.
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/zeron-engine")
-            };
+            // This checkout's: apps/zgx is two below the repository's root.
+            let built = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/zeron-engine");
             built.exists().then_some(built)
         });
-        let device_name = var("ZERON_ZGX_DEVICE_NAME").or_else(|| PREVIEW.then(|| preview_device_name(&computer_name())));
-        let app = PREVIEW
-            .then(|| exe.as_deref()?.ancestors().find(|dir| dir.extension().is_some_and(|ext| ext == "app")).map(Path::to_path_buf))
-            .flatten();
         Ok(Self {
             port,
             data_dir,
@@ -193,50 +217,13 @@ impl Config {
             edge: edge.into(),
             client: client.into(),
             callback_port,
-            device_name,
-            app,
+            managed: false,
         })
     }
 
     pub fn describe(&self) -> String {
         format!("port {}, data {}", self.port, self.data_dir.display())
     }
-
-    /// Where the engine's updater looks for releases: Zeron Preview's own
-    /// channel (none: the edge's, the Zeron app's).
-    fn releases(&self) -> Option<String> {
-        PREVIEW.then(|| format!("{}/releases/preview", self.edge.trim_end_matches('/')))
-    }
-}
-
-/// This Mac's name as the account shows it (System Settings → General →
-/// About → Name), or its host name.
-fn computer_name() -> String {
-    let named = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty());
-    named.unwrap_or_else(|| {
-        std::process::Command::new("/bin/hostname")
-            .arg("-s")
-            .output()
-            .ok()
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Mac".into())
-    })
-}
-
-/// Zeron Preview's device, told apart from the Zeron app's on the same Mac.
-fn preview_device_name(computer: &str) -> String {
-    format!("{} · Preview", computer.trim())
 }
 
 fn expand(path: &str, home: &Path) -> PathBuf {
@@ -272,16 +259,21 @@ impl Spawner {
             if !self.said_missing {
                 self.said_missing = true;
                 eprintln!(
-                    "zeron-zgx: engine: nothing answers on {} and there's no engine to start: \
-                     build one (`cargo build -p zeron --bin zeron-engine` at the repository's root) \
-                     or set ZERON_ZGX_ENGINE_BIN",
-                    config.describe()
+                    "zeron-zgx: engine: nothing answers on {} and there's no engine to start: {}",
+                    config.describe(),
+                    if config.managed {
+                        "this app has no Zeron Engine beside it"
+                    } else {
+                        "build one (`cargo build -p zeron --bin zeron-engine` at the repository's root) \
+                         or set ZERON_ZGX_ENGINE_BIN"
+                    }
                 );
             }
             return false;
         };
         self.last = Some(Instant::now());
-        match spawn(config, bin) {
+        let started = if config.managed { launch(config) } else { spawn(config, bin) };
+        match started {
             Ok(()) => {
                 eprintln!("zeron-zgx: engine: started {} ({})", bin.display(), config.describe());
                 true
@@ -294,8 +286,26 @@ impl Spawner {
     }
 }
 
-/// The engine, detached (its own process group, no inherited pipes), so
-/// this app closing leaves it running; it logs to its data dir.
+/// Zeron.app's engine, started as Zeron.app starts it (crates/launch).
+fn launch(config: &Config) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let child = zeron_launch::launch(
+        &zeron_launch::LaunchConfig {
+            data_dir: config.data_dir.clone(),
+            ipc_port: config.port,
+            edge_url: config.edge.clone(),
+            workos_client_id: Some(config.client.clone()),
+            edge_token: None,
+            org_id: None,
+        },
+        &exe,
+    )?;
+    zeron_launch::reap(child);
+    Ok(())
+}
+
+/// A development engine, detached (its own process group, no inherited
+/// pipes), so this app closing leaves it running; it logs to its data dir.
 fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     // Which build it is, kept (an engine that reports it is this app's), as
@@ -324,17 +334,6 @@ fn spawn(config: &Config, bin: &Path) -> std::io::Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // Zeron Preview's: its device's name, its release channel and its bundle
-    // (set after the removals above, which `ZERON_APP` would otherwise lose).
-    if let Some(name) = &config.device_name {
-        command.env("ZERON_DEVICE_NAME", name);
-    }
-    if let Some(releases) = config.releases() {
-        command.env("ZERON_RELEASES_URL", releases);
-    }
-    if let Some(app) = &config.app {
-        command.env("ZERON_APP", app);
-    }
     if let Some(home) = &config.home {
         let (claude, codex) = (home.join(".claude"), home.join(".codex"));
         std::fs::create_dir_all(&claude)?;
@@ -373,6 +372,19 @@ pub fn needs_restart(scope: Option<&str>, signed_in: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn config_of(vars: &[(&str, &str)], home: &Path, exe: Option<&Path>, edge: &str) -> Result<Config, Refusal> {
+        let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let prod = crate::auth::production();
+        Config::from_vars(
+            move |key| vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
+            home,
+            exe,
+            edge,
+            &prod.client,
+            prod.port,
+        )
+    }
+
     #[test]
     fn a_signed_in_session_on_a_local_workspace_restarts() {
         assert!(needs_restart(Some("local"), true));
@@ -382,54 +394,48 @@ mod tests {
         assert!(!needs_restart(None, true));
     }
 
+    /// A development build never touches the production engine: its port,
+    /// today's data dir or the one it was renamed from.
+    #[cfg(not(feature = "beta"))]
     #[test]
-    fn a_preview_device_is_marked_as_one() {
-        assert_eq!(preview_device_name("Wing's MacBook Pro\n"), "Wing's MacBook Pro · Preview");
-    }
-
-    #[test]
-    fn preview_has_an_engine_of_its_own() {
-        for port in [PRODUCTION_PORT, STAGING_PORT] {
-            assert_ne!(PREVIEW_PORT, port);
-        }
-        for data in [PRODUCTION_DATA, STAGING_DATA] {
-            assert_ne!(PREVIEW_DATA, data);
-        }
-    }
-
-    /// A preview build's engine: production's edge, sign-in and release
-    /// channel, Preview's port and data, whatever the variables say; and
-    /// staging's engine refused outright.
-    #[cfg(feature = "preview")]
-    #[test]
-    fn a_preview_build_resolves_to_production_only() {
+    fn a_development_build_refuses_the_production_engine() {
         let home = Path::new("/Users/someone");
-        let prod = crate::auth::endpoint();
-        let config = |vars: &[(&str, &str)]| {
-            let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-            Config::from_vars(
-                move |key| vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
-                home,
-                &prod.edge,
-                &prod.client,
-                prod.port,
-            )
-        };
-        let plain = config(&[]).unwrap();
-        assert_eq!((plain.edge.as_str(), plain.client.as_str()), ("https://edge.zeron.sh", "client_01KWD0EAKZKD50YCQJNYSRE4BY"));
-        assert_eq!(plain.callback_port, 27641);
-        assert_eq!((plain.port, plain.data_dir.clone()), (PREVIEW_PORT, home.join(PREVIEW_DATA)));
-        assert_eq!(plain.releases().as_deref(), Some("https://edge.zeron.sh/releases/preview"));
-        assert!(plain.device_name.as_deref().is_some_and(|n| n.ends_with(" · Preview")));
-        // The edge-picking variables do nothing (src/auth.rs); staging's
-        // engine is refused.
-        let staged = config(&[("ZERON_ZGX_ENV", "staging"), ("ZERON_ZGX_EDGE", "https://staging.zeron.sh")]).unwrap();
-        assert_eq!(staged.edge, "https://edge.zeron.sh");
-        assert!(config(&[("ZERON_ZGX_ENGINE_PORT", "27871")]).is_err());
-        assert!(config(&[("ZERON_ZGX_ENGINE_DATA", "~/.zeron-staging")]).is_err());
-        assert!(config(&[("ZERON_ZGX_ENGINE_PORT", "27654")]).is_err());
-        // Nor any other edge, should one be handed in.
-        assert!(Config::from_vars(|_| None, home, "https://staging.zeron.sh", &prod.client, prod.port).is_err());
+        let edge = "https://staging.zeron.sh";
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654")], home, None, edge).is_err());
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.comet-native")], home, None, edge).is_err());
+        let staging = config_of(&[], home, None, edge).unwrap();
+        assert_eq!((staging.port, staging.data_dir.clone()), (STAGING_PORT, home.join(STAGING_DATA)));
+        assert!(!staging.follows_bundle());
+    }
+
+    /// The beta manages Zeron.app's own engine: its port and data, the
+    /// bundle's engine, production's edge and sign-in; never staging's.
+    #[cfg(feature = "beta")]
+    #[test]
+    fn a_beta_build_manages_zeron_app_s_engine() {
+        let dir = std::env::temp_dir().join(format!("zgx-beta-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let macos = dir.join("Zeron.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("zeron");
+        std::fs::write(macos.join("Zeron Engine"), "").unwrap();
+        let home = Path::new("/Users/someone");
+        let prod = crate::auth::production();
+        let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
+        assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
+        assert_eq!(beta.startable(), Some(macos.join("Zeron Engine").as_path()));
+        assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
+        assert!(beta.follows_bundle());
+        // As Zeron.app: ZERON_DATA_DIR and ZERON_IPC_PORT move it; the
+        // development variables don't.
+        let moved = config_of(&[("ZERON_DATA_DIR", "/tmp/z"), ("ZERON_IPC_PORT", "27700"), ("ZERON_ZGX_ENGINE_PORT", "1")], home, Some(&exe), &prod.edge).unwrap();
+        assert_eq!((moved.port, moved.data_dir), (27700, PathBuf::from("/tmp/z")));
+        // Never staging's engine, nor another edge.
+        assert!(config_of(&[("ZERON_IPC_PORT", "27871")], home, Some(&exe), &prod.edge).is_err());
+        assert!(config_of(&[("ZERON_DATA_DIR", "/Users/someone/.zeron-staging")], home, Some(&exe), &prod.edge).is_err());
+        assert!(config_of(&[], home, Some(&exe), "https://staging.zeron.sh").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

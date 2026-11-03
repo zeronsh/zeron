@@ -349,8 +349,15 @@ type Reply = Rc<RefCell<(Option<Result<Value, String>>, Option<Waker>)>>;
 
 enum Pending {
     Call(Reply),
-    /// `None` while its callback runs (it may start or stop other watches).
-    Watch(Option<Box<dyn FnMut(Value)>>),
+    Watch(Watching),
+}
+
+/// A watch's callbacks.
+struct Watching {
+    /// `None` while it runs (it may start or stop other watches).
+    on_item: Option<Box<dyn FnMut(Value)>>,
+    /// Told once if it ends of itself (an error, done, the connection gone).
+    on_end: Option<Box<dyn FnOnce(String)>>,
 }
 
 struct Inner {
@@ -415,11 +422,27 @@ impl Rpc {
     /// A watch: `on_item` sees the current value, then every change, until
     /// the handle drops or the connection ends.
     pub fn watch(&self, method: &str, params: Value, on_item: impl FnMut(Value) + 'static) -> Watch {
+        self.watch_ending(method, params, on_item, |_| {})
+    }
+
+    /// [`Rpc::watch`], and `on_end(why)` if it ends before its handle drops:
+    /// its error, "done", or "closed" (the connection ended). Never after
+    /// the handle drops.
+    pub fn watch_ending(
+        &self,
+        method: &str,
+        params: Value,
+        on_item: impl FnMut(Value) + 'static,
+        on_end: impl FnOnce(String) + 'static,
+    ) -> Watch {
         let id = self.send(method, params);
-        self.0
-            .pending
-            .borrow_mut()
-            .insert(id, Pending::Watch(Some(Box::new(on_item))));
+        self.0.pending.borrow_mut().insert(
+            id,
+            Pending::Watch(Watching {
+                on_item: Some(Box::new(on_item)),
+                on_end: Some(Box::new(on_end)),
+            }),
+        );
         Watch { rpc: self.clone(), id }
     }
 
@@ -430,14 +453,20 @@ impl Rpc {
                 Ok(frames) => frames,
                 Err(reason) => {
                     self.0.closed.set(true);
-                    // Outstanding calls fail, so their awaiters move on.
-                    for (_, pending) in self.0.pending.borrow_mut().drain() {
-                        if let Pending::Call(reply) = pending {
-                            let mut slot = reply.borrow_mut();
-                            slot.0 = Some(Err("closed".into()));
-                            if let Some(waker) = slot.1.take() {
-                                waker.wake();
+                    // Outstanding calls fail, so their awaiters move on, and
+                    // watches are told they ended.
+                    let pending: Vec<Pending> = self.0.pending.borrow_mut().drain().map(|(_, p)| p).collect();
+                    for pending in pending {
+                        match pending {
+                            Pending::Call(reply) => {
+                                let mut slot = reply.borrow_mut();
+                                slot.0 = Some(Err("closed".into()));
+                                if let Some(waker) = slot.1.take() {
+                                    waker.wake();
+                                }
                             }
+                            Pending::Watch(Watching { on_end: Some(on_end), .. }) => on_end("closed".into()),
+                            Pending::Watch(_) => {}
                         }
                     }
                     return reason;
@@ -470,21 +499,30 @@ impl Rpc {
                     }
                 }
             }
-            Some(Pending::Watch(callback)) => {
+            Some(Pending::Watch(watching)) => {
                 if frame.get("done").is_some() || frame.get("err").is_some() {
+                    let on_end = watching.on_end.take();
                     pending.remove(&id);
+                    drop(pending);
+                    if let Some(on_end) = on_end {
+                        let why = match frame.get("err") {
+                            Some(error) => error.as_str().unwrap_or("error").to_owned(),
+                            None => "done".to_owned(),
+                        };
+                        on_end(why);
+                    }
                     return;
                 }
                 let Some(item) = frame.get("item").cloned() else {
                     return;
                 };
-                let Some(mut on_item) = callback.take() else {
+                let Some(mut on_item) = watching.on_item.take() else {
                     return;
                 };
                 drop(pending);
                 on_item(item);
-                if let Some(Pending::Watch(slot)) = self.0.pending.borrow_mut().get_mut(&id) {
-                    *slot = Some(on_item);
+                if let Some(Pending::Watch(watching)) = self.0.pending.borrow_mut().get_mut(&id) {
+                    watching.on_item = Some(on_item);
                 }
             }
             None => {}
@@ -503,5 +541,62 @@ impl Drop for Watch {
         if self.rpc.0.pending.borrow_mut().remove(&self.id).is_some() && !self.rpc.is_closed() {
             self.rpc.post(json!({ "id": self.id, "cancel": true }).to_string());
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A connection with no socket: frames handed to it as the network
+    /// thread would.
+    fn loopback() -> (Rpc, Frames, OwnedFd) {
+        let (heard, bell) = pipe().unwrap();
+        let (tx, _rx) = mpsc::channel::<String>();
+        let frames = Frames(Arc::default());
+        let rpc = Rpc(Rc::new(Inner {
+            tx,
+            bell: Arc::new(bell),
+            frames: frames.clone(),
+            next_id: Cell::new(1),
+            pending: RefCell::default(),
+            closed: Cell::new(false),
+        }));
+        (rpc, frames, heard)
+    }
+
+    #[test]
+    fn a_watch_that_ends_says_why_once_and_never_after_its_handle_drops() {
+        let (rpc, frames, _heard) = loopback();
+        let ended: Rc<RefCell<Vec<String>>> = Rc::default();
+        let items: Rc<Cell<u32>> = Rc::default();
+        let (e, i) = (ended.clone(), items.clone());
+        let watch = rpc.watch_ending("W", json!({}), move |_| i.set(i.get() + 1), move |why| e.borrow_mut().push(why));
+        rpc.route(json!({ "id": watch.id, "item": 1 }));
+        rpc.route(json!({ "id": watch.id, "item": 2 }));
+        assert_eq!(items.get(), 2);
+        rpc.route(json!({ "id": watch.id, "err": "no checkout" }));
+        assert_eq!(*ended.borrow(), vec!["no checkout".to_string()]);
+        // Ended: nothing more, and dropping it tells nothing again.
+        rpc.route(json!({ "id": watch.id, "item": 3 }));
+        drop(watch);
+        assert_eq!((items.get(), ended.borrow().len()), (2, 1));
+
+        // Dropped first: never told.
+        let e = ended.clone();
+        let quiet = rpc.watch_ending("W", json!({}), |_| {}, move |why| e.borrow_mut().push(why));
+        let id = quiet.id;
+        drop(quiet);
+        rpc.route(json!({ "id": id, "err": "late" }));
+        assert_eq!(ended.borrow().len(), 1);
+
+        // The connection gone: each open watch told "closed".
+        let e = ended.clone();
+        let _open = rpc.watch_ending("W", json!({}), |_| {}, move |why| e.borrow_mut().push(why));
+        frames.push(None, Some("gone".into()));
+        let mut pump = std::pin::pin!(rpc.pump());
+        let waker = std::task::Waker::noop();
+        assert!(pump.as_mut().poll(&mut std::task::Context::from_waker(waker)).is_ready());
+        assert_eq!(*ended.borrow(), vec!["no checkout".to_string(), "closed".to_string()]);
     }
 }

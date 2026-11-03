@@ -1043,6 +1043,26 @@ return function(id: string): any
 		return ui.shared("zeron.devices", {} :: { any })
 	end
 
+	-- The window it's drawn in: whether it shows (not hidden, minimised or
+	-- covered by another) and whether it's the one in front. Read as a
+	-- state is (an effect or computed reading them runs again as they
+	-- change); true where the app doesn't say. Leave work no one would see
+	-- for when it shows. (`peek`: read as `:peek()` reads, followed by
+	-- nothing.)
+	function M.window(peek: boolean?): { shown: boolean, active: boolean }
+		local ok, shown, active = pcall(function(): (any, any)
+			local s, a = ui.shared("zgx.window.shown", true), ui.shared("zgx.window.active", true)
+			if peek then
+				return s:peek(), a:peek()
+			end
+			return s:get(), a:get()
+		end)
+		if not ok then
+			return { shown = true, active = true }
+		end
+		return { shown = shown ~= false, active = active ~= false }
+	end
+
 	-- Its service ("service": "service.luau", with the "service"
 	-- permission): on this device (no device), or on another of yours by
 	-- its id (`zeron.devices()`). Each device runs it only if it allowed

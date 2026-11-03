@@ -184,6 +184,7 @@ Zeron draws that row on your settings page: "Use as wallpaper", and while it's o
 | `zeron.menu_entries(name, context)` | the items others added to a menu of yours (`<id>.<name>`), as ContextMenu entries | |
 | `zeron.store(key, default)` | kept between runs (1 MB): `:get()`, `:peek()`, `:set(v)` | (always) |
 | `zeron.every(seconds, fn)` | now and then, 30 s at least; returns a stop function | (always) |
+| `zeron.window(peek?)` | `{ shown, active }`: whether the window shows (not hidden, minimised or covered) and is in front, read as states (an effect reading them runs again). Leave work no one would see for when it shows | (always) |
 | `zeron.db.exec(sql, params)`, `zeron.db.query(sql, params)` | its own SQLite database: promises of `{ changes, last_id }` and of rows | (always) |
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a program its manifest names, as you: a promise of `{ status, stdout, stderr }` | `commands` |
 | `zeron.send(to, data)`, `zeron.on_message(fn)`, `zeron.devices()` | the same plugin on your other devices | `devices` |
@@ -309,6 +310,7 @@ end)
 | `zeron.every(seconds, fn)` | now and then (30 s at least), even while nothing calls it: Zeron starts the service to run it. Register timers at the top level, in the same order each time | |
 | `zeron.on_stop(fn)` | told before it stops (idle, an update, Zeron quitting) | |
 | `zeron.emit(event, data)` | to your windows: those on this device, and those watching from another (`:on`). 64 KB at most | |
+| `zeron.watch(folders, fn, { quiet? })` | changes under whole paths on this device, each all the way down: `fn(changed)` once a burst has been quiet `quiet` ms (250), `changed` by folder: its changed paths (relative, `/`-separated), or `true` when anything may have (as it starts, too many, events lost). Reads aren't changes. Returns a stop function; it lasts while the service runs. Pair it with `emit` to tell windows, instead of their polling | `files.read` |
 | `zeron.run(program, args, { cwd, stdin, timeout, env })` | a promise of `{ status, stdout, stderr }`, as the window's | `commands` |
 | `zeron.fetch(url, { method, headers, body, timeout })` | a promise of `{ status, headers, body }` (http and https) | `network` |
 | `zeron.notify { title, body?, session? }` | as the window's | `notifications` |

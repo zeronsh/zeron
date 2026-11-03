@@ -45,6 +45,7 @@ export type Name =
 	| "status-failed"
 	| "status-done"
 	| "archive-minimalistic"
+	| "archive-up-minimalistic"
 	| "pin"
 	| "bell"
 	| "clock-circle"

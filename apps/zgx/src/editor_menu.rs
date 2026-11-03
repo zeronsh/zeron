@@ -130,51 +130,13 @@ pub fn install(host: &ScriptHost, ui: WeakUi, platform: Platform) {
     }
     // (Over the selected text: the definition hangs from the selection's
     // start, so it needs the selection back first.)
+    // (zgx looks up in an editor shown a line at a time too, the composer's,
+    // since 6f8ad524.)
     host.action("editor_menu.look_up", move |_| {
-        if let (Some(editor), Some(service)) = (ready(), &*platform.borrow())
-            && !editor.look_up(service)
-            && let Some(ui) = ui.upgrade()
-        {
-            look_up_by_lines(&ui, &editor, service);
+        if let (Some(editor), Some(service)) = (ready(), &*platform.borrow()) {
+            editor.look_up(service);
         }
     });
-}
-
-/// Look Up in an editor zgx shows a line at a time (the composer's): zgx's
-/// `look_up` asks its whole text's node, which holds none then, and gives
-/// up (zgx-asks/look-up-line-editor). From where the selection's start
-/// shows instead, at the size its line's text is: the definition hangs
-/// from the baseline there, as zgx's would.
-fn look_up_by_lines(ui: &Ui, editor: &EditorHandle, service: &PlatformService) -> bool {
-    let text = editor.copy();
-    if text.trim().is_empty() {
-        return false;
-    }
-    let (anchor, focus) = editor.selection();
-    let Some(at) = editor.text_area(anchor.min(focus)..anchor.min(focus)) else {
-        return false;
-    };
-    // The type's size: the text the line shows (a node under the editor
-    // with a baseline, across that line).
-    let scene = ui.scene.borrow();
-    let mut size = None;
-    let mut nodes = vec![editor.node];
-    while let Some(node) = nodes.pop() {
-        if let Some(((_, y), s)) = scene.text_baseline(node, 0)
-            && y >= at.y
-            && y <= at.y + at.height
-        {
-            size = Some(s);
-            break;
-        }
-        nodes.extend(scene.children(node).iter().copied());
-    }
-    drop(scene);
-    let Some(size) = size else {
-        return false;
-    };
-    let top = at.y + (at.height - size).max(0.) / 2.;
-    service.0.look_up(&text, (at.x, top + size * 0.8), size)
 }
 
 /// `opened`'s editor, given the focus back with the selection the menu

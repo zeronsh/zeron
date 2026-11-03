@@ -471,3 +471,112 @@ async fn branch_scope_in_worktrees_clones_and_on_the_default_branch() {
     f.ok("status", json!({ "cwd": cwd(&empty) })).await;
     f.ok("changes", json!({ "cwd": cwd(&empty), "scope": "working" })).await;
 }
+
+/// The "changed" events the service told this device's windows within
+/// `wait`, each one's `cwds`.
+async fn changed_within(channel: &mut (impl futures::Stream<Item = Value> + Unpin), wait: std::time::Duration) -> Vec<Value> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let until = tokio::time::Instant::now() + wait;
+    while let Ok(Some(event)) = tokio::time::timeout_at(until, channel.next()).await {
+        if event["event"] == "changed" {
+            out.push(event["data"]["cwds"].clone());
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_watched_checkout_says_when_it_moves_and_never_for_its_own_reads() {
+    use std::time::Duration;
+    let f = fixture().await;
+    let repo = f.repo("watched");
+    write(&repo, ".gitignore", "target/\n");
+    write(&repo, "src/a.rs", "fn a() {}\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "First"]);
+    let mut channel = match f.plugins.dispatch(methods::WATCH_PLUGIN_CHANNEL, json!({})).await {
+        Ok(RpcReply::Stream(stream)) => stream,
+        _ => panic!("no stream"),
+    };
+    let here = cwd(&repo);
+    f.ok("status", json!({ "cwd": here, "watch": true })).await;
+    // (As its watch goes live, once: what moved before it was unseen.)
+    let first = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert!(first.len() <= 1, "{first:?}");
+
+    // Its own asking (status, its snapshot's index and objects, changes,
+    // history, a diff), again and again: nothing said.
+    for _ in 0..4 {
+        f.ok("status", json!({ "cwd": here, "watch": true })).await;
+        let c = f.ok("changes", json!({ "cwd": here, "scope": "working" })).await;
+        f.ok("history", json!({ "cwd": here })).await;
+        let _ = f.ask("diff", json!({ "cwd": here, "a": c["a"], "b": c["b"], "path": "src/a.rs" })).await;
+    }
+    let quiet = changed_within(&mut channel, Duration::from_millis(1200)).await;
+    assert!(quiet.is_empty(), "its own reads were said as changes: {quiet:?}");
+
+    // A file written: said once, for this folder.
+    write(&repo, "src/a.rs", "fn a() { 1 }\n");
+    write(&repo, "src/b.rs", "fn b() {}\n");
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said, vec![json!([here])], "{said:?}");
+
+    // A build's output git ignores: nothing (the second time without
+    // asking git: its folder is known).
+    for i in 0..2 {
+        write(&repo, &format!("target/debug/deps/x{i}.o"), "obj");
+        let said = changed_within(&mut channel, Duration::from_millis(1000)).await;
+        assert!(said.is_empty(), "ignored output was said: {said:?}");
+    }
+
+    // A commit made elsewhere (an agent's git): HEAD, the index and the
+    // branch moved: said.
+    git(&repo, &["add", "-A"]);
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said.len(), 1, "staging: {said:?}");
+    git(&repo, &["commit", "-q", "-m", "Second"]);
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said.len(), 1, "a commit: {said:?}");
+    // And asked again after it: still nothing of its own.
+    f.ok("status", json!({ "cwd": here, "watch": true })).await;
+    f.ok("changes", json!({ "cwd": here, "scope": "working" })).await;
+    let quiet = changed_within(&mut channel, Duration::from_millis(1200)).await;
+    assert!(quiet.is_empty(), "{quiet:?}");
+}
+
+#[tokio::test]
+async fn a_linked_worktree_is_told_of_its_own_branch_and_index() {
+    use std::time::Duration;
+    let f = fixture().await;
+    let repo = f.repo("main-tree");
+    write(&repo, "a.txt", "a\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "First"]);
+    let linked = f.scratch.path().join("linked");
+    git(&repo, &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()]);
+    let mut channel = match f.plugins.dispatch(methods::WATCH_PLUGIN_CHANNEL, json!({})).await {
+        Ok(RpcReply::Stream(stream)) => stream,
+        _ => panic!("no stream"),
+    };
+    let here = cwd(&linked);
+    f.ok("status", json!({ "cwd": here, "watch": true })).await;
+    let _ = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    // Its index is in the repository's git folder (worktrees/linked): a
+    // file staged there is said.
+    write(&linked, "b.txt", "b\n");
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said, vec![json!([here])], "a new file: {said:?}");
+    git(&linked, &["add", "b.txt"]);
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said.len(), 1, "staged in the linked tree: {said:?}");
+    // The main tree's index moving isn't its.
+    write(&repo, "c.txt", "c\n");
+    git(&repo, &["add", "c.txt"]);
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert!(said.is_empty(), "another worktree's index: {said:?}");
+    // Its branch moved by a commit made in it: said.
+    git(&linked, &["commit", "-q", "-m", "Side"]);
+    let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
+    assert_eq!(said.len(), 1, "{said:?}");
+}

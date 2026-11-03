@@ -96,7 +96,9 @@ function M.line(text: Node, ...: Node?): Node
 	return ui.row(parts)
 end
 
-function M.label(text: string | () -> string, strong: (() -> boolean)?, weight: string?, class: string?): Node
+-- (`ink`: its colour at rest, where a list's titles read in another, a
+-- settings page's in the primary.)
+function M.label(text: string | () -> string, strong: (() -> boolean)?, weight: string?, class: string?, ink: string?): Node
 	return FadeText {
 		text,
 		class = class,
@@ -109,7 +111,7 @@ function M.label(text: string | () -> string, strong: (() -> boolean)?, weight: 
 			return if strong and strong() then "$font.weight.medium" else "$font.weight.regular"
 		end,
 		color = function()
-			return if strong == nil or strong() then "$text.primary" else "$text.secondary"
+			return if strong == nil or strong() then "$text.primary" else ink or "$text.secondary"
 		end,
 	}
 end
@@ -775,6 +777,9 @@ export type RowProps = {
 	lead: Node?,
 	-- What the pointer finds in its corner (archive), as the sidebar's rows.
 	action: Node?,
+	-- Its title in the primary ink at rest (a settings page's rows, read as
+	-- its other rows are), not the sidebar's quieter one.
+	primary: boolean?,
 }
 
 -- A session row's height as the sidebar's density makes it: compact, or
@@ -813,7 +818,7 @@ function M.Row(props: RowProps): Node
 	end
 	local title: Node = M.label(function(): string
 		return cur().title
-	end, strong)
+	end, strong, nil, nil, if props.primary then "$text.primary" else nil)
 	if props.title_lead then
 		title = ui.row {
 			grow = 1,

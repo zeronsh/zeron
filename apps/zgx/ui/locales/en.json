@@ -1666,14 +1666,31 @@
         "unreachable_line": "The engine couldn't reach the release feed.",
         "up_to_date": "Zeron is up to date",
         "newest_checked": "{version} is the newest · checked {ago}",
+        "downloading": "Downloading Zeron {version}…",
+        "downloading_line": "You can keep working.",
+        "ready": "Zeron {version} is ready",
+        "ready_line": "Restart to finish. If you don't, it installs when you quit Zeron.",
+        "restart": "Restart to update",
+        "download_failed": "Couldn't download Zeron {version}",
+        "held": "Zeron {version} can't be installed yet",
+        "available_stable": "Zeron {version} (Stable) is available",
+        "update": "Update",
         "newest": "{version} is the newest we know of."
       },
       "description": "Which Zeron this is, and keeping it up to date.",
       "app": {
         "label": "This app",
         "built": "Not packaged yet · built {built}",
-        "not_packaged": "Not packaged yet."
+        "not_packaged": "Not packaged yet.",
+        "packaged": "Built {built}"
       },
+      "beta": {
+        "label": "Get beta updates",
+        "terms": "beta early test channel stable preview next",
+        "on": "You're getting beta updates. Turn this off to go back to Stable.",
+        "off": "Try the next Zeron early. Needs macOS {version} or later."
+      },
+      "updates_self_description": "Zeron updates itself: a new version downloads in the background and installs when you restart.",
       "version_info": {
         "label": "Version info",
         "description": "For a bug report: the versions and builds above.",
@@ -1683,11 +1700,29 @@
     },
     "archived": {
       "title": "Archived",
-      "description": "Sessions you've put away. Their conversations are kept.",
+      "description": "{n, plural, one {# session, hidden from the sidebar until restored.} other {# sessions, hidden from the sidebar until restored.}}",
+      "description_none": "Hidden from the sidebar until restored.",
       "empty_title": "Nothing archived",
       "empty_body": "Archive a session from its menu in the sidebar.",
-      "where": "{project} · {ago}",
-      "unarchive": "Unarchive"
+      "search": "Search archived sessions",
+      "none_match": "No archived sessions match “{q}”",
+      "group": {
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "week": "This week",
+        "earlier": "Earlier"
+      },
+      "untitled": "Untitled session",
+      "restore": "Restore to sidebar",
+      "delete_one": "Delete…",
+      "delete_all": "Delete all",
+      "delete_all_title": "Delete all archived sessions?",
+      "sessions": "{n, plural, one {# archived session} other {# archived sessions}}",
+      "its_machine": " and its Cloud machine",
+      "machines": "{n, plural, one {, and # Cloud machine,} other {, and # Cloud machines,}}",
+      "delete_all_body": "{what} will be permanently deleted. This can’t be undone.",
+      "couldnt_delete": "{n, plural, one {Couldn’t delete # archived session. Try again.} other {Couldn’t delete # archived sessions. Try again.}}",
+      "show_more": "Show more"
     },
     "shell": {
       "back": "Back to chats",
@@ -2319,7 +2354,25 @@
       "title": "New project",
       "search_devices": "Search devices…",
       "no_devices": "No devices found",
-      "no_devices_hint": "Try another device name."
+      "no_devices_hint": "Try another device name.",
+      "cloud": "Cloud",
+      "cloud_hint": "Your GitHub repositories",
+      "cloud_title": "Cloud",
+      "search_repos": "Search repositories…",
+      "loading_repos": "Loading your repositories…",
+      "no_repos": "No repositories found",
+      "no_repos_hint": "Cloud lists the repositories the Zeron GitHub App can reach. Add more in Settings → Cloud.",
+      "no_repos_yet": "No repositories yet",
+      "choose_repos": "Choose repositories in Settings → Cloud",
+      "github_not_connected": "GitHub isn't connected",
+      "connect_github": "Connect GitHub in Settings → Cloud",
+      "repos_failed": "Couldn't load your repositories",
+      "repos_failed_hint": "Go back and pick Cloud to try again.",
+      "repos_offline": "Zeron can't be reached right now",
+      "private": "Private",
+      "on_device": "On {device}",
+      "from_github": "From GitHub",
+      "add_cloud_project": "Add project"
     }
   },
   "onboarding": {
@@ -2829,7 +2882,10 @@
       "out_of_date": "Zeron's engine is out of date",
       "restart_tip": "Zeron updated in the background. Restarting its engine ends what's running in it.",
       "theirs_tip": "It was started outside this app: restart it there to update it.",
-      "short": "Engine out of date"
+      "short": "Engine out of date",
+      "old": "This Zeron needs a newer engine",
+      "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
+      "short_old": "Needs a newer engine"
     }
   },
   "account": {
@@ -3004,7 +3060,10 @@
         "available_unversioned": "Update available:.",
         "added": "It also asks to {list}; you'll be asked first.",
         "removed": "It no longer asks to {list}."
-      }
+      },
+      "unverified": "Unverified",
+      "from": "From {where}",
+      "from_file": "From a file"
     },
     "page": {
       "title": "Plugins",
@@ -3075,7 +3134,9 @@
       "mine": "It's mine",
       "not_now": "Not now",
       "allow": "Allow",
-      "on_device": "On {device}"
+      "on_device": "On {device}",
+      "unverified_why": "Zeron can't confirm who made this. Allow it only if you trust where it came from.",
+      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}."
     },
     "permissions": {
       "screen_recording": {
@@ -3180,7 +3241,20 @@
       "make_it": "Make it",
       "couldnt_make": "Couldn't make the template",
       "name": "Name",
-      "name_placeholder": "My template"
+      "name_placeholder": "My template",
+      "install_more": "Install",
+      "install_title": "Install Template",
+      "install_dialog_title": "Install a template",
+      "install_dialog_body": "Paste a link to a .zeron-template file, a GitHub release or a repository, or choose a file. Zeron checks who signed it, and you allow it before it's used.",
+      "link": "Link",
+      "install": "Install",
+      "choose_file": "Choose File",
+      "couldnt_install": "Couldn't install the template",
+      "update": "Update",
+      "updating": "Updating",
+      "updated_toast": "Updated {name}",
+      "updated_toast_version": "Updated {name} {version}",
+      "couldnt_update": "Couldn't update {name}"
     },
     "consent": {
       "made_by_you": "Made by you",
@@ -3203,7 +3277,9 @@
       "left_out": "{n, plural, one {# file} other {# files}} left out",
       "left_out_detail": "No template may replace these, so Zeron keeps its own: {files}",
       "not_now": "Not now",
-      "install": "Install"
+      "install": "Install",
+      "unverified_body": "Zeron can't confirm who made this. Install it only if you trust where it came from.",
+      "unverified_body_from": "Zeron can't confirm who made this. Install it only if you trust where it came from: {where}."
     }
   }
 }

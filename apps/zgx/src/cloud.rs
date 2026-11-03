@@ -17,7 +17,9 @@
 //!                                { days = { { day, credits } }, credits,
 //!                                  balance, available }
 //!   cloud.repos                  the repositories Cloud can open, newest push
-//!                                first: { { name, private, branch, pushed } }
+//!                                first: { { name, private, branch, clone_url,
+//!                                pushed } }; `github_not_connected` without
+//!                                a GitHub connection for Cloud
 //!   cloud.branches({ repo, default? })
 //!                                the branches a Cloud chat of `repo` can start
 //!                                from, the default first, as `chat.refs`
@@ -96,6 +98,9 @@ async fn call(method: &str, params: Json) -> Result<Json, String> {
         eprintln!("zeron-zgx: cloud: {method} failed: {error}");
         if error.to_ascii_lowercase().contains("unknown method") {
             "outdated".to_string()
+        } else if error.contains("github_not_connected") {
+            // (`ListGithubRepos` without a GitHub connection for Cloud.)
+            "github_not_connected".to_string()
         } else {
             engine::outcome(&error).to_string()
         }
@@ -195,6 +200,7 @@ fn repos_value(listed: &Json) -> Value {
                     ("name", Value::from(r["fullName"].as_str().unwrap_or_default())),
                     ("private", Value::Bool(r["private"].as_bool() == Some(true))),
                     ("branch", str_or_nil(&r["defaultBranch"])),
+                    ("clone_url", str_or_nil(&r["cloneUrl"])),
                     // (Seconds, as the scripts' times are.)
                     ("pushed", Value::from(r["pushedAt"].as_f64().unwrap_or(0.0) / 1000.0)),
                 ])

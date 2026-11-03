@@ -1004,9 +1004,251 @@ local function branch_totals(args: any): any
 	end)
 end
 
+-- -- watching -------------------------------------------------------------
+--
+-- A checkout a window shows is watched here, on its device: its work tree,
+-- and what in its git folders says the branch, the index or a ref moved
+-- (HEAD, index, refs, packed-refs; a linked worktree's own git folder and
+-- the repository's shared one). A burst of changes that matters is told
+-- once (`zeron.emit("changed", { cwds })`), and windows ask again; nothing
+-- is asked here meanwhile.
+--
+-- What the plugin does itself is never told: reads aren't changes, `git
+-- status` takes no lock and writes no index (GIT_OPTIONAL_LOCKS), and the
+-- snapshot's index and the objects it writes are in the git folder, past
+-- what's listened to. Files git ignores (a build's output) aren't either:
+-- asked of `git check-ignore` once per folder, then known.
+
+-- A window keeps a checkout watched by asking its status this often at
+-- least (`watch = true`); a watch not asked for this long ends.
+local LEASE = 180
+-- How long a burst is quiet before it's told (ms).
+local QUIET = 250
+-- Paths checked against .gitignore in one run, at most (past them, told).
+local MAX_CHECKED = 512
+
+-- In a git folder, what says something moved (by its path in there).
+local MOVES = { HEAD = true, index = true, ["packed-refs"] = true, config = true, MERGE_HEAD = true, REBASE_HEAD = true, CHERRY_PICK_HEAD = true, REVERT_HEAD = true }
+-- In the shared one of a linked worktree's repository: its refs only.
+local SHARED_MOVES = { ["packed-refs"] = true, config = true }
+
+type Watched = {
+	root: string,
+	dir: string,
+	common: string,
+	stop: () -> (),
+	-- The windows' folders in it, each with when it was last asked for.
+	cwds: { [string]: number },
+	-- Folders in the work tree git ignores (`a/b/`), as asked.
+	ignored: { [string]: boolean },
+}
+local watched: { [string]: Watched } = {}
+
+local function under(path: string, folder: string): string?
+	if path == folder then
+		return ""
+	end
+	if string.sub(path, 1, #folder + 1) == folder .. "/" then
+		return string.sub(path, #folder + 2)
+	end
+	return nil
+end
+
+-- Whether a path in a git folder says something moved.
+local function moved_in(rel: string, shared: boolean): boolean
+	if string.sub(rel, -5) == ".lock" then
+		return false
+	end
+	if string.sub(rel, 1, 5) == "refs/" then
+		return true
+	end
+	if shared then
+		return SHARED_MOVES[rel] == true
+	end
+	return MOVES[rel] == true or string.sub(rel, 1, 13) == "rebase-merge/" or string.sub(rel, 1, 13) == "rebase-apply/"
+end
+
+-- The work tree's changed paths git doesn't ignore: none, some, or
+-- `true` (too many to ask about: told). Asks git once for those under no
+-- folder known to be ignored, with each one's folders, and keeps the
+-- folders it ignores.
+local function kept(w: Watched, paths: { string }): boolean
+	local asked: { string } = {}
+	local seen: { [string]: boolean } = {}
+	local candidates: { string } = {}
+	for _, path in paths do
+		if string.match(path, "^%.git/") or path == ".git" or string.find(path, "/.git/", 1, true) then
+			continue
+		end
+		-- (A rule changed: what's ignored is asked again.)
+		if string.match(path, "%.gitignore$") then
+			table.clear(w.ignored)
+			return true
+		end
+		local skip = false
+		local prefix = ""
+		local folders: { string } = {}
+		for part in string.gmatch(path, "([^/]+)/") do
+			prefix ..= part .. "/"
+			if w.ignored[prefix] then
+				skip = true
+				break
+			end
+			table.insert(folders, prefix)
+		end
+		if skip then
+			continue
+		end
+		table.insert(candidates, path)
+		for _, x in { path, table.unpack(folders) } do
+			if not seen[x] then
+				seen[x] = true
+				table.insert(asked, x)
+			end
+		end
+	end
+	if #candidates == 0 then
+		return false
+	end
+	if #asked > MAX_CHECKED then
+		return true
+	end
+	local r = run(w.root, { "check-ignore", "-z", "--stdin" }, { stdin = table.concat(asked, "\0") .. "\0" })
+	-- (1: none ignored; past that, it couldn't say: told.)
+	if r.status > 1 or r.status < 0 then
+		return true
+	end
+	local ignored: { [string]: boolean } = {}
+	for name in string.gmatch(r.stdout, "([^%z]+)") do
+		ignored[name] = true
+		if string.sub(name, -1) == "/" then
+			w.ignored[name] = true
+		end
+	end
+	for _, path in candidates do
+		if not ignored[path] then
+			local inside = false
+			local prefix = ""
+			for part in string.gmatch(path, "([^/]+)/") do
+				prefix ..= part .. "/"
+				if ignored[prefix] then
+					inside = true
+					break
+				end
+			end
+			if not inside then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- A burst heard in `w`'s folders: whether a window should ask again.
+local function matters(w: Watched, changed: { [string]: any }): boolean
+	local tree: { string } = {}
+	for folder, paths in changed do
+		if paths == true then
+			return true
+		end
+		for _, rel in paths do
+			local path = if rel == "" then folder else folder .. "/" .. rel
+			local in_dir = under(path, w.dir)
+			if in_dir then
+				if moved_in(in_dir, false) then
+					return true
+				end
+				continue
+			end
+			local in_common = under(path, w.common)
+			if in_common then
+				if moved_in(in_common, true) then
+					return true
+				end
+				continue
+			end
+			local in_tree = under(path, w.root)
+			if in_tree and in_tree ~= "" then
+				table.insert(tree, in_tree)
+			end
+		end
+	end
+	return #tree > 0 and kept(w, tree)
+end
+
+-- Keep `cwd`'s checkout watched (renewing it), and end watches no window
+-- asked for lately.
+local function keep_watched(cwd: string)
+	local now = os.time()
+	for root, w in watched do
+		for c, at in w.cwds do
+			if now - at > LEASE then
+				w.cwds[c] = nil
+			end
+		end
+		if next(w.cwds) == nil then
+			w.stop()
+			watched[root] = nil
+		end
+	end
+	for _, w in watched do
+		if w.cwds[cwd] then
+			w.cwds[cwd] = now
+			return
+		end
+	end
+	local out = git(cwd, { "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir" })
+	local lines = string.split(trim(out), "\n")
+	local root, dir, common = lines[1], lines[2], lines[3]
+	if not root or not dir or not common then
+		return
+	end
+	local w = watched[root]
+	if w then
+		w.cwds[cwd] = now
+		return
+	end
+	-- (Each folder once: a git folder inside the work tree is in its watch.)
+	local folders = { root }
+	for _, f in { dir, common } do
+		local covered = false
+		for _, g in folders do
+			if under(f, g) then
+				covered = true
+			end
+		end
+		if not covered then
+			table.insert(folders, f)
+		end
+	end
+	local made: Watched = { root = root, dir = dir, common = common, stop = function() end, cwds = { [cwd] = now }, ignored = {} }
+	made.stop = zeron.watch(folders, function(changed: any)
+		if watched[root] ~= made then
+			return
+		end
+		local ok, tell = pcall(matters, made, changed)
+		if not ok or tell then
+			local cwds = {}
+			for c in made.cwds do
+				table.insert(cwds, c)
+			end
+			zeron.emit("changed", { root = root, cwds = cwds })
+		end
+	end, { quiet = QUIET })
+	watched[root] = made
+end
+
 -- Reading only, safe to run again; the rest change the checkout.
 zeron.serve("status", function(args: any): any
-	return status(check_cwd(args.cwd))
+	local cwd = check_cwd(args.cwd)
+	local s = status(cwd)
+	if args.watch then
+		local ok, why = pcall(keep_watched, cwd)
+		if not ok then
+			print(`watching {cwd}: {why}`)
+		end
+	end
+	return s
 end, { safe = true })
 zeron.serve("changes", changes, { safe = true })
 zeron.serve("diff", diff, { safe = true })

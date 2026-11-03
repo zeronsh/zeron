@@ -1081,6 +1081,9 @@ impl Engine {
             "{}/releases/harness-compatibility.json",
             config.edge_url.trim_end_matches('/')
         ));
+        // The release channel a macOS app install follows lives in the data
+        // dir (update-channel.json), so this report follows the app's choice.
+        zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();

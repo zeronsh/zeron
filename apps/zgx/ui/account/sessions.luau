@@ -78,7 +78,9 @@ export type ProjectIcon = { emoji: string?, image: string?, hue: string? }
 export type Project = { id: string, name: string, device: string, path: string, git: boolean, github: string?, icon: ProjectIcon? }
 -- `online`: its presence heartbeat fresh (this device always); `seen`: its
 -- last beat, in unix seconds, to judge that again as time passes.
-export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string? }
+-- `cloud`: one of Cloud's (the account's, or a session's machine): never a
+-- device to pick.
+export type Device = { id: string, name: string, platform: string, here: boolean, online: boolean?, seen: number?, version: string?, cloud: boolean? }
 export type Section = { id: string, name: string, sessions: { string }, collapsed: boolean? }
 export type Places = { pinned: { string }, sections: { Section } }
 export type Now = {
@@ -181,7 +183,7 @@ function M.computers(devices: { Device }?, computers_only: boolean?): { Device }
 	local out: { Device } = {}
 	for _, d in devices or {} do
 		local phone = d.platform == "ios" or d.platform == "android"
-		if d.platform ~= "cloud" and not (computers_only and phone) then
+		if not d.cloud and d.platform ~= "cloud" and not (computers_only and phone) then
 			table.insert(out, if d.here then 1 else #out + 1, d)
 		end
 	end

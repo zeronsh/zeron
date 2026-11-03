@@ -31,6 +31,10 @@ pub const SHARED_READ: &[(&str, Option<&str>)] = &[
     ("zeron.project", Some("zeron.sessions")),
     ("zeron.device", Some("zeron.devices")),
     ("zeron.devices", Some("zeron.devices")),
+    // Whether the window shows and is in front (the SDK's `zeron.window`):
+    // work no one would see waits for it.
+    ("zgx.window.shown", None),
+    ("zgx.window.active", None),
 ];
 
 /// What plugins may change of the app's own shared state, and the grant

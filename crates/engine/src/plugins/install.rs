@@ -298,6 +298,30 @@ fn plain_url(url: &str) -> bool {
     url.starts_with("https://") || (cfg!(test) && url.starts_with("file://"))
 }
 
+/// `link` as people paste it, made a full https link: `owner/repo` is
+/// GitHub's, a host without a scheme (`github.com/owner/repo`) is https.
+/// None when it isn't an https link at all.
+pub fn https_link(link: &str) -> Option<String> {
+    let link = link.trim();
+    // `owner/repo`: GitHub.
+    let shorthand = link.split('/').count() == 2
+        && !link.contains(':')
+        && link.split('/').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
+    // A host without a scheme (`github.com/owner/repo`, as people paste
+    // it): https.
+    let bare_host = !link.contains("://")
+        && link.split('/').next().is_some_and(|host| host.contains('.') && !host.starts_with('.') && !host.contains(['@', ':']))
+        && link.split('/').count() > 1;
+    let link = if shorthand {
+        format!("https://github.com/{link}")
+    } else if bare_host {
+        format!("https://{link}")
+    } else {
+        link.to_owned()
+    };
+    plain_url(&link).then_some(link)
+}
+
 /// What `link` names, if it's something a plugin can come from: a package
 /// link (`….zeron-plugin`), a GitHub release (`…/releases/latest`,
 /// `…/releases/tag/<tag>`), a GitHub repository (`owner/repo`, its page,
@@ -320,25 +344,9 @@ pub fn origin(link: &str, git_ref: Option<&str>, path: Option<&str>) -> Result<O
     {
         return Err("That branch or tag can't be used".into());
     }
-    // `owner/repo`: GitHub.
-    let shorthand = link.split('/').count() == 2
-        && !link.contains(':')
-        && link.split('/').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
-    // A host without a scheme (`github.com/owner/repo`, as people paste
-    // it): https.
-    let bare_host = !link.contains("://")
-        && link.split('/').next().is_some_and(|host| host.contains('.') && !host.starts_with('.') && !host.contains(['@', ':']))
-        && link.split('/').count() > 1;
-    let link = if shorthand {
-        format!("https://github.com/{link}")
-    } else if bare_host {
-        format!("https://{link}")
-    } else {
-        link.to_owned()
-    };
-    if !plain_url(&link) {
+    let Some(link) = https_link(link) else {
         return Err("Plugins come from https links".into());
-    }
+    };
     let bare = link.split(['?', '#']).next().unwrap_or(&link).trim_end_matches('/');
     if bare.ends_with(&format!(".{EXTENSION}")) {
         return Ok(Origin::Link(link));
@@ -407,6 +415,12 @@ pub async fn download(url: &str) -> Result<Vec<u8>, String> {
 
 /// The `.zeron-plugin` asset of `repo`'s release `tag` (the latest when none).
 pub async fn release_asset(repo: &str, tag: Option<&str>) -> Result<String, String> {
+    release_asset_of(repo, tag, EXTENSION).await
+}
+
+/// The asset of `repo`'s release `tag` (the latest when none) whose name
+/// ends `.{extension}` (a plugin's, a template's).
+pub async fn release_asset_of(repo: &str, tag: Option<&str>, extension: &str) -> Result<String, String> {
     let api = match tag {
         Some(tag) => format!("https://api.github.com/repos/{repo}/releases/tags/{tag}"),
         None => format!("https://api.github.com/repos/{repo}/releases/latest"),
@@ -425,10 +439,10 @@ pub async fn release_asset(repo: &str, tag: Option<&str>) -> Result<String, Stri
         .as_array()
         .into_iter()
         .flatten()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(&format!(".{EXTENSION}"))))
+        .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(&format!(".{extension}"))))
         .and_then(|a| a["browser_download_url"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| "That release has no .zeron-plugin file".to_string())
+        .ok_or_else(|| format!("That release has no .{extension} file"))
 }
 
 async fn git(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {

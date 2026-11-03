@@ -74,7 +74,7 @@ local function author(it: any): Node
 	elseif kind == "verified" then
 		return ds.Badge { ui.t("plugins.consent.made_by", { username = it.author.username }), tone = "info", icon = "shield-check" }
 	end
-	return ds.Badge { ui.t("plugins.consent.unknown_author"), tone = "warning", icon = "danger-triangle" }
+	return ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", icon = "danger-triangle" }
 end
 
 -- (The host's reason as it gives it; else Zeron's words.)
@@ -83,7 +83,8 @@ local function why_unknown(it: any): string | Message
 	if it.status == "tampered" then
 		return ui.t("plugins.consent.tampered_why")
 	end
-	return reason or ui.t("plugins.consent.unknown_why")
+	local where = words.where(it.source)
+	return reason or (if where then ui.t("plugins.consent.unverified_why_from", { where = where }) else ui.t("plugins.consent.unverified_why"))
 end
 
 -- What it asks, as of this plugin's state: all of it for a new one, what's
@@ -150,7 +151,7 @@ local function body(key: string): Node
 		if unknown
 			then ds.Callout {
 				tone = "warning",
-				title = if it.status == "tampered" then ui.t("plugins.consent.tampered") else ui.t("plugins.consent.unknown_author"),
+				title = if it.status == "tampered" then ui.t("plugins.consent.tampered") else ui.t("plugins.words.unverified"),
 				body = why_unknown(it),
 			}
 			else nil,

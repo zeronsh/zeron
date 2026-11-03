@@ -395,3 +395,11 @@ test("a plugin's wallpaper going off falls back to Appearance's choice, and anot
 	app:frames(20)
 	expect(line(app, "From Parallax scenes.")).never.to_be("")
 end)
+
+test("a plugin's page says Unverified at its top right when Zeron can't vouch for who made it", function()
+	local app = greeter(open())
+	expect(app:has(`{PAGE} >> "Unverified"`)).to_be(false)
+	app:command("greeter_unverified")
+	app:frames(20)
+	expect(app:has(`{PAGE} >> "Unverified"`)).to_be(true)
+end)

@@ -234,10 +234,13 @@ local function day_block(day: Day, _i: number, now: State<any>): Node
 				end,
 			},
 		},
+		-- (Each washed edge to edge under the pointer, as every list of
+		-- things in a card is: Settings.CatalogRow.)
 		ds.Settings.Each(pages, visit_row, {
 			key = function(v: data.Visit): string
 				return v.url
 			end,
+			wash = true,
 		}),
 	}
 end

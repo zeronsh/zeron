@@ -243,12 +243,37 @@ function M.Group(props: GroupProps): Node
 	}
 end
 
+-- A row in a card, washed edge to edge under the pointer: no inset and no
+-- corner of its own (the card's corner clips the first and last, so the
+-- only curve is the card's), as the board's rows and every settings list's
+-- are. The row's own controls take their clicks; the wash only says which
+-- row they're on. `over`, the caller's, says while the pointer's on it (a
+-- row showing its actions then). Never a padded card with a rounded wash
+-- inside it.
+M.CatalogRow = ui.component(function(props: { row: Node, over: State<boolean>? }): Node
+	local over = props.over or ui.use_state(false)
+	return ui.column {
+		class = "catalog-row",
+		w_full = true,
+		bg = function(): string
+			return if over:get() then "$hover" else "#00000000"
+		end,
+		on_hover = function(inside: boolean)
+			over:set(inside)
+		end,
+		props.row,
+	}
+end)
+local CatalogRow = M.CatalogRow
+
 -- A Group of rows that come and go: `Settings.Each(list, row, { key = … })`
 -- (`list` a state or computed, `row` as `ui.each` builds one, `key` each
 -- item's identity). Each row is its item's: one arriving or leaving leaves
 -- the rest the same nodes, and the hairline before a row follows whether it
--- is the first. Empty, it is no card at all.
-export type EachOptions = { key: (item: any) -> any }
+-- is the first. Empty, it is no card at all. `wash`: each row washed edge
+-- to edge under the pointer (`CatalogRow`), for rows that are things in a
+-- list (sessions, plugins) rather than settings.
+export type EachOptions = { key: (item: any) -> any, wash: boolean? }
 
 function M.Each(list: State<{ any }>, row: (item: any, i: number, now: State<any>) -> Node, opts: EachOptions): Node
 	local key = opts.key
@@ -276,7 +301,7 @@ function M.Each(list: State<{ any }>, row: (item: any, i: number, now: State<any
 						end,
 						M.Rule()
 					),
-					row(item, i, now),
+					if opts.wash then CatalogRow { row = row(item, i, now) } else row(item, i, now),
 				}
 			end, {
 				key = key,
@@ -820,25 +845,6 @@ local function trail(props: CatalogProps): Node?
 		new,
 	}
 end
-
--- A Catalog's row in its card: washed edge to edge under the pointer (the
--- card's corner clips the last one, so the wash's curve is the card's), as
--- the board's rows are. The row's own controls take their clicks; the wash
--- only says which row they're on.
-local CatalogRow = ui.component(function(props: { row: Node }): Node
-	local over = ui.use_state(false)
-	return ui.column {
-		class = "catalog-row",
-		w_full = true,
-		bg = function(): string
-			return if over:get() then "$hover" else "#00000000"
-		end,
-		on_hover = function(inside: boolean)
-			over:set(inside)
-		end,
-		props.row,
-	}
-end)
 
 function M.Catalog(props: CatalogProps): Node
 	local query, tab = props.search.value, props.tabs.value

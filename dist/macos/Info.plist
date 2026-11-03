@@ -24,6 +24,12 @@
     <string>__VERSION__</string>
     <key>CFBundleVersion</key>
     <string>__VERSION__</string>
+    <!-- The engine inside (Contents/MacOS/Zeron Engine). A running engine
+         restarts into this bundle's when it's newer than itself; a beta app
+         carries stable's engine, so its app version is no guide
+         (crates/update bundle_engine_version). -->
+    <key>ZeronEngineVersion</key>
+    <string>__VERSION__</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

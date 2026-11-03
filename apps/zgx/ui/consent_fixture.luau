@@ -90,6 +90,16 @@ ui.command { id = "focus", title = "Show Focus", run = function() show("focus") 
 ui.command { id = "ping", title = "Show Ping", run = function() show("ping") end }
 ui.command { id = "more", title = "Show Notes tool asking more", run = function() show("more") end }
 ui.command { id = "sync", title = "Show Checkout sync, here", run = function() show("sync") end }
+-- Ping, as installed from GitHub: where it came from, said.
+ui.command {
+	id = "ping_github",
+	title = "Show Ping, from GitHub",
+	run = function()
+		PLUGINS.ping.source = { kind = "git", url = "https://github.com/eve/ping.git" }
+		PLUGINS.ping.hash = "ping-github"
+		show("ping")
+	end,
+}
 ui.command { id = "sync_devbox", title = "Show Checkout sync, on Devbox", run = function() show("sync", "Devbox") end }
 ui.command {
 	id = "tamper",

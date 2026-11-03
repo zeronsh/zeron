@@ -25,8 +25,6 @@
 -- string read now (`title` stays the English it's kept and compared by).
 
 local ds = require("@ds")
-local status = require("@ds/status")
-local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 
 local M = {}
@@ -124,11 +122,7 @@ local TITLE_H = 38
 -- The group the pages that come and go list ahead of.
 local EXTRAS_BEFORE = "Zeron"
 
--- Archived: sessions put away, the latest first; each opens again, or
--- comes back to the sidebar.
-local archived = ui.computed(function(): { sessions.Chat }
-	return sessions.now:get().archived
-end)
+-- Archived: sessions put away (screens/settings/archived), last.
 M.add {
 	id = "archived",
 	title = "Archived",
@@ -137,66 +131,7 @@ M.add {
 	-- pages, apart from the account's and the organization's.)
 	group = "Workspace",
 	view = function(): Node
-		local function project_name(id: string?): string?
-			for _, p in sessions.now:get().projects do
-				if p.id == id then
-					return p.name
-				end
-			end
-			return nil
-		end
-		return ds.Settings.Page {
-			title = ui.t("settings.archived.title"),
-			description = ui.t("settings.archived.description"),
-			ui.show(
-				function(): boolean
-					return #archived:get() == 0
-				end,
-				ds.EmptyState {
-					icon = "archive-minimalistic",
-					title = ui.t("settings.archived.empty_title"),
-					body = ui.t("settings.archived.empty_body"),
-				}
-			),
-			ds.Settings.Each(archived, function(_, _, now: State<sessions.Chat>): Node
-				return ds.Settings.Row {
-					label = function(): string
-						return now:get().title
-					end,
-					description = function(): string
-						local c = now:get()
-						local where = project_name(c.project)
-						local ago = status.ago(os.time() - c.updated)
-						return if where then ui.t("settings.archived.where", { project = where, ago = ago }):get() else ago
-					end,
-					truncate = true,
-					control = ui.row {
-						gap = "$space.2",
-						items = "center",
-						ds.Button {
-							tone = "ghost",
-							size = "sm",
-							on_click = function()
-								route.open_session(now:peek().id)
-							end,
-							ui.t("common.open"),
-						},
-						ds.Button {
-							tone = "secondary",
-							size = "sm",
-							on_click = function()
-								sessions.unarchive(now:peek().id)
-							end,
-							ui.t("settings.archived.unarchive"),
-						},
-					},
-				}
-			end, {
-				key = function(c: sessions.Chat): string
-					return c.id
-				end,
-			}),
-		}
+		return require("@app/screens/settings/archived").view()
 	end,
 }
 

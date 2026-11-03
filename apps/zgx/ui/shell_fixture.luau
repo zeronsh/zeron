@@ -100,6 +100,7 @@ store.catalog:set({
 } :: any)
 
 local HOUR = 3600
+local DAY = 24 * HOUR
 local NOW = os.time()
 
 local model = {
@@ -228,16 +229,35 @@ stub.unarchive = function(id: string)
 	end
 	publish()
 end
+-- (`archived_delete_fails`: the host refuses those it names.)
+local refused: { [string]: boolean } = {}
 stub.delete = function(id: string): any
 	note(`delete:{id}`)
-	for i, c in model.chats do
-		if c.id == id then
-			table.remove(model.chats, i)
-			break
+	if refused[id] then
+		return {
+			after = function(_, _ok: any, failed: any)
+				if failed then
+					failed("refused")
+				end
+			end,
+		}
+	end
+	for _, list in { model.chats, model.archived } do
+		for i, c in list do
+			if c.id == id then
+				table.remove(list, i)
+				break
+			end
 		end
 	end
 	publish()
-	return { after = function() end }
+	return {
+		after = function(_, ok: any)
+			if ok then
+				ok(nil)
+			end
+		end,
+	}
 end
 -- (A link as the host makes it: its workspace hashed there.)
 stub.link = function(id: string): any
@@ -285,6 +305,18 @@ end
 -- (`fixture.icons_outdated`: refused as an engine from before project
 -- icons refuses it.)
 local icons_refused: string? = nil
+-- Cloud's machines among the devices, as the engine lists them: two
+-- sessions' (their platform, id and capability say Cloud's), never a device
+-- to pick.
+ui.command {
+	id = "fixture.cloud_machines",
+	title = "Fixture: Cloud sessions' machines among the devices",
+	run = function()
+		table.insert(model.devices, { id = "cloud-s1", name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+		table.insert(model.devices, { id = "cloud-s2", name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+		publish()
+	end,
+}
 ui.command { id = "fixture.icons_outdated", title = "Fixture: an engine without project icons", menu = "Fixture", run = function()
 	icons_refused = "outdated"
 end }
@@ -404,13 +436,14 @@ projects_stub.clone = function(device: string, url: string, parent: string): any
 	return answer({ path = `{parent}/{name}`, name = name })
 end
 local made = 0
-projects_stub.create = function(device: string, path: string, git: boolean): any
-	note(`create:{device}:{path}:{tostring(git)}`)
+projects_stub.create = function(device: string, path: string, git: boolean, repo: string?): any
+	-- (A Cloud project's repository after it.)
+	note(`create:{device}:{path}:{tostring(git)}{if repo then `:{repo}` else ""}`)
 	made += 1
 	local id = `new{made}`
 	ui.after(0, function()
 		local name = string.match(path, "([^/\\]+)$") or path
-		table.insert(model.projects, { id = id, name = name, device = device, path = path, git = git })
+		table.insert(model.projects, { id = id, name = name, device = device, path = path, git = git, github = repo })
 		publish()
 	end)
 	return answer(id)
@@ -502,6 +535,87 @@ for _, word in { "unsaved", "offline", "reconnecting", "fine" } do
 		end,
 	}
 end
+-- Archived over the days (Settings → Archived): 37, by when each last
+-- moved (today, yesterday, this week, earlier; anchored to today's start,
+-- so a run near midnight groups them the same), two on Cloud machines of
+-- their own.
+local function day_start(at: number): number
+	local d = os.date("*t", at) :: any
+	d.hour, d.min, d.sec = 0, 0, 0
+	return os.time(d)
+end
+ui.command {
+	id = "archived_days",
+	title = "Archived: 37 sessions over the days, two on Cloud",
+	run = function()
+		local titles = { "Port the sidebar fold", "Fix flaky login test", "Draft release notes", "Investigate memory spike", "Refactor engine RPC", "Theme picker polish", "Cloud machine warmup", "Update onboarding copy", "Bisect the scroll bug", "Rename settings keys", "Wire the panel home", "Audit the icon set" }
+		local now = os.time()
+		local today = day_start(now)
+		local function at(i: number): number
+			if i <= 3 then
+				return math.max(today, now - i)
+			elseif i <= 6 then
+				return day_start(today - 43200) + 43200 + i
+			elseif i <= 10 then
+				return day_start(today - 3 * 86400) + 43200 + i
+			end
+			return day_start(today - (10 + i) * 86400) + 43200
+		end
+		model.archived = {}
+		for i = 1, 37 do
+			local p = if i % 3 == 0 then "borealis" else "atlas"
+			local cloud = i == 4 or i == 20
+			table.insert(model.archived, {
+				id = `ar{i}`,
+				title = if i <= #titles then titles[i] else `{titles[(i - 1) % #titles + 1]} {i}`,
+				project = p,
+				device = if cloud then `cloud-ar{i}` elseif p == "borealis" then "box" else "mac",
+				updated = at(i),
+				created = at(i) - 3 * HOUR,
+				agent = if i % 4 == 1 then "openai" else "claude",
+				harness = if i % 4 == 1 then "codex" else nil,
+			})
+		end
+		publish()
+	end,
+}
+-- One archived session, on a Cloud machine of its own.
+ui.command {
+	id = "archived_one_cloud",
+	title = "Archived: one session, on Cloud",
+	run = function()
+		model.archived = { { id = "solo", title = "On a machine of its own", project = "atlas", device = "cloud-solo", updated = os.time() - 60, created = os.time() - HOUR, agent = "claude" } }
+		publish()
+	end,
+}
+ui.command {
+	id = "archived_none",
+	title = "Archived: none",
+	run = function()
+		model.archived = {}
+		publish()
+	end,
+}
+-- Restored elsewhere (another device): the first archived session.
+ui.command {
+	id = "archived_restored_elsewhere",
+	title = "Archived: the first restored on another device",
+	run = function()
+		local c = table.remove(model.archived, 1)
+		if c then
+			table.insert(model.chats, c)
+		end
+		publish()
+	end,
+}
+ui.command {
+	id = "archived_delete_fails",
+	title = "Archived: the host refuses to delete two",
+	run = function()
+		refused.ar2 = true
+		refused.ar3 = true
+	end,
+}
 ui.command {
 	id = "archive_many",
 	title = "Thirty sessions archived elsewhere",
@@ -563,6 +677,37 @@ ui.command {
 		for i = 1, 400 do
 			table.insert(model.chats, { id = `m{i}`, title = `Many {i}`, project = "borealis", device = "box", updated = NOW - 100 * HOUR - i, created = NOW - 100 * HOUR - i, agent = "claude" })
 		end
+		publish()
+	end,
+}
+-- Five hundred repositories on this Mac and fifteen hundred sessions in
+-- them, three each on branches of their own (`r<i>-<k>`): fifty touched in
+-- the last day, four hundred and fifty in the last fortnight, the rest
+-- older (GitHub's watch at scale: examples_tests' github_scale).
+ui.command {
+	id = "scale",
+	title = "Five hundred repositories, fifteen hundred sessions",
+	run = function()
+		model.chats = {}
+		for i = 1, 500 do
+			table.insert(model.projects, { id = `r{i}`, name = `Repo {i}`, device = "mac", path = `/work/r{i}`, git = true })
+			for k = 1, 3 do
+				local n = (i - 1) * 3 + k
+				local age = if n <= 50 then n * 60 elseif n <= 500 then DAY + n * 600 else 30 * DAY + n * 60
+				table.insert(model.chats, { id = `s{n}`, title = `Session {n}`, project = `r{i}`, device = "mac", branch = `r{i}-{k}`, updated = os.time() - age, created = os.time() - age - HOUR, agent = "claude" })
+			end
+		end
+		publish()
+	end,
+}
+-- One of them, out of sight and old, starts working (the active tier).
+ui.command {
+	id = "scale_work",
+	title = "An old session starts working",
+	run = function()
+		local s = find("s900")
+		s.status = "working"
+		s.updated = os.time()
 		publish()
 	end,
 }

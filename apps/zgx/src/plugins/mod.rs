@@ -63,7 +63,10 @@ use zgx_desktop::{TaskSpawner, WindowContext, WindowFactory};
 use zgx_script::{Capability, Plugin, ScriptHost, Shared, Value};
 
 use crate::auth::text;
-use crate::engine::{self, rpc::Watch};
+use crate::engine::{
+    self,
+    rpc::{Rpc, Watch},
+};
 
 /// How often the templates folder is looked at for a change, where the
 /// kernel doesn't say (not macOS, or its watch couldn't be made). A look
@@ -170,12 +173,22 @@ struct Inbox {
 type Store = (Shared, serde_json::Map<String, Json>);
 
 /// A plugin's GitHub: its `plugin.<id>.github` and the watches behind it,
-/// by session (what each watches, and the watch).
+/// by session.
 #[derive(Default)]
 struct Gh {
     shared: Option<Shared>,
     prs: serde_json::Map<String, Json>,
-    watches: HashMap<String, (String, Watch)>,
+    watches: HashMap<String, PrWatch>,
+}
+
+/// A session's pull request watch: what it's of (`key`, `params`), the
+/// watch (none while it waits to start again, having ended), and how long
+/// it waits when it ends.
+struct PrWatch {
+    key: String,
+    params: Json,
+    watch: Option<Watch>,
+    retry: github::Retry,
 }
 
 pub struct Bridge {
@@ -816,6 +829,24 @@ fn template_name(root: &Path, id: &str) -> String {
     live::installed(root).into_iter().find(|t| t.id == id).map(|t| t.name).unwrap_or_else(|| id.to_string())
 }
 
+/// The update the engine found for template `id` (`<templates>/.updates/
+/// <id>.json`), while it's for the package installed (`hash`): its version,
+/// and why it's refused when it is.
+fn template_update(root: &Path, id: &str, hash: &str) -> Option<Json> {
+    if hash.is_empty() {
+        return None;
+    }
+    let found: Json = serde_json::from_slice(&std::fs::read(root.join(".updates").join(format!("{id}.json"))).ok()?).ok()?;
+    if found["from"].as_str() != Some(hash) {
+        return None;
+    }
+    let mut out = json!({ "version": found["version"].as_str().unwrap_or("") });
+    if let Some(refused) = found["refused"].as_str() {
+        out["refused"] = json!(refused);
+    }
+    Some(out)
+}
+
 /// A plugin's icon: the SVG its manifest names (`"icon": "icon.svg"`), a file
 /// in its own folder (its checked copy once it has one), read whole; none if
 /// it names none, or one outside its folder, too big, or not an SVG. Drawn
@@ -1255,9 +1286,17 @@ impl Bridge {
             if !look.is_null() {
                 fields.push(("look", json_value(&look)));
             }
-            // Someone's, from a package: who signed it.
+            // Someone's, from a package: who signed it, where it came from
+            // (never a local path), and a newer version found there.
             if let Some(imported) = &t.imported {
-                fields.push(("imported", json_value(imported)));
+                let mut imported = imported.clone();
+                if let Some(source) = imported.get_mut("source").and_then(Json::as_object_mut) {
+                    source.retain(|k, _| matches!(k.as_str(), "kind" | "url" | "ref"));
+                }
+                if let Some(found) = template_update(&root, &t.id, imported["hash"].as_str().unwrap_or("")) {
+                    fields.push(("update", json_value(&found)));
+                }
+                fields.push(("imported", json_value(&imported)));
             }
             // One of Zeron's built-in themes: which.
             if let Some(theme) = &t.theme {
@@ -2106,16 +2145,11 @@ impl Bridge {
                 }
                 for (id, params) in &wanted {
                     let key = github::watch_key(params);
-                    if gh.watches.get(id).is_some_and(|(k, _)| *k == key) {
+                    if gh.watches.get(id).is_some_and(|w| w.key == key) {
                         continue;
                     }
-                    let (heard, plugin, session) = (Rc::downgrade(&b), plugin.clone(), id.clone());
-                    let watch = rpc.watch("WatchCheckoutChangeRequest", params.clone(), move |status| {
-                        if let Some(b) = heard.upgrade() {
-                            b.github_heard(&plugin, &session, &status);
-                        }
-                    });
-                    gh.watches.insert(id.clone(), (key, watch));
+                    let watch = Self::pr_watch(&b, &rpc, &plugin, id, &key, params);
+                    gh.watches.insert(id.clone(), PrWatch { key, params: params.clone(), watch: Some(watch), retry: github::Retry::new() });
                 }
                 gh.shared.clone().map(|s| (s, json_value(&Json::Object(gh.prs.clone()))))
             };
@@ -2125,14 +2159,78 @@ impl Bridge {
         });
     }
 
+    /// Session `session`'s pull request watched (`params`, as `key` names
+    /// them): what it hears published, and an end told.
+    fn pr_watch(b: &Rc<Bridge>, rpc: &Rpc, plugin: &str, session: &str, key: &str, params: &Json) -> Watch {
+        let (heard, ended) = (Rc::downgrade(b), Rc::downgrade(b));
+        let (plugin, session, key) = (plugin.to_string(), session.to_string(), key.to_string());
+        let (p, s) = (plugin.clone(), session.clone());
+        rpc.watch_ending(
+            "WatchCheckoutChangeRequest",
+            params.clone(),
+            move |status| {
+                if let Some(b) = heard.upgrade() {
+                    b.github_heard(&p, &s, &status);
+                }
+            },
+            move |why| {
+                if let Some(b) = ended.upgrade() {
+                    b.github_ended(&plugin, &session, &key, &why);
+                }
+            },
+        )
+    }
+
+    /// A session's pull request watch ended of itself (an error, the
+    /// engine gone): started again after its wait, if it's still wanted
+    /// as it was.
+    fn github_ended(self: &Rc<Self>, plugin: &str, session: &str, key: &str, why: &str) {
+        let wait = {
+            let mut all = self.gh.borrow_mut();
+            let Some(w) = all.get_mut(plugin).and_then(|gh| gh.watches.get_mut(session)).filter(|w| w.key == key) else {
+                return;
+            };
+            w.watch = None;
+            w.retry.ended()
+        };
+        eprintln!("zeron-zgx: plugin {plugin}: {session}'s pull request watch ended ({why}); again in {}s", wait.as_secs());
+        let me = Rc::downgrade(self);
+        let (plugin, session, key) = (plugin.to_string(), session.to_string(), key.to_string());
+        self.tasks.spawn(async move {
+            zgx::timer::sleep(wait).await;
+            let Some(rpc) = engine::get().connection(Duration::from_secs(5)).await else {
+                // (No engine yet: waited for again, longer.)
+                if let Some(b) = me.upgrade() {
+                    b.github_ended(&plugin, &session, &key, "no engine");
+                }
+                return;
+            };
+            let Some(b) = me.upgrade() else { return };
+            let params = {
+                let all = b.gh.borrow();
+                match all.get(&plugin).and_then(|gh| gh.watches.get(&session)) {
+                    Some(w) if w.key == key && w.watch.is_none() => w.params.clone(),
+                    _ => return,
+                }
+            };
+            let watch = Self::pr_watch(&b, &rpc, &plugin, &session, &key, &params);
+            let mut all = b.gh.borrow_mut();
+            match all.get_mut(&plugin).and_then(|gh| gh.watches.get_mut(&session)) {
+                Some(w) if w.key == key && w.watch.is_none() => w.watch = Some(watch),
+                _ => {}
+            }
+        });
+    }
+
     /// A session's pull request, as its watch heard it.
     fn github_heard(&self, plugin: &str, session: &str, status: &Json) {
         let publish = {
             let mut all = self.gh.borrow_mut();
             let Some(gh) = all.get_mut(plugin) else { return };
-            if !gh.watches.contains_key(session) {
+            let Some(w) = gh.watches.get_mut(session) else {
                 return;
-            }
+            };
+            w.retry.heard();
             gh.prs.insert(session.to_string(), github::summary(status));
             gh.shared.clone().map(|s| (s, json_value(&Json::Object(gh.prs.clone()))))
         };
@@ -2583,16 +2681,52 @@ impl Bridge {
         });
         host.async_action("templates.import", {
             let me = me.clone();
-            move |path| {
+            // A file (`path`, or `{ path }`) or a link (`{ url }`).
+            move |arg| {
                 let me = me.clone();
                 async move {
-                    let reply = call("ImportTemplate", json!({ "path": text(&path) })).await?;
+                    let given = |name: &str| arg.field(name).map(text).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    let params = match (given("path").or_else(|| Some(text(&arg)).filter(|s| !s.is_empty())), given("url")) {
+                        (Some(path), None) => json!({ "path": path }),
+                        (None, Some(url)) => json!({ "url": url }),
+                        _ => return Err("Choose a template file or paste a link".into()),
+                    };
+                    let reply = call("ImportTemplate", params).await?;
                     if let Some(b) = me.upgrade() {
                         if let Some(name) = reply["pending"].as_str() {
                             // Shown now: no "waiting" toast for it as well.
                             b.told.borrow_mut().insert(format!("template:{name}"));
                             template_consent::review(&b, name);
                         }
+                        b.look();
+                    }
+                    Ok(json_value(&reply))
+                }
+            }
+        });
+        // Each template from a link (or a file) checked where it came from
+        // for a newer version; and the one found for a template, installed
+        // in its place.
+        host.async_action("templates.check_updates", {
+            let me = me.clone();
+            move |_| {
+                let me = me.clone();
+                async move {
+                    let reply = call("CheckTemplateUpdates", json!({})).await?;
+                    if let Some(b) = me.upgrade() {
+                        b.look();
+                    }
+                    Ok(json_value(&reply))
+                }
+            }
+        });
+        host.async_action("templates.update", {
+            let me = me.clone();
+            move |id| {
+                let me = me.clone();
+                async move {
+                    let reply = call("UpdateTemplate", json!({ "id": text(&id) })).await?;
+                    if let Some(b) = me.upgrade() {
                         b.look();
                     }
                     Ok(json_value(&reply))

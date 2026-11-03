@@ -50,6 +50,8 @@ end
 -- of Zeron's own, so the host leaves it out, as here.)
 local model = {
 	on = false,
+	-- Greeter as someone else's, signed by no one Zeron knows.
+	unverified = false,
 	settings = declared("Hello", 30),
 	-- What's been set (only that): kept while the plugin is off.
 	stored = {} :: { [string]: any },
@@ -106,13 +108,13 @@ local function publish()
 				name = "Greeter",
 				version = "1.0.0",
 				description = "A greeting in the title bar.",
-				author = { kind = "you" },
+				author = if model.unverified then { kind = "unknown" } else { kind = "you" },
 				status = if model.on then "on" else "off",
 				permissions = { "ui.add" },
 				allowed = { "ui.add" },
 				ask = {},
 				hash = "greeter-1",
-				own = true,
+				own = not model.unverified,
 			},
 			if model.scenes
 				then {
@@ -231,6 +233,14 @@ state_stub.check_updates = function(): any
 	return nil
 end
 
+ui.command {
+	id = "greeter_unverified",
+	title = "Greeter is someone else's, unverified",
+	run = function()
+		model.unverified = true
+		publish()
+	end,
+}
 ui.command {
 	id = "plugin_on",
 	title = "Greeter is turned on",

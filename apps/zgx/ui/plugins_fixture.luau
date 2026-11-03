@@ -108,14 +108,51 @@ stub.check_updates = function()
 	checks:set(checks:peek() + 1)
 	return nil
 end
+-- (An install takes a while, as from a link: it answers a promise that
+-- `installed` or `install_failed` settles, so the busy dialog shows.)
+local open_install: any = nil
 stub.install = function(from: { path: string?, url: string? })
 	note(`install:{from.url or from.path or ""}`)
-	local clock: any = plugin("clock", "Clock", "verified", "pending")
-	clock.source = { kind = "git", url = "https://github.com/ada/clock.git" }
-	table.insert(model, clock)
-	publish()
-	return nil
+	return {
+		after = function(_self: any, ok: (any) -> (), err: (any) -> ())
+			open_install = { ok = ok, err = err }
+		end,
+	}
 end
+ui.command {
+	id = "installed",
+	title = "The install finishes: Clock, waiting for you",
+	run = function()
+		local clock: any = plugin("clock", "Clock", "verified", "pending")
+		clock.source = { kind = "git", url = "https://github.com/ada/clock.git" }
+		table.insert(model, clock)
+		publish()
+		local p = open_install
+		open_install = nil
+		if p then
+			p.ok({ plugin = clock, waiting = true })
+		end
+	end,
+}
+ui.command {
+	id = "install_failed",
+	title = "The install fails",
+	run = function()
+		local p = open_install
+		open_install = nil
+		if p then
+			p.err({ message = "That release has no .zeron-plugin file" })
+		end
+	end,
+}
+ui.command {
+	id = "ping_from_github",
+	title = "Ping was installed from GitHub",
+	run = function()
+		(find("ping") :: any).source = { kind = "git", url = "https://github.com/eve/ping.git" }
+		publish()
+	end,
+}
 stub.update = function(id: string)
 	note(`update:{id}`)
 	local p: any = find(id)

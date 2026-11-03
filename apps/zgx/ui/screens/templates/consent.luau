@@ -10,6 +10,7 @@
 --   { item = Pending?, busy = boolean, error = string? }
 -- (a package as the engine lists it waiting: `pending, id, name,
 -- description, version, zeron_version, key, files, ignored, hash, source,
+-- from = { kind, url?, ref? } (where it came from: a file, a link),
 -- author = { kind = "you" | "verified" | "unknown", username?, reason? }`)
 -- and answers `templates.decide { pending, allow, hash }` (the hash it was
 -- shown: a package that changed meanwhile isn't installed).
@@ -37,7 +38,7 @@ local function signer(it: any): Node
 	elseif kind == "verified" then
 		return ds.Badge { ui.t("templates.consent.made_by", { username = it.author.username }), tone = "info", icon = "shield-check" }
 	end
-	return ds.Badge { ui.t("templates.consent.unknown_author"), tone = "warning", icon = "danger-triangle" }
+	return ds.Badge { ui.t("plugins.words.unverified"), tone = "warning", icon = "danger-triangle" }
 end
 
 -- Whom the warning names (read now: in a function, it follows the locale).
@@ -138,9 +139,15 @@ local function body(key: string): Node
 		if unknown
 			then ds.Callout {
 				tone = "warning",
-				title = ui.t("templates.consent.unknown_author"),
-				-- (The host's reason as it gives it; else Zeron's words.)
-				body = (it.author and it.author.reason) or ui.t("templates.consent.unknown_body"),
+				title = ui.t("plugins.words.unverified"),
+				-- (The host's reason as it gives it; else Zeron's words, with
+				-- where it came from.)
+				body = (it.author and it.author.reason) or (function(): any
+					local where = words.where(it.from)
+					return if where
+						then ui.t("templates.consent.unverified_body_from", { where = where })
+						else ui.t("templates.consent.unverified_body")
+				end)(),
 			}
 			else nil,
 		ui.column {

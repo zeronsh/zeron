@@ -2,15 +2,20 @@
 -- shipping app has them (its About panel and "Check for Updates…", crates/ui
 -- app_menus.rs, app_update.rs; the engine's updater, crates/update).
 --
--- What updates is the engine's updater (src/about.rs): the engine on this
--- Mac, which knows its version and the newest release and, on an install
--- it manages, updates itself and starts again on the new version. The
--- installed Zeron app carries its own engine and updates it from its own
--- window. This app isn't packaged yet, so the page says so: nothing here
--- updates it.
+-- As the Zeron app (the beta: `self_updating`), it updates itself as
+-- Zeron.app does (src/about.rs): a new version downloads in the background,
+-- "Restart to update" installs it, and one nobody restarted for installs on
+-- quit. "Get beta updates" chooses the release channel; leaving beta goes
+-- back to Stable even when that's an older version.
+--
+-- A development build isn't packaged: what updates is the engine's updater,
+-- the engine on this Mac, which knows its version and the newest release
+-- and, on an install it manages, updates itself and starts again on it.
 --
 -- The host's `about` (shared): { app_version, app_build, engine_version?,
--- engine_build?, latest?, available, checked_at?, error? }.
+-- engine_build?, latest?, available, checked_at?, error?, self_updating,
+-- channels, channel?, channel_note?, beta_minimum?, held?, switch, flow,
+-- flow_version?, flow_error?, blocker? }.
 
 local ds = require("@ds")
 local host = require("@app/screens/settings/host")
@@ -39,6 +44,12 @@ search.index(M.ID, ui.t("settings.about.title"), ui.t("settings.about.terms"), {
 		section = ui.t("settings.about.links_section"),
 		terms = ui.t("settings.about.release_notes.terms"),
 	},
+	{
+		key = "beta",
+		title = ui.t("settings.about.beta.label"),
+		section = ui.t("settings.about.updates_section"),
+		terms = ui.t("settings.about.beta.terms"),
+	},
 	{ key = "website", title = ui.t("settings.about.website.label"), section = ui.t("settings.about.links_section"), terms = ui.t("settings.about.website.terms") },
 	{ key = "copy_version", title = ui.t("settings.about.copy_version.label"), terms = ui.t("settings.about.copy_version.terms") },
 })
@@ -52,6 +63,17 @@ export type About = {
 	available: boolean,
 	checked_at: number?,
 	error: string?,
+	self_updating: boolean?,
+	channels: boolean?,
+	channel: string?,
+	channel_note: string?,
+	beta_minimum: string?,
+	held: string?,
+	switch: boolean?,
+	flow: string?,
+	flow_version: string?,
+	flow_error: string?,
+	blocker: string?,
 }
 
 M.now = ui.shared("about", { app_version = "", available = false } :: About)
@@ -123,8 +145,19 @@ function M.update()
 		M.doing:set("updated")
 	end, function(err: any)
 		local word = err.message
-		M.doing:set(if word == "unmanaged" or word == "current" or word == "offline" then word else "failed")
+		-- (Held: the page says why from `about.held`.)
+		M.doing:set(if word == "held" then "" elseif word == "unmanaged" or word == "current" or word == "offline" then word else "failed")
 	end)
+end
+
+-- "Get beta updates": the host answers with the channel it chose (or why
+-- not, `channel_note`), and the switch follows that.
+local beta = ui.state("about_beta", false)
+ui.effect(function()
+	beta:set(M.now:get().channel == "beta")
+end)
+function M.set_beta(on: boolean)
+	host.invoke("about.channel", on)
 end
 
 -- What the update row says now: its title, its line, and its action (in
@@ -138,6 +171,40 @@ function M.describe(a: About, doing: string): Update
 		return ui.t(`settings.about.state.{key}`, args):get()
 	end
 	local retry = ui.t("common.retry"):get()
+	if a.self_updating then
+		-- The Zeron app's own updates (Zeron.app's lifecycle).
+		local mine = a.app_version
+		if doing == "checking" then
+			return { title = s("checking"), line = s("checking_line") }
+		elseif a.flow == "downloading" then
+			return { title = s("downloading", { version = a.flow_version or "" }), line = s("downloading_line") }
+		elseif a.flow == "ready" then
+			return { title = s("ready", { version = a.flow_version or "" }), line = s("ready_line"), action = s("restart"), accent = true }
+		elseif a.flow == "failed" then
+			return {
+				title = s("download_failed", { version = a.flow_version or "" }),
+				line = a.flow_error or s("failed_line"),
+				action = retry,
+				accent = true,
+			}
+		elseif a.held and a.latest then
+			return { title = s("held", { version = a.latest }), line = a.held, action = s("check_again") }
+		elseif doing == "offline" then
+			return { title = s("couldnt_check"), line = s("offline_line"), action = retry }
+		elseif doing == "failed" then
+			return { title = s("couldnt_update"), line = s("failed_line"), action = retry }
+		elseif a.available and a.latest then
+			local title = if a.switch then s("available_stable", { version = a.latest }) else s("available", { version = a.latest })
+			return { title = title, line = s("you_have", { version = mine }), action = s("update"), accent = true }
+		elseif a.error and not checked then
+			return { title = s("couldnt_check"), line = s("unreachable_line"), action = retry }
+		end
+		return {
+			title = s("up_to_date"),
+			line = if checked then s("newest_checked", { version = mine, ago = checked }) else s("newest", { version = mine }),
+			action = s("check"),
+		}
+	end
 	if doing == "checking" then
 		return { title = s("checking"), line = s("checking_line") }
 	elseif doing == "updating" then
@@ -226,6 +293,9 @@ function M.view(): Node
 					label = ui.t("settings.about.app.label"),
 					description = function(): string
 						local built = M.build(M.now:get().app_build)
+						if M.now:get().self_updating and built then
+							return ui.t("settings.about.app.packaged", { built = built }):get()
+						end
 						return if built
 							then ui.t("settings.about.app.built", { built = built }):get()
 							else ui.t("settings.about.app.not_packaged"):get()
@@ -252,7 +322,10 @@ function M.view(): Node
 		},
 		ds.Settings.Section {
 			title = ui.t("settings.about.updates_section"),
-			description = ui.t("settings.about.updates_description"),
+			-- (Whether the app updates itself is fixed for the process.)
+			description = if M.now:peek().self_updating
+				then ui.t("settings.about.updates_self_description")
+				else ui.t("settings.about.updates_description"),
 			ds.Settings.Group {
 				row("updates", {
 					label = function(): string
@@ -287,6 +360,22 @@ function M.view(): Node
 						}),
 					},
 				}),
+				-- The release channel (a macOS app install).
+				ui.show(function(): boolean
+					return M.now:get().channels == true
+				end, row("beta", {
+					label = ui.t("settings.about.beta.label"),
+					description = function(): string
+						local a = M.now:get()
+						if a.channel_note then
+							return a.channel_note
+						end
+						return if a.channel == "beta"
+							then ui.t("settings.about.beta.on"):get()
+							else ui.t("settings.about.beta.off", { version = a.beta_minimum or "13.0" }):get()
+					end,
+					control = ds.Switch { value = beta, label = ui.t("settings.about.beta.label"), on_change = M.set_beta },
+				})),
 			},
 		},
 		ds.Settings.Section {

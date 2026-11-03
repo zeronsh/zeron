@@ -134,6 +134,11 @@ export type Page = {
 	typed: ((query: string) -> Page?)?,
 	-- Tab: what's typed, completed (a folder's name, its separator after).
 	complete: ((query: string) -> string?)?,
+	-- A root page's own: the scopes (All, Sessions, Commands, Settings),
+	-- Tab and ⌘1–4 moving between them (⌘K's). A root without them is a
+	-- step of its own (New project's devices): its title heads the search
+	-- as the pages opened from it do, and Tab only completes or opens.
+	scopes: boolean?,
 }
 export type Props = {
 	open: State<boolean>,
@@ -661,6 +666,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	-- The pages open, the root first (plain: a page holds functions), and a
 	-- count that changes as one opens or closes, for what follows them.
 	local stack: { Level } = { { page = props.root, query = "", hi = nil, scope = "all" } }
+	-- Whether the root has scopes (⌘K's); without, every step is a page.
+	local scoped = props.root.scopes == true
 	local depth = ui.use_state(1)
 	local hi = ui.use_state(nil :: string?)
 	local offset = ui.use_state(0)
@@ -944,7 +951,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		end
 		-- Under All, sessions stop after a few: the rest are a row away
 		-- (their scope), so actions and settings stay in reach.
-		if at_root and sc == "all" then
+		if at_root and scoped and sc == "all" then
 			for _, s in sections do
 				local of_sessions = #s.hits > 0 and scope_of(s.hits[1].item) == "sessions"
 				if of_sessions and s.title ~= "Pinned" and s.title ~= "Recent" and #s.hits > ALL_SESSIONS + 1 then
@@ -967,7 +974,9 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		local function add_row(row: Row)
 			table.insert(new_rows, row)
 		end
-		local titled = #sections > 1 or at_root
+		-- (Every page's sections say what they are, with their counts: a
+		-- step's one section too.)
+		local titled = #sections > 0
 		if waiting then
 			-- Loading: the rows' shapes, under what is loading.
 			add_row({ kind = "head", key = "head:loading", h = HEAD_FIRST, title = (p.loading and p.loading.title) or "Loading…" })
@@ -1375,7 +1384,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			local r = by_key[hi:peek() or ""]
 			if r and r.item and r.item.page and not e.shift then
 				activate(r.key, false)
-			elseif depth:peek() == 1 then
+			elseif depth:peek() == 1 and scoped then
 				set_scope(if e.shift then -1 else 1)
 			end
 			return true
@@ -1412,7 +1421,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 				return true
 			end
 			return false
-		elseif cmd and (k == "1" or k == "2" or k == "3" or k == "4") and depth:peek() == 1 then
+		elseif cmd and (k == "1" or k == "2" or k == "3" or k == "4") and depth:peek() == 1 and scoped then
 			scope:set(SCOPES[tonumber(k) :: number].id)
 			return true
 		elseif cmd and (k == "k" or k == "K") then
@@ -1431,10 +1440,31 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 		gap = "$space.1",
 		items = "center",
 		shrink = 0,
+		-- (A root without scopes is a step too: its title first, quiet while
+		-- it's the one shown, a way back once another opens over it.)
+		ui.show(
+			function(): boolean
+				return not scoped and depth:get() == 1
+			end,
+			ui.text {
+				function(): string
+					return props.root.title or ""
+				end,
+				literal = true,
+				pl = "$zeron.space.tight",
+				pr = "$space.1",
+				text_size = "$font.size.sm",
+				weight = "$font.weight.medium",
+				color = "$text.tertiary",
+			}
+		),
 		ui.each(ui.computed(function(): { string }
 			local out = {}
-			for i = 2, depth:get() do
-				table.insert(out, stack[i].page.title)
+			local d = depth:get()
+			if scoped or d > 1 then
+				for i = if scoped then 2 else 1, d do
+					table.insert(out, stack[i].page.title)
+				end
 			end
 			return out
 		end), function(title: string)
@@ -1479,7 +1509,8 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			end, status.StatusIcon { kind = "working", size = 14 }, Icon { name = "palette-search", size = 16 }),
 		},
 		ui.show(function(): boolean
-			return depth:get() > 1
+			-- (A root without scopes is a step: its title shows.)
+			return depth:get() > 1 or not scoped
 		end, crumbs),
 		ui.input(EditorMenu.on({
 			id = "palette-search",
@@ -1566,7 +1597,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 	)
 	local scope_row = ui.show(
 		function(): boolean
-			return depth:get() == 1
+			return depth:get() == 1 and scoped
 		end,
 		ui.column { w_full = true, shrink = 0, ui.row(scope_items), rule() }
 	)
@@ -1893,7 +1924,7 @@ local Body = ui.component(function(props: Props & { recent_state: State<{ string
 			return p.empty or { title = locale.s("ds.command_palette.empty.nothing_yet") }
 		end
 		local c = counts:get()
-		if d == 1 and scope:get() ~= "all" and c.all > 0 then
+		if d == 1 and scoped and scope:get() ~= "all" and c.all > 0 then
 			return {
 				title = locale.s("ds.command_palette.empty.nothing_in_scope"),
 				hint = locale.s("ds.command_palette.empty.elsewhere", { n = count(c.all) }),

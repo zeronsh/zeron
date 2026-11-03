@@ -1,7 +1,8 @@
 --!strict
 -- A session's checkout as the window keeps it: what its device's service
--- (service.luau) last said of it, asked again every few seconds while a
--- Git tab shows it, and the files and diffs asked only as they move. One
+-- (service.luau) last said of it, asked again as that device says it
+-- changed while a Git tab shows it, and the files and diffs asked only as
+-- they move. One
 -- per session, shared by the tab's two views and by what other plugins
 -- place in its slots, so switching views asks nothing again.
 --
@@ -52,9 +53,11 @@ export type Commit = { sha: string, parents: { string }, author: string, email: 
 -- failed.
 export type Diff = { lines: { any }?, cut: boolean?, problem: Problem? }
 
--- How often a shown tab asks again (ms). (A call that hasn't come back
--- holds the next: a slow device is asked as fast as it answers.)
-local EVERY = 3000
+-- How often a shown tab asks again with nothing heard (ms). The checkout's
+-- device says when it changes (its service watches it: service.luau), so
+-- this is only a net, for a change it couldn't tell (its link was down).
+-- It also keeps the device's watch (`LEASE` there).
+local SAFETY = 60000
 -- A file's diff shows at most this many lines (and says so past them).
 local MAX_LINES = 2000
 
@@ -163,8 +166,17 @@ return function(zeron: any)
 			-- The last word changes were asked for (scope, trees, index).
 			seen = "",
 			busy = false,
+			-- Asked again while an ask was on its way: once more after it.
+			again_status = false,
 			loading_changes = false,
-			watchers = 0,
+			-- The views showing it now (each its own key: on screen, in a
+			-- window that shows); a change heard while none does is kept
+			-- for when one does.
+			showing = {} :: { [any]: boolean },
+			stale = false,
+			listening = false,
+			-- When it last answered (ui.now()).
+			answered_at = 0,
 		}
 		models[id] = m
 
@@ -253,6 +265,9 @@ return function(zeron: any)
 		-- index, the commit or the scope moved (`force`: whatever moved).
 		function m.refresh(force: boolean?)
 			if m.busy then
+				-- (What moved since it was asked is asked once more after.)
+				m.again_status = true
+				m.again_force = m.again_force or force
 				return
 			end
 			local _, cwd = where()
@@ -262,8 +277,16 @@ return function(zeron: any)
 				return
 			end
 			m.busy = true
-			m.call("status", nil, 90):after(function(s: Status)
+			local function settled()
 				m.busy = false
+				if m.again_status then
+					local again_force = m.again_force
+					m.again_status, m.again_force = false, false
+					m.refresh(again_force)
+				end
+			end
+			-- (`watch`: its device keeps watching it, and says when it moves.)
+			m.call("status", { watch = true }, 90):after(function(s: Status)
 				local was = m.status:peek()
 				if not was or ui.json.encode(was) ~= ui.json.encode(s) then
 					m.status:set(s)
@@ -278,19 +301,76 @@ return function(zeron: any)
 				if m.history:peek() and (s.oid or "") .. (s.branch or "") ~= m.history_head then
 					m.load_history(false)
 				end
+				m.answered_at = ui.now()
+				settled()
 			end, function(err: any)
-				m.busy = false
 				m.problem:set(M.problem(err))
 				m.asked:set(true)
+				settled()
 			end)
 		end
 
-		-- Every few seconds while a view shows it: its node's timer, gone
-		-- with it. (Call in a component.)
-		function m.watch()
-			m.refresh()
-			ui.every(EVERY, function()
+		local function shown(): boolean
+			return next(m.showing) ~= nil and zeron.window(true).shown
+		end
+
+		-- Its device said the checkout changed: asked again if a view shows
+		-- it, else when one does.
+		function m.heard()
+			if shown() then
 				m.refresh()
+			else
+				m.stale = true
+			end
+		end
+
+		-- What its device says of it (once per model; its listener lasts
+		-- with the window, as the model does).
+		local function listen()
+			if m.listening then
+				return
+			end
+			m.listening = true
+			local device = where()
+			zeron.service(device):on("changed", function(data: any)
+				local _, cwd = where()
+				if cwd and type(data) == "table" and type(data.cwds) == "table" and table.find(data.cwds, cwd) then
+					m.heard()
+				end
+			end)
+		end
+
+		-- Asked as its device says it changed while a view shows it
+		-- (`shows`: its node is on screen), on showing again if it changed
+		-- meanwhile, as the window comes back in front, and once a minute
+		-- with nothing heard. Nothing while it's hidden. (Call in a
+		-- component: its effect, and the timer it makes, go with it.)
+		function m.watch(shows: any)
+			listen()
+			local key = {}
+			local front = zeron.window(true).active
+			ui.effect(function()
+				local window = zeron.window()
+				local on = shows:get() and window.shown
+				local now_front = window.active
+				local came_front = now_front and not front
+				front = now_front
+				if not on then
+					m.showing[key] = nil
+					return
+				end
+				m.showing[key] = true
+				ui.on_cleanup(function()
+					m.showing[key] = nil
+				end)
+				-- (Long unasked, its device's watch may have lapsed too.)
+				if m.stale or came_front or not m.asked:peek() or ui.now() - m.answered_at > SAFETY then
+					m.stale = false
+					m.refresh()
+				end
+				ui.every(SAFETY, function()
+					m.refresh()
+				end)
 			end)
 		end
 

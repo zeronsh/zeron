@@ -14,6 +14,15 @@
 //! update" (screens/engine/update). Host action:
 //!   engine.restart     stop the engine this app started; the supervisor
 //!                      starts the one on disk in its place
+//!
+//! Zeron.app's beta manages Zeron.app's own engine, which restarts into its
+//! bundle's by itself (src/engine/manager.rs): no staleness of this app's to
+//! judge there, and `engine.restart` stops it at once. Instead each
+//! connection asks whether the engine serves this interface (its
+//! `zgx-interface-v1` capability, crates/proto): shared `engine.interface`,
+//! `{ supported }`. An older engine (the stable app's from before the beta,
+//! still running) can't: the scripts say so and offer to restart it, or to go
+//! back to Stable (about.channel).
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
@@ -23,6 +32,20 @@ use zgx_desktop::WindowContext;
 use zgx_script::{ScriptHost, Shared, Value};
 
 use crate::engine::{self, manager};
+
+/// The capability an engine serving this interface advertises
+/// (crates/proto `capabilities::ZGX_INTERFACE_V1`).
+const INTERFACE: &str = "zgx-interface-v1";
+
+/// Whether an engine advertising `capabilities` serves this interface. Only
+/// the beta asks: a development build's staging engine is whatever the
+/// checkout built.
+fn serves_interface(capabilities: &serde_json::Value) -> bool {
+    !cfg!(feature = "beta")
+        || capabilities
+            .as_array()
+            .is_some_and(|all| all.iter().any(|c| c.as_str() == Some(INTERFACE)))
+}
 
 /// What's known of the engine's build: stale, and whether it's this app's.
 fn record(stale: bool, ours: bool) -> Value {
@@ -90,6 +113,27 @@ thread_local! {
     static WINDOWS: RefCell<Vec<Shared>> = const { RefCell::new(Vec::new()) };
     static SAID: Cell<(bool, bool)> = const { Cell::new((false, false)) };
     static CHECKING: Cell<bool> = const { Cell::new(false) };
+    /// Every window's `engine.interface`, and what it says now.
+    static INTERFACES: RefCell<Vec<Shared>> = const { RefCell::new(Vec::new()) };
+    static SUPPORTED: Cell<bool> = const { Cell::new(true) };
+}
+
+fn interface_record(supported: bool) -> Value {
+    Value::record([("supported", Value::Bool(supported))])
+}
+
+fn tell_interface(supported: bool) {
+    if SUPPORTED.with(|s| s.replace(supported)) == supported {
+        return;
+    }
+    if !supported {
+        eprintln!("zeron-zgx: engine: doesn't serve this interface ({INTERFACE}): an older engine");
+    }
+    INTERFACES.with(|w| {
+        for shared in w.borrow().iter() {
+            shared.set(interface_record(supported));
+        }
+    });
 }
 
 fn tell(judged: (bool, bool)) {
@@ -105,6 +149,8 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     engine::install(cx);
     let (stale, ours) = SAID.with(Cell::get);
     WINDOWS.with(|w| w.borrow_mut().push(host.shared("engine.update", record(stale, ours))));
+    let supported = SUPPORTED.with(Cell::get);
+    INTERFACES.with(|w| w.borrow_mut().push(host.shared("engine.interface", interface_record(supported))));
     install_restart(host);
     if CHECKING.with(|c| c.replace(true)) {
         return;
@@ -123,6 +169,11 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
             let Ok(info) = rpc.call("EngineInfo", json!({})).await else {
                 return;
             };
+            tell_interface(serves_interface(&info["capabilities"]));
+            // Zeron.app's engine follows its bundle by itself.
+            if config.follows_bundle() {
+                return;
+            }
             let running = info["build"].as_str().map(str::to_owned);
             let mut said = None::<(bool, bool)>;
             while generation.get() == mine {
@@ -158,10 +209,16 @@ fn install_restart(host: &ScriptHost) {
         let Some(config) = engine.config() else {
             return Err("Zeron isn't available here".into());
         };
-        // (Only one this app started, and only while it can start another.)
+        // (Only one this app started, and only while it can start another;
+        // in the beta, Zeron.app's own, which its bundle's replaces.)
         let Some(rpc) = engine.current() else {
             return Err("offline".into());
         };
+        if config.follows_bundle() {
+            eprintln!("zeron-zgx: engine: restarting Zeron's engine");
+            engine.stop().await?;
+            return Ok(Value::Nil);
+        }
         let info = rpc.call("EngineInfo", json!({})).await?;
         let running = info["build"].as_str().map(str::to_owned);
         if config.startable().is_none() || running.is_none() || running != manager::started_build(config) {
@@ -176,6 +233,25 @@ fn install_restart(host: &ScriptHost) {
 #[cfg(test)]
 mod tests {
     use super::judge;
+
+    /// The beta serves only an engine with the interface's capability (the
+    /// stable engine from before the beta has none); a development build
+    /// takes whatever its checkout built.
+    #[test]
+    fn the_beta_asks_for_the_interface_s_capability() {
+        let with = serde_json::json!(["message-queue-v1", "zgx-interface-v1"]);
+        let without = serde_json::json!(["message-queue-v1"]);
+        assert!(super::serves_interface(&with));
+        assert_eq!(super::serves_interface(&without), !cfg!(feature = "beta"));
+        assert_eq!(super::serves_interface(&serde_json::Value::Null), !cfg!(feature = "beta"));
+    }
+
+    /// The engine's own name for it (zgx doesn't link crates/proto).
+    #[test]
+    fn the_capability_is_the_engine_s() {
+        let proto = include_str!("../../../crates/proto/src/workspace.rs");
+        assert!(proto.contains(&format!("ZGX_INTERFACE_V1: &str = \"{}\"", super::INTERFACE)));
+    }
 
     #[test]
     fn a_binary_is_asked_again_only_once_it_changes() {

@@ -291,13 +291,13 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: IMPORT_TEMPLATE,
-            description: "Install a template from a .zeron-template file. Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
+            description: "Install a template from a .zeron-template file (`path`) or a link (`url`: to a .zeron-template file, or a GitHub repository or release with one; a template from a link is checked there for updates). Zeron checks its signature over every file first: an unsigned or changed package is refused. One signed on this device installs at once. Anyone else's waits for the person: a template runs as Zeron's own code with all its powers, so they must allow it in Zeron's window (Templates shows it waiting, with who signed it); you can't allow it for them. The reply says which: `installed` (its id), or `pending` with `needs_consent`. Files no template may replace are never installed (`ignored` names them). list_templates shows it once installed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The .zeron-template file's full path." }
-                },
-                "required": ["path"]
+                    "path": { "type": "string", "description": "The .zeron-template file's full path." },
+                    "url": { "type": "string", "description": "Or a link: a .zeron-template file's, or a GitHub repository or release (e.g. owner/repo) with one." }
+                }
             }),
         },
     ]
@@ -307,6 +307,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
 struct PackageArgs {
     id: Option<String>,
     path: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -516,10 +518,11 @@ impl Tools {
             };
             (methods::EXPORT_TEMPLATE, json!({ "id": id, "path": path }))
         } else {
-            let Some(path) = path else {
-                return Err("Say which file to import: `path`, a .zeron-template file.".into());
-            };
-            (methods::IMPORT_TEMPLATE, json!({ "path": path }))
+            match (path, args.url.filter(|u| !u.trim().is_empty())) {
+                (Some(path), None) => (methods::IMPORT_TEMPLATE, json!({ "path": path })),
+                (None, Some(url)) => (methods::IMPORT_TEMPLATE, json!({ "url": url })),
+                _ => return Err("Say what to import: `path`, a .zeron-template file, or `url`, a link to one.".into()),
+            }
         };
         let mut reply = self.zeron.call_rpc(method, params).await.map_err(plain)?;
         if reply["needs_consent"] == json!(true) {
@@ -972,10 +975,19 @@ mod tests {
         // No tool decides for the person.
         let catalog = super::super::catalog();
         assert!(catalog.iter().all(|d| !d.name.contains("decide") && !d.name.contains("allow")));
-        for tool in [EXPORT_TEMPLATE, IMPORT_TEMPLATE] {
-            let def = catalog.iter().find(|d| d.name == tool).unwrap();
-            assert!(def.input_schema["required"].as_array().unwrap().contains(&json!("path")), "{tool}");
+        let export = catalog.iter().find(|d| d.name == EXPORT_TEMPLATE).unwrap();
+        assert!(export.input_schema["required"].as_array().unwrap().contains(&json!("path")));
+        // Importing takes a file or a link.
+        let import = catalog.iter().find(|d| d.name == IMPORT_TEMPLATE).unwrap();
+        for field in ["path", "url"] {
+            assert!(import.input_schema["properties"].get(field).is_some(), "{field}");
         }
+        assert!(tools.call(IMPORT_TEMPLATE, json!({ "path": "/x/a.zeron-template", "url": "ada/midnight" })).await.is_err());
+        let before = engine.calls.lock().unwrap().len();
+        let _ = tools.call(IMPORT_TEMPLATE, json!({ "url": "ada/midnight" })).await;
+        let calls = engine.calls.lock().unwrap();
+        assert_eq!(calls.len(), before + 1);
+        assert!(format!("{:?}", calls.last().unwrap()).contains("ada/midnight"));
     }
 
     #[tokio::test]

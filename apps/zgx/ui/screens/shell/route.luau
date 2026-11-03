@@ -429,6 +429,24 @@ function M.settings(page: string?)
 	go("settings", { page = to })
 end
 
+-- A `zeron://` link the system handed the app (a clicked banner, a chat's
+-- link), read by the host (src/links.rs): `{ seq, chat?, settings? }`, `seq`
+-- moving with each. Followed once each, never on a reload.
+local link = ui.shared("app.link", { seq = 0 } :: { seq: number, chat: string?, settings: string? })
+local followed = ui.state("shell_link_followed", 0)
+ui.effect(function()
+	local l = link:get()
+	if l.seq == 0 or l.seq == followed:peek() then
+		return
+	end
+	followed:set(l.seq)
+	if l.chat then
+		M.open_session(l.chat)
+	elseif l.settings then
+		M.settings(l.settings)
+	end
+end)
+
 -- To a plugin's page ("pages.add", listed in the sidebar). One replaces
 -- another, so a step back from any is back to the chats.
 function M.plugin_page(plugin: string, page: string)

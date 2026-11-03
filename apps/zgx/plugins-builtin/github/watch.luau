@@ -6,31 +6,83 @@
 -- A session's repository is its folder's on this Mac (or its project's
 -- folder's), found once and kept. A session whose folder isn't on this Mac
 -- is looked for on GitHub by its branch, among pull requests that involve
--- you. Then every two minutes (Zeron's own pace), one GraphQL ask a repository covers every
--- session's branch in it (aliases), and an unchanged answer changes
--- nothing. What was last heard is kept, so badges show at launch.
+-- you. What was last heard is kept, so badges show at launch.
+--
+-- How often a session is asked depends on how much it matters now: one on
+-- screen (its row, its card, its panel) or working, every half minute;
+-- one touched in the last fortnight, every twelve minutes; older ones out
+-- of sight, never. A repository asked for one of its sessions answers for
+-- all of them, and one GraphQL ask covers many repositories (aliases), so
+-- five hundred repositories are a handful of asks, not five hundred. As
+-- GitHub's quota for the hour runs low (`rateLimit`, in every answer),
+-- everything is asked less often; near its end, nothing until it resets.
+-- A pull request the engine already watches for a session on screen
+-- (`zeron.github.watch_pr`, Zeron's own sign-in) comes from there, pushed;
+-- gh asks of it only at the slow pace.
 --
 --   watch.pr(session_id)   in a build function: a function reading that
---                          session's pull request as it changes (nil: none)
+--                          session's pull request as it changes (nil: none),
+--                          the session asked often while the build stands
+--   watch.read(session_id) the same reader, the session not marked shown
 --   watch.sessions()       every session's, by id (`{ [id] = pr | false }`)
 
-local SECONDS = 2 * 60
--- After a failed ask, the next waits longer each time (20 s, doubling, at
--- most 15 minutes), as Zeron's own watcher does.
-local BACKOFF_FIRST, BACKOFF_MAX = 20, 15 * 60
+-- The watch's beat (seconds): what's due is asked on it. Between asks, in
+-- beats: a session on screen or working; one touched lately; how lately
+-- (days).
+local BEAT = 30
+local HOT = 1
+local WARM = 24
+local RECENT_DAYS = 14
+-- One ask covers this many repositories, and branches, at most.
+local BATCH_REPOS, BATCH_BRANCHES = 50, 150
+-- Repositories looked up (`gh repo view`) per round, at most: the rest the
+-- next round, a moment later.
+local LOOKUPS = 8
+-- After a failed ask, the next waits longer each time (a beat, doubling,
+-- at most 15 minutes), as Zeron's own watcher does.
+local BACKOFF_FIRST, BACKOFF_MAX = 1, 30
+-- A session looked for on GitHub by its branch (its folder isn't here) is
+-- looked for again this many times less often than it'd be asked.
+local SEARCH_SLOWER = 5
 
 -- What a badge and a notification read of a pull request.
 local FIELDS = [[number title url state isDraft reviewDecision baseRefName headRefName isCrossRepository
-  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
+  reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } } } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }]]
+
+-- Seconds since 1970 of GitHub's "2026-11-02T18:04:05Z" (UTC).
+local function epoch(iso: string?): number?
+	local y, mo, d, h, mi, s = string.match(iso or "", "^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+	if not y then
+		return nil
+	end
+	local year, month, day = tonumber(y) :: number, tonumber(mo) :: number, tonumber(d) :: number
+	-- (Days from the civil date: Howard Hinnant's.)
+	year -= if month <= 2 then 1 else 0
+	local era = (if year >= 0 then year else year - 399) // 400
+	local yoe = year - era * 400
+	local doy = (153 * (month + (if month > 2 then -3 else 9)) + 2) // 5 + day - 1
+	local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+	local days = era * 146097 + doe - 719468
+	return days * 86400 + (tonumber(h) :: number) * 3600 + (tonumber(mi) :: number) * 60 + (tonumber(s) :: number)
+end
 
 return function(zeron: any, pulls: any)
 	local M = {}
 	-- Each session's pull request (or false: none), as last heard.
 	local heard = ui.state("github_watch", {} :: { [string]: any })
-	-- Each folder's repository (or false: none), and each remote session's.
+	-- Each folder's repository (or false: none), and each session's.
 	local repos: { [string]: any } = {}
 	local viewer: string? = nil
+	-- What shows each session now (its badge, its card, its panel), and
+	-- what the engine says of it there.
+	local shown: { [string]: number } = {}
+	local engine: { [string]: () -> any } = {}
+	-- The beat it is, and when each session was last asked of GitHub.
+	local beat = 0
+	local asked_at: { [string]: number } = {}
+	-- When each session not found on this Mac was last looked for.
+	local searched: { [string]: number } = {}
 
 	-- GitHub's pull request as a badge reads it.
 	local function record(pr: any): any
@@ -62,15 +114,63 @@ return function(zeron: any, pulls: any)
 		}
 	end
 
+	-- The engine's pull request (github.rs `summary`) as a badge reads it;
+	-- a draft as gh last said, the engine not saying.
+	local function from_engine(e: any, mine: any?): any
+		local state = e.state
+		if state == "open" and type(mine) == "table" and mine.number == e.number and mine.state == "draft" then
+			state = "draft"
+		end
+		local ci = if e.ci == "passed" or e.ci == "failed" or e.ci == "pending" then e.ci else nil
+		local review = if e.review == "approved" or e.review == "changesRequested" or e.review == "reviewRequired" then e.review else nil
+		return {
+			number = e.number,
+			title = e.title,
+			url = e.url,
+			state = state,
+			base = e.base,
+			head = e.head,
+			review = review,
+			requested_of_you = e.requested_of_you == true,
+			ci = ci,
+		}
+	end
+
 	local failures = 0
 	local resume_at = 0
 	local function failed_ask()
 		failures += 1
-		resume_at = os.time() + math.min(BACKOFF_MAX, BACKOFF_FIRST * 2 ^ (failures - 1))
+		resume_at = beat + math.min(BACKOFF_MAX, BACKOFF_FIRST * 2 ^ (failures - 1))
+	end
+
+	-- GitHub's quota for the hour, as its last answer said: how much
+	-- slower to ask (1: as usual), and until when nothing is asked.
+	local quota = { remaining = 5000, limit = 5000, reset = 0 }
+	local function slower(): number
+		local share = quota.remaining / math.max(1, quota.limit)
+		if share < 0.1 then
+			return 8
+		elseif share < 0.25 then
+			return 4
+		elseif share < 0.5 then
+			return 2
+		end
+		return 1
+	end
+	local function heard_quota(rate: any)
+		if type(rate) ~= "table" or type(rate.remaining) ~= "number" then
+			return
+		end
+		quota.remaining, quota.limit = rate.remaining, (rate.limit or quota.limit)
+		quota.reset = epoch(rate.resetAt) or quota.reset
+		-- (Near its end: nothing until it resets, a few left for what you
+		-- open yourself.)
+		if quota.remaining < math.max(20, quota.limit * 0.02) and quota.reset > os.time() then
+			resume_at = math.max(resume_at, beat + math.ceil((quota.reset - os.time()) / BEAT))
+		end
 	end
 
 	local function publish(changes: { [string]: any })
-		failures = 0
 		local now = table.clone(heard:peek())
 		local moved = false
 		for id, pr in changes do
@@ -92,47 +192,83 @@ return function(zeron: any, pulls: any)
 		return if type(b) == "string" and b ~= "" then b else nil
 	end
 
-	-- One ask for every branch of `repo`: each session's pull request.
-	local function ask_repo(repo: string, sessions: { { id: string, branch: string } })
-		local owner, name = string.match(repo, "^([^/]+)/([^/]+)$")
-		if not owner then
-			return
+	-- Whether the engine watches session `id` and has told its pull request
+	-- (it shows: the engine watches what shows).
+	local function engine_has(id: string): boolean
+		return (shown[id] or 0) > 0 and engine[id] ~= nil and engine[id]() ~= nil
+	end
+
+	-- How often session `id` is asked (in beats), or nil: not at all.
+	local function every(id: string, s: any, now: number): number?
+		local on_screen = (shown[id] or 0) > 0
+		local working = s.status == "working" or s.status == "input"
+		-- (The engine watching it pushes it: gh only now and then.)
+		if (on_screen or working) and not engine_has(id) then
+			return HOT * (if slower() >= 4 then slower() / 2 else 1)
 		end
-		local vars: { [string]: any } = { owner = owner, name = name }
-		local defs = { "$owner: String!", "$name: String!" }
-		local parts = {}
-		for i, s in sessions do
-			vars[`b{i}`] = s.branch
-			table.insert(defs, `$b{i}: String!`)
-			table.insert(parts, `b{i}: pullRequests(headRefName: $b{i}, first: 10, orderBy: \{ field: UPDATED_AT, direction: DESC \}, states: [OPEN, MERGED, CLOSED]) \{ nodes \{ {FIELDS} \} \}`)
+		local recent = type(s.updated) == "number" and now - s.updated < RECENT_DAYS * 86400
+		if recent or on_screen then
+			return WARM * slower()
 		end
-		local query = `query({table.concat(defs, ", ")}) \{ viewer \{ login \} repository(owner: $owner, name: $name) \{ {table.concat(parts, " ")} \} \}`
-		pulls.graphql(query, vars):after(function(data: any)
+		return nil
+	end
+
+	type Ask = { id: string, branch: string }
+
+	-- One ask for many repositories' branches: each session's pull request.
+	local function ask(batch: { { repo: string, sessions: { Ask } } }, done: () -> ())
+		local vars: { [string]: any } = {}
+		local defs: { string } = {}
+		local parts: { string } = {}
+		for r, entry in batch do
+			local owner, name = string.match(entry.repo, "^([^/]+)/([^/]+)$")
+			vars[`o{r}`], vars[`n{r}`] = owner, name
+			table.insert(defs, `$o{r}: String!`)
+			table.insert(defs, `$n{r}: String!`)
+			local branches = {}
+			for k, s in entry.sessions do
+				vars[`b{r}_{k}`] = s.branch
+				table.insert(defs, `$b{r}_{k}: String!`)
+				table.insert(branches, `b{r}_{k}: pullRequests(headRefName: $b{r}_{k}, first: 5, orderBy: \{ field: UPDATED_AT, direction: DESC \}, states: [OPEN, MERGED, CLOSED]) \{ nodes \{ {FIELDS} \} \}`)
+			end
+			table.insert(parts, `r{r}: repository(owner: $o{r}, name: $n{r}) \{ {table.concat(branches, " ")} \}`)
+		end
+		local query = `query({table.concat(defs, ", ")}) \{ viewer \{ login \} rateLimit \{ cost remaining limit resetAt \} {table.concat(parts, " ")} \}`
+		pulls.graphql(query, vars, { background = true }):after(function(data: any)
+			failures = 0
 			viewer = data.viewer and data.viewer.login or viewer
-			local repository = data.repository or {}
+			heard_quota(data.rateLimit)
 			local changes: { [string]: any } = {}
-			for i, s in sessions do
-				-- Its own branch's: one opened from a fork's branch of the same
-				-- name (anyone's `main`) is someone else's.
-				local found = nil
-				for _, pr in pulls.nodes(repository[`b{i}`]) do
-					if not pr.isCrossRepository then
-						found = pr
-						break
+			for r, entry in batch do
+				local repository = data[`r{r}`] or {}
+				for k, s in entry.sessions do
+					-- Its own branch's: one opened from a fork's branch of the
+					-- same name (anyone's `main`) is someone else's.
+					local found = nil
+					for _, pr in pulls.nodes(repository[`b{r}_{k}`]) do
+						if not pr.isCrossRepository then
+							found = pr
+							break
+						end
 					end
+					changes[s.id] = if found then record(found) else false
 				end
-				changes[s.id] = if found then record(found) else false
 			end
 			publish(changes)
-		end, failed_ask)
+			done()
+		end, function()
+			failed_ask()
+			done()
+		end)
 	end
 
 	-- A session whose folder isn't here: its branch's pull request among
 	-- those that involve you, the repository named as its project first.
 	local function search(id: string, branch: string, project: string?)
-		local query = `query($q: String!) \{ viewer \{ login \} search(query: $q, type: ISSUE, first: 10) \{ nodes \{ ... on PullRequest \{ repository \{ nameWithOwner name \} {FIELDS} \} \} \} \}`
-		pulls.graphql(query, { q = `is:pr head:{branch} involves:@me sort:updated-desc` }):after(function(data: any)
+		local query = `query($q: String!) \{ viewer \{ login \} rateLimit \{ cost remaining limit resetAt \} search(query: $q, type: ISSUE, first: 10) \{ nodes \{ ... on PullRequest \{ repository \{ nameWithOwner name \} {FIELDS} \} \} \} \}`
+		pulls.graphql(query, { q = `is:pr head:{branch} involves:@me sort:updated-desc` }, { background = true }):after(function(data: any)
 			viewer = data.viewer and data.viewer.login or viewer
+			heard_quota(data.rateLimit)
 			local pick = nil
 			for _, pr in pulls.nodes(data.search) do
 				if pr.headRefName == branch and not pr.isCrossRepository then
@@ -153,121 +289,230 @@ return function(zeron: any, pulls: any)
 		end, failed_ask)
 	end
 
-	-- When each session not found on this Mac was last looked for on
-	-- GitHub (not again for a while if it had none).
-	local searched: { [string]: number } = {}
+	-- The rounds: each asks what's due, on the beat and as something new
+	-- shows.
+	local round: () -> ()
+	-- (A burst of rows mounting, sessions arriving: one round after it.)
+	local soon_armed = false
+	local function soon()
+		if not soon_armed then
+			soon_armed = true
+			ui.after(500, function()
+				soon_armed = false
+				round()
+			end)
+		end
+	end
 
-	-- Every session's pull request, asked again.
+	-- Session `id`'s repository, from its folder on this Mac or its
+	-- project's: "known" (now kept), "looking" (asked, or `start` false:
+	-- to ask later), or "none" here.
+	local looking: { [string]: boolean } = {}
+	local function lookup(id: string, s: any, start: boolean): string
+		local project = if s.project then zeron.context_of("project", s.project) else nil
+		for _, f in { s.cwd, project and project.path } do
+			if type(f) == "string" and f ~= "" and repos[f] ~= false then
+				if repos[f] then
+					repos[`session:{id}`] = repos[f]
+					return "known"
+				end
+				if not looking[f] and start then
+					looking[f] = true
+					pulls.repository(f):after(function(repo: string)
+						looking[f] = nil
+						repos[f] = repo
+						soon()
+					end, function()
+						looking[f] = nil
+						repos[f] = false
+						soon()
+					end)
+				end
+				return "looking"
+			end
+		end
+		return "none"
+	end
+
 	local busy = false
-	-- (Not more than once in 20 seconds unless asked: sessions coming and
-	-- going in a burst ask GitHub once.)
-	local last_poll = 0
-	local function poll(force: boolean?)
-		if busy or (not force and (os.time() - last_poll < 20 or os.time() < resume_at)) then
+	function round()
+		if busy then
+			return
+		end
+		local now = os.time()
+		if beat < resume_at then
+			return
+		end
+		-- Each repository's sessions worth asking, and which repositories
+		-- are due (a session of theirs is).
+		local by_repo: { [string]: { Ask } } = {}
+		-- (Each due repository's shortest period: while repositories are
+		-- still being found, only the often-asked go, the rest wait to go
+		-- together.)
+		local due: { [string]: number } = {}
+		local lookups = 0
+		local later = false
+		for id, s in zeron.sessions() do
+			local branch = branch_of(s)
+			local period = branch and every(id, s, now)
+			if not branch or not period then
+				continue
+			end
+			local at = (asked_at[id] or -math.huge) + period
+			local repo = repos[`session:{id}`]
+			if not repo then
+				local was = lookups
+				local found = lookup(id, s, lookups < LOOKUPS)
+				if found == "looking" then
+					if lookups == was then
+						later = later or lookups >= LOOKUPS
+					end
+					lookups += if lookups < LOOKUPS then 1 else 0
+					continue
+				end
+				repo = repos[`session:{id}`]
+			end
+			if repo then
+				-- (What the engine tells isn't asked of gh too, unless it's
+				-- due itself.)
+				if at <= beat or not engine_has(id) then
+					by_repo[repo] = by_repo[repo] or {}
+					table.insert(by_repo[repo], { id = id, branch = branch :: string })
+				end
+				if at <= beat then
+					due[repo] = math.min(due[repo] or math.huge, period)
+				end
+			elseif at <= beat then
+				-- Not here: GitHub, by its branch, now and then.
+				if beat - (searched[id] or -math.huge) >= period * SEARCH_SLOWER then
+					searched[id] = beat
+					asked_at[id] = beat
+					local project = if s.project then zeron.context_of("project", s.project) else nil
+					search(id, branch :: string, project and project.name)
+				end
+			end
+		end
+		-- The due repositories, a batch at a time.
+		local batches: { { { repo: string, sessions: { Ask } } } } = {}
+		local batch: { { repo: string, sessions: { Ask } } } = {}
+		local branches = 0
+		local list: { string } = {}
+		local settling = later or next(looking) ~= nil
+		for repo, period in due do
+			if not settling or period < WARM then
+				table.insert(list, repo)
+			end
+		end
+		table.sort(list)
+		for _, repo in list do
+			local sessions = by_repo[repo]
+			if #batch >= BATCH_REPOS or (branches + #sessions > BATCH_BRANCHES and #batch > 0) then
+				table.insert(batches, batch)
+				batch, branches = {}, 0
+			end
+			table.insert(batch, { repo = repo, sessions = sessions })
+			branches += #sessions
+			for _, s in sessions do
+				asked_at[s.id] = beat
+			end
+		end
+		if #batch > 0 then
+			table.insert(batches, batch)
+		end
+		if #batches == 0 then
+			-- (Lookups on their way start a round as they come; those left
+			-- for later, a moment from now.)
+			if later and next(looking) == nil then
+				soon()
+			end
 			return
 		end
 		busy = true
-		last_poll = os.time()
-		local by_repo: { [string]: { { id: string, branch: string } } } = {}
-		local function add(repo: string, id: string, branch: string)
-			by_repo[repo] = by_repo[repo] or {}
-			table.insert(by_repo[repo], { id = id, branch = branch })
-		end
-		-- (Each session's lookup counted out; when the last is in, each
-		-- repository is asked once.)
-		local waiting = 1
-		local function done()
-			waiting -= 1
-			if waiting == 0 then
-				for repo, list in by_repo do
-					ask_repo(repo, list)
+		local left = #batches
+		for _, b in batches do
+			ask(b, function()
+				left -= 1
+				if left == 0 then
+					busy = false
+					round()
 				end
-				busy = false
-			end
+			end)
 		end
-		for id, s in zeron.sessions() do
-			local branch = branch_of(s)
-			if branch then
-				local known = repos[`session:{id}`]
-				if known then
-					add(known, id, branch)
-				else
-					local project = if s.project then zeron.context_of("project", s.project) else nil
-					-- Its folder on this Mac, then its project's; else GitHub,
-					-- by its branch.
-					local folders: { string } = {}
-					for _, f in { s.cwd, project and project.path } do
-						if type(f) == "string" and f ~= "" then
-							table.insert(folders, f)
-						end
-					end
-					waiting += 1
-					local function lookup(i: number)
-						local folder = folders[i]
-						if not folder then
-							if force or os.time() - (searched[id] or 0) >= 5 * SECONDS then
-								searched[id] = os.time()
-								search(id, branch, project and project.name)
-							end
-							done()
-						elseif repos[folder] == false then
-							lookup(i + 1)
-						else
-							pulls.repository(folder):after(function(repo: string)
-								repos[folder] = repo
-								repos[`session:{id}`] = repo
-								add(repo, id, branch)
-								done()
-							end, function()
-								repos[folder] = false
-								lookup(i + 1)
-							end)
-						end
-					end
-					lookup(1)
-				end
-			end
-		end
-		done()
 	end
 
-	-- What was heard last time, at once; then GitHub, now and every minute,
-	-- and again soon after a session comes or its branch moves.
+	-- What was heard last time, at once; then GitHub.
 	pulls.cached("watch", function(value: any?)
 		if type(value) == "table" and next(heard:peek()) == nil then
 			heard:set(value)
 		end
 	end)
-	zeron.every(SECONDS, function()
-		poll(false)
+	soon()
+	ui.every(BEAT * 1000, function()
+		beat += 1
+		round()
 	end)
 	-- Asked again now (Zeron's menu bar: GitHub › Refresh pull requests).
 	ui.command {
 		id = "refresh",
 		title = zeron.s("command.refresh"),
 		run = function()
-			poll(true)
+			table.clear(asked_at)
+			table.clear(searched)
+			resume_at = 0
+			round()
 		end,
 	}
-	local shape = ""
+	-- A session arriving, or its branch moving, is asked soon.
+	local shape: { [string]: string } = {}
 	ui.effect(function()
-		local parts = {}
+		local moved = false
 		for id in zeron.sessions() do
 			local s = zeron.context_of("session", id) or {}
-			table.insert(parts, `{id}:{branch_of(s) or ""}`)
+			local b = `{branch_of(s) or ""}|{s.status or ""}`
+			if shape[id] ~= b then
+				shape[id] = b
+				asked_at[id] = nil
+				moved = true
+			end
 		end
-		table.sort(parts)
-		local now = table.concat(parts, ",")
-		if now ~= shape then
-			shape = now
-			-- (Once the last ask is 20 seconds old, so a change isn't missed.)
-			ui.after(math.max(500, (20 - (os.time() - last_poll)) * 1000 + 100), function()
-				poll(false)
-			end)
+		if moved then
+			soon()
 		end
 	end)
 
 	function M.pr(session: string): () -> any
+		-- (On screen while this build stands: asked often; seen at once
+		-- if it hadn't been lately.)
+		shown[session] = (shown[session] or 0) + 1
+		local first = shown[session] == 1
+		pcall(ui.on_cleanup, function()
+			local n = (shown[session] or 1) - 1
+			shown[session] = if n > 0 then n else nil
+		end)
+		-- What the engine says of it, where Zeron's sign-in lets it watch
+		-- ("github"): pushed as it moves, and laid into what's heard.
+		local ok, theirs = pcall(zeron.github.watch_pr, session)
+		if ok and type(theirs) == "function" then
+			engine[session] = theirs
+			ui.effect(function()
+				local e = theirs()
+				if e then
+					publish({ [session] = from_engine(e, heard:peek()[session]) })
+				end
+			end)
+		end
+		if first and beat - (asked_at[session] or -math.huge) >= HOT then
+			soon()
+		end
+		return function(): any
+			local pr = heard:get()[session]
+			return if pr == false then nil else pr
+		end
+	end
+
+	-- That session's pull request as heard, without its showing: what reads
+	-- every session's (notices.luau) doesn't make each one asked often.
+	function M.read(session: string): () -> any
 		return function(): any
 			local pr = heard:get()[session]
 			return if pr == false then nil else pr
@@ -277,6 +522,11 @@ return function(zeron: any, pulls: any)
 	function M.sessions(): { [string]: any }
 		return heard:get()
 	end
+
+	-- (For the tests: how round would ask, and the quota as heard.)
+	M.epoch = epoch
+	M.slower = slower
+	M.quota = quota
 
 	return M
 end

@@ -461,9 +461,12 @@ return function(zeron: any, pulls: any, _Viewer: any): (props: { page: any, pane
 				end
 				if #list == 0 then
 					local said = if q ~= "" then { zeron.s("board.empty.nomatch_title", { q = q }), zeron.s("board.empty.nomatch_body") } else empty_words(chosen.filter)
+					-- (In from the card's sides, as Settings.Catalog's empty states
+					-- are: its words wrap inside the card, never against its edge.)
 					return ui.column {
 						w_full = true,
 						py = "$space.6",
+						px = "$space.4",
 						EmptyState { icon = if q ~= "" then "search" else "pull-request", title = said[1], body = said[2] },
 					}
 				end

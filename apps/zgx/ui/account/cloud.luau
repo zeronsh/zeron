@@ -7,7 +7,9 @@
 --   cloud.now:get()   { phase = "unknown" | "loading" | "ready" | "failed",
 --                       status?, repos?, repos_loading, failure? }
 --   cloud.load()        Cloud's status, then its repositories while it's on
---   cloud.load_repos()  the repositories again (after choosing on GitHub)
+--   cloud.load_repos()  the repositories again (after choosing on GitHub);
+--                       `repos_failure` says why one didn't come
+--                       ("github_not_connected", "offline", "failed")
 --   cloud.offered()     signed in and the account has Cloud (tracked)
 --   cloud.on()          …and it's on (tracked)
 --   cloud.reaches(name) the repository of that `owner/name`, if Cloud can
@@ -33,12 +35,13 @@ export type Status = {
 	awake: number?,
 	max_awake: number?,
 }
-export type Repo = { name: string, private: boolean, branch: string?, pushed: number }
+export type Repo = { name: string, private: boolean, branch: string?, clone_url: string?, pushed: number }
 export type Now = {
 	phase: string,
 	status: Status?,
 	repos: { Repo }?,
 	repos_loading: boolean,
+	repos_failure: string?,
 	failure: string?,
 }
 
@@ -120,13 +123,25 @@ function M.load()
 	end)
 end
 
-function M.load_repos()
+-- (`done`: called once the read lands, either way.)
+function M.load_repos(done: (() -> ())?)
 	patch { repos_loading = true }
 	ui.call("cloud.repos", nil):after(function(list: any)
-		patch { repos = list or {}, repos_loading = false }
-	end, function()
-		-- (A failed read keeps what was known.)
-		patch { repos_loading = false }
+		patch { repos = list or {}, repos_loading = false, repos_failure = nil :: any }
+		if done then
+			done()
+		end
+	end, function(e: any)
+		-- (A failed read keeps what was known, but GitHub gone is gone.)
+		local word = if type(e) == "table" and type(e.message) == "string" then e.message else "failed"
+		if word == "github_not_connected" then
+			patch { repos = {}, repos_loading = false, repos_failure = word }
+		else
+			patch { repos_loading = false, repos_failure = word }
+		end
+		if done then
+			done()
+		end
 	end)
 end
 
@@ -136,6 +151,13 @@ end
 
 function M.branches(repo: string, default: string?): any
 	return ui.call("cloud.branches", { repo = repo, default = default })
+end
+
+-- The logical Cloud device's id, while Cloud is on (where a Cloud project
+-- lives).
+function M.device(): string?
+	local s = M.now:get().status
+	return if M.on() and s then s.device else nil
 end
 
 -- Signed out, nothing of the account's Cloud stays for the next one.

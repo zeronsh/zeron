@@ -60,3 +60,21 @@ test("stale, someone else's: noted, never restarted", function()
 	app:frames(10)
 	expect(app:state("test_engine_restarts")).to_be(0)
 end)
+
+-- The beta's check: an engine that doesn't serve this interface (the stable
+-- app's, from before the beta) is started again into the bundle's at once
+-- when idle, as a stale one of this app's is; one that still can't, once
+-- restarted, says Zeron needs a newer engine and leads to About & updates.
+test("an engine too old for this interface: restarted, then the way back to Stable", function()
+	local app = open()
+	app:set_state("engine.interface", { supported = false })
+	expect(eventually(app, function(): boolean
+		return app:state("test_engine_restarts") == 1
+	end)).to_be(true)
+	expect(app:wait('role:button "This Zeron needs a newer engine"', { timeout_ms = 15000 })).to_be(true)
+	expect(app:state("test_engine_restarts")).to_be(1)
+	-- A newer engine serves it: nothing shown.
+	app:set_state("engine.interface", { supported = true })
+	app:frames(10)
+	expect(app:has("#engine-update")).to_be(false)
+end)

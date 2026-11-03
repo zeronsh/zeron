@@ -1666,14 +1666,31 @@
         "unreachable_line": "引擎无法连接到版本更新源。",
         "up_to_date": "Zeron 已是最新版本",
         "newest_checked": "{version} 是最新版本 · 检查于{ago}",
+        "downloading": "正在下载 Zeron {version}…",
+        "downloading_line": "可以继续工作。",
+        "ready": "Zeron {version} 已准备好",
+        "ready_line": "重新启动即可完成。如果不重新启动，退出 Zeron 时会自动安装。",
+        "restart": "重新启动以更新",
+        "download_failed": "无法下载 Zeron {version}",
+        "held": "暂时无法安装 Zeron {version}",
+        "available_stable": "Zeron {version}（稳定版）可用",
+        "update": "更新",
         "newest": "{version} 是目前已知的最新版本。"
       },
       "description": "查看 Zeron 的版本并保持更新。",
       "app": {
         "label": "此 App",
         "built": "尚未打包 · 构建于 {built}",
-        "not_packaged": "尚未打包。"
+        "not_packaged": "尚未打包。",
+        "packaged": "构建于 {built}"
       },
+      "beta": {
+        "label": "获取测试版更新",
+        "terms": "测试版 抢先 渠道 稳定版 beta stable",
+        "on": "正在获取测试版更新。关闭即可回到稳定版。",
+        "off": "抢先试用下一版 Zeron。需要 macOS {version} 或更高版本。"
+      },
+      "updates_self_description": "Zeron 会自动更新：新版本在后台下载，重新启动时安装。",
       "version_info": {
         "label": "版本信息",
         "description": "用于问题报告的上述版本和构建信息。",
@@ -1683,11 +1700,29 @@
     },
     "archived": {
       "title": "已归档",
-      "description": "已归档的会话。对话会保留。",
+      "description": "{n, plural, other {# 个会话，恢复前不会显示在侧边栏中。}}",
+      "description_none": "恢复前不会显示在侧边栏中。",
       "empty_title": "没有已归档的会话",
       "empty_body": "在侧边栏中的会话菜单中归档会话。",
-      "where": "{project} · {ago}",
-      "unarchive": "取消归档"
+      "search": "搜索已归档的会话",
+      "none_match": "没有与“{q}”匹配的已归档会话",
+      "group": {
+        "today": "今天",
+        "yesterday": "昨天",
+        "week": "本周",
+        "earlier": "更早"
+      },
+      "untitled": "未命名会话",
+      "restore": "恢复到侧边栏",
+      "delete_one": "删除…",
+      "delete_all": "全部删除",
+      "delete_all_title": "删除所有已归档的会话？",
+      "sessions": "{n, plural, other {# 个已归档的会话}}",
+      "its_machine": "及其 Cloud 机器",
+      "machines": "{n, plural, other {，以及 # 台 Cloud 机器，}}",
+      "delete_all_body": "{what}将被永久删除。此操作无法撤销。",
+      "couldnt_delete": "{n, plural, other {有 # 个已归档的会话无法删除。请重试。}}",
+      "show_more": "显示更多"
     },
     "shell": {
       "back": "返回对话",
@@ -2319,7 +2354,25 @@
       "title": "新建项目",
       "search_devices": "搜索设备…",
       "no_devices": "未找到设备",
-      "no_devices_hint": "试试其他设备名称。"
+      "no_devices_hint": "试试其他设备名称。",
+      "cloud": "Cloud",
+      "cloud_hint": "你的 GitHub 仓库",
+      "cloud_title": "Cloud",
+      "search_repos": "搜索仓库…",
+      "loading_repos": "正在加载你的仓库…",
+      "no_repos": "没有找到仓库",
+      "no_repos_hint": "Cloud 会列出 Zeron GitHub 应用可以访问的仓库。可在“设置 → Cloud”中添加更多。",
+      "no_repos_yet": "还没有仓库",
+      "choose_repos": "在“设置 → Cloud”中选择仓库",
+      "github_not_connected": "尚未连接 GitHub",
+      "connect_github": "在“设置 → Cloud”中连接 GitHub",
+      "repos_failed": "无法加载你的仓库",
+      "repos_failed_hint": "返回并再次选择 Cloud以重试。",
+      "repos_offline": "现在无法连接 Zeron",
+      "private": "私有",
+      "on_device": "在 {device} 上",
+      "from_github": "来自 GitHub",
+      "add_cloud_project": "添加项目"
     }
   },
   "onboarding": {
@@ -2829,7 +2882,10 @@
       "out_of_date": "Zeron 引擎版本过旧",
       "restart_tip": "Zeron 已在后台更新。重新启动引擎会结束其中正在运行的任务。",
       "theirs_tip": "引擎是在此 App 外启动的：请在那里重新启动以更新。",
-      "short": "引擎已过期"
+      "short": "引擎已过期",
+      "old": "此版本 Zeron 需要更新的引擎",
+      "old_tip": "引擎版本低于此版本的要求。打开“关于与更新”即可回到稳定版。",
+      "short_old": "需要更新的引擎"
     }
   },
   "account": {
@@ -3004,7 +3060,10 @@
         "available_unversioned": "有可用更新。",
         "added": "它还请求{list}；将先征求你的许可。",
         "removed": "它不再请求{list}。"
-      }
+      },
+      "unverified": "未验证",
+      "from": "来自 {where}",
+      "from_file": "来自文件"
     },
     "page": {
       "title": "插件",
@@ -3075,7 +3134,9 @@
       "mine": "这是我的",
       "not_now": "暂不",
       "allow": "允许",
-      "on_device": "在 {device} 上"
+      "on_device": "在 {device} 上",
+      "unverified_why": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许。",
+      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。"
     },
     "permissions": {
       "screen_recording": {
@@ -3180,7 +3241,20 @@
       "make_it": "创建",
       "couldnt_make": "无法创建模板",
       "name": "名称",
-      "name_placeholder": "我的模板"
+      "name_placeholder": "我的模板",
+      "install_more": "安装",
+      "install_title": "安装模板",
+      "install_dialog_title": "安装模板",
+      "install_dialog_body": "粘贴 .zeron-template 文件、GitHub 发布版或代码仓库的链接，或选择一个文件。Zeron 会检查是谁签名的，在使用前由你允许。",
+      "link": "链接",
+      "install": "安装",
+      "choose_file": "选择文件",
+      "couldnt_install": "无法安装该模板",
+      "update": "更新",
+      "updating": "正在更新",
+      "updated_toast": "已更新 {name}",
+      "updated_toast_version": "已更新 {name} {version}",
+      "couldnt_update": "无法更新 {name}"
     },
     "consent": {
       "made_by_you": "由你制作",
@@ -3203,7 +3277,9 @@
       "left_out": "{n, plural, other {# 个文件未包含}}",
       "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自带文件：{files}",
       "not_now": "暂不",
-      "install": "安装"
+      "install": "安装",
+      "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",
+      "unverified_body_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装：{where}。"
     }
   }
 }
