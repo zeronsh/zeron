@@ -52,6 +52,7 @@ local locale = require("@self/locale")
 -- A session's row, its corner, its group's header and pager: shared with
 -- every other list of sessions (the panel home's).
 local SessionRow = require("@self/session_row")
+local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
 
 export type Session = {
@@ -2403,6 +2404,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A pager's own key, where it isn't its group's sessions' (an outer
 		-- group's inner groups: `{key}/groups`).
 		pkey: string?,
+		-- The empty projects' row: the projects (their tiles stack on it).
+		gs: { Group }?,
 	}
 	type Shape = { items: { Item }, at: { [string]: number }, counts: { [string]: number } }
 	local function build_shape(by: Organize): Shape
@@ -2730,8 +2733,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			-- (its new chat, its menu); closed, none of them in the list.
 			if #empties > 0 then
 				local ef = empties_fold()
-				add({ kind = "empties", key = "empties", place = "regular", chain = base, n = #empties, base = function(): number
-					return SLOT + gap_after
+				add({ kind = "empties", key = "empties", place = "regular", chain = base, n = #empties, gs = empties, base = function(): number
+					return TITLE + gap_after
 				end })
 				if ef.present then
 					local inner = { gf, ef }
@@ -3532,6 +3535,142 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local i = s.at[key]
 			return if i then s.items[i] else nil
 		end
+		-- The empty projects' row (the section title's frame, as Archived's):
+		-- a chevron pointing at them (down while they show), "Empty", a stack
+		-- of their tiles overlapping (as many as fit, at most EMPTY_TILES: whole
+		-- tiles dropped, never the word or the count cut), and how many at the
+		-- end. Its full phrase, "21 empty projects", names it and is its tooltip.
+		local EMPTY_TILES = 5
+		local EMPTY_TILE, EMPTY_OVERLAP, EMPTY_GAP = 18, 6, 1.5
+		-- What the row keeps before the stack, points: its insets, the chevron,
+		-- the word (an estimate, the longer of its locales'), the spaces, and
+		-- the count's digits.
+		local EMPTY_FIXED = 8 * 2 + 12 + 4 + 40 + 4 + 8
+		local EMPTY_DIGIT = 7
+		local function empties_row(now: () -> Item): Node
+			local function says(): string
+				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
+			end
+			-- The projects whose tiles show: as many as the width keeps.
+			local function stacked(): { string }
+				local gs = now().gs or {}
+				local free = room() - PAD * 2 - EMPTY_FIXED - EMPTY_DIGIT * #tostring(now().n or 0)
+				local fit = 0
+				if free >= EMPTY_TILE then
+					fit = 1 + math.floor((free - EMPTY_TILE) / (EMPTY_TILE - EMPTY_OVERLAP))
+				end
+				local ids: { string } = {}
+				for i = 1, math.min(fit, EMPTY_TILES, #gs) do
+					table.insert(ids, (gs[i] :: Group).project :: string)
+				end
+				return ids
+			end
+			local function stack(key: string?): Node
+				local ids = if key and key ~= "" then string.split(key :: string, "\n") else {}
+				local items: { Node } = {}
+				for i, id in ids do
+					local g: Group? = nil
+					for _, c in now().gs or {} do
+						if c.project == id then
+							g = c
+						end
+					end
+					if not g then
+						continue
+					end
+					local held: { [any]: any } = {
+						shrink = 0,
+						w = EMPTY_TILE,
+						h = EMPTY_TILE,
+						ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
+						(g :: Group).tile(function(): boolean
+							return false
+						end, nil),
+					}
+					-- (Cut where the next tile sits, and a gap round it: the
+					-- ring is the sidebar's own, glass or not.)
+					if i < #ids then
+						People.cut_into(held, EMPTY_TILE, { x = EMPTY_TILE - EMPTY_OVERLAP + EMPTY_TILE / 2, r = EMPTY_TILE / 2 + EMPTY_GAP })
+					end
+					table.insert(items, ui.div(held))
+				end
+				return ui.row { class = "empty-projects-stack", shrink = 0, items = "center", table.unpack(items) }
+			end
+			local frame: { [any]: any } = {
+				class = "empty-projects",
+				role = "button",
+				label = says,
+				w = function(): number
+					return room() - PAD * 2
+				end,
+				h = TITLE,
+				shrink = 0,
+				pl = "$space.2",
+				pr = "$space.2",
+				items = "center",
+				color = "$text.tertiary",
+				cursor = "pointer",
+				hover = { color = "$text.secondary" },
+				on_click = function()
+					fold_set(empties_fold(), not empties_open:peek())
+				end,
+				ui.div {
+					w = 12,
+					h = 12,
+					shrink = 0,
+					mr = "$space.1",
+					ui.presence(function(): string
+						return if empties_open:get() then "alt-arrow-down" else "alt-arrow-right"
+					end, function(name: string): Node
+						return Icon { name = name :: Icon.Name, size = 12 }
+					end),
+				},
+				ui.text {
+					locale.t("ds.sidebar.empty_projects_word"),
+					shrink = 0,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+				ui.div {
+					ml = "$space.1",
+					shrink = 1,
+					min_w = 0,
+					ui.presence(function(): string
+						return table.concat(stacked(), "\n")
+					end, stack),
+				},
+				ui.div { grow = 1 },
+				ui.text {
+					function(): string
+						return tostring(now().n or 0)
+					end,
+					shrink = 0,
+					text_size = "$font.size.xs",
+					tabular = true,
+				},
+				ui.presence(says, function(name: string): Node
+					return ui.div { absolute = true, left = 0, top = 0, w_full = true, h_full = true, tooltip = name, tooltip_delay = 150, pointer_events = "none" }
+				end),
+			}
+			frame.relative = true
+			return ui.div(folds(
+				{
+					w_full = true,
+					ui.row(fades(frame :: any, function(): boolean
+						return not railed()
+					end)),
+				},
+				function(): boolean
+					return not railed()
+				end,
+				function(): number
+					return TITLE
+				end,
+				8,
+				false
+			))
+		end
+
 		local function build(key: string): Node
 			local it = item_of(key)
 			if not it then
@@ -3635,27 +3774,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					tree_now
 				)
 			elseif it.kind == "empties" then
-				-- "21 empty projects": quiet, its chevron where a group's tile
-				-- stands, pointing at them, down while they show.
-				local function says(): string
-					return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
-				end
-				node = row {
-					class = "empty-projects",
-					name = says,
-					lead = ui.div {
-						color = "$text.tertiary",
-						ui.presence(function(): string
-							return if empties_open:get() then "alt-arrow-down" else "alt-arrow-right"
-						end, function(name: string): Node
-							return Icon { name = name :: Icon.Name, size = 12 }
-						end),
-					},
-					words = SessionRow.pager_words(says),
-					on_click = function()
-						fold_set(empties_fold(), not empties_open:peek())
-					end,
-				}
+				-- The Archived row's own (a section's title: its height, its
+				-- words, its ink) with a chevron before: "Empty", the first
+				-- projects' tiles stacked, the count at its end.
+				node = empties_row(now)
 			elseif it.kind == "more" then
 				-- "Show N more": the shelf's next few.
 				node = row {

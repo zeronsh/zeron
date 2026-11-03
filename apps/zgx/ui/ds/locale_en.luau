@@ -380,6 +380,7 @@ return {
 	["ds.sidebar.empty"] = "No sessions yet",
 	["ds.sidebar.resize"] = "Resize sidebar",
 	["ds.sidebar.show_less"] = "Show less",
+	["ds.sidebar.empty_projects_word"] = "Empty",
 	["ds.sidebar.empty_projects"] = "{n, plural, one {# empty project} other {# empty projects}}",
 	["ds.git.pull_request"] = "Pull request",
 	["ds.git.file"] = "File",

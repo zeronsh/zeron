@@ -208,3 +208,38 @@ test("many empty projects opened: the list builds only the rows in view", functi
 	expect(shows(app, "Gone 60")).to_be(true)
 	expect(shows(app, "Gone 1")).to_be(false)
 end)
+
+test("the row reads Empty, a stack of project tiles (at most 5), and the count", function()
+	-- The tiles in the row: the fixture's are letters, one each.
+	local app: any
+	local function stacked(label: string): number
+		local n, inside, indent = 0, false, 0
+		for line in app:tree(SIDE):gmatch("[^\n]+") do
+			local pad = #line:match("^ *")
+			if line:find(` button "{label}"`, 1, true) then
+				inside, indent = true, pad
+			elseif inside and pad <= indent then
+				break
+			elseif inside and line:match(' text "[^"%d]" ') then
+				n += 1
+			end
+		end
+		return n
+	end
+	app = open()
+	expect(shows(app, "2 empty projects")).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "2 empty projects" >> "Empty"`)).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "2 empty projects" >> "2"`)).to_be(true)
+	expect(stacked("2 empty projects")).to_be(2)
+
+	-- Sixty: the stack stops at five, the word and the count whole.
+	app = mount("shell_fixture.luau")
+	app:resize(1200, 700)
+	app:frames(30)
+	app:command("many_empty_projects")
+	app:frames(30)
+	expect(shows(app, "60 empty projects")).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "Empty"`)).to_be(true)
+	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "60"`)).to_be(true)
+	expect(stacked("60 empty projects")).to_be(5)
+end)
