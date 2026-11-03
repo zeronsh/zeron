@@ -26,6 +26,7 @@ local status = require("@self/status")
 local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
+local IconButton = require("@self/icon_button").IconButton
 
 export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
@@ -48,6 +49,9 @@ export type Tool = {
 	added: number?,
 	removed: number?,
 	failed: boolean?,
+	-- No result yet: while its reply is still written, it's running, and
+	-- with `stop_tool` its row has a stop of its own.
+	running: boolean?,
 	-- What its row opens to beyond its call (ds/tool_detail): its output's
 	-- summary, its files' counts, an older doc's diff, and the refs of its
 	-- whole output and diff.
@@ -76,6 +80,11 @@ export type Props = {
 	-- A subagent's spawn row (its tool's `subagent`): what opens it (its
 	-- lane). Without it, the row opens its call as any does.
 	open_subagent: ((sub: any) -> ())?,
+	-- Stop one running tool (a hung command, a subagent) while the reply
+	-- goes on: its row's stop square calls it, then reads "Stopping" until
+	-- the tool's result comes, and "Stopped" after. `settle(false)` says it
+	-- wasn't stopped after all (the caller says why), and the row is as it was.
+	stop_tool: ((tool: Tool, settle: (stopping: boolean) -> ()) -> ())?,
 }
 
 local GLYPH: { [Kind]: Icon.Name } = {
@@ -186,6 +195,9 @@ end
 -- map each, holding only what's open (or, for a group, chosen), not a
 -- state per tool.
 local CALLS_OPEN = ui.state("activity_calls_open", {} :: { [string]: boolean })
+-- Tools the reader stopped, by id: "stopping" until their result, then
+-- "stopped" (kept, so a row made again still says so).
+local STOPS = ui.state("activity_stops", {} :: { [string]: string })
 local GROUPS_CHOSEN = ui.state("activity_groups_chosen", {} :: { [string]: boolean })
 
 -- A thought's row: no glyph, no branch, no header, its words themselves
@@ -380,7 +392,79 @@ end
 
 -- (`below`: a tool with a branch follows, so the trunk runs on under this
 -- one; `running`: it is the one in flight, its glyph the working loader.)
-local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?): Node
+-- A running tool's stop: a square at the row's end while the reply is
+-- written and the tool has no result; once asked, "Stopping" until its
+-- result comes, then "Stopped".
+local function stop_control(now: () -> Tool, live: () -> boolean, stop_tool: (Tool, (boolean) -> ()) -> ()): Node
+	local function stage(): string?
+		return STOPS:get()[now().id]
+	end
+	local function set(id: string, to: string?)
+		local all = table.clone(STOPS:peek())
+		all[id] = to
+		STOPS:set(all)
+	end
+	-- Its result came: a stop asked for is done.
+	ui.effect(function()
+		local t = now()
+		if not t.running and STOPS:peek()[t.id] == "stopping" then
+			set(t.id, "stopped")
+		end
+	end)
+	local function stoppable(): boolean
+		return now().running == true and live() and stage() == nil
+	end
+	local function label(): string
+		local t = now()
+		return if t.target then `{t.verb} {line_of(t)}` else t.verb
+	end
+	return ui.row {
+		shrink = 0,
+		h = ROW,
+		items = "center",
+		gap = "$space.1",
+		ui.show(
+			function(): boolean
+				return stage() ~= nil
+			end,
+			ui.text {
+				function(): string
+					return if stage() == "stopped"
+						then locale.s("ds.activity.stopped")
+						else locale.s("ds.activity.stopping")
+				end,
+				class = "activity-stop-state",
+				role = "status",
+				shrink = 0,
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			}
+		),
+		ui.show(
+			stoppable,
+			IconButton {
+				icon = "stop",
+				label = function(): string
+					return locale.s("ds.activity.stop_named", { name = label() })
+				end,
+				tooltip = locale.s("ds.activity.stop"),
+				size = "sm",
+				tone = "quiet",
+				on_click = function()
+					local t = now()
+					set(t.id, "stopping")
+					stop_tool(t, function(stopping: boolean)
+						if not stopping and STOPS:peek()[t.id] == "stopping" then
+							set(t.id, nil)
+						end
+					end)
+				end,
+			}
+		),
+	}
+end
+
+local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?, live: (() -> boolean)?, stop_tool: ((Tool, (boolean) -> ()) -> ())?): Node
 	if now().kind == "thought" then
 		return thought_row(now, below)
 	end
@@ -427,120 +511,127 @@ local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean
 				c:fill(tree_line.branch { x = TRUNK, mid = mid, tip = BRANCH_END, h = h, bend = BEND, on = below() }, "$zeron.tree")
 			end,
 		},
-		ui.button {
+		ui.row {
 			w_full = true,
 			h = ROW,
-			p = 0,
 			items = "center",
-			relative = true,
-			overflow = "hidden",
-			bg = "#00000000",
-			hover = { bg = "#00000000" },
-			active = { bg = "#00000000" },
-			-- Only a row that opens is a stop for the keys (a long run of
-			-- tools isn't a long run of stops), its ring showing there.
-			focusable = opens,
-			focus = if opens then control.ring else { border = 0 },
-			selectable = false,
-			label = function(): string
-				local t = now()
-				local sub = lane()
-				if sub then
-					return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
-				end
-				return if t.target then `{t.verb} {line_of(t)}` else t.verb
-			end,
-			-- (A tool's call comes with it: whether it opens is known as its
-			-- row is made.)
-			expanded = if opens then showing else nil,
-			cursor = if opens then "pointer" else nil,
-			on_click = function()
-				local sub = lane()
-				if sub and open_subagent then
-					open_subagent(sub)
-					return
-				end
-				if has_call() or has_detail() then
-					local all = table.clone(CALLS_OPEN:peek())
-					all[id] = not showing()
-					CALLS_OPEN:set(all)
-				end
-			end,
-			ui.div {
-				absolute = true,
-				left = GLYPH_LEFT,
-				top = (ROW - GLYPH_SIZE) / 2,
-				color = tint,
-				ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
-					name = function(): Icon.Name
-						return GLYPH[now().kind]
-					end,
-					size = GLYPH_SIZE,
-				}),
-			},
-			ui.row {
-				pl = ui.raw(GUTTER, "past the tree's gutter"),
+			ui.button {
 				grow = 1,
 				min_w = 0,
-				gap = "$space.1",
+				h = ROW,
+				p = 0,
 				items = "center",
-				ui.text {
-					function(): string
-						return now().verb
-					end,
-					literal = true,
-					shrink = 0,
-					text_size = "$font.size.sm",
-					color = "$text.secondary",
+				relative = true,
+				overflow = "hidden",
+				bg = "#00000000",
+				hover = { bg = "#00000000" },
+				active = { bg = "#00000000" },
+				-- Only a row that opens is a stop for the keys (a long run of
+				-- tools isn't a long run of stops), its ring showing there.
+				focusable = opens,
+				focus = if opens then control.ring else { border = 0 },
+				selectable = false,
+				label = function(): string
+					local t = now()
+					local sub = lane()
+					if sub then
+						return locale.s("ds.activity.open_subagent", { title = sub.title or locale.s("ds.activity.subagent") })
+					end
+					return if t.target then `{t.verb} {line_of(t)}` else t.verb
+				end,
+				-- (A tool's call comes with it: whether it opens is known as its
+				-- row is made.)
+				expanded = if opens then showing else nil,
+				cursor = if opens then "pointer" else nil,
+				on_click = function()
+					local sub = lane()
+					if sub and open_subagent then
+						open_subagent(sub)
+						return
+					end
+					if has_call() or has_detail() then
+						local all = table.clone(CALLS_OPEN:peek())
+						all[id] = not showing()
+						CALLS_OPEN:set(all)
+					end
+				end,
+				ui.div {
+					absolute = true,
+					left = GLYPH_LEFT,
+					top = (ROW - GLYPH_SIZE) / 2,
+					color = tint,
+					ui.show(running, status.StatusIcon { kind = "working", size = GLYPH_SIZE }, Icon {
+						name = function(): Icon.Name
+							return GLYPH[now().kind]
+						end,
+						size = GLYPH_SIZE,
+					}),
 				},
-				ui.show(
-					function(): boolean
-						return now().target ~= nil
-					end,
-					FadeText {
+				ui.row {
+					pl = ui.raw(GUTTER, "past the tree's gutter"),
+					grow = 1,
+					min_w = 0,
+					gap = "$space.1",
+					items = "center",
+					ui.text {
 						function(): string
-							return line_of(now())
+							return now().verb
 						end,
 						literal = true,
-						shrink = 1,
-						font = "$font.mono",
+						shrink = 0,
 						text_size = "$font.size.sm",
-						color = "$text.primary",
-					}
-				),
-				-- An edit's lines, added and removed, in their hues.
-				ui.show(
-					function(): boolean
-						return now().added ~= nil
-					end,
-					ui.text {
-						function(): string
-							return `+{now().added or 0}`
+						color = "$text.secondary",
+					},
+					ui.show(
+						function(): boolean
+							return now().target ~= nil
 						end,
-						shrink = 0,
-						tabular = true,
-						font = "$font.mono",
-						text_size = "$font.size.xs",
-						color = "$success",
-					}
-				),
-				ui.show(
-					function(): boolean
-						local r = now().removed
-						return r ~= nil and r > 0
-					end,
-					ui.text {
-						function(): string
-							return `−{now().removed or 0}`
+						FadeText {
+							function(): string
+								return line_of(now())
+							end,
+							literal = true,
+							shrink = 1,
+							font = "$font.mono",
+							text_size = "$font.size.sm",
+							color = "$text.primary",
+						}
+					),
+					-- An edit's lines, added and removed, in their hues.
+					ui.show(
+						function(): boolean
+							return now().added ~= nil
 						end,
-						shrink = 0,
-						tabular = true,
-						font = "$font.mono",
-						text_size = "$font.size.xs",
-						color = "$danger",
-					}
-				),
+						ui.text {
+							function(): string
+								return `+{now().added or 0}`
+							end,
+							shrink = 0,
+							tabular = true,
+							font = "$font.mono",
+							text_size = "$font.size.xs",
+							color = "$success",
+						}
+					),
+					ui.show(
+						function(): boolean
+							local r = now().removed
+							return r ~= nil and r > 0
+						end,
+						ui.text {
+							function(): string
+								return `−{now().removed or 0}`
+							end,
+							shrink = 0,
+							tabular = true,
+							font = "$font.mono",
+							text_size = "$font.size.xs",
+							color = "$danger",
+						}
+					),
+				},
 			},
+			if stop_tool and live then stop_control(now, live, stop_tool) else nil,
 		},
 		ui.show(
 			showing,
@@ -726,7 +817,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent)
+					end, props.open_subagent, live, props.stop_tool)
 				end, {
 					key = function(t: Tool): string
 						return t.id

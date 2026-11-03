@@ -693,7 +693,11 @@
       "show_all_lines": "显示全部 {n} 行",
       "open_subagent": "打开子智能体 {title}",
       "subagent": "子智能体",
-      "worked_for": "运行了 {secs} 秒 · {summary}"
+      "worked_for": "运行了 {secs} 秒 · {summary}",
+      "stop": "停止",
+      "stop_named": "停止 {name}",
+      "stopping": "正在停止",
+      "stopped": "已停止"
     },
     "transcript": {
       "copy_message": "拷贝消息",
@@ -2633,6 +2637,12 @@
       "couldnt_stop_task": "无法停止该进程",
       "commands_or_skills": "命令或技能",
       "drop_to_mention": "松开以提及"
+    },
+    "stop": {
+      "stopped": "已停止 {name}",
+      "not_running": "{name} 已经结束",
+      "unsupported": "该代理无法单独停止此项",
+      "failed": "无法停止 {name}"
     }
   },
   "panel": {
@@ -2837,7 +2847,8 @@
       "port_open_external": "在默认浏览器中打开",
       "port_copy": "复制网址",
       "port_copied": "网址已复制",
-      "previews_unavailable": "本地预览暂时不可用"
+      "previews_unavailable": "本地预览暂时不可用",
+      "stop_subagent": "停止子代理 {title}"
     }
   },
   "files": {
