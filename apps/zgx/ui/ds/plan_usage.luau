@@ -1,12 +1,14 @@
 -- How much of an agent's plan its live account has used, as the composer's
--- plan ring shows it beside the context ring and its card says it (Zeron's
--- crates/ui/src/account_usage.rs): each window the provider reports (the
--- five hours, the week; Cursor's pools), the ring reading the most used, in
--- the accent until it nears its limit (amber from four fifths, red from 95
--- in a hundred, as Settings → Providers' meters read).
+-- limits chip shows it and its card says it (Zeron's
+-- crates/ui/src/account_usage.rs, and the Android app's wave,
+-- apps/android ui/AccountUsage.kt): each window the provider reports (the
+-- five hours, the week; Cursor's pools), the chip reading the most used.
 --
 --   plan_usage.fraction(p)  0 to 1: the most used window, or nil (none)
---   plan_usage.ink(f)       the ring's ink at `f`
+--   plan_usage.percent(f)   "67%"
+--   Wave { fraction = fn }  Android's wave: a violet wavefront filling its
+--                           box from the left as far as `fraction`, eased
+--                           there as it changes (600 ms)
 --   Card { plan = fn }      the card (ds/hover_card's): the agent's usage
 --                           and how much at its head, who on what plan,
 --                           then each window: its name, a slim bar, how
@@ -15,6 +17,8 @@
 local locale = require("@self/locale")
 local HoverCard = require("@self/hover_card")
 local progress = require("@self/progress")
+local ink = require("@self/visual_ink")
+local motion = require("@self/motion")
 
 -- A window: its name as the provider gives it ("5h", "Weekly"), how much
 -- of it is used (0 to 1), and when it starts over (seconds since the
@@ -34,17 +38,81 @@ function M.fraction(p: Plan?): number?
 	return most
 end
 
--- Settings → Providers' thresholds (ds/provider_card's `level`).
+-- The Android card's thresholds: amber from three quarters, red from nine
+-- tenths.
 local function tone(f: number): string
-	return if f >= 0.95 then "danger" elseif f >= 0.8 then "warning" else "accent"
-end
-
-function M.ink(f: number): string
-	return `$zeron.tone.{tone(f)}.ink`
+	return if f >= 0.9 then "danger" elseif f >= 0.75 then "warning" else "accent"
 end
 
 local function percent(f: number): string
 	return locale.s("ds.composer.quota.percent", { n = math.floor(math.clamp(f, 0, 1) * 100 + 0.5) })
+end
+M.percent = percent
+
+-- Android's violet: lighter on a dark theme, deeper on a light one (read
+-- off the text's own ink, so a template's theme decides too).
+local VIOLET_DARK, VIOLET_LIGHT = { 0xb2, 0xa5, 0xff }, { 0x6e, 0x50, 0xd7 }
+local function violet(alpha: number): string
+	local text = ink.hex("text.primary")
+	local r = tonumber(text:sub(2, 3), 16) or 255
+	local g = tonumber(text:sub(4, 5), 16) or 255
+	local b = tonumber(text:sub(6, 7), 16) or 255
+	local c = if (r + g + b) / 3 > 128 then VIOLET_DARK else VIOLET_LIGHT
+	return string.format("#%02x%02x%02x%02x", c[1], c[2], c[3], math.floor(alpha * 255 + 0.5))
+end
+
+-- The wavefront at `front` (0 to 1 of `w`), its edge bent by `bend`: flat
+-- along the top to just past the front, then down in two curves, the
+-- leading edge rising a little (Android's `wave`, the same control points).
+local function wave(w: number, h: number, front: number, bend: number): any
+	local x = w * front
+	return ui.path()
+		:move(0, 0)
+		:line(x + bend, 0)
+		:cubic(x + bend * 1.5, h * 0.22, x - bend * 1.8, h * 0.43, x, h * 0.58)
+		:cubic(x + bend * 1.3, h * 0.76, x - bend, h * 0.91, x - bend, h)
+		:line(0, h)
+		:close()
+end
+
+-- The wave: Android's `accountUsageFill`, drawn behind what holds it. The
+-- bend is greatest mid-way and calms near empty and full; a fainter crest
+-- runs a step ahead; the fill deepens toward its front (13% to 30%).
+function M.Wave(props: { fraction: () -> number?, [string]: any }): Node
+	local target = props.fraction
+	local shown = ui.use_state(math.clamp(target() or 0, 0, 1))
+	-- Eased to a new reading over 600 ms (Android's tween), ticking only
+	-- while it moves.
+	ui.effect(function()
+		local to = math.clamp(target() or 0, 0, 1)
+		local from = shown:peek()
+		if math.abs(to - from) < 0.001 then
+			return
+		end
+		local ms = motion.ms(600)
+		if ms <= 0 then
+			shown:set(to)
+			return
+		end
+		local start = os.clock()
+		ui.every(16, function(): boolean
+			local t = math.min((os.clock() - start) * 1000 / ms, 1)
+			shown:set(from + (to - from) * (1 - (1 - t) ^ 3))
+			return t < 1
+		end)
+	end)
+	local canvas = table.clone(props)
+	canvas.fraction = nil
+	canvas.draw = function(c, w, h)
+		local p = shown:get()
+		if p <= 0 then
+			return
+		end
+		local bend = h * 0.13 * math.clamp(math.min(p, 1 - p) * 10, 0, 1)
+		c:fill(wave(w, h, math.min(p + 0.025, 1), bend * 0.7), violet(0.10))
+		c:fill(wave(w, h, p, bend), ui.linear(0, 0, w, 0, { violet(0.13), violet(0.30) }))
+	end
+	return ui.canvas(canvas)
 end
 
 -- When a window starts over, as Settings says it: a clock time within 22
@@ -131,8 +199,9 @@ end
 -- The card: a hover card (ds/hover_card: the menus' glass, framed once),
 -- the agent's usage and the most used window's percentage at its head, who
 -- on what plan under it, then each window.
-function M.Card(props: { plan: () -> Plan? }): Node
-	local plan = props.plan
+-- The card's props: its frame's measures and what it holds (for a hover
+-- card, or a popover's panel); `id` names it.
+local function card(plan: () -> Plan?, id: string): { [any]: any }
 	local function fraction(): number
 		return M.fraction(plan()) or 0
 	end
@@ -154,8 +223,8 @@ function M.Card(props: { plan: () -> Plan? }): Node
 		local p = plan()
 		return if p then p.windows else {}
 	end)
-	return HoverCard.Card {
-		id = "composer-plan-card",
+	return {
+		id = id,
 		w = 328,
 		p = "$space.1",
 		gap = 0,
@@ -216,6 +285,31 @@ function M.Card(props: { plan: () -> Plan? }): Node
 			}),
 		},
 	}
+end
+
+function M.Card(props: { plan: () -> Plan? }): Node
+	return HoverCard.Card(card(props.plan, "composer-plan-card"))
+end
+
+-- The same card pinned open from `anchor` (a press on the chip): a popover
+-- in the hover card's frame, closing on a press outside it or Escape.
+function M.Popover(props: { plan: () -> Plan?, open: State<boolean>, anchor: Node, placement: any }): Node
+	local panel = HoverCard.frame(card(props.plan, "composer-plan-pinned"), "card")
+	panel.open = props.open
+	panel.anchor = props.anchor
+	panel.placement = props.placement
+	panel.label = locale.t("ds.composer.quota_used")
+	panel.items = "stretch"
+	-- It takes the focus as it opens (a press pinned it), so Escape is its.
+	panel.focusable = true
+	panel.on_key = function(e: any): boolean?
+		if e.key == "Escape" then
+			props.open:set(false)
+			return true
+		end
+		return nil
+	end
+	return ui.popover(panel)
 end
 
 return M

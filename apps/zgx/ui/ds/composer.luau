@@ -136,11 +136,12 @@ export type Props = {
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
 	-- How much of the agent's plan is used (its live account's windows): a
-	-- ring before the context ring, the most used window's, shown while
-	-- there's one; hovering or focusing it opens a card of each window, how
-	-- much and when it starts over, as Zeron's footer does
-	-- (crates/ui/src/account_usage.rs). `on_quota` hears its card open
-	-- (the moment to ask the provider again).
+	-- chip before the context ring, the most used window's percentage over
+	-- the Android app's wave, shown while there's one; resting on it
+	-- previews a card of each window, how much and when it starts over, and
+	-- a press pins that card open (Zeron's footer, crates/ui/src/
+	-- account_usage.rs). `on_quota` hears its card open (the moment to ask
+	-- the provider again).
 	quota: (() -> PlanUsage?)?,
 	on_quota: (() -> ())?,
 	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
@@ -715,48 +716,104 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 	return ui.presence(side, build)
 end
 
--- The plan ring: the context ring's chip and ring, in the accent (so the
--- two read apart, as Zeron's do), reading the most used window; its card
--- says each.
-local function plan_ring(quota: () -> PlanUsage?, on_open: (() -> ())?, side: () -> string): Node
-	local function fraction(): number
-		return plan_usage.fraction(quota()) or 0
+-- The limits chip: the most used window's percentage over the Android
+-- app's wave (ds/plan_usage), a violet wavefront filling the chip as far as
+-- the plan is used. Resting on it previews the card; a press pins the card
+-- open (a popover: a press outside or Escape closes it, a press on the chip
+-- again too), the provider asked again as it opens.
+local function limits_chip(quota: () -> PlanUsage?, on_open: (() -> ())?, side: () -> string): Node
+	local pinned = ui.use_state(false)
+	local function fraction(): number?
+		return plan_usage.fraction(quota())
 	end
-	local function build(at: string): Node
+	local function ask()
+		if on_open then
+			on_open()
+		end
+	end
+	-- What it shows, built again as it pins or unpins (a pinned card has no
+	-- preview of its own) or the composer changes sides.
+	local function face(key: string): Node
+		local at = string.match(key, "^[^|]+") or "top"
 		return ui.row {
-			id = "composer-plan",
+			id = "composer-limits-face",
+			relative = true,
 			h = CHIP_H,
 			px = "$zeron.space.tight",
 			items = "center",
 			rounded = CHIP_RADIUS,
-			hover = { bg = "$hover" },
-			focusable = true,
-			label = locale.t("ds.composer.quota_used"),
-			tooltip = plan_usage.Card { plan = quota },
+			overflow = "hidden",
+			tooltip = if pinned:peek() then nil else plan_usage.Card { plan = quota },
 			tooltip_placement = { side = at, align = "end", offset = 8 },
 			tooltip_delay = 150,
-			on_hover = if on_open
-				then function(inside: boolean)
-					if inside then
-						on_open()
-					end
+			on_hover = function(inside: boolean)
+				if inside then
+					ask()
 				end
-				else nil,
-			ui.canvas {
-				w = 12,
-				h = 12,
-				shrink = 0,
-				draw = function(c, w, h)
-					local f = fraction()
-					c:stroke(ui.path():arc(w / 2, h / 2, 5.25, 0, 360), "$border.strong", 1.5)
-					if f > 0 then
-						c:stroke(ui.path():arc(w / 2, h / 2, 5.25, -90, 360 * f), plan_usage.ink(f), 1.5, { cap = "round" })
-					end
+			end,
+			plan_usage.Wave {
+				fraction = fraction,
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				pointer_events = "none",
+			},
+			ui.text {
+				function(): string
+					return plan_usage.percent(fraction() or 0)
 				end,
+				id = "composer-limits-percent",
+				tabular = true,
+				text_size = "$font.size.xs",
+				weight = "$font.weight.medium",
+				color = "$text.secondary",
 			},
 		}
 	end
-	return ui.presence(side, build)
+	-- The chip, the popover's anchor (zgx's popover holds its anchor): built
+	-- with it as the composer changes sides.
+	local function chip(): Node
+		return ui.row {
+			id = "composer-limits",
+			h = CHIP_H,
+			items = "center",
+			rounded = CHIP_RADIUS,
+			hover = { bg = "$hover" },
+			bg = function(): any
+				return if pinned:get() then "$hover" else nil
+			end :: any,
+			focusable = true,
+			role = "button",
+			label = locale.t("ds.composer.quota_used"),
+			on_click = function()
+				if not pinned:peek() then
+					ask()
+				end
+				pinned:set(not pinned:peek())
+			end,
+			-- (Focus left on the chip by the press: Escape closes its card.)
+			on_key = function(e: any): boolean?
+				if e.key == "Escape" and pinned:peek() then
+					pinned:set(false)
+					return true
+				end
+				return nil
+			end,
+			ui.presence(function(): string
+				return `{side()}|{if pinned:get() then "pinned" else "free"}`
+			end, face),
+		}
+	end
+	return ui.presence(side, function(at: string): Node
+		return plan_usage.Popover {
+			plan = quota,
+			open = pinned,
+			anchor = chip(),
+			placement = { side = at, align = "end", offset = 8 },
+		}
+	end)
 end
 
 -- Where it works, as a line: where it runs (a worktree's glyph, Cloud's,
@@ -2197,7 +2254,7 @@ return ui.component(function(props: Props): Node
 				if props.quota
 					then ui.show(function(): boolean
 						return plan_usage.fraction((props.quota :: () -> PlanUsage?)()) ~= nil
-					end, plan_ring(props.quota, props.on_quota, side))
+					end, limits_chip(props.quota, props.on_quota, side))
 					else nil,
 				if props.usage
 					then ui.show(function(): boolean
