@@ -1510,6 +1510,11 @@ local function Transcript(props: Props): Node
 							id = m.id,
 							text = m.text,
 							attachments = m.attachments,
+							-- (Its pictures follow the message: sent from here,
+							-- this Mac's files, then the chat's copies.)
+							now = function(): any
+								return state:get()
+							end,
 							open = props.open_link,
 							link_menu = props.link_menu,
 							pictures = props.sent_pictures,
