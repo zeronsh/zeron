@@ -42,6 +42,9 @@ pub const KNOWN_PERMISSIONS: &[&str] = &[
     // each device that allowed it, called by its windows and agents from
     // this device or another (plugins/service).
     "service",
+    // The synced notes of the main chat it's shown in (docs/session-notes.md),
+    // read and written through the app (apps/zgx src/plugins/notes.rs).
+    "notes",
 ];
 
 /// Ids the app keeps for itself.

@@ -1,0 +1,13 @@
+{
+  "id": "notes",
+  "name": "Notes",
+  "version": "1.0.0",
+  "description": "A Markdown scratchpad for each main chat, in its panel, synced across your computers.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.add",
+    "panel.tabs",
+    "notes"
+  ]
+}

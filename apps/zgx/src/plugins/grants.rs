@@ -58,9 +58,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NEVER_REPLACED: &[&str] = &["@app/screens/plugins", "@app/screens/shell/settings"];
 
 /// Each plugin's own actions (`plugin.<id>.<name>`).
-pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "menu_run", "compose_comment"];
+pub const OWN_ACTIONS: &[&str] = &["result", "ack", "send", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "github_call", "store_set", "setting_status", "open_url", "notify", "cost", "run", "db", "service_call", "menu_run", "compose_comment", "notes_watch", "notes_set"];
 /// Each plugin's own shared state, to read (`plugin.<id>.<name>`).
-pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed"];
+pub const OWN_SHARED: &[&str] = &["calls", "inbox", "records", "github", "store", "settings", "locales", "menu_items", "composed", "notes"];
 
 /// The capability naming plugin `id`'s own calls and actions.
 pub fn own(id: &str) -> Capability {
@@ -128,6 +128,9 @@ pub fn capabilities(id: &str, permissions: &[String], change: &[String], replace
             "commands" => {}
             // Banners go through Zeron's own, under its Settings.
             "notifications" => {}
+            // The notes of the chat it's shown in, and no other's: the host
+            // checks each ask (`notes`), through the plugin's own names.
+            "notes" => {}
             // Its own tabs and pages: Zeron draws a placeholder of each,
             // which only this plugin may fill (replace).
             "panel.tabs" => out.push(Capability::Override(tab_selector(id))),
@@ -212,6 +215,20 @@ mod tests {
                 Capability::Override(".plugin-page.plugin-prs".into()),
             ]
         );
+    }
+
+    /// "notes" opens nothing of zgx's: no element, shared state or action
+    /// of the app's own. What it lets a plugin do is the host's to check on
+    /// each ask, through `plugin.<id>.notes*`, which are the plugin's own
+    /// names (src/plugins/notes.rs; plugins/notes_tests.rs plays it).
+    #[test]
+    fn notes_is_checked_by_the_host_alone() {
+        assert_eq!(capabilities("notes", &s(&["notes"]), &[], &[]), vec![own("notes")]);
+        for name in ["notes_watch", "notes_set"] {
+            assert!(OWN_ACTIONS.contains(&name), "{name}");
+        }
+        assert!(OWN_SHARED.contains(&"notes"));
+        assert!(!SHARED_READ.iter().any(|(k, _)| k.contains("notes")));
     }
 
     #[test]

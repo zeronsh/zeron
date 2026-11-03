@@ -1,0 +1,14 @@
+{
+  "row": {
+    "label": "笔记"
+  },
+  "tab": {
+    "title": "笔记",
+    "label": "会话笔记",
+    "placeholder": "这个会话的笔记。支持 Markdown。",
+    "local_only": "Zeron 更新后即可同步",
+    "save_failed": "无法保存笔记。正在重试…",
+    "too_large": "笔记最多 {kb} KB。最新的更改未保存。",
+    "no_chat": "笔记属于某个对话。请从它的面板打开。"
+  }
+}

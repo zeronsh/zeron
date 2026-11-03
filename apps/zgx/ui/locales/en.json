@@ -2647,8 +2647,7 @@
       "close_others": "Close Other Tabs",
       "close_left": "Close Tabs to the Left",
       "close_right": "Close Tabs to the Right",
-      "unsaved": "Unsaved changes",
-      "notes": "Notes"
+      "unsaved": "Unsaved changes"
     },
     "strip": {
       "label": "Panel tabs",
@@ -2662,8 +2661,7 @@
       "terminal": "Terminal",
       "title": "Open a tab",
       "side_chat": "Side chat",
-      "fork": "Fork chat",
-      "notes": "Notes"
+      "fork": "Fork chat"
     },
     "plugin_off": "Its plugin isn't on right now.",
     "broken": {
@@ -2840,13 +2838,6 @@
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
       "previews_unavailable": "Local previews aren't available right now"
-    },
-    "notes": {
-      "label": "Session notes",
-      "placeholder": "Notes for this session. Markdown works here.",
-      "local_only": "Syncs once Zeron updates",
-      "save_failed": "Couldn't save the notes. Retrying…",
-      "too_large": "Notes are limited to {kb} KB. The latest changes aren't saved."
     }
   },
   "files": {
@@ -3010,6 +3001,10 @@
         "notifications": {
           "title": "Send you notifications",
           "detail": "As Zeron's own, under Settings → Notifications."
+        },
+        "notes": {
+          "title": "Read and write the open chat's notes",
+          "detail": "Only the chat it's shown in. Notes sync to your other devices."
         },
         "links_open": {
           "title": "Open links",

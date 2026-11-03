@@ -98,7 +98,9 @@
 --       SQLite database (no permission; a promise)
 --   zeron.run(program, args, { cwd, stdin, timeout, env })  a program its
 --       manifest's "commands" names, as you: { status, stdout, stderr } ("commands")
---   zeron.settings()           its settings' values by id (declared in
+--   zeron.notes.chat() / .watch(chat) / .set(chat, base_hash, text)  the
+--       synced notes of the main chat it's shown in, and no other's ("notes")
+--   zeron.settings()          its settings' values by id (declared in
 --       zeron-plugin.json's "settings"; Zeron draws their page in Settings,
 --       under Plugins, while the plugin is on), followed where read
 --   zeron.setting(id)          one of them: :get() (followed), :peek()
@@ -688,6 +690,71 @@ return function(id: string): any
 	-- (what to notify of), never for a row's drawing (`watch_pr`'s, its own).
 	function M.github.heard(): any
 		return github_heard:get() or {}
+	end
+
+	-- A main chat's notes, synced across your devices ("notes"): only those
+	-- of the chat the plugin is shown in (the session page's, a main chat's:
+	-- never a side chat's or a subagent's), read and written through Zeron.
+	--   zeron.notes.chat()        the chat whose notes it may open now, or
+	--                             nil (followed where it's read)
+	--   zeron.notes.watch(chat)   in a build function: that chat's notes kept
+	--                             watched while the node shows; a function
+	--                             reading what the engine says: { text, hash,
+	--                             epoch, seq }, { unsupported = true } (an
+	--                             engine from before notes), { error }, or nil
+	--                             (nothing yet, or not opened to it)
+	--   zeron.notes.set(chat, base_hash, text)  compare-and-set on the hash
+	--                             of what it read: a promise of { kind =
+	--                             "applied", hash, epoch, seq } | { kind =
+	--                             "conflict", current } | { kind = "tooLarge",
+	--                             limit }; refused "unsupported" (an engine
+	--                             from before notes) or "not_allowed"
+	-- A chat it showed stays open to it for the run, so a write lands after
+	-- the person moves on.
+	local notes_heard = ui.shared(`{prefix}.notes`, {} :: any)
+	local notes_watched: { [string]: number } = {}
+	local notes_asking = false
+	local function ask_notes()
+		notes_asking = false
+		local list = {}
+		for chat, n in notes_watched do
+			if n > 0 then
+				table.insert(list, chat)
+			end
+		end
+		table.sort(list)
+		ui.invoke(`{prefix}.notes_watch`, list)
+	end
+	M.notes = {}
+	function M.notes.chat(): string?
+		local now = notes_heard:get()
+		return if type(now) == "table" and type(now.chat) == "string" then now.chat else nil
+	end
+	function M.notes.watch(chat: string): () -> any
+		notes_watched[chat] = (notes_watched[chat] or 0) + 1
+		if not notes_asking then
+			notes_asking = true
+			ui.after(0, ask_notes)
+		end
+		pcall(ui.on_cleanup, function()
+			local n = (notes_watched[chat] or 1) - 1
+			notes_watched[chat] = if n > 0 then n else nil
+			if not notes_asking then
+				notes_asking = true
+				ui.after(0, ask_notes)
+			end
+		end)
+		-- (That chat's entry alone: another's moving tells its reader nothing.)
+		local mine = ui.computed(function(): any
+			local now = notes_heard:get()
+			return if type(now) == "table" and type(now.notes) == "table" then now.notes[chat] else nil
+		end)
+		return function(): any
+			return mine:get()
+		end
+	end
+	function M.notes.set(chat: string, base_hash: string, text: string): any
+		return ui.call(`{prefix}.notes_set`, { chatId = chat, baseHash = base_hash, text = text })
 	end
 
 	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run

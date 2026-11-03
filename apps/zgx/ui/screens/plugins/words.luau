@@ -176,6 +176,9 @@ function M.permission(item: any, permission: string): Line
 		return line(false, "chat-round-line", "plugins.words.permission.github_write.title")
 	elseif permission == "notifications" then
 		return line(false, "bell", "plugins.words.permission.notifications.title", "plugins.words.permission.notifications.detail")
+	elseif permission == "notes" then
+		-- Only the open chat's (a main chat's), through Zeron (src/plugins/notes.rs).
+		return line(false, "notebook", "plugins.words.permission.notes.title", "plugins.words.permission.notes.detail")
 	elseif permission == "links.open" then
 		return line(false, "arrow-up-right", "plugins.words.permission.links_open.title", "plugins.words.permission.links_open.detail")
 	elseif permission == "navigate" then
