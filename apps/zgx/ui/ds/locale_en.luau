@@ -537,6 +537,8 @@ return {
 	["ds.tool_detail.show_full_size"] = "{what, select, diff {Show full diff ({size})} other {Show full output ({size})}}",
 	["ds.tool_detail.loading_full"] = "{what, select, diff {Loading full diff…} other {Loading full output…}}",
 	["ds.tool_detail.failed_full"] = "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}",
+	["ds.tool_detail.earlier_trimmed"] = "… earlier output trimmed",
+	["ds.tool_detail.exit_code"] = "Exit code {code}",
 	["ds.activity.phrase.thought"] = "{n, plural, one {thought} other {thought # times}}",
 	["ds.activity.phrase.search"] = "{n, plural, one {searched once} other {searched # times}}",
 	["ds.activity.phrase.glob"] = "{n, plural, one {listed files} other {listed files # times}}",
