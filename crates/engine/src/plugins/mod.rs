@@ -116,6 +116,8 @@ pub fn handles(method: &str) -> bool {
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
             | methods::DECIDE_TEMPLATE
+            | methods::CHECK_TEMPLATE_UPDATES
+            | methods::UPDATE_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
@@ -136,6 +138,18 @@ type NotifyFn = Arc<dyn Fn(&str, &str, &str, Option<&str>) -> String + Send + Sy
 enum Kick {
     Rescan,
     Paths(Vec<PathBuf>),
+}
+
+/// Whether a watcher event may mean something changed. inotify reports
+/// reads too (a file opened, or closed unwritten): counted, every read of a
+/// plugin's files (a rescan's own, a check's) set off another rescan, and
+/// kept the re-sign's debounce from ever going quiet.
+fn is_change(event: &notify::Event) -> bool {
+    use notify::event::{AccessKind, AccessMode, EventKind};
+    match event.kind {
+        EventKind::Access(kind) => kind == AccessKind::Close(AccessMode::Write),
+        _ => true,
+    }
 }
 
 /// The engine's plugin service. Cheap to clone.
@@ -559,6 +573,9 @@ impl Plugins {
             &self.inner.plugins_dir,
             notify::RecursiveMode::Recursive,
             move |event: &notify::Event| {
+                if !is_change(event) {
+                    return;
+                }
                 let kick = if event.need_rescan() || event.paths.is_empty() {
                     Kick::Rescan
                 } else {
@@ -575,8 +592,10 @@ impl Plugins {
     /// reloads as it's saved. In an installed app the folder never changes.
     fn watch_builtin(&self, dir: &Path) {
         let Some(tx) = lock(&self.inner.kick).clone() else { return };
-        let watch = crate::fs_watch::FsWatchHub::global().watch(dir, notify::RecursiveMode::Recursive, move |_event: &notify::Event| {
-            let _ = tx.send(Kick::Rescan);
+        let watch = crate::fs_watch::FsWatchHub::global().watch(dir, notify::RecursiveMode::Recursive, move |event: &notify::Event| {
+            if is_change(event) {
+                let _ = tx.send(Kick::Rescan);
+            }
         });
         *lock(&self.inner.builtin_watch) = Some(watch);
     }
@@ -990,12 +1009,26 @@ impl Plugins {
         let Some(list) = reply.get_mut("templates").and_then(|t| t.as_array_mut()) else {
             return reply;
         };
+        let dir = self.inner.data_dir.join(TEMPLATES_DIR);
         for entry in list.iter_mut() {
             if let Some(key) = entry["imported"]["key"].as_str().map(str::to_owned) {
                 entry["imported"]["author"] = serde_json::json!(self.author_of(&key));
             }
+            // Where it came from (never a local path), and a newer version
+            // found there.
+            if let Some(source) = entry["imported"]
+                .as_object_mut()
+                .and_then(|i| i.remove("source"))
+                .and_then(|s| serde_json::from_value::<install::Source>(s).ok())
+            {
+                entry["imported"]["source"] = source.shown();
+            }
+            if let (Some(id), Some(hash)) = (entry["id"].as_str(), entry["imported"]["hash"].as_str())
+                && let Some(found) = template_packages::found(&dir, id, hash)
+            {
+                entry["update"] = found.shown();
+            }
         }
-        let dir = self.inner.data_dir.join(TEMPLATES_DIR);
         let pending: Vec<serde_json::Value> = template_packages::pending(&dir)
             .into_iter()
             .map(|mut p| {
@@ -1079,7 +1112,14 @@ impl Plugins {
                 let mcp = e.mcp()?;
                 let snapshot = e.item.snapshot.as_ref()?;
                 let command = match mcp.command.strip_prefix("./") {
-                    Some(rest) => Path::new(snapshot).join(rest).display().to_string(),
+                    // (The manifest's path is `/`-separated: joined part by
+                    // part, it's this platform's own, `\` on Windows.)
+                    Some(rest) => rest
+                        .split('/')
+                        .filter(|part| !part.is_empty())
+                        .fold(PathBuf::from(snapshot), |path, part| path.join(part))
+                        .display()
+                        .to_string(),
                     None => mcp.command.clone(),
                 };
                 Some(zeron_proto::McpServer {
@@ -1461,6 +1501,52 @@ impl Plugins {
                 .map_err(|_| failed("Couldn't reach the templates folder"))?
                 .map_err(failed)?;
                 RpcReply::value(&self.with_template_authors(reply))
+            }
+            // From a link: fetched and verified, then imported as a file is.
+            methods::IMPORT_TEMPLATE if params.get("url").and_then(|u| u.as_str()).is_some_and(|u| !u.trim().is_empty()) => {
+                if params.get("path").and_then(|p| p.as_str()).is_some_and(|p| !p.trim().is_empty()) {
+                    return Err(failed("Give a template file (`path`) or a link (`url`), not both"));
+                }
+                let url = params["url"].as_str().unwrap_or("").to_owned();
+                let origin = template_packages::origin(&url).map_err(failed)?;
+                let (package, mut source) = template_packages::fetch(&origin).await.map_err(failed)?;
+                source.version = package.version();
+                source.installed_at = now_secs();
+                let from = source.url.clone().unwrap_or_default();
+                let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+                let this = self.clone();
+                let reply = tokio::task::spawn_blocking(move || {
+                    template_packages::import_package(&dir, package, &from, source, |key: &str| this.author_of(key))
+                })
+                .await
+                .map_err(|_| failed("Couldn't reach the templates folder"))?
+                .map_err(failed)?;
+                RpcReply::value(&reply)
+            }
+            methods::CHECK_TEMPLATE_UPDATES => {
+                #[derive(serde::Deserialize, Default)]
+                struct CheckParams {
+                    #[serde(default)]
+                    id: Option<String>,
+                }
+                let p: CheckParams = parse_params(params)?;
+                RpcReply::value(&self.check_template_updates(p.id.as_deref()).await)
+            }
+            methods::UPDATE_TEMPLATE => {
+                #[derive(serde::Deserialize)]
+                struct UpdateParams {
+                    id: String,
+                }
+                let p: UpdateParams = parse_params(params)?;
+                let dir = self.inner.data_dir.join(TEMPLATES_DIR);
+                let this = self.clone();
+                let reply = tokio::task::spawn_blocking(move || {
+                    template_packages::update(&dir, p.id.trim(), |key: &str| this.author_of(key))
+                })
+                .await
+                .map_err(|_| failed("Couldn't reach the templates folder"))?
+                .map_err(failed)?;
+                RpcReply::value(&reply)
             }
             methods::EXPORT_TEMPLATE | methods::IMPORT_TEMPLATE | methods::DECIDE_TEMPLATE => {
                 #[derive(serde::Deserialize, Default)]

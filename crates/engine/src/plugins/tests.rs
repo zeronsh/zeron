@@ -290,6 +290,24 @@ async fn plugins_auto_resign_does_not_loop_and_never_signs_others() {
     );
 }
 
+/// Reads are no change: inotify reports a file opened or closed unwritten,
+/// and the re-sign above waits for a quiet moment that reads (its own
+/// checks, a rescan) would never leave.
+#[test]
+fn plugins_watcher_ignores_reads() {
+    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind};
+    let event = |kind| notify::Event::new(kind).add_path(PathBuf::from("/p/live/init.luau"));
+    assert!(!is_change(&event(EventKind::Access(AccessKind::Open(AccessMode::Any)))));
+    assert!(!is_change(&event(EventKind::Access(AccessKind::Close(AccessMode::Read)))));
+    assert!(!is_change(&event(EventKind::Access(AccessKind::Read))));
+    assert!(is_change(&event(EventKind::Access(AccessKind::Close(AccessMode::Write)))));
+    assert!(is_change(&event(EventKind::Modify(ModifyKind::Data(DataChange::Any)))));
+    assert!(is_change(&event(EventKind::Create(CreateKind::File))));
+    assert!(is_change(
+        &notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
+    ));
+}
+
 #[tokio::test]
 async fn plugins_watcher_re_signs_own_plugin_on_save() {
     let f = fixture();
@@ -972,7 +990,10 @@ async fn plugins_native_mcp_servers_run_from_the_snapshot() {
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].name, "plugin-native");
     let snapshot = on["snapshot"].as_str().unwrap();
-    assert_eq!(servers[0].command, format!("{snapshot}/bin/server"));
+    assert_eq!(
+        servers[0].command,
+        Path::new(snapshot).join("bin").join("server").display().to_string()
+    );
     assert!(Path::new(&servers[0].command).is_file());
     assert_eq!(servers[0].args, vec!["--stdio".to_string()]);
     assert_eq!(servers[0].env.get("A").map(String::as_str), Some("1"));

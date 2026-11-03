@@ -284,8 +284,19 @@ fn create_no_replace(root: &Path, relative: &Path, dir: bool) -> std::io::Result
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(target)
+            .open(&target)
             .map(|_| ())
+            .map_err(|error| {
+                // Windows refuses to open a folder as a file with "access
+                // denied", not "already exists": the name is taken all the same.
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::fs::symlink_metadata(&target).is_ok()
+                {
+                    std::io::Error::new(std::io::ErrorKind::AlreadyExists, error)
+                } else {
+                    error
+                }
+            })
     }
 }
 
