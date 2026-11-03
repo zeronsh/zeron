@@ -40,10 +40,12 @@ test("running subagents from two harnesses show open at the reply's top, out of 
 	-- Model and what it's on, while running.
 	expect(app:has('~"haiku · Explore"')).to_be(true)
 	expect(app:has('~"gpt-5.5 · Reading routes.ts"')).to_be(true)
-	-- Each has its Stop; none opens yet.
+	-- Each has its Stop, and each row whose lane is known opens it.
 	expect(app:has('role:button "Stop Map the parser"')).to_be(true)
 	expect(app:has('role:button "Stop Review the API"')).to_be(true)
-	expect(app:has('role:button "Open Map the parser"')).to_be(false)
+	expect(app:has('role:button "Open Map the parser"')).to_be(true)
+	expect(app:has('role:button "Open Review the API"')).to_be(true)
+	expect(app:has('role:button "Open Check the tests"')).to_be(false)
 	-- The tool group counts the command alone: the Zeron call is the block's.
 	expect(app:has('role:button "Ran 1 command"')).to_be(true)
 	expect(app:has('~"called 1 tool"')).to_be(false)
@@ -161,4 +163,50 @@ test("subagents' live changes reach their rows in place", function()
 	app:frames(5)
 	expect(row_node(app, "Map the parser")).to_be(row)
 	expect(app:error()).to_be(nil)
+end)
+
+test("a subagent's whole row opens its lane while it runs; its Stop only stops", function()
+	local app = open()
+	-- Its title, its second line, its face: each is in the row's press.
+	expect(app:has('role:button "Open Map the parser" >> "Map the parser"')).to_be(true)
+	expect(app:has('role:button "Open Map the parser" >> "haiku · Explore"')).to_be(true)
+	app:click('role:button "Open Map the parser"')
+	app:frames(10)
+	expect(calls(app)).to_contain("lane:s2:subagent:s2--sub--1")
+	app:click('role:button "Open Review the API"')
+	app:frames(10)
+	expect(calls(app)).to_contain("lane:s2:subagent:kid1")
+	-- Stop is its own press: it stops, and opens nothing.
+	local function lanes_opened(): number
+		return select(2, string.gsub(calls(app), "lane:", ""))
+	end
+	local before = lanes_opened()
+	app:click('role:button "Stop Map the parser"')
+	app:frames(10)
+	expect(calls(app)).to_contain("stop_call:s2:sp1")
+	expect(lanes_opened()).to_be(before)
+	-- No lane known (its doc not stamped yet): the row opens nothing.
+	expect(app:has('role:button "Open Check the tests"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
+test("a subagent's row is a key stop: Enter opens its lane", function()
+	local app = open()
+	local found = false
+	for _ = 1, 40 do
+		app:key("Tab")
+		app:frames(3)
+		for line in app:tree():gmatch("[^\n]+") do
+			if line:find(" focused", 1, true) and line:find('button "Open Review the API"', 1, true) then
+				found = true
+			end
+		end
+		if found then
+			break
+		end
+	end
+	expect(found).to_be(true)
+	app:key("Enter")
+	app:frames(10)
+	expect(calls(app)).to_contain("lane:s2:subagent:kid1")
 end)
