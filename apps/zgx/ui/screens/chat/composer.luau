@@ -1256,6 +1256,15 @@ local function Composer(): Node
 		end
 		gliding = anime.animate(place, { value = y, duration = GLIDE.duration, ease = GLIDE.ease })
 	end
+	-- Made again (as the window opens on its last session, the composer is
+	-- built twice), a glide begun here must not land after: `place` is kept,
+	-- and it would put a session's composer where a new chat's stood.
+	ui.on_cleanup(function()
+		if gliding then
+			gliding:cancel()
+			gliding = nil
+		end
+	end)
 	ui.effect(function()
 		local y = target_y()
 		local nc = new_chat()
