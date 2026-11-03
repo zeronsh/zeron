@@ -316,6 +316,58 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// What a child (`parent_chat_id`) is to its parent: a side chat the
+    /// person treats as a conversation of its own, or a subagent the
+    /// parent's agent delegated to (listed under the parent's Subagents).
+    /// Recorded when an agent creates the child through the Zeron MCP
+    /// server; `None` on top-level chats, on side chats a person started or
+    /// forked, and on rows written before the field existed (all read as
+    /// side chats). A value from a newer peer this build doesn't know
+    /// decodes to `None` rather than costing the row.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_child_kind"
+    )]
+    pub child_kind: Option<ChildKind>,
+}
+
+/// A child chat's relation to its parent ([`Chat::child_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildKind {
+    /// A side conversation: shown under the parent's side chats.
+    Side,
+    /// Delegated work: shown under the parent's subagents.
+    Subagent,
+}
+
+impl ChildKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChildKind::Side => "side",
+            ChildKind::Subagent => "subagent",
+        }
+    }
+
+    /// The kind a stored value names; `None` for one this build doesn't know.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "side" => Some(ChildKind::Side),
+            "subagent" => Some(ChildKind::Subagent),
+            _ => None,
+        }
+    }
+}
+
+/// Decode `childKind` leniently: an unknown kind (a newer peer's) or a
+/// non-string reads as `None`, never failing the row.
+pub fn lenient_child_kind<'de, D>(deserializer: D) -> Result<Option<ChildKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.as_ref().and_then(serde_json::Value::as_str).and_then(ChildKind::parse))
 }
 
 impl Chat {
@@ -2303,5 +2355,37 @@ mod space_icon_tests {
         assert_eq!(icon(Some("🚀"), Some("https://e.test/a"), None).normalized(), Err("both"));
         // A hue alone colours the default tile.
         assert_eq!(icon(None, None, Some("amber")).normalized(), Ok(Some(icon(None, None, Some("amber")))));
+    }
+}
+
+#[cfg(test)]
+mod child_kind_tests {
+    use super::{Chat, ChildKind};
+
+    fn row(extra: serde_json::Value) -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "id": "c", "deviceId": "d", "title": null, "archived": false, "cwd": null,
+            "branch": null, "checkoutId": null, "config": null, "lastMessagePreview": null,
+            "lastMessageAt": null, "createdAt": "2026-11-03T10:00:00Z", "parentChatId": "p"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            row[k] = v.clone();
+        }
+        row
+    }
+
+    #[test]
+    fn a_child_kind_round_trips_and_an_unknown_one_costs_only_itself() {
+        let chat: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "subagent" }))).unwrap();
+        assert_eq!(chat.child_kind, Some(ChildKind::Subagent));
+        assert_eq!(serde_json::to_value(&chat).unwrap()["childKind"], "subagent");
+        let side: Chat = serde_json::from_value(row(serde_json::json!({ "childKind": "side" }))).unwrap();
+        assert_eq!(side.child_kind, Some(ChildKind::Side));
+        // A newer peer's kind, or none at all: the row stays, the kind is None.
+        for extra in [serde_json::json!({ "childKind": "orbit" }), serde_json::json!({ "childKind": 3 }), serde_json::json!({})] {
+            let chat: Chat = serde_json::from_value(row(extra)).unwrap();
+            assert_eq!(chat.child_kind, None);
+            assert!(serde_json::to_value(&chat).unwrap().get("childKind").is_none());
+        }
     }
 }
