@@ -98,6 +98,24 @@ pub fn framework(args: &[String]) -> (&'static str, u8) {
     }
 }
 
+/// Interpreters' switches that take no value (`python -u app.py`, `node
+/// --inspect server.js`): any other flag without `=` is read as taking the
+/// argument after it.
+const SWITCHES: &[&str] = &[
+    "-u", "-B", "-O", "-OO", "-E", "-s", "-S", "-I", "-q", "-b", "-bb", "-d", "-i", "-v",
+    "--inspect", "--inspect-brk", "--watch", "--trace-warnings", "--no-warnings",
+    "--enable-source-maps", "--hot", "--smol",
+];
+
+/// A flag whose name looks like a credential's (`--token`, `--api-key`,
+/// `--password`).
+fn secret_flag(flag: &str) -> bool {
+    let name = flag.trim_start_matches('-').to_ascii_lowercase();
+    ["token", "secret", "passw", "auth", "credential", "cookie", "key"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
 /// What a listener is, in a few words, for clients to name it by: its
 /// program, and what a runner runs (`node server.js`, `python3 -m
 /// http.server`, `vite`, `npm run dev`, `cargo test zeron_engine` for a
@@ -137,11 +155,33 @@ pub fn process_label(args: &[String]) -> String {
     let inline = rest
         .iter()
         .any(|a| matches!(a.as_str(), "-c" | "-e" | "--eval" | "-p" | "--print"));
-    let words = || rest.iter().filter(|a| !a.starts_with('-'));
+    // Its arguments that are no flag nor a flag's value: a flag without
+    // `=` takes the next argument (`--token abc`, `-p 3000`), unless it's
+    // an interpreter's switch known to stand alone; one whose name looks
+    // like a credential's always does.
+    let words = || {
+        let mut out: Vec<&String> = Vec::new();
+        let mut value = false;
+        for arg in rest {
+            if std::mem::take(&mut value) {
+                continue;
+            }
+            if arg == "--" {
+                continue;
+            }
+            if arg.starts_with('-') {
+                value = !arg.contains('=') && (secret_flag(arg) || !SWITCHES.contains(&arg.as_str()));
+                continue;
+            }
+            out.push(arg);
+        }
+        out.into_iter()
+    };
     let lower = program.to_ascii_lowercase();
     if lower.starts_with("python") {
         if let Some(i) = rest.iter().position(|a| a == "-m")
             && let Some(module) = rest.get(i + 1)
+            && !module.starts_with('-')
             && plain(module, "")
         {
             return format!("{program} -m {module}");
@@ -788,6 +828,18 @@ mod tests {
         assert_eq!(label(&["/w/target/debug/deps/zeron_engine-0123456789abcdef", "--x"]), "cargo test zeron_engine");
         assert_eq!(label(&["/usr/bin/zeron-engine", "serve", "--token", "abc"]), "zeron-engine");
         assert_eq!(label(&[]), "");
+        // A flag's value is never what runs: `--flag value` is a pair.
+        assert_eq!(label(&["node", "-p", "3000", "server.js"]), "node");
+        assert_eq!(label(&["node", "--port", "3000", "server.js"]), "node server.js");
+        assert_eq!(label(&["node", "--inspect", "server.js"]), "node server.js");
+        assert_eq!(label(&["python3", "-u", "app.py"]), "python3 app.py");
+        assert_eq!(label(&["python3", "--token", "abc", "app.py"]), "python3 app.py");
+        assert_eq!(label(&["node", "--api-key", "s3cr3t", "app.js"]), "node app.js");
+        assert_eq!(label(&["node", "--api-key=s3cr3t", "app.js"]), "node app.js");
+        assert_eq!(label(&["npx", "--token", "abc", "server"]), "npx server");
+        assert_eq!(label(&["npx", "--token=abc", "server"]), "npx server");
+        assert_eq!(label(&["npm", "--auth", "abc", "run", "dev"]), "npm run dev");
+        assert_eq!(label(&["server", "-p", "3000"]), "server");
         // Nothing but plain names: a secret in a script's place, a URL, a
         // runner's argument, never.
         for args in [
@@ -796,9 +848,14 @@ mod tests {
             vec!["npx", "https://user:pass@host/x?key=1"],
             vec!["npm", "run", "--token=abc"],
             vec!["server", "--token=abc", "https://user:pass@host/x?key=1"],
+            vec!["npx", "--token", "abc", "server"],
+            vec!["node", "--api-key", "s3cr3t", "app.js"],
+            vec!["python3", "--password", "abc", "-m", "http.server"],
+            vec!["npm", "--auth", "abc"],
+            vec!["cargo", "--token", "abc", "run"],
         ] {
             let l = label(&args);
-            for secret in ["abc", "pass", "key=1", "host"] {
+            for secret in ["abc", "s3cr3t", "pass", "key=1", "host"] {
                 assert!(!l.contains(secret), "{l:?} from {args:?}");
             }
         }
