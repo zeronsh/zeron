@@ -5,7 +5,9 @@
 //! needs to understand a workbench color id or TextMate scope.
 
 mod builtins;
+pub mod catalog;
 mod library;
+pub mod luau_data;
 pub mod vscode;
 
 use std::collections::{BTreeMap, HashSet};

@@ -62,6 +62,7 @@ The theme is the person's choice, not the template's. They pick one for light an
 
 - **Draw with tokens** (rule 1). A theme sets every colour token (`$text.primary`, `$accent`, `$border`, `$zeron.window`, `$zeron.syntax.*` and the rest) through `ds/palettes`. A raw colour, `ui.raw` included, stays as written under every theme.
 - **A theme of your own** goes in `theme.luau` at the template's root: `return { name = "Ink", dark = { … }, light = { … } }`, a palette for each scheme you have, in `ds/palettes`' shape: `background`, `raised`, `text`, `muted`, `faint`, `accent`, `danger`, `warning`, `success`, `syntax` (12 colours: comment, keyword, string, number, type, function, property, variable, punctuation, tag, attribute, invalid) and, if you like, `shell`, `card`, `terminal` and `ansi` (16). It must be data: a table of strings, numbers and tables, no code. Zeron reads it as data to list it on the Themes page as your template's theme.
+- **Themes of the person's own** are made with the theme tools (`create_theme`, docs/themes.md), not with a template.
 - **It's a suggestion.** Your theme is worn for a scheme only while the person hasn't chosen one for that scheme. A theme with only `dark` fills only dark. Anyone can pick it on the Themes page and wear it with any template.
 - Your `ds/themes/zeron-{light,dark}.json` still sets the rest of the look (type, spacing, radii, glass), and its colours show wherever no theme is worn.
 
