@@ -662,6 +662,13 @@
       "view_named": "查看 {name}",
       "done": "完成"
     },
+    "mermaid": {
+      "show_source": "显示源代码",
+      "show_diagram": "显示图表",
+      "failed": "无法绘制此图表：{reason}",
+      "view": "查看图表",
+      "name": "Mermaid 图表"
+    },
     "math": {
       "style": {
         "fira": "无衬线",

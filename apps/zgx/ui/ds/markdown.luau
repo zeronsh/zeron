@@ -49,6 +49,8 @@ local Links = require("@ds/links")
 local FileIcon = require("@self/file_icons")
 -- LaTeX math: `$$…$$` and `$…$` read before markdown is (ds/math).
 local Math = require("@self/math")
+-- ```mermaid fences drawn as their diagrams (ds/mermaid).
+local Mermaid = require("@self/mermaid")
 local MarkdownFind = require("@self/markdown_find")
 local locale = require("@self/locale")
 local Wide = require("@self/wide")
@@ -137,6 +139,9 @@ type Ctx = {
 	find: { q: string, cur: number, n: number }?,
 	-- Set a step smaller (Props' `small`).
 	small: boolean?,
+	-- The whole text now: a ```mermaid fence reads its end to know whether
+	-- it's still being written (ds/mermaid).
+	source: (() -> string)?,
 }
 
 -- A reply's pictures in the order it wrote them, by its group (each of its
@@ -923,6 +928,29 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			find = { q = f.q, from = f.n, cur = f.cur }
 			f.n += #MarkdownFind.occurrences(b.text, f.q)
 		end
+		if lang == "mermaid" then
+			-- Its diagram once the fence has closed and the host has drawn
+			-- it; the code until then, or if it can't be (ds/mermaid).
+			local source = if ctx then ctx.source else nil
+			local code = b.text
+			return ui.div {
+				provide = { code = { lang = b.lang or "", source = b.text } },
+				w_full = true,
+				min_w = 0,
+				Mermaid.Diagram {
+					text = b.text,
+					lang = b.lang,
+					writing = if source
+						then function(): boolean
+							return Mermaid.writing(source(), code)
+						end
+						else nil,
+					code = function(): Node
+						return CodeBlock { lang = b.lang, text = b.text, find = find, class = `md-code lang-{lang}` }
+					end,
+				},
+			}
+		end
 		return ui.div {
 			provide = { code = { lang = b.lang or "", source = b.text } },
 			w_full = true,
@@ -1192,6 +1220,12 @@ return function(props: Props): Node
 	local ctx: Ctx? = if props.image or props.open or props.link_menu or props.task or props.pictures or props.small
 		then { image = props.image, image_size = props.image_size, open = props.open, link_menu = props.link_menu, task = props.task, tasks = {}, pictures = props.pictures, group = props.group, small = props.small }
 		else nil
+	-- A text that grows: what a ```mermaid fence reads to know whether
+	-- it's still being written (ds/mermaid).
+	if type(text) == "function" then
+		ctx = ctx or { tasks = {} }
+		;(ctx :: Ctx).source = text
+	end
 	-- Its words' ink, where the caller sets it (a thought's secondary).
 	local ink = props.ink
 	local column: { [any]: any } = { w_full = true, min_w = 0, gap = if props.small then "$space.3" else "$space.4" }

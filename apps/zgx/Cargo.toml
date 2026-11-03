@@ -65,6 +65,12 @@ ureq = { version = "2", features = ["json"] }
 # A template's preview, taken from the window (src/plugins/live.rs): the
 # version zgx's own snapshots are written with.
 png = "0.18"
+# Mermaid diagrams (src/mermaid.rs): the shipping app's renderer, at the root
+# workspace's version, its SVG drawn with text by the usvg and resvg zgx
+# draws SVG with (`text`: glyphs from this machine's fonts).
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+usvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
+resvg = { version = "0.46", default-features = false, features = ["text"] }
 serde_json = "1"
 # Agents' logos: their sites' icon links, resolved (src/agent_logos.rs).
 # A tool's diff as the changes pane draws it (src/tool_details.rs): the
