@@ -9,9 +9,9 @@ local page = require("@app/screens/themes/page")
 settings.add {
 	id = "themes",
 	title = "Themes",
-	icon = "palette-search",
+	icon = "palette",
 	view = page.View,
-	group = "Organization",
+	group = "Customize",
 	before = "archived",
 }
 

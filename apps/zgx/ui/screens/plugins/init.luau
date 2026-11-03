@@ -74,7 +74,7 @@ settings.add {
 	title = "Plugins",
 	icon = "widget",
 	view = page.View,
-	group = "Organization",
+	group = "Customize",
 	before = "archived",
 }
 
