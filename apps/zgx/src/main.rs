@@ -49,6 +49,7 @@ mod math;
 mod plugins;
 mod previews;
 mod projects;
+mod relaunch;
 mod session_home;
 mod sessions;
 mod settings;
@@ -128,6 +129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if argv.get(1).map(String::as_str) == Some("terminal-bridge") {
         std::process::exit(terminal::bridge(&argv[2..]));
     }
+    // This launch as it started, for Reload Zeron (src/relaunch.rs), before
+    // anything below sets a variable; started by one, the launch it
+    // replaces waited out first.
+    relaunch::remember();
     // No type check after each reload unless asked (`ZGX_CHECK=1`): a debug
     // zgx host runs `luau-lsp analyze` over the whole app on every reload,
     // on a thread of its own that a newer reload doesn't stop. With several
@@ -276,6 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Quitting: an update downloaded and never restarted for installs now,
     // so the next launch is on it (src/about.rs).
     about::install_on_quit();
+    // Reload Zeron: the windows closed, a fresh launch in this one's place.
+    relaunch::after_quit();
     Ok(())
 }
 
@@ -504,6 +511,10 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     }
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
+    // Reload Zeron: the app quits and starts again, the same launch
+    // (src/relaunch.rs).
+    let windows = cx.windows.clone();
+    host.action("app.relaunch", move |_| relaunch::ask(|| windows.quit()));
     // Setup finished: remembered, and the main window opens in its place.
     let (window, windows) = (cx.window.clone(), cx.windows.clone());
     host.action("app.open_main", move |_| {
@@ -772,8 +783,26 @@ fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bo
         None
     };
     let commands = serve_commands(cx, &host);
+    // Reload interface: every script evaluated again and the window's
+    // interface mounted anew, as a save under ui/ does (state kept), on the
+    // next turn rather than inside the command that asks. (The host is held
+    // only while the window is open.)
+    let reloading: Rc<RefCell<Option<ScriptHost>>> = Rc::new(RefCell::new(Some(host.clone())));
+    let (slot, tasks) = (reloading.clone(), cx.tasks.clone());
+    host.action("app.reload_interface", move |_| {
+        let slot = slot.clone();
+        tasks.spawn(async move {
+            let host = slot.borrow().clone();
+            if let Some(host) = host
+                && let Err(error) = host.reload()
+            {
+                eprintln!("zeron-zgx: reload interface: {error}");
+            }
+        });
+    });
     let keep = RefCell::new(Some((host, devtools, commands)));
     cx.on_closed(move || {
+        reloading.borrow_mut().take();
         if let Some((host, devtools, commands)) = keep.borrow_mut().take() {
             host.save();
             drop(devtools);
