@@ -9,8 +9,9 @@
 -- taken on the right, and the chevron. Open, a row each: its mark, its
 -- title, under it "model · what it's on" while it runs or its result's
 -- first line once done, its state (the working ring, a check), how long it
--- took, and what can be done with it: Stop while it runs, Open (its lane in
--- the panel) once it's done. Rows sit on the chat: no card, no box.
+-- took, and Stop while it runs. A row opens its subagent's lane in the panel,
+-- running or done (a click anywhere on it but Stop, Enter on it), its wash
+-- under the pointer. Rows sit on the chat: no card, no box.
 --
 -- Open while any of them runs; folded once all are done, unless the reader
 -- chose (kept per reply, by `key`, across it being made again).
@@ -24,7 +25,6 @@
 
 local Icon = require("@self/icon")
 local IconButton = require("@self/icon_button").IconButton
-local Button = require("@self/button")
 local FadeText = require("@self/fade_text")
 local Mark = require("@self/mark")
 local people = require("@self/people")
@@ -155,9 +155,19 @@ local function row(now_of: () -> Sub, tick: () -> number, props: Props): Node
 		local s = now_of()
 		return props.on_stop ~= nil and running(s) and s.stoppable == true and stage() == nil
 	end
+	-- Its lane opens from the whole row, running or done.
 	local function can_open(): boolean
-		local s = now_of()
-		return props.on_open ~= nil and not running(s) and s.openable == true
+		return props.on_open ~= nil and now_of().openable == true
+	end
+	local function open()
+		if props.on_open and now_of().openable then
+			props.on_open(now_of())
+		end
+	end
+	-- The action's room at the row's end: an icon button's, wider while it
+	-- says "Stopping".
+	local function room(): number
+		return if stage() ~= nil and running(now_of()) then 72 else 22
 	end
 	return ui.row {
 		class = "subagent-row",
@@ -165,53 +175,91 @@ local function row(now_of: () -> Sub, tick: () -> number, props: Props): Node
 		label = function(): string
 			return now_of().title
 		end,
+		relative = true,
 		w_full = true,
 		min_w = 0,
-		py = "$space.1",
-		gap = "$space.2",
-		items = "center",
-		face(function(): string?
-			return now_of().mark
-		end, ROW_FACE),
-		ui.column {
-			grow = 1,
-			min_w = 0,
-			FadeText {
-				function(): string
-					return now_of().title
-				end,
-				literal = true,
-				text_size = "$font.size.sm",
-				weight = "$font.weight.semibold",
-				color = "$text.primary",
-			},
-			FadeText {
-				second,
-				class = "subagent-step",
-				literal = true,
-				text_size = "$font.size.xs",
-				color = "$text.secondary",
-			},
-		},
-		status.StatusIcon { kind = kind, size = 14 },
-		ui.text {
-			function(): string
-				return took(now_of(), tick())
+		-- The row itself is the press that opens its lane (a click anywhere
+		-- on it but Stop, Enter on it), its wash under the pointer.
+		ui.button {
+			class = "subagent-open",
+			label = function(): string
+				local t = now_of().title
+				return if can_open() then locale.s("ds.subagents.open_named", { title = t }) else t
 			end,
-			class = "subagent-time",
-			shrink = 0,
-			tabular = true,
-			font = "$font.mono",
-			text_size = "$font.size.xs",
-			color = "$text.tertiary",
-		},
-		-- Its action, in one place: Stop while it runs, then "Stopping";
-		-- Open once it's done.
-		ui.row {
-			shrink = 0,
+			disabled = function(): boolean
+				return not can_open()
+			end,
+			w_full = true,
+			min_w = 0,
+			px = "$space.2",
+			py = "$space.1",
+			gap = "$space.2",
 			items = "center",
-			justify = "end",
-			min_w = ui.raw(44, "the action's room: Open's width, so rows line up"),
+			rounded = "$radius.md",
+			bg = "#00000000",
+			hover = { bg = "$hover" },
+			active = { bg = "$pressed" },
+			focus = control.ring,
+			cursor = function(): string
+				return if can_open() then "pointer" else "default"
+			end,
+			selectable = false,
+			on_click = open,
+			face(function(): string?
+				return now_of().mark
+			end, ROW_FACE),
+			ui.column {
+				grow = 1,
+				min_w = 0,
+				FadeText {
+					function(): string
+						return now_of().title
+					end,
+					literal = true,
+					text_size = "$font.size.sm",
+					weight = "$font.weight.semibold",
+					color = "$text.primary",
+				},
+				FadeText {
+					second,
+					class = "subagent-step",
+					literal = true,
+					text_size = "$font.size.xs",
+					color = "$text.secondary",
+				},
+			},
+			status.StatusIcon { kind = kind, size = 14 },
+			ui.text {
+				function(): string
+					return took(now_of(), tick())
+				end,
+				class = "subagent-time",
+				shrink = 0,
+				tabular = true,
+				font = "$font.mono",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			},
+			-- Done, the open arrow; running, room for Stop over it.
+			ui.row {
+				shrink = 0,
+				w = room,
+				justify = "end",
+				color = "$text.tertiary",
+				ui.show(function(): boolean
+					return can_open() and not running(now_of())
+				end, Icon { name = "arrow-up-right", size = 14 }),
+			},
+		},
+		-- Stop: over the row's end, a press of its own (a sibling over the
+		-- row's press, never inside it, so it stops and opens nothing).
+		ui.row {
+			absolute = true,
+			top = 0,
+			bottom = 0,
+			right = ui.raw(8, "the row's inset ($space.2)"),
+			items = "center",
+			gap = "$space.1",
 			ui.show(
 				function(): boolean
 					return stage() ~= nil and running(now_of())
@@ -246,23 +294,6 @@ local function row(now_of: () -> Sub, tick: () -> number, props: Props): Node
 							end
 						end)
 					end,
-				}
-			),
-			ui.show(
-				can_open,
-				Button {
-					tone = "ghost",
-					size = "xs",
-					label = function(): string
-						return locale.s("ds.subagents.open_named", { title = now_of().title })
-					end,
-					selectable = false,
-					on_click = function()
-						if props.on_open then
-							props.on_open(now_of())
-						end
-					end,
-					locale.t("ds.subagents.open"),
 				}
 			),
 		},
