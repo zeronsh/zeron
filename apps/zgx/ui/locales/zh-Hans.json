@@ -1760,6 +1760,7 @@
         "organization": "组织",
         "workspace": "工作区",
         "cloud": "Cloud",
+        "customize": "自定义",
         "plugins": "插件",
         "browser": "浏览器"
       }
@@ -2874,8 +2875,7 @@
     "comment": {
       "placeholder": "添加评论",
       "submit": "评论",
-      "you": "你",
-      "pending": "待发送"
+      "you": "你"
     },
     "unreachable": {
       "title": "无法连接到这些文件",

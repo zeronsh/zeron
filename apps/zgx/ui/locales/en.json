@@ -1760,6 +1760,7 @@
         "organization": "Organization",
         "workspace": "Workspace",
         "cloud": "Cloud",
+        "customize": "Customize",
         "plugins": "Plugins",
         "browser": "Browser"
       }
@@ -2874,8 +2875,7 @@
     "comment": {
       "placeholder": "Leave a comment",
       "submit": "Comment",
-      "you": "You",
-      "pending": "Pending"
+      "you": "You"
     },
     "unreachable": {
       "title": "Can't reach these files",

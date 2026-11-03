@@ -241,6 +241,24 @@ test("yours can be renamed, and removing the one in use gives its scheme back", 
 	expect(app:has('#theme-zeron >> .theme-in-use >> "In use"')).to_be(true)
 end)
 
+test("a change made outside the window shows on the page and restyles the theme in use", function()
+	local app = open()
+	app:command("drop_harbor")
+	app:frames(30)
+	app:command("scheme_dark")
+	app:frames(20)
+	app:click('#theme-custom-harbor-night >> role:button "Use"')
+	app:frames(20)
+	expect(read(app, "worn")).to_contain("theme-dark #14181f")
+	-- An agent changes Harbor Night's colours and makes another theme.
+	app:command("agent_edits")
+	app:frames(30)
+	expect(read(app, "worn")).to_contain("theme-dark #2a1430")
+	expect(app:has("#theme-custom-ink")).to_be(true)
+	expect(app:has('#theme-custom-ink >> ~"Imported"')).to_be(true)
+	expect(app:has('#theme-custom-harbor-night >> .theme-in-use >> "In use"')).to_be(true)
+end)
+
 test("Appearance picks a theme for each scheme showing, and leads to the Themes page", function()
 	local app = open("appearance")
 	-- Following the system: one for light, one for dark.

@@ -32,6 +32,7 @@ pub mod snapshot;
 pub mod status;
 pub mod template_packages;
 pub mod templates;
+pub mod themes;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -140,7 +141,9 @@ pub fn handles(method: &str) -> bool {
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
             | methods::PLUGIN_STATUS
+            | methods::WATCH_THEMES
     ) || lifecycle::handles(method)
+        || themes::handles(method)
 }
 
 /// How long `PluginStatus` waits for the window's account.
@@ -203,6 +206,8 @@ struct Inner {
     written: Mutex<HashMap<String, Vec<u8>>>,
     tools: Arc<ToolBroker>,
     channel: Arc<Slot>,
+    /// The window, told when the theme methods change the theme files.
+    themes: Arc<Slot>,
     kick: Mutex<Option<mpsc::UnboundedSender<Kick>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     watch: Mutex<Option<crate::fs_watch::FsWatch>>,
@@ -482,6 +487,7 @@ impl Plugins {
                 reviews: Mutex::new(reviews::Reviews::default()),
                 tools: Arc::new(ToolBroker::default()),
                 channel: Arc::new(Slot::default()),
+                themes: Arc::new(Slot::default()),
                 kick: Mutex::new(None),
                 tasks: Mutex::new(Vec::new()),
                 watch: Mutex::new(None),
@@ -1921,6 +1927,21 @@ impl Plugins {
             }
             methods::WATCH_PLUGIN_CHANNEL => {
                 Ok(RpcReply::Stream(self.inner.channel.subscribe(|| {})))
+            }
+            methods::WATCH_THEMES => Ok(RpcReply::Stream(self.inner.themes.subscribe(|| {}))),
+            method if themes::handles(method) => {
+                if let Some(by) = zeron_rpc::caller().record() {
+                    tracing::info!(method, %by, "themes: asked by an agent");
+                }
+                let (data_dir, asked) = (self.inner.data_dir.clone(), method.to_owned());
+                let reply = tokio::task::spawn_blocking(move || themes::answer(&data_dir, &asked, &params))
+                    .await
+                    .map_err(|_| failed("Couldn't reach the themes"))?
+                    .map_err(failed)?;
+                if themes::changes(method) {
+                    self.inner.themes.push(serde_json::json!({ "changed": true }));
+                }
+                RpcReply::value(&reply)
             }
             methods::LIST_TEMPLATES
             | methods::CREATE_TEMPLATE

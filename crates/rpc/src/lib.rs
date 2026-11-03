@@ -536,6 +536,29 @@ pub mod methods {
     /// map}`: each screen's named elements (`#id`, `.class`) from its source;
     /// `DescribeElements` is the live window's.
     pub const DESCRIBE_APP: &str = "DescribeApp";
+    /// Themes (the window's colours, apart from its template; all data,
+    /// this device's, in the data dir: `zeron_theme::catalog`): `{}` →
+    /// `{themes: [{id, name, source, editable, variants: {light?, dark?},
+    /// in_use, template?, problem?}], wearing: {light, dark}, chosen, guide}`.
+    pub const LIST_THEMES: &str = "ListThemes";
+    /// `{id}` → `{id, name, source, editable, light?, dark?, adjusted, note?}`:
+    /// a theme's palettes, in the shape `CreateTheme` takes.
+    pub const GET_THEME: &str = "GetTheme";
+    /// `{name, light?, dark?}` (palettes) or `{name?, vscode}` (a VS Code
+    /// colour theme's JSON) → `{id, name, variants, adjusted}`: a theme of
+    /// yours.
+    pub const CREATE_THEME: &str = "CreateTheme";
+    /// `{id, name?, light?, dark?}` (a palette, or null to take that scheme
+    /// away) → `{id, name, variants, adjusted}`: yours only.
+    pub const UPDATE_THEME: &str = "UpdateTheme";
+    /// `{id}` → `{deleted}`: yours only; a scheme it was worn for goes back.
+    pub const DELETE_THEME: &str = "DeleteTheme";
+    /// `{id, slot?: "light" | "dark" | "both"}` → `{theme, name, worn_for,
+    /// chosen}`: what the window wears.
+    pub const USE_THEME: &str = "UseTheme";
+    /// `{}` → stream (the app) of `{changed: true}`, after each change the
+    /// theme methods make, for the window to read the files again.
+    pub const WATCH_THEMES: &str = "WatchThemes";
     /// `{}` → `{elements: [{selector, place, about, provides, present}],
     /// everywhere, how}`: where plugins can place their nodes, as the main
     /// window running now has it (it writes the map as its template
@@ -616,6 +639,14 @@ pub fn local_only(method: &str) -> bool {
             | methods::UPDATE_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
+            // Themes: this device's library and choice, never another's.
+            | methods::LIST_THEMES
+            | methods::GET_THEME
+            | methods::CREATE_THEME
+            | methods::UPDATE_THEME
+            | methods::DELETE_THEME
+            | methods::USE_THEME
+            | methods::WATCH_THEMES
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
@@ -690,6 +721,15 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::DELETE_TEMPLATE
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
+            // Themes: data only (no consent: a theme can't run anything),
+            // read, made, changed, deleted (yours only) and worn. Not the
+            // window's watch.
+            | methods::LIST_THEMES
+            | methods::GET_THEME
+            | methods::CREATE_THEME
+            | methods::UPDATE_THEME
+            | methods::DELETE_THEME
+            | methods::USE_THEME
     )
 }
 
@@ -904,6 +944,13 @@ mod tests {
             methods::CHECK_TEMPLATE_UPDATES,
             methods::UPDATE_TEMPLATE,
             methods::DESCRIBE_APP,
+            methods::LIST_THEMES,
+            methods::GET_THEME,
+            methods::CREATE_THEME,
+            methods::UPDATE_THEME,
+            methods::DELETE_THEME,
+            methods::USE_THEME,
+            methods::WATCH_THEMES,
         ] {
             assert!(local_only(method), "{method}");
         }
@@ -1270,6 +1317,8 @@ mod tests {
             methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
             methods::EXPORT_PLUGIN,
+            // The window's own watch of the theme files.
+            methods::WATCH_THEMES,
         ] {
             assert!(!agent_allowed(method), "{method}");
             match agent.call(method, serde_json::json!({})).await {
@@ -1279,6 +1328,12 @@ mod tests {
         }
         let asked = agent.call(methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // The theme tools' methods, exactly: data only.
+        for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
+            assert!(agent_allowed(method), "{method}");
+            let asked = agent.call(method, serde_json::json!({})).await.unwrap();
+            assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
+        }
 
         let app = connect_ws(&url, Some(&tokens.full)).await.unwrap();
         for method in [methods::DECIDE_PLUGIN, methods::ACCESS_TOKEN] {

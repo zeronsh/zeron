@@ -61,6 +61,7 @@ export type Name =
 	| "project-default"
 	| "calendar"
 	| "keyboard"
+	| "palette"
 	| "palette-search"
 	| "split-columns"
 	| "volume-loud"

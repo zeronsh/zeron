@@ -171,6 +171,7 @@ local GROUP_KEYS: { [string]: string } = {
 	Organization = "settings.shell.group.organization",
 	Workspace = "settings.shell.group.workspace",
 	Cloud = "settings.shell.group.cloud",
+	Customize = "settings.shell.group.customize",
 	Plugins = "settings.shell.group.plugins",
 }
 local function title_of(id: string, title: string): string
