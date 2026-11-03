@@ -242,4 +242,30 @@ test("the row reads Empty, a stack of project tiles (at most 5), and the count",
 	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "Empty"`)).to_be(true)
 	expect(app:has(`{SIDE} >> role:button "60 empty projects" >> "60"`)).to_be(true)
 	expect(stacked("60 empty projects")).to_be(5)
+
+	-- No chevron, as Archived has none: nothing in the row but words and tiles.
+	local function block(label: string): string
+		local out, inside, indent = {}, false, 0
+		for line in app:tree(SIDE):gmatch("[^\n]+") do
+			local pad = #line:match("^ *")
+			if line:find(` button "{label}"`, 1, true) then
+				inside, indent = true, pad
+			elseif inside and pad <= indent then
+				break
+			elseif inside then
+				table.insert(out, line)
+			end
+		end
+		return table.concat(out, "\n")
+	end
+	expect(block("60 empty projects")).never.to_contain(" img ")
+	-- Opened: the tiles have flown into the rows, none left in the header;
+	-- closed, they're back in the stack.
+	toggle(app, "60 empty projects")
+	app:frames(40)
+	expect(stacked("60 empty projects")).to_be(0)
+	expect(block("60 empty projects")).never.to_contain(" img ")
+	toggle(app, "60 empty projects")
+	app:frames(40)
+	expect(stacked("60 empty projects")).to_be(5)
 end)

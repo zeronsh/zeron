@@ -3535,66 +3535,161 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local i = s.at[key]
 			return if i then s.items[i] else nil
 		end
-		-- The empty projects' row (the section title's frame, as Archived's):
-		-- a chevron pointing at them (down while they show), "Empty", a stack
-		-- of their tiles overlapping (as many as fit, at most EMPTY_TILES: whole
-		-- tiles dropped, never the word or the count cut), and how many at the
-		-- end. Its full phrase, "21 empty projects", names it and is its tooltip.
+		-- The empty projects' row (the Archived title's own frame, no
+		-- caret: the whole row folds): "Empty", a stack of their tiles
+		-- overlapping (as many as fit, at most EMPTY_TILES: whole tiles
+		-- dropped, never the word or the count cut), and how many at the
+		-- end. Its full phrase, "21 empty projects", names it and is its
+		-- tooltip. Opened, each tile of the stack flies down to be its
+		-- project's icon in the row under it (and back up as it closes),
+		-- on the fold's own motion; the stack's tiles are made once and
+		-- follow the projects in place.
 		local EMPTY_TILES = 5
 		local EMPTY_TILE, EMPTY_OVERLAP, EMPTY_GAP = 18, 6, 1.5
-		-- What the row keeps before the stack, points: its insets, the chevron,
-		-- the word (an estimate, the longer of its locales'), the spaces, and
-		-- the count's digits.
-		local EMPTY_FIXED = 8 * 2 + 12 + 4 + 40 + 4 + 8
+		-- What the row keeps before the stack, points: its insets, the word
+		-- (an estimate, the longer of its locales'), the space, and the
+		-- count's digits.
+		local EMPTY_FIXED = 8 * 2 + 40 + 4 + 8
 		local EMPTY_DIGIT = 7
+		-- A tile's cut: a rounded square the next one's size, and a gap round it
+		-- (params[0]: its centre and half-side as fractions of the width,
+		-- params[1]: its corner), so the tile behind is notched to the shape of
+		-- the one over it, with no shadow, whatever shows through.
+		local NOTCH = ui.layer_shader([[
+fn layer(input:LayerInput)->vec4<f32> {
+ let w=input.size.x;
+ let c=vec2(input.params[0].x*w,.5*input.size.y);
+ let h=input.params[0].y*w;
+ let r=input.params[0].z*w;
+ let q=abs(input.p-c)-vec2(h-r);
+ let d=length(max(q,vec2(0.0)))+min(max(q.x,q.y),0.0)-r;
+ return vec4(input.color.rgb,input.color.a*smoothstep(-.5,.5,d));
+}
+]])
 		local function empties_row(now: () -> Item): Node
 			local function says(): string
 				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
 			end
-			-- The projects whose tiles show: as many as the width keeps.
-			local function stacked(): { string }
-				local gs = now().gs or {}
-				local free = room() - PAD * 2 - EMPTY_FIXED - EMPTY_DIGIT * #tostring(now().n or 0)
-				local fit = 0
-				if free >= EMPTY_TILE then
-					fit = 1 + math.floor((free - EMPTY_TILE) / (EMPTY_TILE - EMPTY_OVERLAP))
-				end
-				local ids: { string } = {}
-				for i = 1, math.min(fit, EMPTY_TILES, #gs) do
-					table.insert(ids, (gs[i] :: Group).project :: string)
-				end
-				return ids
+			local function group_at(i: number): Group?
+				return (now().gs or {})[i]
 			end
-			local function stack(key: string?): Node
-				local ids = if key and key ~= "" then string.split(key :: string, "\n") else {}
-				local items: { Node } = {}
-				for i, id in ids do
-					local g: Group? = nil
-					for _, c in now().gs or {} do
-						if c.project == id then
-							g = c
-						end
-					end
-					if not g then
-						continue
-					end
-					local held: { [any]: any } = {
-						shrink = 0,
-						w = EMPTY_TILE,
-						h = EMPTY_TILE,
-						ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
-						(g :: Group).tile(function(): boolean
-							return false
-						end, nil),
-					}
-					-- (Cut where the next tile sits, and a gap round it: the
-					-- ring is the sidebar's own, glass or not.)
-					if i < #ids then
-						People.cut_into(held, EMPTY_TILE, { x = EMPTY_TILE - EMPTY_OVERLAP + EMPTY_TILE / 2, r = EMPTY_TILE / 2 + EMPTY_GAP })
-					end
-					table.insert(items, ui.div(held))
+			local function project_at(i: number): Project?
+				local g = group_at(i)
+				return if g then index:get().by_project[g.project :: string] else nil
+			end
+			-- How many tiles the width keeps.
+			local function fit(): number
+				local free = room() - PAD * 2 - EMPTY_FIXED - EMPTY_DIGIT * #tostring(now().n or 0)
+				if free < EMPTY_TILE then
+					return 0
 				end
-				return ui.row { class = "empty-projects-stack", shrink = 0, items = "center", table.unpack(items) }
+				return math.min(EMPTY_TILES, 1 + math.floor((free - EMPTY_TILE) / (EMPTY_TILE - EMPTY_OVERLAP)))
+			end
+			local function shows(i: number): boolean
+				return i <= fit() and group_at(i) ~= nil
+			end
+			-- The fold's own motion (its height's progress, its ink): 0 closed,
+			-- 1 open.
+			local function flown(): number
+				return value(empties_fold().h, clock:get())
+			end
+			local function inked(): number
+				return value(empties_fold().o, clock:get())
+			end
+			local stack_ref = ui.ref()
+			local STEP = EMPTY_TILE - EMPTY_OVERLAP
+			-- Where tile `i` lands, from where it stands: its project's row
+			-- icon (the rows' own tile slot, centred on its slot).
+			local function lands(i: number): (number, number)
+				local g = group_at(i)
+				local sh0 = sh:peek()
+				local from, to = sh0.at["empties"], if g then sh0.at[`group:{g.key}`] else nil
+				local box, list = stack_ref:peek(), list_view:peek()
+				if not (from and to and box and list) then
+					return 0, 0
+				end
+				local dy = (SLOT - TITLE) / 2
+				for k = from, to - 1 do
+					dy += sh0.items[k].base()
+				end
+				local dx = list.x + PAD + (SLOT - EMPTY_TILE) / 2 - (box.x + (i - 1) * STEP)
+				return dx, dy
+			end
+			local function tile(i: number, cut: boolean): Node
+				local held: { [any]: any } = {
+					shrink = 0,
+					w = EMPTY_TILE,
+					h = EMPTY_TILE,
+					Tile {
+						size = EMPTY_TILE,
+						label = function(): string
+							local p = project_at(i)
+							return if p then p.name else ""
+						end,
+						hue = function(): string?
+							local p = project_at(i)
+							return (p and p.hue) or "gray"
+						end,
+						src = function(): string?
+							local p = project_at(i)
+							return if p then p.src else nil
+						end,
+						emoji = function(): string?
+							local p = project_at(i)
+							return if p then p.emoji else nil
+						end,
+					},
+				}
+				if cut then
+					held.layer_shader = NOTCH
+					local half = EMPTY_TILE / 2 + EMPTY_GAP
+					local radius = ((ui.theme.get("radius.sm") :: number?) or 4) + EMPTY_GAP
+					held.layer_params = {
+						{ (STEP + EMPTY_TILE / 2) / EMPTY_TILE, half / EMPTY_TILE, radius / EMPTY_TILE, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+					}
+				end
+				return ui.div(held)
+			end
+			local function slot(i: number): Node
+				return ui.show(function(): boolean
+					return shows(i)
+				end, ui.div {
+					shrink = 0,
+					ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
+					-- (Flying: down to its row's icon as the fold opens, back as
+					-- it closes; it fades as the rows' own come in.)
+					x = function(): number
+						local p = flown()
+						return if p > 0 then p * (lands(i)) else 0
+					end,
+					y = function(): number
+						local p = flown()
+						if p <= 0 then
+							return 0
+						end
+						local _, dy = lands(i)
+						return p * dy
+					end,
+					opacity = function(): number
+						return 1 - inked()
+					end,
+					-- (The notch only while it sits in the stack.)
+					ui.show(function(): boolean
+						return not (i < EMPTY_TILES and shows(i + 1)) or flown() > 0
+					end, tile(i, false)),
+					if i < EMPTY_TILES
+						then ui.show(function(): boolean
+							return shows(i + 1) and flown() <= 0
+						end, tile(i, true))
+						else nil,
+				})
+			end
+			local slots: { Node } = {}
+			for i = 1, EMPTY_TILES do
+				table.insert(slots, slot(i))
 			end
 			local frame: { [any]: any } = {
 				class = "empty-projects",
@@ -3614,31 +3709,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				on_click = function()
 					fold_set(empties_fold(), not empties_open:peek())
 				end,
-				ui.div {
-					w = 12,
-					h = 12,
-					shrink = 0,
-					mr = "$space.1",
-					ui.presence(function(): string
-						return if empties_open:get() then "alt-arrow-down" else "alt-arrow-right"
-					end, function(name: string): Node
-						return Icon { name = name :: Icon.Name, size = 12 }
-					end),
-				},
 				ui.text {
 					locale.t("ds.sidebar.empty_projects_word"),
 					shrink = 0,
 					text_size = "$font.size.xs",
 					weight = "$font.weight.medium",
 				},
-				ui.div {
+				-- (Gone from the header once they've landed in the rows.)
+				ui.show(function(): boolean
+					return inked() < 1 or not empties_open:get()
+				end, ui.row {
+					class = "empty-projects-stack",
+					ref = stack_ref,
 					ml = "$space.1",
 					shrink = 1,
 					min_w = 0,
-					ui.presence(function(): string
-						return table.concat(stacked(), "\n")
-					end, stack),
-				},
+					items = "center",
+					table.unpack(slots),
+				}),
 				ui.div { grow = 1 },
 				ui.text {
 					function(): string
@@ -3809,7 +3897,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					local a = slides[key]
 					return if a then value(a, clock:get()) else 0
 				end,
-				overflow = "hidden",
+				-- (The empty projects' row lets its tiles fly out of it.)
+				overflow = if it.kind == "empties" then "visible" else "hidden",
 				opacity = function(): number
 					local now = item_of(key)
 					local t = clock:get()
