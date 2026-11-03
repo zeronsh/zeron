@@ -291,6 +291,61 @@ function M.carrying_session(): boolean
 	return false
 end
 
+-- Files carried from outside end with a drop or with their leave. One lost
+-- on the way (the platform's drag ended elsewhere, or what the files were
+-- over went first) left the chat dimmed under "Drop to attach" for good,
+-- Escape and all. Any sign the drag is over lets go of them: Escape, the
+-- window losing focus, the pointer over the chat (none reaches a window
+-- while another app's drag is over it), or no word of them for a while. A
+-- sidebar session carried is the window's own drag, whose end is always
+-- heard: kept. True if files were let go of.
+function M.let_go(): boolean
+	local now = M.dropping:peek()
+	local next, any = {}, false
+	for zone, what in now do
+		if what == "session" then
+			next[zone] = what
+		else
+			any = true
+		end
+	end
+	if any then
+		M.dropping:set(next)
+	end
+	return any
+end
+
+-- No word of them for this long (each move from one part of the chat to
+-- another is one): let go. The pointer's word counts only once they've
+-- been over the chat a moment: a move it made just before the drag came
+-- can be heard after it.
+local STALE_MS = 8000
+local SETTLE_MS = 300
+local settled = false
+ui.effect(function()
+	settled = false
+	if M.carrying() then
+		ui.after(SETTLE_MS, function()
+			settled = true
+		end)
+		ui.after(STALE_MS, function()
+			M.let_go()
+		end)
+	end
+end)
+ui.effect(function()
+	if ui.window.active:get() == false then
+		M.let_go()
+	end
+end)
+
+-- The pointer over the chat again: no drag from outside is under way.
+function M.pointer_back()
+	if settled then
+		M.let_go()
+	end
+end
+
 -- Another chat mentioned (a sidebar session dropped on the chat): a chip,
 -- sent as Zeron's chat mention (screens/chat/chat_links). Once each.
 function M.mention_chat(id: string)
@@ -345,6 +400,11 @@ function M.drop_zone(zone: string): { [string]: any }
 		end,
 		on_drag_leave = function()
 			M.over(zone, false)
+		end,
+		on_hover = function(inside: boolean)
+			if inside then
+				M.pointer_back()
+			end
 		end,
 		on_drop = function(payload: any)
 			M.dropping:set({})

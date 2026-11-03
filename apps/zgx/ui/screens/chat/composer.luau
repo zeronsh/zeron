@@ -1486,6 +1486,7 @@ local function Composer(): Node
 				drop_when = composer_zone.drop_when,
 				on_drag_over = composer_zone.on_drag_over,
 				on_drag_leave = composer_zone.on_drag_leave,
+				on_hover = composer_zone.on_hover,
 				on_drop = composer_zone.on_drop,
 				-- (A new chat with nowhere to work: its page asks for a project in
 				-- its place, as Zeron's first launch does. Hidden here, inside
