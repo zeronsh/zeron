@@ -935,3 +935,71 @@ test("a lanes part's title has the sidebar's \"…\" under the pointer, opening 
 	-- Ports have none of their own.
 	expect(app:has("#panel-home-ports-options")).to_be(false)
 end)
+
+-- The side chat made last (its id), and where its composer starts.
+local function newest_start(app: any): (string?, any)
+	local unsent = (app:state("chat_lanes_unsent") :: any) or {}
+	local starts = (app:state("chat_lanes_starts") :: any) or {}
+	for id in unsent do
+		if starts[id] then
+			return id, starts[id]
+		end
+	end
+	return nil, nil
+end
+
+test("a side chats' group has the sidebar's \"+\" under the pointer: a new side chat there, its project and device chosen", function()
+	local app = home()
+	app:command("box_project")
+	app:command("side_elsewhere")
+	app:frames(10)
+	-- By device: the devbox's group, its "+" only under the pointer.
+	app:set_state("sidebar.view", { organize = "device" })
+	app:frames(30)
+	local PLUS = "#panel-home-side-list-new-device:box"
+	expect(app:has(PLUS)).to_be(false)
+	app:hover('#panel-home-side-list >> role:button "devbox"')
+	app:frames(10)
+	expect(app:has(PLUS)).to_be(true)
+	expect(app:tree(PLUS)).to_contain('"New side chat on devbox"')
+	app:click(PLUS)
+	expect(app:wait(".side-chat-tab", { timeout_ms = 15000 })).to_be(true)
+	app:frames(20)
+	-- A side chat of the session, on the devbox, in its comet-native.
+	local id, at = newest_start(app)
+	expect(id ~= nil).to_be(true)
+	expect(((app:state("chat_lanes_unsent") :: any) or {})[id :: string]).to_be("chat-1")
+	expect(at.device).to_be("box")
+	expect(at.project).to_be("p2")
+	-- Its composer's pickers start there.
+	expect(app:state(`chat_lane_device_{id}`)).to_be("box")
+	expect(app:state(`chat_lane_project_{id}`)).to_be("p2")
+	-- Its first message makes it there.
+	app:type(".side-chat-tab >> role:textbox", "first words")
+	app:key("Enter")
+	expect(eventually(app, function(): boolean
+		return calls(app):find(`place:{id}:p2:box`, 1, true) ~= nil
+	end)).to_be(true)
+	expect(calls(app)).to_contain(`create:chat-1:{id}`)
+	-- (The group wasn't folded by it.)
+	back_home(app)
+	expect(app:has('role:button "Open side chat Try it on the devbox"')).to_be(true)
+
+	-- By project: "New side chat in comet-native", on its own device.
+	app:set_state("sidebar.view", { organize = "project" })
+	app:frames(30)
+	app:hover('#panel-home-side-list >> role:button "comet-native"')
+	app:frames(10)
+	local IN = "#panel-home-side-list-new-project:p1"
+	expect(app:tree(IN)).to_contain('"New side chat in comet-native"')
+	app:set_state("chat_lanes_starts", {})
+	app:click(IN)
+	expect(eventually(app, function(): boolean
+		return newest_start(app) ~= nil
+	end)).to_be(true)
+	local id2, at2 = newest_start(app)
+	expect(at2.project).to_be("p1")
+	expect(at2.device).to_be("d")
+	app:frames(20)
+	expect(app:state(`chat_lane_project_{id2}`)).to_be("p1")
+end)

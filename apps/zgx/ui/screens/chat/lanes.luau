@@ -25,8 +25,11 @@
 --                         messages, draft } states; `lanes.watch(slot, id)`
 --   lanes.open(session, lane)  a lane in the session's panel, as a tab
 --                         ({ kind = "side_chat" | "subagent", id, title })
---   lanes.new_side_chat(session), lanes.fork(session)  the shipping app's
---                         "New side chat" and "Fork chat"
+--   lanes.new_side_chat(session, at?), lanes.fork(session)  the shipping
+--                         app's "New side chat" and "Fork chat"; `at`
+--                         ({ project?, device? }) where its composer's place
+--                         starts instead of its parent's (the panel home's
+--                         group "+")
 
 local ds = require("@ds")
 local locale = require("@ds/locale")
@@ -175,6 +178,9 @@ end
 -- has nothing of one until its first message (the shipping app's
 -- `create_child_chat` writes nothing until then).
 M.unsent = ui.state("chat_lanes_unsent", {} :: { [string]: string })
+-- Where an unsent side chat's composer starts, where it isn't its
+-- parent's (screens/chat/lane_tab reads it once, as it seeds the place).
+M.starts = ui.state("chat_lanes_starts", {} :: { [string]: { project: string?, device: string? } })
 
 local function set_in(s: State<any>, key: string, value: any)
 	local now = table.clone(s:peek())
@@ -184,12 +190,15 @@ end
 
 -- The shipping app's "New side chat": a side chat of the session, opened in
 -- its panel; made, where its parent is, as its first message is sent.
-function M.new_side_chat(session: string?)
+function M.new_side_chat(session: string?, at: { project: string?, device: string? }?)
 	if not session then
 		ds.toast.show { title = locale.s("chat.lanes.need_conversation"), tone = "warning" }
 		return
 	end
 	local id = M.new_id()
+	if at and (at.project or at.device) then
+		set_in(M.starts, id, { project = at.project, device = at.device })
+	end
 	set_in(M.unsent, id, session)
 	M.open(session, { kind = "side_chat", id = id, title = locale.s("chat.lanes.new_side_chat") })
 end

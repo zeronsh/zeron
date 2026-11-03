@@ -162,7 +162,8 @@ export type Props = {
 	open_plugin_tab: (session: string, tab: { [string]: any }) -> (),
 	-- An action run in a terminal tab of its own (its name, and what runs it).
 	open_action: (title: string, run: { [string]: any }) -> (),
-	new_side_chat: ((session: string) -> ())?,
+	-- (`at`: where its composer starts instead of the session's place.)
+	new_side_chat: ((session: string, at: { project: string?, device: string? }?) -> ())?,
 	fork: ((session: string) -> ())?,
 	side: ((session: string) -> { any })?,
 	subagents: (() -> { any })?,
@@ -951,6 +952,50 @@ local function lanes(props: Props, sid: string): Node
 			},
 		}
 	end
+	-- A side chats' group's "+": a new side chat of the session, its
+	-- composer starting in that group's project and on its device (the
+	-- header's groups: a project's, a device's, or both). A device other
+	-- than the project's takes that device's project of the same name, else
+	-- lets the composer pick one there.
+	local function new_in(groups: { any })
+		local new_side = props.new_side_chat
+		if not new_side then
+			return
+		end
+		local parent = chat_of(sid)
+		local project: string? = if parent then parent.project else nil
+		local device: string? = nil
+		for _, g in groups do
+			if g.kind == "project" then
+				local id = string.match(g.key, "project:([^/]+)$")
+				project = if id == "none" then "none" else id
+			elseif g.kind == "device" then
+				local id = string.match(g.key, "device:([^/]+)$")
+				if id and id ~= "none" then
+					device = id
+				end
+			end
+		end
+		local p = project_of(project)
+		if device and p and p.device ~= device then
+			local same: string? = nil
+			for _, other in sessions.now:peek().projects do
+				if other.device == device and (other.name == p.name or other.path == p.path) then
+					same = other.id
+				end
+			end
+			project = same
+		elseif not device and p then
+			device = p.device
+		end
+		new_side(sid, { project = project, device = device })
+	end
+	local function new_label(g: any): string
+		if g.kind == "device" then
+			return locale.s("panel.home.new_side_on", { name = g.name })
+		end
+		return locale.s("panel.home.new_side_in", { name = g.name })
+	end
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
 	-- corner action. `lanes_part`: side chats' or subagents', with their
@@ -985,6 +1030,9 @@ local function lanes(props: Props, sid: string): Node
 					end
 					else nil,
 				options = if lanes_part then lanes_options :: any else nil,
+				-- (Side chats' groups: a new one there.)
+				on_new = if id == "panel-home-side" and props.new_side_chat then new_in :: any else nil,
+				new_label = new_label :: any,
 			}
 		)
 	end
