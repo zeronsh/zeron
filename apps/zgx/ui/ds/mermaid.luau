@@ -22,9 +22,12 @@ local locale = require("@self/locale")
 
 local M = {}
 
--- What the host drew: the picture on a clear ground, the same on the
--- fence's fill (the lightbox's), and the diagram's own size in points.
-export type Drawn = { src: string, plate: string, w: number, h: number }
+-- What the host drew: the diagram as SVG on a clear ground, the same on
+-- the fence's fill (the lightbox's), both drawn by `ui.svg` at the size and
+-- pixel scale they show at, so sharp at any zoom; the fill's as a PNG file
+-- (the lightbox's size, Copy and Reveal); and the diagram's own size in
+-- points.
+export type Drawn = { svg: string, plate_svg: string, plate: string, w: number, h: number }
 type Result = Drawn | { error: string }
 
 -- The host's drawing, a promise of a `Drawn` (a test's host has none and
@@ -194,7 +197,7 @@ M.Diagram = ui.component(function(props: Props): Node
 			return
 		end
 		promise:after(function(d: any)
-			local r: Result = if type(d) == "table" and type(d.src) == "string" and (d.w or 0) > 0 and (d.h or 0) > 0
+			local r: Result = if type(d) == "table" and type(d.svg) == "string" and type(d.plate) == "string" and (d.w or 0) > 0 and (d.h or 0) > 0
 				then d
 				else { error = "Diagram could not be rendered" }
 			keep(k, r)
@@ -223,12 +226,12 @@ M.Diagram = ui.component(function(props: Props): Node
 	end
 	local function drawn(): Drawn?
 		local r = result:get()
-		return if r and (r :: any).src then r :: Drawn else nil
+		return if r and (r :: any).svg then r :: Drawn else nil
 	end
 	local function open()
 		local d = drawn()
 		if d then
-			Lightbox.open({ { src = d.plate, path = d.plate, name = locale.s("ds.mermaid.name") } }, 1, group)
+			Lightbox.open({ { src = d.plate, path = d.plate, svg = d.plate_svg, name = locale.s("ds.mermaid.name") } }, 1, group)
 		end
 	end
 	-- The diagram as the thumbnail the lightbox grows from and goes back to.
@@ -348,15 +351,17 @@ M.Diagram = ui.component(function(props: Props): Node
 							end
 							return nil
 						end,
-						ui.image {
+						-- (Vectors: drawn at the size and pixel scale it
+						-- shows at, so a zoomed window or a dense display
+						-- keeps it sharp.)
+						ui.svg {
 							src = function(): string
 								local d = drawn()
-								return if d then d.src else ""
+								return if d then "code:" .. d.svg else ""
 							end,
 							aria_hidden = true,
 							w_full = true,
 							h_full = true,
-							fit = "contain",
 						},
 					})),
 				},

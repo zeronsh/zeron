@@ -1,15 +1,19 @@
 //! Mermaid diagrams for the scripts (`ds/mermaid`): the shipping app's
 //! renderer (crates/ui/src/markdown/mermaid.rs, mermaid-rs-renderer 0.3.1)
-//! in the shipping app's style, drawn to pictures `ui.image` shows.
+//! in the shipping app's style, as vectors zgx draws sharp at any size.
 //!
 //!   mermaid.render { source, dark, font, colors = { background, code,
 //!                    text, secondary, tertiary, border, strong, accent } }
 //!
-//! answers `{ src, plate, w, h }`: `src` the diagram on a clear ground (it
-//! sits on its code block's fill), `plate` the same on that fill (for the
-//! lightbox, over its scrim), both PNG files at twice the diagram's size
-//! (less for a large one), `w` by `h` its own size in points. A diagram
-//! that can't be drawn rejects with a short reason. The colours are the
+//! answers `{ svg, plate_svg, plate, w, h }`: `svg` the diagram on a clear
+//! ground (it sits on its code block's fill), `plate_svg` the same on that
+//! fill (the lightbox's, over its scrim), both SVG documents with their
+//! text as outlines (zgx's own SVG drawing has no fonts), for `ui.svg`'s
+//! `src = "code:…"`, which rasterizes them at the size and pixel scale they
+//! show at; `plate` the plate as a PNG file at twice the diagram's size
+//! (less for a large one), for the lightbox's size, Copy and Reveal; `w` by
+//! `h` the diagram's own size in points. A diagram that can't be drawn
+//! rejects with a short reason. The colours are the
 //! theme's tokens as `ui.theme.get` gives them (`#rrggbbaa`), so it follows
 //! the appearance and any template's palette.
 //!
@@ -32,7 +36,7 @@ use zgx_script::{ScriptHost, Value};
 
 pub const ENGINE_VERSION: &str = "mermaid-rs-renderer/0.3.1";
 /// Bumped when what is drawn for the same request changes.
-const STYLE_VERSION: u32 = 1;
+const STYLE_VERSION: u32 = 2;
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 /// The pictures' pixel density over the diagram's own size.
 const DENSITY: f32 = 2.0;
@@ -40,6 +44,8 @@ const DENSITY: f32 = 2.0;
 /// lower density.
 const MAX_SIDE: f32 = 8192.0;
 const MAX_PIXELS: f32 = 12.0 * 1024.0 * 1024.0;
+/// The largest outlined SVG handed over (zgx draws up to 4 MiB of one).
+const MAX_SVG_BYTES: usize = 3 * 1024 * 1024;
 /// Pictures kept on disk; past this the oldest go.
 const KEEP_FILES: usize = 600;
 /// Failures remembered this run.
@@ -55,7 +61,8 @@ pub fn install(host: &ScriptHost) {
         let dir = crate::engine::data_dir().map(|d| d.join("mermaid")).unwrap_or_else(cache_dir);
         let drawn = off_thread(move || draw_cached(&request, &dir)).await.ok_or("Diagram could not be rendered")??;
         Ok(Value::record([
-            ("src", Value::from(drawn.src.to_string_lossy().as_ref())),
+            ("svg", Value::from(drawn.svg.as_str())),
+            ("plate_svg", Value::from(drawn.plate_svg.as_str())),
             ("plate", Value::from(drawn.plate.to_string_lossy().as_ref())),
             ("w", Value::from(drawn.w as f64)),
             ("h", Value::from(drawn.h as f64)),
@@ -252,10 +259,12 @@ fn font_family(theme: &str) -> String {
     if installed { format!("{theme}, {fallbacks}") } else { fallbacks.to_string() }
 }
 
-/// What a request drew: the two pictures and the diagram's own size.
+/// What a request drew: the diagram as vectors, clear and on its plate,
+/// the plate as pixels, and the diagram's own size.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawn {
-    src: PathBuf,
+    svg: String,
+    plate_svg: String,
     plate: PathBuf,
     w: f32,
     h: f32,
@@ -272,23 +281,23 @@ fn draw_cached(request: &Request, dir: &Path) -> Result<Drawn, String> {
     if let Some(why) = failures().lock().unwrap_or_else(|e| e.into_inner()).0.get(&key) {
         return Err(why.clone());
     }
-    let paths = |key: &str| (dir.join(format!("{key}.png")), dir.join(format!("{key}.plate.png")), dir.join(format!("{key}.size")));
-    let (src, plate, size) = paths(&key);
-    if let Some(drawn) = kept(&src, &plate, &size) {
+    let files = Files::of(dir, &key);
+    if let Some(drawn) = files.kept() {
         return Ok(drawn);
     }
     let _guard = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // (Drawn by another request for the same diagram while this one waited.)
-    if let Some(drawn) = kept(&src, &plate, &size) {
+    if let Some(drawn) = files.kept() {
         return Ok(drawn);
     }
     let palette = Palette::from_request(request);
-    let result = render(&request.source, &palette).and_then(|svg| rasterize(&svg, &palette)).and_then(|pictures| {
+    let result = render(&request.source, &palette).and_then(|svg| draw(&svg, &palette)).and_then(|pictures| {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        write_png(&src, &pictures.clear)?;
-        write_png(&plate, &pictures.plate)?;
-        write_atomic(&size, format!("{} {}", pictures.w, pictures.h).as_bytes())?;
-        Ok(Drawn { src: src.clone(), plate: plate.clone(), w: pictures.w, h: pictures.h })
+        write_atomic(&files.svg, pictures.svg.as_bytes())?;
+        write_atomic(&files.plate_svg, pictures.plate_svg.as_bytes())?;
+        write_png(&files.plate, &pictures.plate)?;
+        write_atomic(&files.size, format!("{} {}", pictures.w, pictures.h).as_bytes())?;
+        Ok(Drawn { svg: pictures.svg, plate_svg: pictures.plate_svg, plate: files.plate.clone(), w: pictures.w, h: pictures.h })
     });
     match &result {
         Ok(_) => prune(dir),
@@ -306,12 +315,37 @@ fn draw_cached(request: &Request, dir: &Path) -> Result<Drawn, String> {
     result
 }
 
-/// The pictures drawn for a key before, if all of them are there.
-fn kept(src: &Path, plate: &Path, size: &Path) -> Option<Drawn> {
-    let text = std::fs::read_to_string(size).ok()?;
-    let mut parts = text.split_whitespace().map(|n| n.parse::<f32>().ok());
-    let (w, h) = (parts.next()??, parts.next()??);
-    (src.is_file() && plate.is_file() && w > 0. && h > 0.).then(|| Drawn { src: src.into(), plate: plate.into(), w, h })
+/// A key's files: its vectors, its plate's pixels, and its size (written
+/// last, so a key with a size has the rest).
+struct Files {
+    svg: PathBuf,
+    plate_svg: PathBuf,
+    plate: PathBuf,
+    size: PathBuf,
+}
+
+impl Files {
+    fn of(dir: &Path, key: &str) -> Files {
+        Files {
+            svg: dir.join(format!("{key}.svg")),
+            plate_svg: dir.join(format!("{key}.plate.svg")),
+            plate: dir.join(format!("{key}.plate.png")),
+            size: dir.join(format!("{key}.size")),
+        }
+    }
+
+    /// What was drawn for the key before, if all of it is there.
+    fn kept(&self) -> Option<Drawn> {
+        let text = std::fs::read_to_string(&self.size).ok()?;
+        let mut parts = text.split_whitespace().map(|n| n.parse::<f32>().ok());
+        let (w, h) = (parts.next()??, parts.next()??);
+        if !(w > 0. && h > 0. && self.plate.is_file()) {
+            return None;
+        }
+        let svg = std::fs::read_to_string(&self.svg).ok()?;
+        let plate_svg = std::fs::read_to_string(&self.plate_svg).ok()?;
+        Some(Drawn { svg, plate_svg, plate: self.plate.clone(), w, h })
+    }
 }
 
 /// Only the newest KEEP_FILES diagrams stay.
@@ -328,7 +362,7 @@ fn prune(dir: &Path) {
     sizes.sort();
     for (_, size) in &sizes[..sizes.len() - KEEP_FILES] {
         let key = size.with_extension("");
-        for path in [size.clone(), key.with_extension("png"), key.with_extension("plate.png")] {
+        for path in [size.clone(), key.with_extension("svg"), key.with_extension("plate.svg"), key.with_extension("plate.png")] {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -359,22 +393,48 @@ fn write_png(path: &Path, pixmap: &tiny_skia::Pixmap) -> Result<(), String> {
     write_atomic(path, &bytes)
 }
 
-/// A diagram's two pictures and its own size in points.
+/// How the engine's SVG is read: this machine's fonts, and no `<image>`
+/// resolved, neither a path or URL (a file on this machine read into the
+/// picture) nor inline data. The source is an agent's, so untrusted; the
+/// shipping app's `svg_options` refuses them the same way. (zgx's own SVG
+/// drawing, which draws what this writes, resolves no paths either, and an
+/// image dropped here isn't written out.)
+fn svg_options(font: &str) -> usvg::Options<'static> {
+    usvg::Options {
+        font_family: font.to_string(),
+        fontdb: fonts(),
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    }
+}
+
+/// A diagram drawn: its vectors, clear and on the plate, the plate's
+/// pixels, and its own size in points.
 struct Pictures {
-    clear: tiny_skia::Pixmap,
+    svg: String,
+    plate_svg: String,
     plate: tiny_skia::Pixmap,
     w: f32,
     h: f32,
 }
 
-/// The SVG drawn with its text in this machine's fonts, at DENSITY (less
-/// for a large diagram), on a clear ground and on the plate.
-fn rasterize(svg: &str, palette: &Palette) -> Result<Pictures, String> {
-    let options = usvg::Options { font_family: palette.font.clone(), fontdb: fonts(), ..Default::default() };
-    let tree = usvg::Tree::from_str(svg, &options).map_err(|e| e.to_string())?;
+/// The engine's SVG with its text set in this machine's fonts: as SVG again
+/// with the text as outlines, clear and on the plate, and the plate drawn
+/// at DENSITY (less for a large diagram).
+fn draw(svg: &str, palette: &Palette) -> Result<Pictures, String> {
+    let tree = usvg::Tree::from_str(svg, &svg_options(&palette.font)).map_err(|e| e.to_string())?;
     let (w, h) = (tree.size().width(), tree.size().height());
     if !(w >= 1. && h >= 1.) {
         return Err("Diagram is empty".into());
+    }
+    // (Text written as the paths it was laid out to: `preserve_text` off.)
+    let outlined = tree.to_string(&usvg::WriteOptions::default());
+    let plate_svg = on_plate(&outlined, w, h, &palette.plate.hex());
+    if plate_svg.len() > MAX_SVG_BYTES {
+        return Err("Diagram output exceeds preview size limit".into());
     }
     let density = DENSITY.min(MAX_SIDE / w.max(h)).min((MAX_PIXELS / (w * h)).sqrt());
     if density < 0.5 {
@@ -387,7 +447,16 @@ fn rasterize(svg: &str, palette: &Palette) -> Result<Pictures, String> {
     let [r, g, b, a] = palette.plate.0;
     plate.fill(tiny_skia::Color::from_rgba(r, g, b, a).unwrap_or(tiny_skia::Color::BLACK));
     plate.draw_pixmap(0, 0, clear.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
-    Ok(Pictures { clear, plate, w, h })
+    Ok(Pictures { svg: outlined, plate_svg, plate, w, h })
+}
+
+/// `svg` with a `w` by `h` ground of `fill` under everything it draws.
+fn on_plate(svg: &str, w: f32, h: f32, fill: &str) -> String {
+    let ground = format!("<rect x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\" fill=\"{fill}\"/>");
+    match svg.find("<svg").and_then(|at| svg[at..].find('>').map(|end| at + end + 1)) {
+        Some(at) => format!("{}{ground}{}", &svg[..at], &svg[at..]),
+        None => svg.to_string(),
+    }
 }
 
 /// The shipping app's `mermaid::render`: the source as SVG in Zeron's style.
@@ -595,19 +664,64 @@ mod tests {
             for source in [FLOWCHART, SEQUENCE] {
                 let drawn = draw_cached(&request(source, dark), &dir).unwrap();
                 assert!(drawn.w > 50. && drawn.h > 50., "{drawn:?}");
-                let image = zgx_gpu::assets::decode_image(&std::fs::read(&drawn.src).unwrap()).unwrap();
-                assert_eq!(image.width(), (drawn.w * DENSITY).ceil() as u32);
-                // Clear ground, and ink on it (text drawn as glyphs: more
-                // than the boxes' outlines).
+                // Its text as outlines, drawn by zgx's own SVG drawing (no
+                // fonts there) at 3x, as a zoomed lightbox or a dense
+                // display asks: a clear ground, and ink on it (text drawn
+                // as glyphs: more than the boxes' outlines).
+                assert!(!drawn.svg.contains("<text") && drawn.svg.contains("<path"));
+                let (pw, ph) = ((drawn.w * 3.).ceil() as u32, (drawn.h * 3.).ceil() as u32);
+                let image = zgx_gpu::assets::decode_svg(drawn.svg.as_bytes(), pw, ph).unwrap();
                 let pixels = image.pixels();
                 assert_eq!(pixels[3], 0, "the corner is clear");
                 let inked = pixels.chunks_exact(4).filter(|p| p[3] > 200).count();
-                assert!(inked > 500, "{inked} inked pixels");
+                assert!(inked > 4000, "{inked} inked pixels");
+                let on_plate = zgx_gpu::assets::decode_svg(drawn.plate_svg.as_bytes(), pw, ph).unwrap();
+                // (Inside its edge, which a fit to whole pixels may leave
+                // part covered.)
+                let inside = ((4 * pw + 4) * 4 + 3) as usize;
+                assert_eq!(on_plate.pixels()[inside], 255, "the plate's vectors are opaque");
                 let plate = zgx_gpu::assets::decode_image(&std::fs::read(&drawn.plate).unwrap()).unwrap();
                 assert_eq!(plate.pixels()[3], 255, "the plate is opaque");
                 // Asked again: the same pictures, kept.
                 assert_eq!(draw_cached(&request(source, dark), &dir).unwrap(), drawn);
             }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_image_in_the_svg_reads_nothing() {
+        // A picture on this machine, and the same inline: neither is read
+        // into the diagram, nor written out for zgx to read.
+        let dir = scratch("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.png");
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.write_header().unwrap().write_image_data(&[255, 0, 0, 255].repeat(4)).unwrap();
+        }
+        std::fs::write(&file, &png).unwrap();
+        let palette = Palette::from_request(&request(FLOWCHART, true));
+        for href in [format!("file://{}", file.display()), file.display().to_string(), "file:///etc/hostname".into(), {
+            use base64::Engine;
+            format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png))
+        }] {
+            let svg = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="40"><image href="{href}" xlink:href="{href}" width="40" height="40"/><rect x="1" y="1" width="4" height="4" fill="#00ff00"/></svg>"##
+            );
+            let drawn = draw(&svg, &palette).unwrap();
+            assert!(!drawn.svg.contains("<image") && !drawn.svg.contains("secret") && !drawn.svg.contains("base64"), "{href}: {}", drawn.svg);
+            // Only the square is drawn: nothing red anywhere.
+            let red = drawn.plate.pixels().iter().filter(|p| p.red() > 200 && p.green() < 50).count();
+            assert_eq!(red, 0, "{href}");
+        }
+        // And from a diagram's source, as an agent would write it.
+        let source = format!("flowchart TD\n  A[\"<img src='file://{}'>\"] --> B[\"<image href='file:///etc/hostname'/>\"]", file.display());
+        if let Ok(svg) = render(&source, &palette) {
+            let drawn = draw(&svg, &palette).unwrap();
+            assert!(!drawn.svg.contains("<image") && !drawn.plate_svg.contains("<image"));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
