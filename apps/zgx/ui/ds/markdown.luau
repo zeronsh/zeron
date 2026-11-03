@@ -23,7 +23,14 @@
 --   never wrap (a long one scrolls sideways, fading at the edge it runs
 --   past).
 -- - A table sits in a hairline frame, its header quieter than its cells,
---   its columns as wide as their widest cell; wide, it scrolls sideways.
+--   each column as wide as its cells' words ask, up to a measure of its own
+--   (`zeron.prose.table.column`), past which they wrap; its last column
+--   takes what's left of the frame.
+-- - In a transcript's reply, a table wider than the column takes the
+--   page's spare width, centred on the column, and wider still scrolls
+--   sideways, a rail showing under the pointer (ds/wide); inside a list or
+--   a quote, it keeps to the column. A code block always keeps to the
+--   column, scrolling sideways the same way.
 -- - A quote is set back by a soft bar, in the secondary ink.
 --
 -- The text is selectable through whatever holds it (a transcript puts
@@ -44,6 +51,7 @@ local FileIcon = require("@self/file_icons")
 local Math = require("@self/math")
 local MarkdownFind = require("@self/markdown_find")
 local locale = require("@self/locale")
+local Wide = require("@self/wide")
 
 -- A link's context menu entry (ds/links, ds/context_menu's).
 export type LinkEntry = Links.Entry
@@ -622,12 +630,9 @@ local CodeBlock = ui.component(function(props: { lang: string, text: string, cla
 			if fitted then
 				return ui.column { w_full = true, min_w = 0, code_text(text, props.lang, true, props.find) }
 			end
-			return ui.scroll_x {
-				w_full = true,
-				fade_x = { 16, 32 },
-				fade_overflow = true,
-				code_text(text, props.lang, nil, props.find),
-			}
+			-- (Always the column's width, however long its lines: it scrolls
+			-- sideways, its rail under the pointer, ds/wide.)
+			return Wide.Scroll { child = code_text(text, props.lang, nil, props.find) }
 		end, { w_full = true, min_w = 0 }),
 	}
 end)
@@ -711,6 +716,54 @@ local Picture = ui.component(function(props: { src: string, name: string, w: num
 				ui.image { src = props.src, aria_hidden = true, w_full = true, h_full = true, fit = "contain" },
 			}
 		),
+	}
+end)
+
+-- A table: its cells (built in reading order, a row at a time, so a find
+-- numbers them as it reads) on a grid of `cols` columns, each as wide as
+-- its cells ask up to the table's column measure, past which their words
+-- wrap; a last track takes what's left of the frame. In a reply, a table
+-- wider than the column takes the page's room, centred; wider still, it
+-- scrolls sideways (ds/wide).
+local Table = ui.component(function(props: { cells: { Node }, cols: number }): Node
+	local room = Wide.context()
+	-- The column it's in (laid out), so a narrow table still fills it; and
+	-- how wide its cells run.
+	local column = ui.use_state(if room then room:peek().column else 0)
+	local natural = ui.use_state(0)
+	local measure = ui.theme.get("zeron.prose.table.column")
+	local pad = ui.theme.get("space.4")
+	local track = (if type(measure) == "number" then measure else 320) + 2 * (if type(pad) == "number" then pad else 16)
+	local tracks = string.rep(`fit-content({track}px) `, props.cols) .. "1fr"
+	return ui.column {
+		w_full = true,
+		min_w = 0,
+		on_resize = function(size: { w: number, h: number })
+			if math.abs(size.w - column:peek()) >= 0.5 then
+				column:set(size.w)
+			end
+		end,
+		Wide.Scroll {
+			class = "md-table",
+			self = "center",
+			w = Wide.width(room, function(): number
+				return natural:get() + 2
+			end),
+			rounded = "$radius.xl",
+			border = 1,
+			border_color = "$border",
+			-- (Inside its edge.)
+			fill = function(): number?
+				local c = column:get()
+				return if c > 2 then c - 2 else nil
+			end,
+			on_content = function(w: number)
+				if math.abs(w - natural:peek()) >= 0.5 then
+					natural:set(w)
+				end
+			end,
+			child = ui.div { grow = 1, shrink = 0, grid = true, cols = tracks, props.cells },
+		},
 	}
 end)
 
@@ -923,10 +976,12 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 				}
 			)
 		end
-		return ui.column { role = "list", w_full = true, gap = "$zeron.space.tight", items }
+		-- (Its tables keep to the column: ds/wide.)
+		return ui.column { role = "list", provide = { [Wide.KEY] = false }, w_full = true, gap = "$zeron.space.tight", items }
 	elseif b.t == "quote" then
 		return ui.row {
 			class = "md-quote",
+			provide = { [Wide.KEY] = false },
 			w_full = true,
 			gap = "$space.4",
 			ui.div { w = 2, shrink = 0, rounded = "$radius.full", bg = "$border.strong" },
@@ -935,49 +990,48 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 	elseif b.t == "hr" then
 		return ui.div { w_full = true, h = 1, my = "$space.2", bg = "$border" }
 	elseif b.t == "table" then
-		-- Column by column, so each is as wide as its widest cell; cells keep
-		-- to one line (one height a row), and the last column takes what's
-		-- left of the frame.
-		local box = ui.ref()
-		local cell = {
-			wrap = false,
-			h = 36,
-			px = "$space.4",
-			text_size = "$zeron.prose.small.size",
-			line_height = 36,
-		}
-		local cols: { Node } = {}
-		for c, head in b.head do
-			local head_style = table.clone(cell) :: { [string]: any }
-			head_style.weight = "$font.weight.medium"
-			head_style.color = "$text.secondary"
-			head_style.border_sides = { 0, 0, 1, 0 }
-			head_style.border_color = "$border"
-			local cells: { Node } = { runs(head, head_style, ctx) }
-			for r, row in b.rows do
-				local style = table.clone(cell) :: { [string]: any }
-				style.border_sides = { 0, 0, if r < #b.rows then 1 else 0, 0 }
-				style.border_color = "$border.subtle"
-				table.insert(cells, runs(row[c] or {}, style, ctx))
-			end
-			table.insert(cols, ui.column { shrink = 0, grow = if c == #b.head then 1 else 0, cells })
+		-- Row by row, as it reads (and as a find counts it: ds/markdown_find),
+		-- a filler closing each row on the track that takes what's left of
+		-- the frame, its hairline running to the edge. A cell's words wrap
+		-- past the column measure; one too short to reach it keeps to its
+		-- line. (A wrapping cell's box can come out a hair narrower than
+		-- its words in a grid of many columns, and they'd break where they
+		-- needn't.)
+		local cols = #b.head
+		local function cell(list: { MarkdownRun }, style: { [string]: any }, edge: string, under: number): Node
+			local s = table.clone(style)
+			s.wrap = #MarkdownFind.words(list) > 40
+			return ui.div {
+				border_sides = { 0, 0, under, 0 },
+				border_color = edge,
+				runs(list, s, ctx),
+			}
 		end
-		return ui.scroll_x {
-			class = "md-table",
-			ref = box,
-			w_full = true,
-			rounded = "$radius.xl",
-			border = 1,
-			border_color = "$border",
-			fade_x = { 16, 32 },
-			fade_overflow = true,
-			ui.row {
-				min_w = function(): number
-					return math.max(0, (box.width or 0) - 2)
-				end,
-				cols,
-			},
+		local function filler(edge: string, under: number): Node
+			return ui.div { aria_hidden = true, border_sides = { 0, 0, under, 0 }, border_color = edge }
+		end
+		local text = {
+			px = "$space.4",
+			py = "$space.2",
+			text_size = "$zeron.prose.small.size",
+			line_height = "$zeron.prose.small.line",
 		}
+		local head_style = table.clone(text) :: { [string]: any }
+		head_style.weight = "$font.weight.medium"
+		head_style.color = "$text.secondary"
+		local cells: { Node } = {}
+		for _, head in b.head do
+			table.insert(cells, cell(head, head_style, "$border", 1))
+		end
+		table.insert(cells, filler("$border", 1))
+		for r, row in b.rows do
+			local under = if r < #b.rows then 1 else 0
+			for c = 1, cols do
+				table.insert(cells, cell(row[c] or {}, text, "$border.subtle", under))
+			end
+			table.insert(cells, filler("$border.subtle", under))
+		end
+		return Table { cells = cells, cols = cols }
 	elseif (b.t == "img" or b.t == "pics") and ctx and ctx.pictures then
 		-- A reply's pictures (ds/reply_picture): one alone, or several that
 		-- follow one another together on a tray. One it won't draw (a URL, a

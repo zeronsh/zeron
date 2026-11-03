@@ -659,6 +659,9 @@ return ui.component(function(props: Props): Node
 	end)
 	return ui.column {
 		w_full = true,
+		-- (Its words, thoughts and a compact reply's work alike, keep to the
+		-- column: no wide tables or visuals here, ds/wide.)
+		provide = { wide = false },
 		ui.show(
 			function()
 				return count:get() > 0

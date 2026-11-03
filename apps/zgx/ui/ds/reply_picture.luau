@@ -4,7 +4,9 @@
 -- look is the design system's.
 --
 -- One alone (`Single`) takes its own shape: as wide as the reading column
--- at most, 420 tall at most, never past its own size. A long page shows its
+-- at most (the conversation's measure, as its reader sets it: ds/wide's
+-- `measure`; the theme's picture width outside one), 420 tall at most,
+-- never past its own size. A long page shows its
 -- top, cut to half as wide as it is tall and fading out at its foot; a long
 -- strip its middle, five times as wide as it is tall. A small one (an icon)
 -- sits at its own size in the middle of a 64-point tile, never blown up.
@@ -54,6 +56,7 @@ local locale = require("@self/locale")
 local toast = require("@self/toast")
 -- (By the alias the shell sets its opener on: one instance per path.)
 local Links = require("@ds/links")
+local Wide = require("@self/wide")
 
 local M = {}
 
@@ -117,6 +120,17 @@ local function measures(): { [string]: number }
 		ROW = n("zeron.prose.picture.tray.row", 300),
 		CONTROL = n("zeron.prose.picture.control.inset", 6),
 	}
+end
+
+-- The widest a picture shows here: the reading column's measure where a
+-- reader provides one (a transcript's, which follows its setting), else
+-- the theme's. Read in a component's build; the width, as it changes.
+local function widest(): () -> number
+	local room = Wide.context()
+	return function(): number
+		local r = if room then room:get().measure else 0
+		return if r > 0 then r else measures().W
+	end
 end
 
 local function name_of(e: Entry): string
@@ -729,14 +743,16 @@ function M.Single(props: Props): Node
 	return ui.component(function(): Node
 		local pictures = props.pictures
 		local e: Entry = { src = props.src, alt = props.alt }
+		local most = widest()
 		local function fit(): Fit
 			local m = measures()
+			local W = most()
 			local p = now_of(pictures, e.src)
 			local w, h = size_of(if p.state == "ready" then p.src else nil)
 			if not w or not h then
-				return { w = m.W, h = math.min(m.H, m.W / m.PLACE), crop = "none" }
+				return { w = W, h = math.min(m.H, W / m.PLACE), crop = "none" }
 			end
-			return M.fit(w :: number, h :: number, m.W, m.H)
+			return M.fit(w :: number, h :: number, W, m.H)
 		end
 		return ui.div {
 			class = "md-image",
@@ -772,7 +788,8 @@ function M.Run(props: RunProps): Node
 		local m = measures()
 		local pictures = props.pictures
 		local entries = ui.computed(props.items)
-		local column = ui.use_state(m.W)
+		local most = widest()
+		local column = ui.use_state(most())
 		local function shown(): { Entry }
 			local out = {}
 			for _, e in entries:get() do
@@ -798,7 +815,7 @@ function M.Run(props: RunProps): Node
 				local w, h = size_of(if p.state == "ready" then p.src else nil)
 				table.insert(list, { src = e.src, w = w, h = h })
 			end
-			local inner = math.min(column:get(), m.W) - m.INSET * 2
+			local inner = math.min(column:get(), most()) - m.INSET * 2
 			local places, w, h = M.layout(list, math.max(inner, 1))
 			return { places = places, w = w, h = h }
 		end)

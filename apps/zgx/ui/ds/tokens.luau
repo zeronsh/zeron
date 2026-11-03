@@ -266,6 +266,8 @@ function M.setup()
 					edge = "{border.subtle}",
 				},
 				measure = 660,
+				-- A table's column: its words wrap past this (ds/markdown).
+				table = { column = 320 },
 				bubble = { bg = "{zeron.secondary.bg}", radius = 16 },
 				thumb = { w = 120, h = 84, radius = 10 },
 				-- A picture a reply shows (ds/reply_picture): at most the

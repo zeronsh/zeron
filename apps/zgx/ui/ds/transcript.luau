@@ -45,6 +45,7 @@ local UserMessage = require("@self/user_message")
 local Lightbox = require("@self/lightbox")
 local ReplyPicture = require("@self/reply_picture")
 local Visual = require("@self/visual")
+local Wide = require("@self/wide")
 local Activity = require("@self/activity")
 local status = require("@self/status")
 local Working = require("@self/working")
@@ -184,6 +185,8 @@ export type Block = {
 	path: string?,
 	title: string?,
 	device: string?,
+	-- (A fixture's visual: its script itself, in place of `path`.)
+	source: string?,
 	tools: { Tool }?,
 	summary: string?,
 	live: boolean?,
@@ -458,6 +461,9 @@ type View = {
 	open_subagent: ((sub: any) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
+	-- The page's room around the reading column (ds/wide), for a reply's
+	-- wide tables and visuals, and its pictures' measure.
+	wide: State<Wide.Room>?,
 }
 
 local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
@@ -491,7 +497,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 		end
 		-- An agent's visual: built once, followed by the host (src/visuals.rs).
 		if b.kind == "visual" then
-			return Visual { id = b.id, path = b.path, title = b.title, device = b.device }
+			return Visual { id = b.id, path = b.path, title = b.title, device = b.device, source = b.source }
 		end
 		-- Pictures an agent showed: one alone, or several on a tray, among
 		-- the reply's pictures in the lightbox. More arriving while it works
@@ -600,7 +606,7 @@ local function reply(
 		label = locale.t("ds.transcript.reply"),
 		hook = "chat.message.reply",
 		class = "message message-assistant",
-		provide = { message = m.id },
+		provide = { message = m.id, [Wide.KEY] = if view then view.wide else nil },
 		w_full = true,
 		gap = "$space.3",
 		if m.blocks ~= nil
@@ -1045,6 +1051,18 @@ local function Transcript(props: Props): Node
 		end
 		return ui.theme.get("zeron.prose.measure") :: number
 	end
+	-- The page's room either side of the reading column, for what runs
+	-- wider than it (a reply's tables and visuals: ds/wide): the
+	-- list's width less its rows' sides, the column the measure (the page,
+	-- where that's narrower). Nothing until the list is laid out.
+	local list_w = ui.use_state(0)
+	local wide = ui.computed(function(): Wide.Room
+		local side = ui.theme.get("space.5")
+		local page = math.max(0, list_w:get() - 2 * (if type(side) == "number" then side else 24))
+		local m = measure()
+		local column = if page > 0 then math.min(m, page) else 0
+		return { room = math.max(0, (page - column) / 2), column = column, measure = m }
+	end)
 	local function remember()
 		if not keep then
 			return
@@ -1523,7 +1541,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, wide = wide, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, find = find_for }),
 			},
 		}
 	end
@@ -1614,6 +1632,9 @@ local function Transcript(props: Props): Node
 			-- the window resized): the reading place put back, then taken
 			-- again where it now stands.
 			on_resize = function(size: { w: number, h: number })
+				if math.abs(size.w - list_w:peek()) >= 0.5 then
+					list_w:set(size.w)
+				end
 				local changed = (last_w ~= nil and math.abs(size.w - last_w) >= 0.5)
 					or (last_h ~= nil and math.abs(size.h - last_h) >= 0.5)
 				last_w, last_h = size.w, size.h
