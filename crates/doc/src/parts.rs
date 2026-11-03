@@ -84,16 +84,33 @@ pub struct CommandTail {
     pub truncated: bool,
 }
 
-/// The tail of a command's output that rides its tool part into the doc —
-/// the one tool output the doc keeps (see the `ToolResult` fold). The output
-/// is redacted ([`zeron_proto::redact::redact_output`]: tokens, keys,
-/// credentials in urls, terminal escapes) BEFORE it is cut, so a secret the
-/// cut would split can't survive as an unrecognisable half. The cut starts
-/// on a line where it can: a single line longer than the byte budget keeps
-/// its end. `None` when nothing but whitespace is left.
-pub fn command_output_tail(text: &str) -> Option<CommandTail> {
+/// The tail of `command`'s output that rides its tool part into the doc —
+/// the one tool output the doc keeps (see the `ToolResult` fold), and the
+/// doc syncs to the person's other devices and the cloud. So:
+/// - a command that prints secrets by nature (`env`, `cat .env`, `gh auth
+///   token`, … — [`zeron_proto::redact::command_prints_secrets`]) keeps
+///   none of it, only a note saying so;
+/// - any other output is redacted
+///   ([`zeron_proto::redact::redact_command_output`]: private key blocks,
+///   env-style assignments, secret-named keys, url credentials and webhook
+///   paths, tokens, terminal escapes) BEFORE it is cut, so a secret the cut
+///   would split can't survive as an unrecognisable half.
+///
+/// The cut starts on a line where it can: a single line longer than the
+/// byte budget keeps its end. `None` when nothing but whitespace is left.
+pub fn command_output_tail(command: &str, text: &str) -> Option<CommandTail> {
     let bytes = text.len() as u64;
-    let redacted = zeron_proto::redact::redact_output(text);
+    if text.trim().is_empty() {
+        return None;
+    }
+    if zeron_proto::redact::command_prints_secrets(command) {
+        return Some(CommandTail {
+            text: zeron_proto::redact::SECRET_OUTPUT_WITHHELD.to_owned(),
+            bytes,
+            truncated: false,
+        });
+    }
+    let redacted = zeron_proto::redact::redact_command_output(text);
     let body = redacted.trim_end();
     if body.trim().is_empty() {
         return None;
@@ -529,9 +546,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     // terminal would. Bounded per part, so a long session
                     // grows by at most ~4 KB per command; file reads,
                     // searches, fetches and MCP results stay out.
-                    let tail = matches!(call, ToolCall::Exec { .. })
-                        .then(|| output.as_deref().and_then(command_output_tail))
-                        .flatten();
+                    let tail = match (&*call, output.as_deref()) {
+                        (ToolCall::Exec { command }, Some(output)) => {
+                            command_output_tail(command, output)
+                        }
+                        _ => None,
+                    };
                     *exit_slot = if matches!(call, ToolCall::Exec { .. }) {
                         *exit_code
                     } else {
@@ -1370,7 +1390,7 @@ mod tests {
         assert!(output_truncated);
         // One huge line keeps its end, on a char boundary.
         let line = "é".repeat(5000);
-        let Some(cut) = command_output_tail(&line) else {
+        let Some(cut) = command_output_tail("make", &line) else {
             panic!("no tail");
         };
         assert!(cut.truncated && cut.text.len() <= COMMAND_TAIL_MAX_BYTES);
@@ -1415,6 +1435,89 @@ mod tests {
             assert!(!tail.contains(secret), "{secret} survived: {tail}");
         }
         assert!(tail.starts_with("deploying\n") && tail.ends_with("done"));
+    }
+
+    #[test]
+    fn a_command_that_prints_secrets_keeps_none_of_its_output() {
+        for command in [
+            "env",
+            "printenv",
+            "cat .env.local",
+            "/usr/bin/zsh -lc 'cat ~/.aws/credentials'",
+            "gh auth token",
+            "gcloud auth print-access-token",
+        ] {
+            let mut parts = Vec::new();
+            for event in [
+                AgentEvent::ToolCall {
+                    id: "c".into(),
+                    call: ToolCall::Exec {
+                        command: command.into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "c".into(),
+                    is_error: false,
+                    output: Some("hunter2-but-unlabelled\n".into()),
+                    diff: None,
+                    exit_code: Some(0),
+                },
+            ] {
+                fold_event_into_parts(&mut parts, &event);
+            }
+            let MessagePart::Tool {
+                output: Some(output),
+                exit_code,
+                output_truncated,
+                ..
+            } = &parts[0]
+            else {
+                panic!("{command}: {parts:?}");
+            };
+            assert_eq!(
+                output,
+                zeron_proto::redact::SECRET_OUTPUT_WITHHELD,
+                "{command}"
+            );
+            assert_eq!(*exit_code, Some(0));
+            assert!(!output_truncated);
+        }
+    }
+
+    #[test]
+    fn a_command_tail_drops_keys_and_environment_values() {
+        let out = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\n\
+                   export DB_PASS=letmein\n\
+                   -----BEGIN OPENSSH PRIVATE KEY-----\n\
+                   b3BlbnNzaC1rZXktdjEAAAAA\n\
+                   -----END OPENSSH PRIVATE KEY-----\n\
+                   posting to https://hooks.slack.com/services/T000/B000/XXXX\n\
+                   test result: ok. 5 passed; 0 failed\n";
+        let MessagePart::Tool {
+            output: Some(tail), ..
+        } = fold_command(out, Some(0))
+        else {
+            panic!("no tail");
+        };
+        for secret in [
+            "wJalrXUtnFEMI",
+            "letmein",
+            "b3BlbnNzaC1rZXkt",
+            "T000",
+            "XXXX",
+        ] {
+            assert!(!tail.contains(secret), "{secret} survived: {tail}");
+        }
+        assert!(tail.contains("AWS_SECRET_ACCESS_KEY=[redacted]"), "{tail}");
+        assert!(tail.contains("[private key redacted]"), "{tail}");
+        assert!(
+            tail.contains("https://hooks.slack.com/[redacted]"),
+            "{tail}"
+        );
+        assert!(
+            tail.ends_with("test result: ok. 5 passed; 0 failed"),
+            "{tail}"
+        );
     }
 
     #[test]
