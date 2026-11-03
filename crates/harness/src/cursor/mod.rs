@@ -1105,6 +1105,8 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                             output: None,
                             diff: None,
                             exit_code: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                         }),
                     ];
                     // A finished task IS the subagent finishing: the SDK has

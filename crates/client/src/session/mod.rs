@@ -934,6 +934,7 @@ fn refresh_setup_placeholder(st: &mut CoreState, cloud_booting: bool) -> bool {
                     subagent_tail: None,
                     exit_code: None,
                     output_truncated: false,
+                    preview_paths: Vec::new(),
                 }],
                 created_at: created_at + 1,
                 device_id: String::new(),
