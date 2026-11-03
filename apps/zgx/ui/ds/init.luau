@@ -28,6 +28,7 @@ export type Harness = model_picker.Harness
 export type Model = model_picker.Model
 export type ComposerDevice = composer.Device
 export type ComposerUsage = composer.Usage
+export type ComposerPlanUsage = composer.PlanUsage
 export type ComposerFixed = composer.Fixed
 export type CardLayer = member_card.Layer
 export type CardBadge = member_card.Badge

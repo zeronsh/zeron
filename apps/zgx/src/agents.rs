@@ -1421,7 +1421,7 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
 
 /// An RFC 3339 time ("2026-11-01T15:45:00.5Z", "…+01:00") as seconds since
 /// the epoch.
-fn epoch_secs(s: &str) -> Option<i64> {
+pub(crate) fn epoch_secs(s: &str) -> Option<i64> {
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);

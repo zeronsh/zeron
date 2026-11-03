@@ -46,6 +46,7 @@ mod links;
 mod pasted;
 mod math;
 mod mermaid;
+mod plan_usage;
 mod plugins;
 mod previews;
 mod projects;
@@ -567,6 +568,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     if entry != "intro.luau" {
         auth::install(cx, &host);
         agents::install(cx, &host);
+        // The composer's plan ring (src/plan_usage.rs).
+        plan_usage::install(cx, &host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's

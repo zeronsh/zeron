@@ -654,6 +654,13 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
+      },
+      "quota_used": "Plan usage",
+      "quota": {
+        "heading": "Plan usage",
+        "heading_of": "{name} usage",
+        "percent": "{n}%",
+        "resets": "resets {when}"
       }
     },
     "markdown": {

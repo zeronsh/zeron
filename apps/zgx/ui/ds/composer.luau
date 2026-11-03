@@ -54,12 +54,16 @@ local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
+local plan_usage = require("@self/plan_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
 export type Usage = context_usage.Usage
+-- How much of the agent's plan its live account has used: its windows, as
+-- the provider reports them (ds/plan_usage).
+export type PlanUsage = plan_usage.Plan
 
 -- A device it can run on: its name; Cloud (a machine of its own), this
 -- device ("You"), or one out of reach.
@@ -132,6 +136,14 @@ export type Props = {
 	-- one has none), and hovering or focusing it opens a card saying the
 	-- numbers, as Zeron's does (crates/ui/src/context_usage.rs).
 	usage: (() -> Usage?)?,
+	-- How much of the agent's plan is used (its live account's windows): a
+	-- ring before the context ring, the most used window's, shown while
+	-- there's one; hovering or focusing it opens a card of each window, how
+	-- much and when it starts over, as Zeron's footer does
+	-- (crates/ui/src/account_usage.rs). `on_quota` hears its card open
+	-- (the moment to ask the provider again).
+	quota: (() -> PlanUsage?)?,
+	on_quota: (() -> ())?,
 	-- The footer stands over a wallpaper (a new chat's art): the pill's glass
 	-- continues under it as a tray, the chips on it rather than on the art,
 	-- easing in and out as the art comes and goes. Without, it stays bare.
@@ -706,6 +718,50 @@ local function ring(used: number | () -> number, usage: (() -> Usage?)?, side: (
 	end
 	-- (A placement is read as it's built: one following the composer is
 	-- built again as it changes sides.)
+	return ui.presence(side, build)
+end
+
+-- The plan ring: the context ring's chip and ring, in the accent (so the
+-- two read apart, as Zeron's do), reading the most used window; its card
+-- says each.
+local function plan_ring(quota: () -> PlanUsage?, on_open: (() -> ())?, side: () -> string): Node
+	local function fraction(): number
+		return plan_usage.fraction(quota()) or 0
+	end
+	local function build(at: string): Node
+		return ui.row {
+			id = "composer-plan",
+			h = CHIP_H,
+			px = "$zeron.space.tight",
+			items = "center",
+			rounded = CHIP_RADIUS,
+			hover = { bg = "$hover" },
+			focusable = true,
+			label = locale.t("ds.composer.quota_used"),
+			tooltip = plan_usage.Card { plan = quota },
+			tooltip_placement = { side = at, align = "end", offset = 8 },
+			tooltip_delay = 150,
+			on_hover = if on_open
+				then function(inside: boolean)
+					if inside then
+						on_open()
+					end
+				end
+				else nil,
+			ui.canvas {
+				w = 12,
+				h = 12,
+				shrink = 0,
+				draw = function(c, w, h)
+					local f = fraction()
+					c:stroke(ui.path():arc(w / 2, h / 2, 5.25, 0, 360), "$border.strong", 1.5)
+					if f > 0 then
+						c:stroke(ui.path():arc(w / 2, h / 2, 5.25, -90, 360 * f), plan_usage.ink(f), 1.5, { cap = "round" })
+					end
+				end,
+			},
+		}
+	end
 	return ui.presence(side, build)
 end
 
@@ -2157,6 +2213,11 @@ return ui.component(function(props: Props): Node
 				items = "center",
 				shrink = 0,
 				model,
+				if props.quota
+					then ui.show(function(): boolean
+						return plan_usage.fraction((props.quota :: () -> PlanUsage?)()) ~= nil
+					end, plan_ring(props.quota, props.on_quota, side))
+					else nil,
 				if props.usage
 					then ui.show(function(): boolean
 						local u = (props.usage :: () -> Usage?)()
