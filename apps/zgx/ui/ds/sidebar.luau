@@ -66,7 +66,8 @@ export type Session = {
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
-	-- Subagents running under it (Zeron's "● N" pill beside its corner).
+	-- Subagents and side chats working under it (Zeron's "● N" pill beside
+	-- its corner).
 	subagents: number?,
 	-- Its pull request: a badge beside its corner.
 	pr: PullRequest?,
