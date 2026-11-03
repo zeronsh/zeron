@@ -70,7 +70,9 @@ pub use zeron_term_link::remote::TerminalPath;
 
 /// Re-exported so consumers (the layout engine) name the exact doc types the
 /// transcript carries without a direct `zeron-doc` dependency.
-pub use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+pub use zeron_doc::{
+    MessagePart, MessageRole, MessageStatus, NotesSnapshot, NotesWrite, SessionMessageEntry,
+};
 pub use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, ChatConfig, ChatIndicator, ContextUsage,
     UserInputAnswer, UserInputQuestion, WorktreeSpec,

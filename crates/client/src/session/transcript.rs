@@ -28,6 +28,8 @@ pub(crate) struct Dirty {
     pub queue: bool,
     pub commands: bool,
     pub meta: bool,
+    /// The session notes text.
+    pub notes: bool,
 }
 
 impl Dirty {
@@ -39,11 +41,16 @@ impl Dirty {
             queue: true,
             commands: true,
             meta: true,
+            notes: true,
         }
     }
 
     pub fn observe(&mut self, event: &DiffEvent<'_>) {
         for change in &event.events {
+            if zeron_doc::is_notes_container(change.target) {
+                self.notes = true;
+                continue;
+            }
             let path = change.path;
             let Some((_, Index::Key(root))) = path.first() else {
                 continue;
