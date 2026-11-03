@@ -159,34 +159,37 @@ local function plan(now: number): any
 	}
 end
 
-test("composer plan: a ring before the context ring, shown while the agent reports its plan", function()
+test("composer limits: a wave chip before the context ring, shown while the agent reports its plan", function()
 	local app = mounted()
-	expect(showing(app, "#composer-plan")).to_be(false)
+	expect(showing(app, "#composer-limits")).to_be(false)
 	app:set_state("test_place_quota", plan(os.time()))
 	settle(app)
-	expect(showing(app, "#composer-plan")).to_be(true)
+	expect(showing(app, "#composer-limits")).to_be(true)
 	expect(showing(app, "#composer-context")).to_be(true)
-	-- Before the context ring, as Zeron's footer has them.
+	-- The most used window's percentage, over the wave.
+	expect(app:text("#composer-limits-percent")).to_be("49%")
+	-- Before the context ring, as Zeron's footer has them; one ring only.
 	local function x(sel: string): number
 		local first = string.match(app:tree(sel .. "[1]"), "[^\n]+") or ""
 		return tonumber(string.match(first, " (%-?%d+),%-?%d+ %d+x%d+")) or -1
 	end
-	expect(x("#composer-plan") < x("#composer-context")).to_be(true)
-	-- No windows, or none at all: no ring.
+	expect(x("#composer-limits") < x("#composer-context")).to_be(true)
+	expect(app:has("#composer-plan")).to_be(false)
+	-- No windows, or none at all: no chip.
 	app:set_state("test_place_quota", { name = "Codex", windows = {} })
 	settle(app)
-	expect(showing(app, "#composer-plan")).to_be(false)
+	expect(showing(app, "#composer-limits")).to_be(false)
 	app:set_state("test_place_quota", nil)
 	settle(app)
-	expect(showing(app, "#composer-plan")).to_be(false)
+	expect(showing(app, "#composer-limits")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
-test("composer plan: its card says each window, how much is used and when it starts over", function()
+test("composer limits: resting on it previews each window, how much is used and when it starts over", function()
 	local app = mounted()
 	app:set_state("test_place_quota", plan(os.time()))
 	settle(app)
-	app:hover("#composer-plan")
+	app:hover("#composer-limits")
 	rested(app)
 	expect(app:has("#composer-plan-card")).to_be(true)
 	expect(app:has('#composer-plan-card >> "Codex usage"')).to_be(true)
@@ -206,6 +209,41 @@ test("composer plan: its card says each window, how much is used and when it sta
 	app:set_state("test_place_quota", p)
 	settle(app)
 	expect(app:text("#composer-plan-percent")).to_be("97%")
+	expect(app:text("#composer-limits-percent")).to_be("97%")
+	expect(app:error()).to_be(nil)
+end)
+
+test("composer limits: a press pins the card open until a press outside, Escape, or the chip again", function()
+	local app = mounted()
+	app:set_state("test_place_quota", plan(os.time()))
+	settle(app)
+	app:click("#composer-limits")
+	rested(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(true)
+	expect(app:has('#composer-plan-pinned >> "Codex usage"')).to_be(true)
+	-- No preview of its own over it.
+	expect(showing(app, "#composer-plan-card")).to_be(false)
+	-- The pointer going elsewhere leaves it open.
+	app:hover("#composer-place-project[1]")
+	rested(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(true)
+	app:key("Escape")
+	settle(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(false)
+	-- A press outside closes it too.
+	app:click("#composer-limits")
+	rested(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(true)
+	app:click("#composer-context")
+	settle(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(false)
+	-- And the chip again.
+	app:click("#composer-limits")
+	rested(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(true)
+	app:click("#composer-limits")
+	settle(app)
+	expect(showing(app, "#composer-plan-pinned")).to_be(false)
 	expect(app:error()).to_be(nil)
 end)
 
