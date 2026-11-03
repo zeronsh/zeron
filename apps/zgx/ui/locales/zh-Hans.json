@@ -2290,7 +2290,9 @@
         "shell_palette": "搜索",
         "shell_settings": "设置",
         "shell_find": "查找",
-        "shell_close": "关闭"
+        "shell_close": "关闭",
+        "shell_reload": "重新启动 Zeron",
+        "shell_reload_interface": "重新加载界面"
       },
       "group": {
         "sessions": "会话",
@@ -2330,7 +2332,10 @@
       "settings_page": "设置：{title}",
       "go_to": "前往",
       "frosted_glass": "磨砂玻璃",
-      "search": "搜索会话、命令和文件…"
+      "search": "搜索会话、命令和文件…",
+      "app": "应用",
+      "reload_zeron": "重新启动 Zeron",
+      "reload_interface": "重新加载界面"
     },
     "add_project": {
       "something_went_wrong": "出错了",

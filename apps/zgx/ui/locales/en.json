@@ -2290,7 +2290,9 @@
         "shell_palette": "Search",
         "shell_settings": "Settings",
         "shell_find": "Find",
-        "shell_close": "Close"
+        "shell_close": "Close",
+        "shell_reload": "Reload Zeron",
+        "shell_reload_interface": "Reload interface"
       },
       "group": {
         "sessions": "Sessions",
@@ -2330,7 +2332,10 @@
       "settings_page": "Settings: {title}",
       "go_to": "Go to",
       "frosted_glass": "Frosted glass",
-      "search": "Search sessions, commands and files…"
+      "search": "Search sessions, commands and files…",
+      "app": "App",
+      "reload_zeron": "Reload Zeron",
+      "reload_interface": "Reload interface"
     },
     "add_project": {
       "something_went_wrong": "Something went wrong",

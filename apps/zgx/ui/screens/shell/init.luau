@@ -39,6 +39,7 @@ local MenuAt = require("@ds/menu_at")
 local prefs = require("@app/screens/settings/prefs")
 local fit = require("@app/screens/shell/fit")
 local keys = require("@app/screens/shell/keys")
+local host = require("@app/screens/settings/host")
 -- (The look chosen, applied as it loads.)
 local appearance = require("@app/screens/shell/appearance")
 local motion = require("@ds/motion")
@@ -264,6 +265,16 @@ return function(): Node
 				add.open()
 			end
 		end
+	end
+	-- Reload Zeron: the app quits and starts again, the same launch, its
+	-- engine left running (src/relaunch.rs). Reload interface: every script
+	-- evaluated again in place, as a save does (src/main.rs `serve`).
+	-- (Through settings' host calls, which a fixture answers.)
+	runs["shell.reload"] = function()
+		host.invoke("app.relaunch")
+	end
+	runs["shell.reload_interface"] = function()
+		host.invoke("app.reload_interface")
 	end
 	runs["shell.pin"] = function()
 		local s = route.current:peek().session
