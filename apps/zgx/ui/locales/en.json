@@ -453,6 +453,7 @@
       "devices": "Devices",
       "sessions": "Sessions",
       "new_chat_in": "New chat in {name}",
+      "new_chat_in_on": "New chat in {name} on {device}",
       "new_chat": "New chat",
       "search": "Search",
       "pinned": "Pinned",
