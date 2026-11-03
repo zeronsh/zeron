@@ -53,6 +53,9 @@ same-file = "1"
 tempfile.workspace = true
 # `show_image` reads a shown image's size from its header (already in the
 # tree with these decoders via zeron-ui).
+# Turn-end edges and transcript rendering shared with `zeron mcp`
+# (agent_waits.rs): its own deps are proto, doc and rpc.
+zeron-mcp.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -61,7 +64,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
-zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }

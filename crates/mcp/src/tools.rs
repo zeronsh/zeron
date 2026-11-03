@@ -20,9 +20,11 @@ use zeron_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::zeron::{HarnessInfo, TurnOutcome, TurnProgress, Zeron, session_for, short};
 
 mod plugins;
+#[cfg(test)]
+mod async_tests;
 pub use plugins::ListedTool;
 pub(crate) use plugins::is_plugin_tool_name;
 
@@ -144,7 +146,8 @@ fn catalog() -> Vec<ToolDef> {
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "cloud": { "type": "boolean", "default": false, "description": "Run on a Cloud machine of its own (cloning the project's GitHub repository) instead of the project's device. From a Cloud chat, the child clones the same repository; without cloud it shares this machine." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
+                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply. Only when you can't do anything else until then; prefer notify." },
+                    "notify": { "type": "boolean", "default": false, "description": "With prompt: return at once, and get a message in your chat when the first turn ends (its reply, or why it stopped). Keep working meanwhile." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
@@ -161,19 +164,21 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn through its live mailbox (at the next supported input boundary without interrupting the agent). Use mode 'queue' only to explicitly hold a message for later. With wait=true, blocks until the turn finishes and returns the assistant's reply. For parallel work use send_messages, or send to all chats with wait=false before waiting.",
+            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn through its live mailbox (at the next supported input boundary without interrupting the agent). Use mode 'queue' only to explicitly hold a message for later. Non-blocking by default. notify=true returns at once and delivers the reply into your chat as a message when the turn ends, so you keep working meanwhile. wait=true blocks until the turn finishes and returns the reply: only when you can't proceed without it. For parallel work use send_messages.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
-                "wait": { "type": "boolean", "default": false },
+                "notify": { "type": "boolean", "default": false, "description": "Return at once; get a message in your chat with the reply (or why the turn stopped) when it ends." },
+                "wait": { "type": "boolean", "default": false, "description": "Block until the turn ends and return the reply. Only when you can't proceed without it." },
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Wait for completed, awaitingInput, interrupted, errored, or timedOut. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion. Returns assistant replies when available.",
+            description: "Hear when a chat's turn ends: completed, awaitingInput, interrupted or errored. Non-blocking by default: if the turn already ended it returns the result now (replies included); otherwise it returns at once with watching=true, and Zeron delivers a message into your chat when the turn ends (\"Chat «title» finished …\" with its reply), steered into your running turn or starting a new one. Keep working meanwhile; watch several chats and each one notifies. blocking=true waits here instead (until timedOut): only when you can't proceed without the result. Native pendingInput can be answered with respond_to_input; terminalActivity input must be handled in its terminal. Stale/offline activity is not completion.",
             input_schema: chat_key_schema(json!({
-                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                "blocking": { "type": "boolean", "default": false, "description": "Wait here until the turn ends (or timeout_secs). Default false: return at once and be notified." },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600, "description": "With blocking only." }
             })),
         },
         ToolDef {
@@ -200,6 +205,50 @@ fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
+            name: "ask_question",
+            description: "Ask the person a question without stopping. Non-blocking by default: returns at once with {question_id, status: pending}; the question shows in Zeron on every device (in this chat and on the panel's home), and when the person answers, minutes or hours later, the answer arrives in your chat as a message (\"Answer to your question «…»: …\"), steered into your running turn or starting a new one. Keep working meanwhile on what doesn't depend on it. blocking=true waits here for the answer (until timeout_secs, then the answer is delivered as a message instead): only when you truly can't proceed without it. Use options for choices (buttons); the person may still answer in words. Prefer this to stopping to ask in your reply.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "The question, in Markdown. Short and self-contained: it may be read on a phone, away from this chat." },
+                    "options": { "type": "array", "items": { "type": "string" }, "maxItems": 12, "description": "Choices offered as buttons (at most 12, 200 characters each)." },
+                    "context": { "type": "string", "description": "Markdown shown under the question: what you found, what each choice means." },
+                    "blocking": { "type": "boolean", "default": false, "description": "Wait here for the answer. Default false: return at once; the answer arrives as a message." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600, "description": "With blocking only." }
+                },
+                "required": ["question"]
+            }),
+        },
+        ToolDef {
+            name: "get_question",
+            description: "One of your questions (ask_question): its status (pending, answered, dismissed, cancelled) and answer.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "question_id": { "type": "string" } },
+                "required": ["question_id"]
+            }),
+        },
+        ToolDef {
+            name: "list_questions",
+            description: "Questions asked with ask_question: your chat's by default, oldest first. Open ones only unless include_resolved.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, unique id prefix, or exact title. Defaults to your own chat." },
+                    "include_resolved": { "type": "boolean", "default": false }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cancel_question",
+            description: "Withdraw an open question you asked (it no longer applies). The person stops seeing it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "question_id": { "type": "string" } },
+                "required": ["question_id"]
+            }),
+        },
+        ToolDef {
             name: "archive_chat",
             description: "Archive a chat (hide it from the active sidebar list); pass archived=false to restore. Use it to tidy up chats you created.",
             input_schema: chat_key_schema(json!({
@@ -211,12 +260,12 @@ fn catalog() -> Vec<ToolDef> {
         (
             "create_chats",
             "create_chat",
-            "Create multiple chats concurrently: subagents of your chat by default, or side/standalone chats (kind per request, as create_chat). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. Results preserve request order and include per-request errors; successful requests are not rolled back.",
+            "Create multiple chats concurrently: subagents of your chat by default, or side/standalone chats (kind per request, as create_chat). Put each chat's prompt in its request to start all work together. Prefer this for parallel delegation, including harnesses that execute tool calls sequentially. Each request has create_chat arguments; wait defaults to false. With notify=true each chat's first reply arrives in your chat as a message when its turn ends. Results preserve request order and include per-request errors; successful requests are not rolled back.",
         ),
         (
             "send_messages",
             "send_message",
-            "Send messages to multiple independent chats concurrently. Prefer this to delegate parallel work to existing chats. Each request has send_message arguments; wait defaults to false. If wait=true, requests still run concurrently. Results preserve request order and include per-request errors; successful sends are not rolled back. Do not include dependent messages to the same chat.",
+            "Send messages to multiple independent chats concurrently. Prefer this to delegate parallel work to existing chats. Each request has send_message arguments; wait defaults to false. With notify=true each chat's reply arrives in your chat as a message when its turn ends. If wait=true, requests still run concurrently. Results preserve request order and include per-request errors; successful sends are not rolled back. Do not include dependent messages to the same chat.",
         ),
     ] {
         let item_schema = tools
@@ -604,6 +653,8 @@ struct CreateChatArgs {
     prompt: Option<String>,
     #[serde(default)]
     wait: bool,
+    #[serde(default)]
+    notify: bool,
     timeout_secs: Option<u64>,
 }
 
@@ -625,13 +676,40 @@ struct SendArgs {
     mode: Option<String>,
     #[serde(default)]
     wait: bool,
+    #[serde(default)]
+    notify: bool,
     timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct WaitArgs {
     chat: String,
+    #[serde(default)]
+    blocking: bool,
     timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AskArgs {
+    question: String,
+    #[serde(default)]
+    options: Vec<String>,
+    context: Option<String>,
+    #[serde(default)]
+    blocking: bool,
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct QuestionArgs {
+    question_id: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ListQuestionsArgs {
+    chat: Option<String>,
+    #[serde(default)]
+    include_resolved: bool,
 }
 
 #[derive(Deserialize)]
@@ -736,6 +814,68 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
     messages.iter().rev().find_map(|m| m.pending_input.clone())
 }
 
+/// How long a non-blocking `wait_for_turn` on an already-settled turn may
+/// wait for its reply's transcript to catch up.
+const ALREADY_SETTLED_WAIT: Duration = Duration::from_secs(15);
+
+/// A question as the tools return it.
+fn question_result(q: &Value) -> Value {
+    json!({
+        "question_id": q["id"],
+        "chatId": q["chatId"],
+        "question": q["question"],
+        "options": q["options"],
+        "status": q["status"],
+        "answer": q["answer"],
+        "createdAt": q["createdAt"],
+        "resolvedAt": q["resolvedAt"],
+    })
+}
+
+/// A blocking `ask_question` whose tool call ends without the answer (the
+/// client cancelled it, or the agent was stopped) lets go of the question,
+/// so an answer still reaches the agent, as a message.
+struct ReleaseOnDrop {
+    zeron: Option<Arc<Zeron>>,
+    id: String,
+    chat_id: String,
+}
+
+impl ReleaseOnDrop {
+    fn new(zeron: Arc<Zeron>, id: String, chat_id: String) -> Self {
+        Self {
+            zeron: Some(zeron),
+            id,
+            chat_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.zeron = None;
+    }
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let Some(zeron) = self.zeron.take() else { return };
+        let id = std::mem::take(&mut self.id);
+        let chat_id = std::mem::take(&mut self.chat_id);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let released = zeron
+                    .call(
+                        zeron_rpc::methods::RELEASE_QUESTION,
+                        json!({ "questionId": id, "deliver": true, "chatId": chat_id }),
+                    )
+                    .await;
+                if let Err(error) = released {
+                    tracing::warn!(%error, "ask_question: release failed");
+                }
+            });
+        }
+    }
+}
+
 // ---- dispatch ----------------------------------------------------------------
 
 impl Tools {
@@ -784,6 +924,10 @@ impl Tools {
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
+            "ask_question" => self.ask_question(parse(args)?).await,
+            "get_question" => self.get_question(parse(args)?).await,
+            "list_questions" => self.list_questions(parse(args)?).await,
+            "cancel_question" => self.cancel_question(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
@@ -1244,6 +1388,10 @@ impl Tools {
                 "{harness:?} does not look signed in on this device, so its first turn may fail. Pick a connected harness (list_harnesses) if it does."
             ));
         }
+        anyhow::ensure!(
+            !(args.wait && args.notify),
+            "wait and notify are exclusive: wait blocks for the reply, notify delivers it later"
+        );
         if let Some(prompt) = args.prompt.filter(|p| !p.trim().is_empty()) {
             // The row may not have folded into WatchChats yet; build the
             // chat locally from what we just wrote rather than re-reading.
@@ -1290,6 +1438,8 @@ impl Tools {
                 result["turn"] = self
                     .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                     .await?;
+            } else if args.notify {
+                result["notify"] = self.notify_turn_end(&chat, &pending, true).await?;
             }
         }
         Ok(result)
@@ -1330,6 +1480,10 @@ impl Tools {
         if text.is_empty() {
             anyhow::bail!("text is empty");
         }
+        anyhow::ensure!(
+            !(args.wait && args.notify),
+            "wait and notify are exclusive: wait blocks for the reply, notify delivers it later"
+        );
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
@@ -1375,12 +1529,51 @@ impl Tools {
             result["turn"] = self
                 .await_pending_turn(&chat, pending, wait_duration(args.timeout_secs))
                 .await?;
+        } else if args.notify {
+            result["notify"] = self.notify_turn_end(&chat, &pending, true).await?;
         }
         Ok(result)
     }
 
+    /// Have the engine tell this chat when `chat`'s turn ends (it keeps the
+    /// watch across restarts and delivers a message). Without a chat of our
+    /// own there is nowhere to deliver.
+    async fn notify_turn_end(
+        &self,
+        chat: &Chat,
+        pending: &PendingTurn,
+        expect_turn: bool,
+    ) -> anyhow::Result<Value> {
+        let watcher = self.zeron.origin().chat_id.clone().context(
+            "notifications need a chat to arrive in: only an agent Zeron launched in a chat gets them (use wait/blocking instead)",
+        )?;
+        let watched = self
+            .zeron
+            .call(
+                zeron_rpc::methods::NOTIFY_TURN_END,
+                json!({
+                    "chatId": chat.id,
+                    // The engine takes an agent's own chat from its token;
+                    // named too for engines that serve one token to all.
+                    "watcherChatId": watcher,
+                    "baseline": pending.baseline,
+                    "expectTurn": expect_turn,
+                    "startMessageIds": pending.start.message_ids,
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "watching": true,
+            "watchId": watched.get("watchId").cloned().unwrap_or(Value::Null),
+            "message": "You'll get a message in your chat when this turn ends. Keep working meanwhile.",
+        }))
+    }
+
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        if !args.blocking && self.zeron.origin().chat_id.is_some() {
+            return self.wait_for_turn_later(&chat).await;
+        }
         let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
         let turn = match pending {
             Some(pending) => {
@@ -1518,6 +1711,203 @@ impl Tools {
             )
             .await?;
         Ok(json!({ "chatId": chat.id, "requestId": request_id, "commandId": command_id }))
+    }
+
+    /// `wait_for_turn` without `blocking`: the result now when the turn has
+    /// already ended, else a watch the engine settles with a message.
+    async fn wait_for_turn_later(&self, chat: &Chat) -> anyhow::Result<Value> {
+        let pending = self.pending_turns.lock().await.get(&chat.id).cloned();
+        let sessions = self.zeron.sessions().await?;
+        let session = session_for(&sessions, chat);
+        let (baseline, expect_turn) = match &pending {
+            Some(pending) => (pending.baseline.clone(), true),
+            None => (None, false),
+        };
+        let settled = TurnProgress::new(baseline, expect_turn)
+            .observe(session.as_ref(), chrono::Utc::now())
+            .is_some();
+        if settled {
+            // Already over: answer as the blocking wait would, which returns
+            // on its first snapshot (bounded for a reply still syncing).
+            let turn = match pending {
+                Some(pending) => {
+                    self.await_pending_turn(chat, pending, ALREADY_SETTLED_WAIT)
+                        .await?
+                }
+                None => {
+                    self.await_turn(chat, None, false, ALREADY_SETTLED_WAIT, TurnStart::default())
+                        .await?
+                }
+            };
+            return Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn, "watching": false }));
+        }
+        let pending = pending.unwrap_or_else(|| {
+            Arc::new(PendingTurn {
+                baseline: session.clone(),
+                start: TurnStart::default(),
+            })
+        });
+        let (status, _) = status_of(session.as_ref());
+        let mut result = json!({ "chatId": chat.id, "title": chat.title, "status": status });
+        let notify = self.notify_turn_end(chat, &pending, expect_turn).await?;
+        if let (Some(result), Some(notify)) = (result.as_object_mut(), notify.as_object()) {
+            result.extend(notify.clone());
+        }
+        Ok(result)
+    }
+
+    async fn ask_question(&self, args: AskArgs) -> anyhow::Result<Value> {
+        let chat_id = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .context("ask_question only works from an agent Zeron launched in a chat")?;
+        let asked = self
+            .zeron
+            .call(
+                zeron_rpc::methods::ASK_QUESTION,
+                json!({
+                    "chatId": chat_id,
+                    "question": args.question,
+                    "options": args.options,
+                    "context": args.context,
+                    "blocking": args.blocking,
+                }),
+            )
+            .await?;
+        let id = asked["id"].as_str().context("AskQuestion reply missing id")?.to_owned();
+        if !args.blocking {
+            return Ok(json!({
+                "question_id": id,
+                "status": "pending",
+                "message": "Asked. The answer will arrive in this chat as a message (\"Answer to your question «…»\"); keep working on what doesn't depend on it.",
+            }));
+        }
+        let mut release = ReleaseOnDrop::new(self.zeron.clone(), id.clone(), chat_id.clone());
+        let answered = self
+            .await_question(&chat_id, &id, wait_duration(args.timeout_secs))
+            .await?;
+        let question = match answered {
+            Some(question) => question,
+            None => {
+                // Timed out: from now on the answer comes as a message. One
+                // that landed meanwhile is returned here instead.
+                let released = self
+                    .zeron
+                    .call(
+                        zeron_rpc::methods::RELEASE_QUESTION,
+                        json!({ "questionId": id, "deliver": false, "chatId": chat_id }),
+                    )
+                    .await?;
+                release.disarm();
+                if released["status"] == "pending" {
+                    return Ok(json!({
+                        "question_id": id,
+                        "status": "pending",
+                        "timedOut": true,
+                        "message": "No answer yet. It will arrive in this chat as a message when the person answers; carry on meanwhile.",
+                    }));
+                }
+                released
+            }
+        };
+        release.disarm();
+        Ok(question_result(&question))
+    }
+
+    /// The question once it's no longer pending, or `None` at the deadline.
+    async fn await_question(
+        &self,
+        chat_id: &str,
+        id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Value>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut rx = self
+                .zeron
+                .subscribe(zeron_rpc::methods::WATCH_QUESTIONS, json!({ "chatId": chat_id }))
+                .await?;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                let item = match tokio::time::timeout(remaining, rx.recv()).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break, // resubscribe
+                    Err(_) => return Ok(None),
+                };
+                let found = item
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|q| q["id"] == id)
+                    .cloned();
+                if let Some(question) = found
+                    && question["status"] != "pending"
+                {
+                    return Ok(Some(question));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    async fn questions(&self, chat_id: Option<&str>) -> anyhow::Result<Vec<Value>> {
+        let params = match chat_id {
+            Some(chat_id) => json!({ "chatId": chat_id }),
+            None => json!({}),
+        };
+        let all = self
+            .zeron
+            .snapshot(zeron_rpc::methods::WATCH_QUESTIONS, params)
+            .await?;
+        Ok(all.as_array().cloned().unwrap_or_default())
+    }
+
+    async fn get_question(&self, args: QuestionArgs) -> anyhow::Result<Value> {
+        let question = self
+            .questions(None)
+            .await?
+            .into_iter()
+            .find(|q| q["id"] == args.question_id.as_str())
+            .with_context(|| format!("no question {}", args.question_id))?;
+        Ok(question_result(&question))
+    }
+
+    async fn list_questions(&self, args: ListQuestionsArgs) -> anyhow::Result<Value> {
+        let chat_id = match args.chat {
+            Some(key) => self.zeron.resolve_chat(&key).await?.id,
+            None => self
+                .zeron
+                .origin()
+                .chat_id
+                .clone()
+                .context("name a chat: this server doesn't speak for one")?,
+        };
+        let questions: Vec<Value> = self
+            .questions(Some(&chat_id))
+            .await?
+            .iter()
+            .filter(|q| args.include_resolved || q["status"] == "pending")
+            .map(question_result)
+            .collect();
+        Ok(json!({ "chatId": chat_id, "questions": questions }))
+    }
+
+    async fn cancel_question(&self, args: QuestionArgs) -> anyhow::Result<Value> {
+        let cancelled = self
+            .zeron
+            .call(
+                zeron_rpc::methods::CANCEL_QUESTION,
+                // The engine takes an agent's chat from its token; named too
+                // for engines that serve one token to all.
+                json!({ "questionId": args.question_id, "chatId": self.zeron.origin().chat_id }),
+            )
+            .await?;
+        Ok(question_result(&cancelled))
     }
 
     // ---- shared pieces -------------------------------------------------------

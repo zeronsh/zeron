@@ -28,7 +28,10 @@ use tokio::sync::watch;
 
 use zeron_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use zeron_proto::projectless;
-use zeron_proto::{Chat, ChatConfig, Device, HarnessId, Session, SidebarPreferencesState, Space};
+use zeron_proto::{
+    AgentQuestion, Chat, ChatConfig, Device, HarnessId, QuestionStatus, Session,
+    SidebarPreferencesState, Space,
+};
 use zeron_sync::{DocsStore, RegistryClient, RegistryTuning};
 
 use crate::doc_host::EdgeConfig;
@@ -194,6 +197,8 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
+    /// Agents' questions to the person (`questions` rows), oldest first.
+    questions_tx: watch::Sender<Vec<AgentQuestion>>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -348,6 +353,7 @@ impl WorkspaceHost {
                 .map(|preferences| preferences.pinned_session_ids)
                 .unwrap_or_default(),
         });
+        let (questions_tx, _) = watch::channel(doc.read_questions());
         let (changed_tx, changed_rx) = watch::channel(0u64);
 
         let host = Self {
@@ -360,6 +366,7 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
+                questions_tx,
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
@@ -765,6 +772,43 @@ impl WorkspaceHost {
             self.inner.persist_snapshot()?;
         }
         Ok(())
+    }
+
+    // ── agents' questions (`questions` rows) ────────────────────────────────
+
+    pub fn watch_questions(&self) -> watch::Receiver<Vec<AgentQuestion>> {
+        self.inner.questions_tx.subscribe()
+    }
+
+    pub fn question(&self, id: &str) -> Option<AgentQuestion> {
+        self.read(|doc| doc.question(id))
+    }
+
+    pub fn read_questions(&self) -> Vec<AgentQuestion> {
+        self.read(|doc| doc.read_questions())
+    }
+
+    pub fn add_question(&self, question: &AgentQuestion) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.upsert_question(question))?)
+    }
+
+    /// Close an open question ([`RegistryDoc::resolve_question`]): the
+    /// question after, and whether this call closed it.
+    pub fn resolve_question(
+        &self,
+        id: &str,
+        status: QuestionStatus,
+        answer: Option<&str>,
+    ) -> Option<(AgentQuestion, bool)> {
+        self.mutate(|doc| doc.resolve_question(id, status, answer, Utc::now()))
+    }
+
+    pub fn set_question_delivered(&self, id: &str) -> bool {
+        self.mutate(|doc| doc.set_question_delivered(id, Utc::now()))
+    }
+
+    pub fn set_question_blocking(&self, id: &str, blocking: bool) -> bool {
+        self.mutate(|doc| doc.set_question_blocking(id, blocking))
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
@@ -1488,6 +1532,7 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
+            publish_if_changed(&self.questions_tx, doc.read_questions());
             doc.read_all()
         };
         match snapshot {

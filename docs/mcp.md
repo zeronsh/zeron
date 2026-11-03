@@ -166,11 +166,14 @@ name (default: the local engine's device).
 | `create_chats`     | Concurrent `create_chat` requests with per-request results |
 | `send_messages`    | Concurrent `send_message` requests with per-request results |
 | `read_chat`        | `WatchDocMessages` opening `reset` frame, rendered        |
-| `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`             |
-| `wait_for_turn`    | `WatchSessions` until the chat settles                    |
+| `send_message`     | `QueueCommand` Run / Steer, or `QueueMessage`; `notify` → `NotifyTurnEnd` |
+| `wait_for_turn`    | `WatchSessions` snapshot, then `NotifyTurnEnd` (default) or `WatchSessions` until the chat settles (`blocking`) |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `ask_question`     | `AskQuestion` (the calling chat's); `blocking` → `WatchQuestions` until answered, `ReleaseQuestion` on timeout or cancel |
+| `get_question` / `list_questions` | `WatchQuestions` snapshot                  |
+| `cancel_question`  | `CancelQuestion`                                          |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 | `show_image`       | `PublishImage {chatId, name, data}` (origin chat only; the file base64, read by the MCP server from the agent's cwd) |
 
@@ -206,6 +209,48 @@ For conversational redirection, run `cargo run -p zeron-harness --example
 cursor_steering_probe -- gemini-3-flash`. It sends six bare digits during streamed
 prose and requires only the latest requested answer. Counting turn completions
 alone cannot distinguish real steering from serial responses inside one run.
+
+### Waiting without stopping
+
+Every wait is non-blocking by default, so an agent never sits stuck on a person
+or on another chat. Both kinds end the same way: the engine delivers a message
+into the waiting agent's own chat with a `Steer` command, the composer's
+machinery, which steers a running turn and starts a new turn when the chat is
+idle (turn-boundary providers hold it until their turn ends).
+
+- **Questions.** `ask_question {question, options?, context?, blocking?}`
+  writes a `questions` registry row (`AgentQuestion`, `zeron_proto::questions`)
+  for the calling chat and returns `{question_id, status: "pending"}`. Being a
+  registry row, it syncs to every device; the zgx app shows it as a card above
+  the composer, on the panel's home and as a "? N" pill on the session row.
+  `AnswerQuestion` / `DismissQuestion` (the app's, never an agent's) close it
+  and queue "Answer to your question «…» (question q-…): …" (or a dismissal
+  note) into the asking chat from whichever device answered; the chat doc
+  carries the command to its host. An open question never changes the chat's
+  status: it isn't `awaitingInput`, the agent keeps working.
+  With `blocking: true` the tool waits on `WatchQuestions` and returns the
+  answer itself, so the engine doesn't deliver it. On its timeout it calls
+  `ReleaseQuestion {deliver: false}` (the answer then arrives as a message,
+  unless it landed meanwhile and is returned); if the call is cancelled, a
+  drop guard sends `ReleaseQuestion {deliver: true}`, delivering one that
+  arrived. `cancel_question` withdraws an open question (`CancelQuestion`,
+  only the asking chat's), which tells the agent nothing.
+- **Turn ends.** `wait_for_turn` (unless `blocking: true`) first checks the
+  chat's session row: a turn already over returns its result at once, as the
+  blocking wait would. Otherwise it registers `NotifyTurnEnd {chatId,
+  baseline, expectTurn, startMessageIds}` and returns `{status, watching:
+  true}`. `send_message`/`create_chat` with `notify: true` register the same
+  watch from the send's baseline (exclusive with `wait`). The engine keeps the
+  watches of this device in `turn-watches.json` under the store root and
+  settles them with the same edge the blocking wait uses (`TurnProgress`), so
+  a restart resumes them; when one settles it queues "[Message from Zeron chat
+  «title» …] Chat «title» finished its turn. Its reply: …" (or waiting for an
+  answer, errored, interrupted) into the watcher's chat. One watch per pair of
+  chats; several chats each notify. A watch unsettled after 24 hours is
+  dropped with a note.
+
+Without `ZERON_CHAT_ID` there is no chat to deliver into: `ask_question`
+refuses, and `wait_for_turn` blocks as before.
 
 `wait_for_turn` after a send is edge-triggered on the `Session` row captured
 before the send: it returns on a new `last_completed_turn`, an

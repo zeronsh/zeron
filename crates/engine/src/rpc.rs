@@ -836,6 +836,9 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// Questions to the person and turn watches (absent in bare test
+    /// assemblies, which then answer those methods with an error).
+    agent_waits: Option<crate::agent_waits::AgentWaits>,
     engine_info: EngineInfo,
 }
 
@@ -897,8 +900,15 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            agent_waits: None,
             engine_info,
         }
+    }
+
+    /// Attach questions and turn watches (the *Question and NotifyTurnEnd methods).
+    pub fn with_agent_waits(mut self, waits: crate::agent_waits::AgentWaits) -> Self {
+        self.agent_waits = Some(waits);
+        self
     }
 
     /// Attach the plugins service (the Plugin* methods).
@@ -2383,6 +2393,135 @@ fn is_stream_method(method: &str) -> bool {
 }
 
 /// A watch receiver as a stream: current value first, then every change.
+/// The chat a call acts for. This engine serves agents and the app alike
+/// (no agent-scoped token yet), so it is the `chatId` the caller names.
+fn acting_chat(params_chat: Option<String>) -> Result<String, RpcError> {
+    params_chat
+        .filter(|c| !c.trim().is_empty())
+        .ok_or_else(|| RpcError::BadParams("chatId is required".into()))
+}
+
+impl EngineRpc {
+    /// AskQuestion, WatchQuestions, AnswerQuestion, DismissQuestion,
+    /// CancelQuestion, ReleaseQuestion, NotifyTurnEnd.
+    fn agent_waits_rpc(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Ask {
+            #[serde(default)]
+            chat_id: Option<String>,
+            question: String,
+            #[serde(default)]
+            options: Vec<String>,
+            #[serde(default)]
+            context: Option<String>,
+            #[serde(default)]
+            blocking: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Watch {
+            #[serde(default)]
+            chat_id: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Answer {
+            question_id: String,
+            answer: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct One {
+            question_id: String,
+            #[serde(default)]
+            deliver: bool,
+            /// The asking chat, when the caller acts for one: the question
+            /// must be that chat's.
+            #[serde(default)]
+            chat_id: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Notify {
+            chat_id: String,
+            #[serde(default)]
+            watcher_chat_id: Option<String>,
+            #[serde(default)]
+            baseline: Option<zeron_proto::Session>,
+            #[serde(default)]
+            expect_turn: bool,
+            #[serde(default)]
+            start_message_ids: Vec<String>,
+        }
+        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        if method == methods::WATCH_QUESTIONS {
+            let p: Watch = parse_params(params)?;
+            let rx = self.workspace.watch_questions();
+            let Some(chat_id) = p.chat_id else {
+                return Ok(RpcReply::Stream(watch_stream(rx)));
+            };
+            let stream = watch_stream(rx).map(move |all| {
+                let mine: Vec<serde_json::Value> = all
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|q| q["chatId"] == chat_id.as_str())
+                    .cloned()
+                    .collect();
+                serde_json::Value::Array(mine)
+            });
+            return Ok(RpcReply::Stream(stream.boxed()));
+        }
+        let waits = self
+            .agent_waits
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("questions aren't available on this engine".into()))?;
+        // Who may withdraw or release a question: the chat a caller names
+        // (Zeron's MCP server names its own), held to it. This engine has no
+        // per-chat agent token, so the name is trusted as given; a caller
+        // naming none is the app, acting for the person.
+        let owner = |named: Option<String>| named;
+        let question = match method {
+            methods::ASK_QUESTION => {
+                let p: Ask = parse_params(params)?;
+                let chat = acting_chat(p.chat_id)?;
+                waits
+                    .ask(&chat, &p.question, &p.options, p.context.as_deref(), p.blocking)
+                    .map_err(failed)?
+            }
+            methods::ANSWER_QUESTION => {
+                let p: Answer = parse_params(params)?;
+                waits.answer(&p.question_id, &p.answer).map_err(failed)?
+            }
+            methods::DISMISS_QUESTION => {
+                let p: One = parse_params(params)?;
+                waits.dismiss(&p.question_id).map_err(failed)?
+            }
+            methods::CANCEL_QUESTION => {
+                let p: One = parse_params(params)?;
+                let caller = owner(p.chat_id);
+                waits.cancel(&p.question_id, caller.as_deref()).map_err(failed)?
+            }
+            methods::RELEASE_QUESTION => {
+                let p: One = parse_params(params)?;
+                let caller = owner(p.chat_id);
+                waits.release(&p.question_id, caller.as_deref(), p.deliver).map_err(failed)?
+            }
+            methods::NOTIFY_TURN_END => {
+                let p: Notify = parse_params(params)?;
+                let watcher = acting_chat(p.watcher_chat_id)?;
+                let id = waits
+                    .notify_turn_end(&watcher, &p.chat_id, p.baseline, p.expect_turn, p.start_message_ids)
+                    .map_err(failed)?;
+                return RpcReply::value(&serde_json::json!({ "watchId": id, "watching": true }));
+            }
+            other => return Err(RpcError::UnknownMethod(other.to_owned())),
+        };
+        RpcReply::value(&question)
+    }
+}
+
 fn watch_stream<T>(rx: watch::Receiver<T>) -> BoxStream<'static, serde_json::Value>
 where
     T: serde::Serialize + Clone + Send + Sync + 'static,
@@ -5022,6 +5161,13 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
+            methods::ASK_QUESTION
+            | methods::WATCH_QUESTIONS
+            | methods::ANSWER_QUESTION
+            | methods::DISMISS_QUESTION
+            | methods::CANCEL_QUESTION
+            | methods::RELEASE_QUESTION
+            | methods::NOTIFY_TURN_END => self.agent_waits_rpc(method, params),
             methods::PUBLISH_VISUAL => {
                 let p: PublishVisualParams = parse_params(params)?;
                 let title: String = p
