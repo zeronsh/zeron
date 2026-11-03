@@ -1,11 +1,13 @@
 /**
  * Badges a member earns by what they did, rather than one an operator grants.
  * The directory decides them from facts it stores (user-directory.ts) and
- * never from what a client says. Once earned, a badge stays: nothing an
- * operator or member does afterwards (a rename, a cleared or released name, a
- * new claim) takes it back. Only deleting the account drops it, with
- * everything else on the card. An operator can't define, grant or revoke one
- * by hand (`/admin/badges` refuses these ids).
+ * never from what a client says. Once earned, a badge stays: a rename, a
+ * cleared or released name or a new claim never takes it back. Two things do:
+ * deleting the account, with everything else on the card, and an operator
+ * revoking it (`/admin/badges/revoke`), which waives it for that member so the
+ * award never gives it back. Granting it to them again lifts the waiver and
+ * awards it only if they earned it. An operator can't define an earned badge,
+ * or grant one to "all".
  */
 
 /** V3 BETA: the member claimed their card (a username) during the beta. */
