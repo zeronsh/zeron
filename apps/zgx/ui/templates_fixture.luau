@@ -30,7 +30,7 @@ local function theme(scheme: string, accent: string, window: string, text: strin
 end
 
 local model: { state.Template } = {
-	{ id = "zeron", name = "Zeron", description = "Zeron's own interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = true, status = "ok" },
+	{ id = "zeron", name = "Zeron", description = "The default interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = true, status = "ok" },
 	-- Zeron's official templates (its built-in themes, kept by each launch:
 	-- src/plugins/theme_templates.rs), each with its look, light then dark.
 	{ id = "theme-tokyo-night", name = "Tokyo Night", description = "Tokyo Night's colours on Zeron's interface.", author = "Zeron", version = "0.2.131", zeron_version = "0.2.131", builtin = true, active = false, status = "ok", theme = "tokyo-night", look = official("tokyo-night-light", "tokyo-night") },

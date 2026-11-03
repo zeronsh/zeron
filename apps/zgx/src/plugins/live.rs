@@ -171,7 +171,7 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
         &json(serde_json::json!({
             "id": BUILTIN,
             "name": "Zeron",
-            "description": "Zeron's own interface.",
+            "description": "The default interface.",
             "author": "Zeron",
             "version": ZERON_VERSION,
             "zeron_version": ZERON_VERSION,

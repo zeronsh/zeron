@@ -1763,7 +1763,7 @@
       "choose_source": "选择主题来源",
       "vscode_theme": "VS Code 主题",
       "more_for": "{name}的更多选项",
-      "needs_look": "需要进一步检查。",
+      "needs_look": "此主题有需要修复的地方。",
       "dark": "深色",
       "light": "浅色",
       "rename": "重命名",
@@ -1776,7 +1776,7 @@
       "couldnt_rename": "无法重命名主题",
       "name": "名称",
       "remove_title": "移除此主题？",
-      "remove_body": "它将从你的图库中移除。使用此主题的地方将改用 Zeron 自带的主题。"
+      "remove_body": "它将从你的图库中移除。使用此主题的地方将恢复为默认主题。"
     },
     "store": {
       "says": {
@@ -3030,7 +3030,7 @@
         },
         "notifications": {
           "title": "向你发送通知",
-          "detail": "以 Zeron 的名义发送，可在“设置”→“通知”中管理。"
+          "detail": "与其他通知一样，可在“设置”→“通知”中管理。"
         },
         "links_open": {
           "title": "打开链接",
@@ -3257,18 +3257,18 @@
       "review": "查看",
       "template_waiting_body": "来自其他人的模板。",
       "failed": "{name}已停止运行",
-      "failed_body": "更新或编辑插件前，Zeron 将继续运行但不使用它。",
+      "failed_body": "在插件更新或修复前，Zeron 会在不使用它的情况下继续运行。",
       "show_folder": "显示文件夹",
       "template_failed": "你的模板中的 {name} 有错误",
-      "template_failed_body": "修复并保存模板前，将显示 Zeron 自带界面。",
+      "template_failed_body": "修复并保存前，这部分将显示默认界面。",
       "template_broken": "{name}无法运行",
-      "template_broken_body": "修复并保存模板前，将显示 Zeron 自带界面。"
+      "template_broken_body": "修复并保存模板前，将显示默认界面。"
     }
   },
   "templates": {
     "page": {
       "title": "模板",
-      "description": "Zeron 可以运行的完整界面。模板未包含的部分使用 Zeron 自带界面。",
+      "description": "Zeron 的完整界面。模板未包含的部分使用默认界面。",
       "search": "搜索模板",
       "tabs": "模板",
       "installed": "已安装",
@@ -3281,8 +3281,8 @@
         "named": "由 {name} 制作"
       },
       "about": {
-        "broken": "无法运行，已显示 Zeron 自带界面：{error}",
-        "errors": "部分内容回退到 Zeron 自带界面：{error}",
+        "broken": "无法运行，已显示默认界面：{error}",
+        "errors": "部分内容显示默认界面：{error}",
         "out_of_date": "为 Zeron {version} 制作。此后 Zeron 已更新。",
         "out_of_date_unversioned": "为较早版本的 Zeron 制作。此后 Zeron 已更新。",
         "no_description": "无描述。"
@@ -3307,13 +3307,13 @@
       "couldnt_use": "无法使用 {name}",
       "in_use": "使用中",
       "none_yours": "你还没有模板",
-      "none_body": "请智能体创建一个，或从 Zeron 模板的副本开始。",
+      "none_body": "请智能体创建一个，或从默认界面的副本开始。",
       "show_templates_folder": "显示模板文件夹",
       "delete_title": "删除此模板？",
-      "delete_body": "模板会移到模板文件夹的已移除项目中，以便日后恢复。如果正在使用，Zeron 自带模板会取而代之。",
+      "delete_body": "模板会保留在模板文件夹中，以便日后恢复。如果正在使用，Zeron 会切换到默认界面。",
       "couldnt_delete": "无法删除模板",
       "new_title": "新建模板",
-      "new_body": "这是 Zeron 自带界面的副本，你可以自行更改。请智能体修改，或自行编辑其文件。",
+      "new_body": "默认界面的副本，供你修改。请智能体修改，或自行编辑其文件。",
       "make_it": "创建",
       "couldnt_make": "无法创建模板",
       "name": "名称",
@@ -3350,14 +3350,14 @@
       "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
       "keep": "保留",
       "trust": "仅在信任{whom}时安装",
-      "trust_body": "模板是 Zeron 自身的代码：它会替换 Zeron 的界面，并拥有 Zeron 的全部能力，可访问你的对话、文件、账户和智能体。",
+      "trust_body": "模板作为 Zeron 的一部分运行：它会替换 Zeron 的界面，并能做 Zeron 能做的一切，可访问你的对话、文件、账户和智能体。",
       "unknown_body": "Zeron 无法确定签名所用密钥的所有者。仅在信任来源时安装。",
       "signature": "签名有效",
       "signature_detail": "自使用密钥 {key} 签名后，内容未发生更改。",
       "files": "{n, plural, other {# 个文件}}",
       "files_made_for": "{n, plural, other {# 个文件}} · 为 Zeron {version} 制作",
       "left_out": "{n, plural, other {# 个文件未包含}}",
-      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自带文件：{files}",
+      "left_out_detail": "模板不能替换这些文件，因此 Zeron 会保留自己的版本：{files}",
       "not_now": "暂不",
       "install": "安装",
       "unverified_body": "Zeron 无法确认它的作者。只有在你信任它的来源时才安装。",

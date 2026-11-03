@@ -1459,7 +1459,7 @@ impl Bridge {
                 .and_then(|v| v["chat"].as_str().map(|c| format!(" (asked by chat {})", &c[..c.len().min(8)])))
                 .unwrap_or_default();
             let words = if id == live::BUILTIN {
-                format!("Zeron's own template is back: it was switched without you choosing it here{by}.")
+                format!("The default interface is back: the template was switched without you choosing it here{by}.")
             } else {
                 format!("The template changed to {name} without you choosing it here{by}.")
             };
