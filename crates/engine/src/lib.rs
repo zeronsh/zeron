@@ -647,6 +647,10 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        // Before runs are interrupted: a turn the shutdown cuts off is not
+        // the end a watching chat waits for, and a notification queued now
+        // would sit in its chat unrun. The kept watches resume on boot.
+        self.agent_waits.shutdown();
         self.plugins.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;

@@ -2419,6 +2419,10 @@ impl EngineRpc {
             question_id: String,
             #[serde(default)]
             deliver: bool,
+            /// The asking chat, when the caller acts for one: the question
+            /// must be that chat's.
+            #[serde(default)]
+            chat_id: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -2456,7 +2460,11 @@ impl EngineRpc {
             .agent_waits
             .as_ref()
             .ok_or_else(|| RpcError::Failed("questions aren't available on this engine".into()))?;
-        let agent_chat: Option<Option<String>> = None;
+        // Who may withdraw or release a question: the chat a caller names
+        // (Zeron's MCP server names its own), held to it. This engine has no
+        // per-chat agent token, so the name is trusted as given; a caller
+        // naming none is the app, acting for the person.
+        let owner = |named: Option<String>| named;
         let question = match method {
             methods::ASK_QUESTION => {
                 let p: Ask = parse_params(params)?;
@@ -2475,13 +2483,13 @@ impl EngineRpc {
             }
             methods::CANCEL_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = agent_chat.as_ref().map(|c| c.as_deref().unwrap_or_default());
-                waits.cancel(&p.question_id, caller).map_err(failed)?
+                let caller = owner(p.chat_id);
+                waits.cancel(&p.question_id, caller.as_deref()).map_err(failed)?
             }
             methods::RELEASE_QUESTION => {
                 let p: One = parse_params(params)?;
-                let caller = agent_chat.as_ref().map(|c| c.as_deref().unwrap_or_default());
-                waits.release(&p.question_id, caller, p.deliver).map_err(failed)?
+                let caller = owner(p.chat_id);
+                waits.release(&p.question_id, caller.as_deref(), p.deliver).map_err(failed)?
             }
             methods::NOTIFY_TURN_END => {
                 let p: Notify = parse_params(params)?;

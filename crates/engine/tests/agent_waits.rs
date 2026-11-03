@@ -336,19 +336,44 @@ async fn dismissing_tells_the_agent_and_cancelling_does_not() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(harness.runs().len(), 1, "a withdrawn question says nothing");
-    let statuses: Vec<_> = core
-        .workspace
-        .read_questions()
-        .into_iter()
-        .map(|q| q.status)
-        .collect();
+    let status = |q: &Value| question(&core, q["id"].as_str().unwrap()).status;
+    assert_eq!(status(&first), zeron_proto::QuestionStatus::Dismissed);
+    assert_eq!(status(&second), zeron_proto::QuestionStatus::Cancelled);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_withdraws_or_releases_only_its_own_questions() {
+    let (core, harness, client, _) = setup().await;
+    let asked = ask(&client, false).await;
+    let id = asked["id"].as_str().unwrap();
+    for (method, params) in [
+        (
+            methods::CANCEL_QUESTION,
+            json!({ "questionId": id, "chatId": TARGET }),
+        ),
+        (
+            methods::RELEASE_QUESTION,
+            json!({ "questionId": id, "chatId": TARGET, "deliver": true }),
+        ),
+    ] {
+        let refused = client.call(method, params).await;
+        assert!(refused.is_err(), "{method} on another chat's question");
+    }
     assert_eq!(
-        statuses,
-        vec![
-            zeron_proto::QuestionStatus::Dismissed,
-            zeron_proto::QuestionStatus::Cancelled
-        ]
+        question(&core, id).status,
+        zeron_proto::QuestionStatus::Pending
     );
+    // The person still answers it.
+    let answered = client
+        .call(
+            methods::ANSWER_QUESTION,
+            json!({ "questionId": id, "answer": "yes" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered["status"], "answered");
     let _ = harness.finish.send(());
     core.shutdown().await;
 }
@@ -491,11 +516,14 @@ async fn a_watch_survives_a_restart() {
     .await;
     core.shutdown().await;
     drop(core);
-    // The turn died with the engine; the watch, kept on disk, still reports it.
+    // The shutdown cut the turn off, which is not the end the watcher waits
+    // for: the watch, kept on disk, resumes and reports the revived turn.
     let harness = Held::new();
     let core = assemble(&path, harness.clone());
     wait_for(
         || {
+            // Let the revived turn finish.
+            let _ = harness.finish.send(());
             harness
                 .runs()
                 .iter()
