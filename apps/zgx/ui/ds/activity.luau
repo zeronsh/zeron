@@ -61,6 +61,7 @@ export type Tool = {
 	exit_code: number?,
 	output_ref: string?,
 	output_bytes: number?,
+	output_trimmed: boolean?,
 	diff_ref: string?,
 	stats: { ToolDetail.Stat }?,
 	diff: ToolDetail.Diff?,

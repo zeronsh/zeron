@@ -90,6 +90,8 @@ local TOOLS = {
 		output = "Exit code 2\n\27[1;31merror\27[0m: \27]0;title\7missing \27[4mtarget\27[24m\nfetch 10%\rfetch 100%\n",
 	},
 	{ id = "p7", kind = "exec", verb = "Ran", target = "seq 5000", output = table.concat(HUGE, "\n") },
+	-- (The engine's tail of a long run: its end only, and its exit code.)
+	{ id = "p9", kind = "exec", verb = "Ran", target = "cargo nextest", failed = true, exit_code = 101, output_trimmed = true, output = "test b ... FAILED\nerror: 1 test failed\n" },
 }
 
 local function tools(): { any }
