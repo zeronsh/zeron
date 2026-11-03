@@ -47,6 +47,7 @@ local status = require("@self/status")
 local locale = require("@self/locale")
 local Links = require("@ds/links")
 local ReplyPicture = require("@self/reply_picture")
+local Wide = require("@self/wide")
 
 export type Props = {
 	id: string,
@@ -773,10 +774,18 @@ local JUSTIFY = { start = "start", center = "center", ["end"] = "end", between =
 
 -- How a child sits in a row: the width it was given, the spare width it
 -- takes (asked, or a node with no width of its own), or its own.
+-- (A width it was given is the most it takes: the visual is as wide as its
+-- widths ask, up to the page's room (`required`); past that they give way
+-- together, so nothing runs off its side unseen.)
 local function place(props: { [any]: any }, n: any, parent: string)
 	if n.w then
 		props.w = raw(n.w, "a visual's width for this, as its script asks")
-		props.shrink = 0
+		if parent == "row" then
+			props.shrink = 1
+			props.min_w = 0
+		else
+			props.max_w = "100%"
+		end
 	elseif n.grow or (parent == "row" and FLUID[n.k]) then
 		props.grow = 1
 		props.basis = 0
@@ -972,6 +981,41 @@ build = function(n: any, ctx: Ctx, parent: string): Node
 	return ui.div {}
 end
 
+-- How wide a visual's content must be: the widths its script fixed, side
+-- by side in a row with its gaps (one under another where the row wraps),
+-- the widest of a column's; text, charts and the rest take what they're
+-- given, so they ask for none.
+local function required(n: any): number
+	if type(n) ~= "table" then
+		return 0
+	end
+	local own = if type(n.w) == "number" then n.w else 0
+	local inner = 0
+	local kids = n.children or {}
+	local gap = if type(n.gap) == "number" then n.gap else 0
+	if n.k == "row" then
+		for _, child in kids do
+			local r = required(child)
+			inner = if n.wrap then math.max(inner, r) else inner + r
+		end
+		if not n.wrap and #kids > 1 then
+			inner += gap * (#kids - 1)
+		end
+	elseif n.k == "column" then
+		for _, child in kids do
+			inner = math.max(inner, required(child))
+		end
+	elseif n.k == "grid" then
+		local cols = if type(n.columns) == "number" then n.columns else 1
+		local widest = 0
+		for _, child in kids do
+			widest = math.max(widest, required(child))
+		end
+		inner = widest * cols + gap * math.max(0, cols - 1)
+	end
+	return math.max(own, inner)
+end
+
 -- ---- the visual ---------------------------------------------------------------
 
 return ui.component(function(props: Props): Node
@@ -1061,11 +1105,22 @@ return ui.component(function(props: Props): Node
 		end
 		return drew:get()
 	end
+	-- Wider than the column (widths its script fixed): the page's room, in
+	-- a reply (ds/wide), centred on the column.
+	local room = Wide.context()
+	local need = ui.computed(function(): number
+		local tree = snap:get().tree
+		return if tree then required(tree) else 0
+	end)
 	return ui.column {
 		class = "visual",
 		role = "group",
 		label = title(),
-		w_full = true,
+		self = "center",
+		w = Wide.width(room, function(): number
+			return need:get()
+		end),
+		min_w = 0,
 		gap = "$space.3",
 		ui.presence(function(): string
 			return shape:get()
