@@ -81,6 +81,9 @@ zatex = { path = "../../crates/zatex", features = ["bundled"] }
 # Imported VS Code themes (src/themes.rs): the shipping app's theme crate,
 # its importer, library file and error words.
 zeron-theme = { path = "../../crates/theme" }
+# (A preview's process label and redacted command line, one copy with the
+# engine that advertises them.)
+zeron-proto = { path = "../../crates/proto" }
 # Zeron's command line (`zeron headless`, `zeron login`, …: src/main.rs),
 # the engine helper's start-up (src/engine/manager.rs) and the app's own
 # updates and release channel (src/about.rs): the shipping app's crates,
