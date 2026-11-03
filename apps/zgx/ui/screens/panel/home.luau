@@ -8,7 +8,8 @@
 -- runs one in a terminal tab of its own, its gear edits it, a zeron.json
 -- action not yet added imports, Add action adds one). Then what can open
 -- here, each with the one key that opens it: Browser B, File viewer F,
--- Terminal T, Side chat S, Fork chat K (plugins' rows after them,
+-- Terminal T, Side chat S, Fork chat K, Notes N (a main chat's alone: side
+-- chats and subagents have none; plugins' rows after them,
 -- `hook:panel.empty`; C and H are the Git plugin's). Last, the session's
 -- side chats and forks, and its subagents: each a part that folds (folded
 -- or not kept per session), a list that builds only the rows in view, a
@@ -171,6 +172,10 @@ export type Props = {
 	open_subagent: ((session: string, sub: any) -> ())?,
 	-- A web address in a browser tab of the session's panel (a port's).
 	open_url: ((session: string, url: string) -> ())?,
+	-- The session's notes (screens/panel/notes), and whether it has any to
+	-- open: a main chat's (tracked).
+	open_notes: ((session: string) -> ())?,
+	is_main: ((session: string?) -> boolean)?,
 	showing: () -> boolean,
 }
 
@@ -1225,7 +1230,8 @@ end
 -- ---------------------------------------------------------------------------
 -- The page.
 
-type Choice = { id: string, icon: Icon.Name, label: string, key: string, run: () -> () }
+-- (`shown`: whether it's offered now, tracked; always, without it.)
+type Choice = { id: string, icon: Icon.Name, label: string, key: string, run: () -> (), shown: (() -> boolean)? }
 
 M.Page = ui.component(function(props: Props): Node
 	local sid = props.session
@@ -1250,11 +1256,33 @@ M.Page = ui.component(function(props: Props): Node
 			fork(sid)
 		end })
 	end
+	-- Notes, for a main chat only: a side chat's or a subagent's panel has
+	-- no row, and N opens nothing there.
+	if sid and props.open_notes and props.is_main then
+		local open_notes, is_main = props.open_notes, props.is_main
+		local function main(): boolean
+			return is_main(sid)
+		end
+		table.insert(choices, { id = "panel-open-notes", icon = "notebook", label = "panel.empty.notes", key = "N", shown = main, run = function()
+			open_notes(sid)
+		end })
+	end
 	local letters: { [string]: () -> () } = {}
 	local rows: { Node } = {}
 	for _, c in choices do
-		letters[c.key] = c.run
-		table.insert(rows, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run })
+		local row = PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run }
+		local shown = c.shown
+		if shown then
+			letters[c.key] = function()
+				if shown() then
+					c.run()
+				end
+			end
+			table.insert(rows, ui.show(shown, row))
+		else
+			letters[c.key] = c.run
+			table.insert(rows, row)
+		end
 	end
 	-- Its letters heard while it's here (one home at a time: the last made).
 	local mine: Live = {

@@ -6,6 +6,8 @@
 //!   respondInput) with client-minted message ids for optimistic echo;
 //! - `queue`: enqueue + reorder. Edits and removals go through the host
 //!   (lease / acknowledgement RPCs) because it serializes them with delivery.
+//! - `notes`: the user's scratchpad, written directly (compare-and-set on a
+//!   hash of the text, see `zeron_doc::notes`). The host has no say in it.
 //!
 //! The host writes all transcript entries and command outcomes.
 
@@ -18,9 +20,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use tokio::sync::watch;
 use zeron_doc::{
-    CommandBasedOn, MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, QueuedMessage,
-    SessionCommandEntry, SessionCommandPayload, SessionCommandStatus, SessionDoc,
-    SessionMessageEntry,
+    CommandBasedOn, MessagePart, MessageRole, MessageStatus, NotesSnapshot, NotesWrite,
+    QueueDeliveryGate, QueuedMessage, SessionCommandEntry, SessionCommandPayload,
+    SessionCommandStatus, SessionDoc, SessionMessageEntry,
 };
 use zeron_proto::{
     ChatIndicator, ContextUsage, RunRequest, SandboxLevel, UserInputAnswer, WorktreeSpec,
@@ -196,6 +198,7 @@ pub(crate) struct SessionCore {
     _subscription: loro::Subscription,
     state: Mutex<CoreState>,
     transcript_tx: watch::Sender<Arc<SessionSnapshot>>,
+    notes_tx: watch::Sender<NotesSnapshot>,
     composer: RwLock<Arc<ComposerState>>,
     /// Serializes composer recomputes: each reads its inputs and publishes
     /// under it, so an older read can't land after a newer one.
@@ -222,6 +225,7 @@ impl SessionCore {
             chat_id: chat_id.to_owned(),
             ..Default::default()
         }));
+        let (notes_tx, _) = watch::channel(doc.notes_snapshot());
         let composer = Arc::new(empty_composer(chat_id));
         let refresh_wake = Arc::new(tokio::sync::Notify::new());
         let tasks = client.cancel.child_token();
@@ -254,6 +258,7 @@ impl SessionCore {
                 composer_revision: 0,
             }),
             transcript_tx,
+            notes_tx,
             composer: RwLock::new(composer),
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
@@ -413,6 +418,14 @@ impl SessionCore {
         self.transcript_tx.subscribe()
     }
 
+    pub(crate) fn notes(&self) -> NotesSnapshot {
+        self.notes_tx.borrow().clone()
+    }
+
+    pub(crate) fn subscribe_notes(&self) -> watch::Receiver<NotesSnapshot> {
+        self.notes_tx.subscribe()
+    }
+
     pub(crate) fn composer(&self) -> Arc<ComposerState> {
         read(&self.composer).clone()
     }
@@ -431,6 +444,17 @@ impl SessionCore {
     pub(crate) fn refresh(&self) {
         let Ok(client) = self.client() else { return };
         let dirty = std::mem::take(&mut *lock(&self.dirty));
+        if dirty.notes {
+            let notes = self.doc.notes_snapshot();
+            self.notes_tx.send_if_modified(|slot| {
+                if *slot == notes {
+                    false
+                } else {
+                    *slot = notes;
+                    true
+                }
+            });
+        }
         let now = now_ms();
         let degraded = client.chat_delivery_degraded(&self.chat_id);
         let workspace = client.workspace.snapshot();
@@ -1039,6 +1063,40 @@ impl SessionHandle {
             }
         });
         SnapshotWatch { cancel }
+    }
+
+    /// The session's notes as last published.
+    pub fn notes(&self) -> NotesSnapshot {
+        self.core.notes()
+    }
+
+    /// Callback-style notes subscription: `f` gets the current notes at once,
+    /// then every change, local or remote. Same threading and lifetime as
+    /// [`Self::watch`].
+    pub fn watch_notes(&self, f: impl Fn(NotesSnapshot) + Send + Sync + 'static) -> SnapshotWatch {
+        let mut rx = self.core.subscribe_notes();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        crate::runtime::shared().spawn(async move {
+            let first = rx.borrow_and_update().clone();
+            f(first);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    changed = rx.changed() => if changed.is_err() { return },
+                }
+                let next = rx.borrow_and_update().clone();
+                f(next);
+            }
+        });
+        SnapshotWatch { cancel }
+    }
+
+    /// Compare-and-set the notes against the hash the caller started from
+    /// (see `zeron_doc::notes`). An applied write reaches the room through the
+    /// durable outbox like any other local commit, online or not.
+    pub fn set_notes(&self, base_hash: &str, text: &str) -> Result<NotesWrite> {
+        self.core.write(|doc| doc.write_notes(base_hash, text))
     }
 
     pub fn composer(&self) -> Arc<ComposerState> {

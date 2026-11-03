@@ -67,6 +67,7 @@ export type Name =
 	| "moon"
 	| "terminal"
 	| "document"
+	| "notebook"
 	| "file-diff"
 	| "document-add"
 	| "global"

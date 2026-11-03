@@ -4,9 +4,11 @@
 -- changes), its side chats and the open chat's subagents are made up here;
 -- the home's host calls (screens/panel/home_api), the terminal's, and
 -- what's asked of sessions (create, fork) and lanes (watch) are stood in
--- for, each noted in `calls`. Commands: `many` (300 side chats and 200
--- subagents), `away` (the device can't be reached), `actions_fail`,
--- `actions_ok`, `fixture.light` / `fixture.dark`.
+-- for, each noted in `calls`, and the notes' engine (see there). Commands:
+-- `many` (300 side chats and 200 subagents), `away` (the device can't be
+-- reached), `actions_fail`, `actions_ok`, `notes_remote`,
+-- `notes_old_engine`, `notes_new_engine`, `fixture.light` /
+-- `fixture.dark`.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -212,6 +214,79 @@ tapi.view = function(props: any): Node
 		ui.text { `terminal {if props.term then props.term.command else ""}`, literal = true },
 	}
 end
+
+-- The notes' host (screens/panel/notes_api): an engine of its own here,
+-- compare-and-set on the text's hash as the engine's is (crates/doc
+-- notes.rs), its reports in `test_notes_report`. `notes_text` is what it
+-- holds; `notes_remote` is another computer putting a line at its top;
+-- `notes_old_engine` / `notes_new_engine` an engine from before notes and
+-- one after.
+local notes_api = require("@app/screens/panel/notes_api") :: any
+local Notes = require("@app/screens/panel/notes")
+local notes_text = ui.state("notes_text", "")
+local notes_report = ui.state("test_notes_report", nil :: any)
+local notes_old = false
+local notes_seq = 0
+local function notes_snapshot(): any
+	local t = notes_text:peek()
+	return { text = t, hash = Notes.hash(t), epoch = 7, seq = notes_seq }
+end
+local function notes_publish()
+	notes_seq += 1
+	notes_report:set(if notes_old then { unsupported = true } else notes_snapshot())
+end
+notes_publish()
+notes_api.watch = function(chat: string): () -> ()
+	note(`notes_watch:{chat}`)
+	return function()
+		note(`notes_unwatch:{chat}`)
+	end
+end
+notes_api.report = function(_chat: string): any
+	return notes_report:get()
+end
+notes_api.set = function(_chat: string, base_hash: string, text: string): any
+	if notes_old then
+		return settled(false, { message = "unsupported" })
+	end
+	note(`notes_set:{text}`)
+	if base_hash ~= Notes.hash(notes_text:peek()) then
+		return settled(true, { kind = "conflict", current = notes_snapshot() })
+	end
+	notes_text:set(text)
+	notes_publish()
+	local s = notes_snapshot()
+	return settled(true, { kind = "applied", hash = s.hash, epoch = s.epoch, seq = s.seq })
+end
+ui.command { id = "notes_remote", title = "Notes: another computer writes", run = function()
+	notes_text:set("From the laptop\n" .. notes_text:peek())
+	notes_publish()
+end }
+-- The merge's parts, run here (a test reads `test_notes_selftest`).
+local selftest = ui.state("test_notes_selftest", nil :: any)
+ui.command { id = "notes_selftest", title = "Notes: the merge's parts", run = function()
+	local e = Notes.diff("é", "è") :: any
+	selftest:set({
+		hash_empty = Notes.hash(""),
+		hash_a = Notes.hash("a"),
+		hash_long = Notes.hash("# Plan\n- [ ] é ship notes 🚀"),
+		-- (crates/doc `notes_hash` of the same text.)
+		hash_long_engine = "6d31b6c8ea457310",
+		both = Notes.rebase("abc", "aXbc", "abcY"),
+		one = Notes.rebase("abc", "abc", "abcY"),
+		overlap = Notes.rebase("hello", "help", "hello!"),
+		empty_base = Notes.rebase("", "mine", "theirs"),
+		accent = `{e.from},{e.to},{e.insert}`,
+	})
+end }
+ui.command { id = "notes_old_engine", title = "Notes: an engine from before them", run = function()
+	notes_old = true
+	notes_publish()
+end }
+ui.command { id = "notes_new_engine", title = "Notes: an engine with them", run = function()
+	notes_old = false
+	notes_publish()
+end }
 
 -- Plugins' tabs asked for (the branch's +N −M opens the Git tab).
 local Panel = require("@app/screens/panel")
