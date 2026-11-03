@@ -10,8 +10,8 @@
 -- that still says what matters: "Todo 3/7 · Porting the queue's reorder",
 -- "Running 2 · cargo test · 2m 14s", "Queued 2 · Then run the tests…".
 -- Opening one folds the rest; a tray whose work is done folds itself (the
--- plan once every step is done and the turn is idle). A tray that arrives
--- while nothing is open, opens.
+-- plan once every step is done and the turn is idle). A queue or plan that
+-- arrives while nothing is open, opens; what is running stays folded.
 --
 --   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
 --
@@ -800,15 +800,17 @@ M.Dock = ui.component(function(props: Props): Node
 			open:set(nil)
 		end
 	end)
-	local seen = { queue = false, todos = false, tasks = false }
+	-- What is running doesn't: it stays folded to its header ("Running 3 ·
+	-- cargo test · 2m") until opened, as a session can hold a score of
+	-- processes for hours. Opened, it stays open while any run.
+	local seen = { queue = false, todos = false }
 	ui.effect(function()
-		local q, t, k = has_queue(), has_todos(), has_tasks()
+		local q, t = has_queue(), has_todos()
 		local arrived: Tray? = if q and not seen.queue
 			then "queue"
 			elseif t and not seen.todos and not (all_done() and not live()) then "todos"
-			elseif k and not seen.tasks then "tasks"
 			else nil
-		seen.queue, seen.todos, seen.tasks = q, t, k
+		seen.queue, seen.todos = q, t
 		if arrived and open:peek() == nil then
 			open:set(arrived)
 		end
