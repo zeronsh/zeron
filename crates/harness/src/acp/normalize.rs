@@ -423,6 +423,8 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 },
             ]
         }
@@ -462,6 +464,8 @@ fn resolved_result(update: &Value, id: String) -> Option<AgentEvent> {
         output: tool_output(update),
         diff: tool_diff(update),
         exit_code: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     })
 }
 
@@ -563,6 +567,8 @@ mod tests {
                     output: Some("total 0".into()),
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 },
             ]
         );
@@ -607,6 +613,8 @@ mod tests {
                     new_text: "fn new() {}".into(),
                 }),
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             }
         );
     }
@@ -646,6 +654,8 @@ mod tests {
                 output: None,
                 diff: None,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             }]
         );
     }

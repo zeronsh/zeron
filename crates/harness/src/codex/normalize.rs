@@ -330,6 +330,8 @@ fn tool_lifecycle(phase: Phase, id: String, call: ToolCall, is_error: bool) -> V
                 output: None,
                 diff: None,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             },
         ],
     }
@@ -460,6 +462,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 },
             ];
             if let Some(message) = error {
@@ -504,6 +508,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     output,
                     diff: None,
                     exit_code,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 }]
             }
         },
@@ -560,6 +566,8 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                 output: None,
                 diff: None,
                 exit_code: None,
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             }],
         },
         "webSearch" | "web_search" => tool_lifecycle(
@@ -1038,6 +1046,8 @@ mod tests {
                 },
             },
             AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: "m1".into(),
                 is_error: false,
                 output: Some("secret file contents\n".repeat(10)),
@@ -1087,6 +1097,8 @@ mod tests {
                 output: None,
                 diff: None,
                 exit_code: Some(2),
+                preview_paths: Vec::new(),
+                image_payloads: Vec::new(),
             }]
         );
     }
@@ -1129,6 +1141,8 @@ mod tests {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 },
             ]
         );
@@ -1174,6 +1188,8 @@ mod tests {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     },
                 ]
             );
@@ -1209,6 +1225,8 @@ mod tests {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 },
             ]
         );

@@ -107,6 +107,8 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         },
         fanout_tag(
             i,
@@ -321,6 +323,8 @@ impl Harness for MockHarness {
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
                             exit_code: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                         });
                         send("All 128 tests pass.");
                     } else {
@@ -550,6 +554,8 @@ impl Harness for MockHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     },
                 ]
             })
@@ -589,6 +595,8 @@ impl Harness for MockHarness {
                     output: None,
                     diff: None,
                     exit_code: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 };
                 let done = AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -755,6 +763,8 @@ impl Harness for MockHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     },
                 ]
             })
@@ -812,6 +822,8 @@ impl Harness for MockHarness {
                         output: None,
                         diff: None,
                         exit_code: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     });
                     events.push(AgentEvent::TextDelta {
                         text: format!("Update {} written.\n\n", active + 1),
@@ -983,6 +995,8 @@ fn hang_run(
                         tokio::time::sleep(pause).await;
                         command_open = false;
                         let _ = tx.send(AgentEvent::ToolResult {
+                            image_payloads: Vec::new(),
+                            preview_paths: Vec::new(),
                             id,
                             is_error: true,
                             output: Some("Exit code 137\n\n[killed]".into()),
@@ -1003,6 +1017,8 @@ fn hang_run(
                             session_id: None,
                         }));
                         let _ = tx.send(AgentEvent::ToolResult {
+                            image_payloads: Vec::new(),
+                            preview_paths: Vec::new(),
                             id,
                             is_error: true,
                             output: Some("[Request interrupted by user for tool use]".into()),
@@ -1116,6 +1132,8 @@ fn background_run(
                 },
             });
             let _ = tx.send(AgentEvent::ToolResult {
+                image_payloads: Vec::new(),
+                preview_paths: Vec::new(),
                 id: format!("{id}-call"),
                 is_error: false,
                 output: Some(format!("Command running in background with ID: {id}")),

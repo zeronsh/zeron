@@ -441,6 +441,8 @@ async fn open_tool_call_never_quiesces() {
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         })
         .unwrap();
     rig.feed.send(text("Build done.")).unwrap();
@@ -482,6 +484,8 @@ async fn stale_tool_echo_stays_parked() {
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         })
         .unwrap();
     rig.feed

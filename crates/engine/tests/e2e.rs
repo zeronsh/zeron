@@ -80,6 +80,8 @@ fn mock_script() -> Vec<AgentEvent> {
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         },
         done(DoneStatus::Completed),
     ]
@@ -1338,6 +1340,7 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_tail: None,
         exit_code: None,
         output_truncated: false,
+        preview_paths: Vec::new(),
     }
 }
 
@@ -2879,6 +2882,8 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         },
         AgentEvent::TextDelta { text: "two".into() },
         done(DoneStatus::Completed),
@@ -3283,6 +3288,8 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             output: None,
             diff: None,
             exit_code: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         },
         image.clone(),
         image.clone(),

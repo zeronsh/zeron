@@ -171,6 +171,8 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
             output: None,
             diff: None,
             exit_code: Some(0),
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         }),
     }));
 
@@ -200,6 +202,8 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
         output: None,
         diff: None,
         exit_code: Some(0),
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
     assert!(events.contains(&AgentEvent::ToolResult {
         id: "tool-2".into(),
@@ -207,6 +211,8 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
         output: None,
         diff: None,
         exit_code: None,
+        preview_paths: Vec::new(),
+        image_payloads: Vec::new(),
     }));
 
     // Informational rate-limit frames stay quiet.

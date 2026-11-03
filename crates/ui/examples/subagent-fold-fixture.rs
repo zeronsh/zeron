@@ -41,6 +41,7 @@ fn agent(id: &str, description: &str) -> MessagePart {
         subagent_tail: None,
         exit_code: None,
         output_truncated: false,
+        preview_paths: Vec::new(),
     }
 }
 
