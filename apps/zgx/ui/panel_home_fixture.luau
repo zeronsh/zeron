@@ -237,6 +237,15 @@ ui.command { id = "side_elsewhere", title = "A side chat on the devbox", run = f
 	table.insert(children, { id = "side-box", parent = "chat-1", title = "Try it on the devbox", device = "box", updated = NOW - 10, created = NOW - 20, agent = "claude" })
 	publish()
 end }
+-- Lanes at work further down: a side chat working since long ago (under
+-- the idle one, by when they moved), and a subagent running after the
+-- finished one (spawned in the same turn).
+ui.command { id = "lanes_at_work", title = "Lanes at work further down", run = function()
+	table.insert(children, { id = "side-old", parent = "chat-1", title = "Long-running refactor", device = "d", status = "working", updated = NOW - 7200, created = NOW - 7300, agent = "claude" })
+	publish()
+	table.insert(subs, { id = "t3", kind = "agent", verb = "Ran a subagent", subagent = { ref = "chat-1--sub--3", title = "watch the build", status = "running" } })
+	publish_messages()
+end }
 -- The rows' menus (a secondary click opens them): a session's, the
 -- sidebar's own builder, for `test_menu_of`; a subagent's, the home's.
 -- Their labels in `test_menu_labels`.
