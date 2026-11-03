@@ -19,7 +19,7 @@ use zeron_doc::{
 use zeron_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc, methods};
+use zeron_rpc::{RpcClient, RpcError, RpcSubscription, connect_ipc_as_agent, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -144,7 +144,8 @@ pub struct Zeron {
 impl Zeron {
     /// Lazy dialer: nothing connects until the first tool call, so `zeron
     /// mcp` starts (and answers `initialize`) even before the engine is up.
-    /// Every (re)dial re-reads the engine's IPC token ([`connect_ipc`]).
+    /// Every (re)dial re-reads the engine's agent-scoped IPC token
+    /// ([`connect_ipc_as_agent`]).
     pub fn new(port: u16, data_dir: Option<std::path::PathBuf>, origin: Origin) -> Self {
         Self {
             port: Some(port),
@@ -176,7 +177,8 @@ impl Zeron {
         let Some(port) = self.port else {
             bail!("engine connection closed");
         };
-        let client = connect_ipc(port, self.data_dir.as_deref())
+        // The agent-scoped token only: this server speaks for an agent.
+        let client = connect_ipc_as_agent(port, self.data_dir.as_deref())
             .await
             .map_err(|e| {
                 anyhow!(

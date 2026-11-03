@@ -694,8 +694,11 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 				return if ended() then "$text.tertiary" else "$text.primary"
 			end,
 		},
+		-- The word on it takes what the name leaves (from nothing, not from
+		-- its own width): a long command beside it would otherwise take the
+		-- larger share of the shrinking and cut the name to a few letters.
 		if t.detail
-			then FadeText { t.detail, literal = true, grow = 1, text_size = "$font.size.sm", color = "$text.tertiary" }
+			then FadeText { t.detail, literal = true, grow = 1, basis = 0, text_size = "$font.size.sm", color = "$text.tertiary" }
 			else ui.div { grow = 1 },
 		ui.text {
 			function(): string

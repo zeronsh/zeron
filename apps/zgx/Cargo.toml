@@ -33,7 +33,12 @@ zgx = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b
 # held), and zgx measures 1-10% less CPU for script, text and layout work.
 # `terminal`: `ui.terminal` drawn by zgx (a pseudoterminal and its screen),
 # for the panel's terminal tabs (src/terminal.rs runs the process in it).
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["mimalloc", "terminal"] }
+# `webkitgtk`: `ui.webview` on Linux, for the panel's browser tabs, as
+# WebKitGTK 4.1 pages (webkit2gtk-4.1), opened at run time: building needs
+# none of it, and without it pages are placeholders ("Web view · <url>").
+# zgx-run turns it on by default, but this app takes zgx-run without its
+# defaults (below). Nothing on macOS or Windows.
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", features = ["mimalloc", "terminal", "webkitgtk"] }
 # `inspect`: devtools for `zgx inspect` (and its MCP server), asked for
 # with `--inspect`. `i18n`: `ui.t`'s plurals and numbers by each locale's
 # own rules (ICU4X's data, about 90 KB), for ui/locales' translations.
@@ -44,7 +49,7 @@ zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090
 zgx-gpu = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", default-features = false }
 # Each plugin's own database (`zeron.db`, src/plugins/db.rs): SQLite,
 # built in; `limits` to keep one from attaching any other file.
-rusqlite = { version = "0.32", features = ["bundled", "limits"] }
+rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks"] }
 # `fetch`: zgx's own transport for `ui.fetch` and remote images (HTTP and
 # HTTPS, rustls), given to every window (src/main.rs): the app's scripts,
 # and plugins granted "network". Nothing else of the runner.
@@ -99,6 +104,8 @@ json5 = "0.4"
 # `show_visual` scripts, and its offscreen GPU renderer for their scenes and
 # shaders (the same wgpu zgx draws with).
 zeron-visual = { path = "../../crates/visual" }
+# The rules plugins are held to (paths, programs, network), the engine's own.
+zeron-plugin-guard = { path = "../../crates/plugin-guard" }
 zeron-visual-gpu = { path = "../../crates/visual-gpu" }
 # Their frames' pixel loops, optimized in debug builds too (below).
 zeron-zgx-pixels = { path = "pixels" }

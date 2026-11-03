@@ -453,6 +453,7 @@
       "devices": "Devices",
       "sessions": "Sessions",
       "new_chat_in": "New chat in {name}",
+      "new_chat_in_on": "New chat in {name} on {device}",
       "new_chat": "New chat",
       "search": "Search",
       "pinned": "Pinned",
@@ -489,11 +490,14 @@
         "create_section": "Create section",
         "keep_active": "Active when collapsed",
         "devices_first": "Devices first",
-        "projects_first": "Projects first"
+        "projects_first": "Projects first",
+        "empty_projects": "Empty projects"
       },
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
-      "show_less": "Show less"
+      "show_less": "Show less",
+      "empty_projects_word": "Empty",
+      "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
     },
     "git": {
       "pull_request": "Pull request",
@@ -778,7 +782,8 @@
       "show_fewer": "Show fewer attachments",
       "show_more": "Show {n} more attachments",
       "show_less": "Show less",
-      "more": "+{n} more"
+      "more": "+{n} more",
+      "comment_from": "From {plugin}"
     },
     "composer_dock": {
       "fold": "Fold {title}",
@@ -1780,7 +1785,10 @@
         "not_found": "That's already gone.",
         "invalid": "That doesn't look right.",
         "too_large": "That picture is too large. Try a smaller one.",
-        "last_admin": "You're the only admin of your organization. Make someone else an admin first."
+        "last_admin": "You're the only admin of your organization. Make someone else an admin first.",
+        "busy": "Someone in your organization is changing roles right now. Try again in a moment.",
+        "try_again": "Your account couldn't be deleted just now. Nothing was removed. Try again in a moment.",
+        "timed_out": "Signing in again took too long, so nothing was deleted. Try again."
       },
       "couldnt_save_name": "Couldn't save your name",
       "couldnt_rename_org": "Couldn't rename the organization",
@@ -1990,8 +1998,12 @@
         "description": "Your account, its card and your place in your organization, for good.",
         "failed": "Couldn't delete your account",
         "confirm_title": "Delete your account?",
-        "confirm_body_org": "You'll leave {org} and be signed out everywhere. Your card's address is retired. This can't be undone.",
-        "confirm_body": "You'll be signed out everywhere. Your card's address is retired. This can't be undone."
+        "confirm_body_org": "You'll leave {org} and be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "confirm_body": "You'll be signed out everywhere. Your card's address is retired. This can't be undone. You'll sign in again to confirm it's you.",
+        "step_up": {
+          "title": "To delete your account, sign in again",
+          "body": "Finish signing in in your browser. Your account is deleted as soon as you have."
+        }
       },
       "claim": {
         "open": "Claim a username",
@@ -2012,6 +2024,24 @@
         "sessions": "Your sessions, everywhere",
         "sessions_description": "Pick up any chat on your phone or another computer.",
         "sign_in": "Sign in"
+      },
+      "keys": {
+        "label": "Signing keys",
+        "terms": "keys signing plugins templates security revoke fingerprint devices",
+        "description": "Your devices sign the plugins and templates you make with these. If you don't recognise a key, revoke it.",
+        "this_mac": "This Mac",
+        "another_device": "Another device",
+        "new": "New",
+        "added": "Added {date}",
+        "revoked": "Revoked {date}",
+        "revoke": "Revoke",
+        "revoke_title": "Revoke this key?",
+        "revoke_body": "Plugins and templates it signed will stop counting as yours.",
+        "revoke_failed": "Couldn't revoke the key",
+        "none": "No signing keys yet.",
+        "none_how": "One is made when you sign a plugin.",
+        "failed": "Couldn't load your signing keys",
+        "retry": "Try again"
       }
     },
     "browser": {
@@ -2964,11 +2994,11 @@
         },
         "ui_change": {
           "title": "Change how {places} shows",
-          "detail": "It can hide, reorder or relabel what's there."
+          "detail": "It can hide, reorder, relabel or redraw what's there."
         },
         "ui_replace": {
           "title": "Replace {places} with its own",
-          "detail": "It runs as part of Zeron and can do anything Zeron can."
+          "detail": "Its code runs as part of Zeron: it can do anything you can."
         },
         "profile_read": {
           "title": "See your name, username and picture"
@@ -3014,7 +3044,9 @@
           "detail": "You still send it."
         },
         "network": {
-          "title": "Connect to the internet"
+          "title": "Connect to the internet",
+          "title_any": "Connect to any site on the internet",
+          "title_hosts": "Connect to these places"
         },
         "clipboard": {
           "title": "Read and change your clipboard"
@@ -3037,7 +3069,8 @@
         "commands": {
           "title": "Run {list} on this Mac as you",
           "title_on": "Run {list} on {device} as you",
-          "detail": "It can do whatever {list} can do with your sign-ins."
+          "detail": "It can do whatever {list} can do with your sign-ins.",
+          "detail_anything": "These can do anything you can, with your sign-ins."
         },
         "native": {
           "title": "Run its own program on this Mac for your agents",
@@ -3075,7 +3108,28 @@
       },
       "unverified": "Unverified",
       "from": "From {where}",
-      "from_file": "From a file"
+      "from_file": "From a file",
+      "more": "and {n} more",
+      "diff": {
+        "commands": "Run more programs as you",
+        "mcp": "Run a different program beside your agents",
+        "mcp_gone": "Stop running its program beside your agents",
+        "tools_added": "New tools for your agents",
+        "tools_changed": "Tools that now tell your agents something else",
+        "service": "Run a different background service",
+        "entry": "Start from a different file",
+        "network": "Connect to more places",
+        "settings": "Its settings changed",
+        "ui_replace": "Replace {places} with its own"
+      },
+      "can_anything": "{name}: can do anything you can",
+      "any_site": "Any site on the internet",
+      "near_host": "{host}: this Mac or your network",
+      "details": {
+        "changes": "Parts of Zeron it changes",
+        "replaces": "Screens it replaces",
+        "changes_since": "Also changes, since you allowed it"
+      }
     },
     "page": {
       "title": "Plugins",
@@ -3129,7 +3183,9 @@
       "remove_body_device": "It stops everywhere in Zeron on {device} at once. Its folder goes to the removed items in that computer's plugins folder, in case you want it back.",
       "install_dialog_title_device": "Install a plugin on {device}",
       "install_dialog_body_device": "Paste a link to a .zeron-plugin file, a GitHub release or a repository. Zeron checks who signed it, and you allow what it asks before it runs there.",
-      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins."
+      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins.",
+      "setup_title": "Finish setting up your account",
+      "setup_body": "Your plugins load as soon as you've chosen where you work."
     },
     "consent": {
       "made_by_you": "Made by you",
@@ -3143,12 +3199,20 @@
       "tampered": "Changed since you allowed it",
       "asks_again": "It now also asks to:",
       "asks": "It asks to:",
-      "mine": "It's mine",
+      "mine": "It's mine…",
       "not_now": "Not now",
       "allow": "Allow",
       "on_device": "On {device}",
       "unverified_why": "Zeron can't confirm who made this. Allow it only if you trust where it came from.",
-      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}."
+      "unverified_why_from": "Zeron can't confirm who made this. Allow it only if you trust where it came from: {where}.",
+      "made_on_your_device": "Made on one of your devices",
+      "grew": "New since you allowed it:",
+      "allow_there": "Allow it on {device}: it asks there, in Zeron on that computer.",
+      "mine_confirm": "Sign {name} as your own? Only if you wrote it yourself: Zeron will treat it as yours from now on, on this Mac.",
+      "mine_cancel": "Cancel",
+      "mine_sign": "Sign as mine",
+      "details": "Details",
+      "details_hide": "Hide details"
     },
     "permissions": {
       "screen_recording": {
@@ -3279,6 +3343,12 @@
       "nothing": "Nothing waiting",
       "nothing_body": "This template was answered already.",
       "install_title": "Install {name}?",
+      "keep_title": "Keep {name}?",
+      "keep_trust": "Keep it only if you trust what made it",
+      "keep_body": "An agent made, changed or switched to this template, or it hasn't been kept since it changed. Until you keep it, it's a preview: Zeron won't let it run programs, use your account, change plugins, templates or files, or send to agents. Kept, it runs with everything Zeron can do.",
+      "keep_files": "{n, plural, one {# file} other {# files}} of its own, as they are now",
+      "keep_files_detail": "If they change again, Zeron asks again.",
+      "keep": "Keep",
       "trust": "Install it only if you trust {whom}",
       "trust_body": "A template is Zeron's own code: it replaces Zeron's interface and runs with everything Zeron can do, with your chats, files, accounts and agents.",
       "unknown_body": "Zeron can't tell whose key signed it. Install it only if you trust where it came from.",

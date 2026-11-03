@@ -156,3 +156,9 @@ export const RUNNER_DEVICE_HEADER = "x-zeron-runner-device";
  * device, JWT `cld`). A session runner may read its account's project
  * spaces. Same strip-then-stamp discipline. */
 export const RUNNER_ACCOUNT_HEADER = "x-zeron-runner-account";
+
+/** Header the Worker stamps on a device-room client dial whose calling device
+ * it verified (device-link.ts): a runner's own device, or a device that
+ * proved possession of its registered plugin key. DeviceRoom puts it on every
+ * frame that client relays (`fromDevice`). Same strip-then-stamp discipline. */
+export const CALLER_DEVICE_HEADER = "x-zeron-caller-device";

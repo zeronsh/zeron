@@ -1691,8 +1691,9 @@ local function Transcript(props: Props): Node
 			-- painting them again (a view between device pixels can't).
 			snap = true,
 		} },
-		-- The scrollbar, over the list and never faded, running from its top
-		-- to the band the composer covers.
+		-- The scrollbar, over the list and never faded, running its whole
+		-- height: at the window's edge, beside the composer rather than
+		-- under it, so scrolled to the end it reaches the page's end.
 		Rail {
 			id = "transcript-rail",
 			offset = offset,
@@ -1701,7 +1702,7 @@ local function Transcript(props: Props): Node
 				return list.height or 0
 			end,
 			track = function(): number
-				return math.max(0, (list.height or 0) - foot())
+				return list.height or 0
 			end,
 		},
 		-- What a selection offers.

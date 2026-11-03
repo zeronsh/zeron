@@ -32,11 +32,12 @@ members = [
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
+    "crates/plugin-guard",
     "apps/zeron",
 ]
 
 [workspace.package]
-version = "0.2.134"
+version = "0.2.136"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -71,6 +72,7 @@ zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
+zeron-plugin-guard = { path = "crates/plugin-guard" }
 
 # CRDT
 loro = "1.17"

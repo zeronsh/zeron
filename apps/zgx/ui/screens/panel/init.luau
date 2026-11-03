@@ -52,6 +52,7 @@
 
 local ds = require("@ds")
 local control = require("@ds/control")
+local token = require("@ds/token")
 local motion = require("@ds/motion")
 local Icon = require("@ds/icon")
 local FileIcon = require("@ds/file_icons")
@@ -388,7 +389,7 @@ local LABEL_MAX = 140
 local SLOT = 18
 local BAND_H, BAND_PAD = 38, "$space.1"
 local STRIP_START = "$space.2"
-local TOGGLE_ROOM = ui.raw(34, "the title bar's panel toggle stands over the strip's end")
+local TOGGLE_ROOM = 34
 local STRIP_FADE = 36
 local SLIDE: Motion = { duration = 150, ease = "out(3)" }
 -- The title bar's controls' size (the Expand button stands with them).
@@ -802,14 +803,13 @@ M.Panel = ui.component(function(props: Props): Node
 				id = `panel-tab-{id}`,
 				ref = ref,
 				-- (What plugins place by, and what's under them: the tab, and a
-				-- file tab's file by its path.)
+				-- file tab's file, as a token.)
 				class = if tab.kind == "files" then "panel-tab file-tab" else "panel-tab",
 				provide = if tab.kind == "files"
 					then {
 						panel = id,
 						file = ui.computed(function(): string?
-							local path = Files.tab_file(id)
-							return path or tab.path
+							return token.file(Files.tab_file(id) or tab.path)
 						end),
 					}
 					else { panel = id },
@@ -1094,7 +1094,10 @@ M.Panel = ui.component(function(props: Props): Node
 				return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left), "clear of the title bar's controls, as its edge moves")
 			end
 			else STRIP_START,
-		pr = TOGGLE_ROOM,
+		-- (And the window's own buttons, where they stand at the right.)
+		pr = function(): number
+			return ui.raw(TOGGLE_ROOM + ds.TitleBar.window_buttons_right(), "the title bar's panel toggle, and the window's buttons, stand over the strip's end")
+		end,
 		items = "center",
 		window_drag = true,
 		-- (No hairline under it: the strip and what's under it are one

@@ -27,6 +27,8 @@ async fn call(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    // Allowing and signing as Zeron's consent window does: with a review.
+    let params = super::authority_tests::as_consent_window(plugins, method, params).await;
     match plugins.dispatch(method, params).await {
         Ok(RpcReply::Value(value)) => Ok(value),
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -409,6 +411,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("ada".into()),
             mine: false,
             revoked: false,
+            verified: None,
         },
     );
     fake.keys.lock().unwrap().insert(
@@ -417,6 +420,7 @@ async fn plugins_verified_author_and_different_author() {
             username: Some("eve".into()),
             mine: false,
             revoked: false,
+            verified: None,
         },
     );
     f.plugins.set_directory(fake.clone());
@@ -589,7 +593,7 @@ async fn plugins_list_is_sorted_and_reports_broken() {
 }
 
 #[tokio::test]
-async fn plugins_verify_and_sign_any_folder() {
+async fn plugins_verify_any_folder_and_sign_only_in_the_plugins_folder() {
     let f = fixture();
     let outside = tempfile::tempdir().unwrap();
     write_plugin(outside.path(), "ext", serde_json::json!({}), None);
@@ -603,16 +607,13 @@ async fn plugins_verify_and_sign_any_folder() {
     .await
     .unwrap();
     assert_eq!(unsigned["status"], "unsigned");
-    let signed = call(
-        &f.plugins,
-        methods::SIGN_PLUGIN,
-        serde_json::json!({ "path": path }),
-    )
-    .await
-    .unwrap();
+    // This device's key signs nothing outside the plugins folder (R4).
+    assert!(call(&f.plugins, methods::SIGN_PLUGIN, serde_json::json!({ "path": path })).await.is_err());
+    let key = signing::load_or_create_key(&f.data).unwrap();
+    sign_folder(&folder, &key).unwrap();
+    let signed = call(&f.plugins, methods::VERIFY_PLUGIN, serde_json::json!({ "path": path })).await.unwrap();
     assert_eq!(signed["status"], "ok");
     assert_eq!(signed["author"]["kind"], "you");
-    assert_eq!(signed["files"], 1);
     std::fs::write(folder.join("extra.luau"), "x").unwrap();
     let tampered = call(
         &f.plugins,
@@ -838,6 +839,7 @@ async fn plugins_deliver_checks_on_the_receiving_side() {
                 username: Some(user.into()),
                 mine: false,
                 revoked: false,
+                verified: None,
             },
         );
     }
@@ -1091,7 +1093,7 @@ fn someone(f: &Fixture, fake: &Arc<FakeDirectory>, username: &str) -> SigningKey
     let (key, _) = SigningKey::generate().unwrap();
     fake.keys.lock().unwrap().insert(
         key.public(),
-        Lookup::Found { username: Some(username.into()), mine: false, revoked: false },
+        Lookup::Found { username: Some(username.into()), mine: false, revoked: false, verified: None },
     );
     f.plugins.set_directory(fake.clone());
     f.plugins.set_account(|| Some("user-1".into()));
@@ -1218,10 +1220,14 @@ async fn plugins_an_unknown_authors_update_keeps_consent_by_key() {
     call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": installed["plugin"]["hash"] }))
         .await
         .unwrap();
-    // Updated, signed by the same key: still the one allowed.
+    // Updated, signed by the same key: nobody knows whose key that is, and
+    // the decision was for the content, so it waits for you again (R3).
     std::fs::write(&path, signed_package(&zed, "zed", "2", &["ui.add"], "return 2")).unwrap();
     let updated = call(&f.plugins, methods::UPDATE_PLUGIN, serde_json::json!({ "id": "zed" })).await.unwrap();
-    assert_eq!(updated["plugin"]["status"], "on", "same key, same asks: {updated}");
+    assert_eq!(updated["plugin"]["status"], "pending", "same key, same asks: {updated}");
+    call(&f.plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": "zed", "allow": true, "hash": updated["plugin"]["hash"] }))
+        .await
+        .unwrap();
     std::fs::write(&path, signed_package(&zed, "zed", "3", &["ui.add", "notifications"], "return 3")).unwrap();
     let updated = call(&f.plugins, methods::UPDATE_PLUGIN, serde_json::json!({ "id": "zed" })).await.unwrap();
     assert_eq!(updated["plugin"]["status"], "pending");
