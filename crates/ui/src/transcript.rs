@@ -33,17 +33,19 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
-    ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StyledImage as _, StyledText,
-    Subscription, Task, TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px,
-    size,
+    AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, Focusable as _, ListAlignment,
+    ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathBuilder, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, StyledImage as _,
+    StyledText, Subscription, Task, TextAlign, TextRun, Window, canvas, div, img, list, point,
+    prelude::*, px, size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::view::{AnswerLine, InputOutcome};
 use zeron_proto::{HarnessId, ToolCall};
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::find::FindState;
 use crate::markdown::mermaid_cache::{self, MermaidCache};
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -3439,6 +3441,10 @@ pub struct Transcript {
     compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
     show_jump_button: bool,
+    /// The open find bar, or `None` while closed.
+    find: Option<FindState>,
+    /// A find query to open once this chat attaches (global search result).
+    pending_find: Option<(String, String)>,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
@@ -3829,6 +3835,8 @@ impl Transcript {
             compact_fold_settle: None,
             highlights: HighlightStore::default(),
             show_jump_button: false,
+            find: None,
+            pending_find: None,
             last_scroll_distance: 0.0,
             pinned,
             input_escaped: false,
@@ -5124,6 +5132,14 @@ impl Transcript {
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
             self.copied_message = None;
+            self.find = None;
+            if let Some((chat_id, query)) = self.pending_find.take() {
+                if self.chat_id.as_deref() == Some(chat_id.as_str()) {
+                    self.find_query_in_chat(&query, cx);
+                } else {
+                    self.pending_find = Some((chat_id, query));
+                }
+            }
             self.copied_message_clear = None;
             self.list.reset(0);
             self.pending_viewport = None;
@@ -5580,6 +5596,7 @@ impl Transcript {
                 self.spring_kick = true;
             }
         }
+        self.refresh_find();
         cx.notify();
     }
 
@@ -7986,6 +8003,7 @@ impl Transcript {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
+        crate::find::begin_row(&row.id);
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
         let workspace_root = self.workspace_root(cx);
@@ -9685,9 +9703,11 @@ fn user_bubble_text(
         .collect();
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
+    let find = crate::find::washes(row_id, &text);
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, cx| {
+            render::paint_find_washes(window, &layout, &find, &sel_theme);
             for (span, icon) in mentions.iter().zip(&chip_icons) {
                 // Centered on the label like the composer's chips.
                 let label = crate::composer::chip_pad_ranges(&span.range)[0].end;
@@ -10331,6 +10351,7 @@ fn detail_body(
                 text,
                 runs,
                 theme.selection,
+                None,
             ))
     };
     let plain = |text: &SharedString, color: gpui::Hsla| {
@@ -11249,6 +11270,269 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         }
     }
     fnv1a(&acc)
+}
+
+/// Matches of `query` a row paints: a user row's text, or its markdown block.
+fn row_find_count(row: &Row, query: &str) -> usize {
+    match &row.kind {
+        RowKind::User { text, .. } => crate::find::match_ranges(text, query).len(),
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+            .blocks
+            .get(*block_ix)
+            .map_or(0, |top| crate::find::block_count(&top.block, query)),
+        _ => 0,
+    }
+}
+
+impl Transcript {
+    /// Open the find bar over the loaded transcript, or refocus it when it is
+    /// already open.
+    pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(find) = self.find.as_mut() {
+            find.focus_pending = true;
+            cx.notify();
+            return;
+        }
+        self.start_find(window.focused(cx), cx);
+    }
+
+    /// Open the find bar on `query` in `chat_id`: now when it is already
+    /// shown, else once it attaches.
+    pub(crate) fn find_in_chat(&mut self, chat_id: String, query: String, cx: &mut Context<Self>) {
+        if self.chat_id.as_deref() == Some(chat_id.as_str()) {
+            self.find_query_in_chat(&query, cx);
+        } else {
+            self.pending_find = Some((chat_id, query));
+        }
+    }
+
+    fn find_query_in_chat(&mut self, query: &str, cx: &mut Context<Self>) {
+        if self.find.is_none() {
+            self.start_find(None, cx);
+        }
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        find.focus_pending = true;
+        find.jump_pending = true;
+        find.input.update(cx, |input, cx| input.set_text(query, cx));
+        self.set_find_query(query.to_owned(), cx);
+    }
+
+    fn start_find(&mut self, previous_focus: Option<gpui::FocusHandle>, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            ComposerInput::with_context("Find in thread…", "PaletteSearch", cx)
+                .with_single_line()
+                .with_text_metrics(13.0, 18.0)
+        });
+        let edited = cx.subscribe(
+            &input,
+            |this: &mut Self, input, event: &ComposerInputEvent, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    let query = input.read(cx).text().to_string();
+                    this.set_find_query(query, cx);
+                }
+            },
+        );
+        self.find = Some(FindState {
+            input,
+            query: String::new(),
+            matches: Vec::new(),
+            current: None,
+            previous_focus,
+            focus_pending: true,
+            jump_pending: false,
+            _edited: edited,
+        });
+        crate::find::set_active_query(Some(""));
+        cx.notify();
+    }
+
+    /// Close the find bar and hand focus back to whatever held it before.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(find) = self.find.take() else {
+            return;
+        };
+        crate::find::set_active_query(None);
+        crate::find::set_current(None);
+        if let Some(focus) = find.previous_focus {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Re-run the search after a query edit and land on the first match.
+    fn set_find_query(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        find.query = query;
+        find.current = None;
+        crate::find::set_active_query(Some(&find.query));
+        self.refresh_find();
+        if let Some(row_ix) = self.sync_find_current() {
+            if let Some(find) = self.find.as_mut() {
+                find.jump_pending = false;
+            }
+            self.jump_to_find_row(row_ix);
+        }
+        cx.notify();
+    }
+
+    /// Advance to the next (`forward`) or previous match, wrapping around.
+    fn step_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+        {
+            let Some(find) = self.find.as_mut() else {
+                return;
+            };
+            let len = find.matches.len();
+            if len == 0 {
+                return;
+            }
+            let current = find.current.unwrap_or(if forward { len - 1 } else { 0 });
+            let next = if forward {
+                (current + 1) % len
+            } else {
+                (current + len - 1) % len
+            };
+            find.current = Some(next);
+        }
+        if let Some(row_ix) = self.sync_find_current() {
+            self.jump_to_find_row(row_ix);
+        }
+        cx.notify();
+    }
+
+    /// Scroll a matched row near the viewport top, clearing the find bar.
+    fn jump_to_find_row(&mut self, ix: usize) {
+        self.stop_automatic_scrolling();
+        self.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+    }
+
+    /// Recompute matches over newly loaded or changed rows, keeping the match
+    /// cursor inside the result set.
+    fn refresh_find(&mut self) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let query = find.query.trim();
+        find.matches =
+            crate::find::occurrences(self.rows.iter().map(|row| row_find_count(row, query)));
+        find.current = match find.current {
+            Some(ix) if !find.matches.is_empty() => Some(ix.min(find.matches.len() - 1)),
+            _ => (!find.matches.is_empty()).then_some(0),
+        };
+        let jump = !find.matches.is_empty() && std::mem::take(&mut find.jump_pending);
+        if let Some(row_ix) = self.sync_find_current().filter(|_| jump) {
+            self.jump_to_find_row(row_ix);
+        }
+    }
+
+    /// Publish the current occurrence to the painters; its row index.
+    fn sync_find_current(&self) -> Option<usize> {
+        let current = self.find.as_ref().and_then(|find| {
+            let (row_ix, nth) = *find.matches.get(find.current?)?;
+            Some((row_ix, self.rows.get(row_ix)?.id.clone(), nth))
+        });
+        crate::find::set_current(current.as_ref().map(|(_, id, nth)| (id.clone(), *nth)));
+        current.map(|(row_ix, _, _)| row_ix)
+    }
+
+    pub(crate) fn find_open(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// The find field, unpositioned: the shell stacks it above the session
+    /// cards in the chat column's top-right corner.
+    pub(crate) fn render_find_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (input, count) = {
+            let find = self.find.as_mut()?;
+            if std::mem::take(&mut find.focus_pending) {
+                let input = find.input.clone();
+                window.focus(&input.read(cx).focus_handle(cx), cx);
+            }
+            (find.input.clone(), find.count_label())
+        };
+        let theme = Theme::of(cx).for_popup();
+        let icon_button = |id: &'static str, glyph: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(px(24.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|el| el.bg(theme.surface_raised_hover))
+                .child(
+                    crate::icons::icon(glyph)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                )
+        };
+        let bar = div()
+            .id("transcript-find")
+            .key_context("FindInThread")
+            .h(px(crate::find::BAR_HEIGHT))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .pl(px(12.0))
+            .pr(px(6.0))
+            .rounded(px(crate::popover::CARD_RADIUS))
+            .border_1()
+            .border_color(theme.border)
+            .bg(crate::popover::surface_bg(&theme))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .text_color(theme.text)
+            .child(crate::popover::palette_search_icon(&theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .child(input),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(count),
+            )
+            .child(
+                icon_button("find-prev", crate::icons::ALT_ARROW_UP)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_find(false, cx))),
+            )
+            .child(
+                icon_button("find-next", crate::icons::ALT_ARROW_DOWN)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_find(true, cx))),
+            )
+            .child(
+                icon_button("find-close", crate::icons::CLOSE)
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+            )
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "enter" => this.step_find(!event.keystroke.modifiers.shift, cx),
+                    "escape" => this.close_find(window, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }));
+        Some(
+            crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, bar)
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for Transcript {

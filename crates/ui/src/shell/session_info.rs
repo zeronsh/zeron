@@ -430,6 +430,27 @@ impl Shell {
         (docked, reveal, reserve)
     }
 
+    /// The find field, in the slot above the session cards.
+    pub(super) fn render_find_field(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let bar = self
+            .transcript
+            .update(cx, |transcript, cx| transcript.render_find_bar(window, cx))?;
+        Some(
+            div()
+                .absolute()
+                .top(px(Theme::TITLEBAR_HEIGHT + 12.0))
+                .right(px(SESSION_CARD_INSET))
+                .w(px(SESSION_CARD_WIDTH))
+                .occlude()
+                .child(bar)
+                .into_any_element(),
+        )
+    }
+
     /// The card, positioned within the main column; `None` while closed or
     /// with no chat selected.
     pub(super) fn render_session_info(
@@ -447,6 +468,13 @@ impl Shell {
         }
         let theme = Theme::of(cx).for_popup();
         let now = Utc::now();
+        // An open find field takes the top slot; the cards stack below it.
+        let find_drop = if self.transcript.read(cx).find_open() {
+            crate::find::BAR_HEIGHT + SESSION_CARDS_GAP
+        } else {
+            0.0
+        };
+        let max_height = max_height - find_drop;
         let (chat, device, glyph, presence, project, branch) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row()?.clone();
@@ -617,7 +645,7 @@ impl Shell {
                 .id("session-info")
                 .debug_selector(|| "session-info".into())
                 .absolute()
-                .top(px(Theme::TITLEBAR_HEIGHT + 12.0 + dy))
+                .top(px(Theme::TITLEBAR_HEIGHT + 12.0 + find_drop + dy))
                 .right(px(SESSION_CARD_INSET - dx))
                 // The lanes card scrolls inside what the session card leaves
                 // it below the titlebar.

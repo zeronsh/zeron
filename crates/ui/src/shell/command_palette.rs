@@ -51,6 +51,9 @@ pub(super) struct CommandPalette {
     files_ready: Option<WorkspaceTarget>,
     /// Content matches in the focused chat's workspace.
     content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
+    /// Chats whose transcripts mention the query, from the engine's FTS index.
+    transcript_hits: Vec<zeron_proto::TranscriptSearchHit>,
+    transcript_task: Option<Task<()>>,
     _search_events: Subscription,
 }
 
@@ -192,10 +195,12 @@ pub(super) enum Tab {
     Threads,
     Commands,
     Files,
+    Messages,
 }
 
 impl Tab {
-    pub(super) const ALL: [Tab; 4] = [Tab::All, Tab::Threads, Tab::Commands, Tab::Files];
+    pub(super) const ALL: [Tab; 5] =
+        [Tab::All, Tab::Threads, Tab::Messages, Tab::Commands, Tab::Files];
 
     fn label(self) -> &'static str {
         match self {
@@ -203,6 +208,7 @@ impl Tab {
             Self::Threads => "Threads",
             Self::Commands => "Commands",
             Self::Files => "Files",
+            Self::Messages => "Messages",
         }
     }
 
@@ -231,6 +237,7 @@ enum Section {
     Commands,
     Files,
     InFiles,
+    InMessages,
 }
 
 impl Section {
@@ -243,6 +250,7 @@ impl Section {
             Self::Commands => "Commands",
             Self::Files => "Files",
             Self::InFiles => "In Files",
+            Self::InMessages => "In messages",
         }
     }
 }
@@ -291,6 +299,8 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
+    /// A chat whose transcript matches, with the matched snippet.
+    Message(zeron_proto::TranscriptSearchHit),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -312,6 +322,7 @@ impl PaletteRow {
         let id = match &self.kind {
             RowKind::Command(command) => format!("command:{}", command.label()),
             RowKind::Chat(id) => format!("chat:{id}"),
+            RowKind::Message(hit) => format!("message:{}:{}", hit.chat_id, hit.snippet),
             RowKind::File { path, .. } => format!("file:{path}"),
             RowKind::Content(found) => {
                 format!("content:{}:{}:{}", found.path, found.line, found.column)
@@ -463,6 +474,7 @@ impl Shell {
                     palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                 }
                 this.search_palette_workspace(cx);
+                this.search_transcripts(cx);
                 cx.notify();
             }
         });
@@ -480,6 +492,8 @@ impl Shell {
             files: WorkspaceQuery::default(),
             files_ready: None,
             content: WorkspaceQuery::default(),
+            transcript_hits: Vec::new(),
+            transcript_task: None,
             _search_events: events,
         });
         // Load the default Files list (recently changed files) right away.
@@ -506,6 +520,54 @@ impl Shell {
             }
             cx.notify();
         }
+    }
+
+    /// Fill the In messages section from the engine's transcript index.
+    /// Engines without the method answer with an error and it stays empty.
+    fn search_transcripts(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(palette) = self.command_palette.as_mut() else {
+            return;
+        };
+        let query = palette.search.read(cx).text().trim().to_owned();
+        palette.transcript_hits.clear();
+        if query.is_empty() {
+            palette.transcript_task = None;
+            return;
+        }
+        palette.transcript_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let request = zeron_proto::SearchTranscriptsRequest {
+                query: query.clone(),
+                limit: 50,
+            };
+            let Ok(params) = serde_json::to_value(&request) else {
+                return;
+            };
+            let Ok(hits) = engine
+                .client()
+                .call(zeron_rpc::methods::SEARCH_TRANSCRIPTS, params)
+                .await
+                .map(serde_json::from_value::<Vec<zeron_proto::TranscriptSearchHit>>)
+            else {
+                return;
+            };
+            let Ok(hits) = hits else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(palette) = this.command_palette.as_mut()
+                    && palette.search.read(cx).text().trim() == query
+                {
+                    palette.transcript_hits = hits;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Look the query up in the focused workspace: file names at once,
@@ -718,6 +780,17 @@ impl Shell {
             )
             .with_status(palette.content.status())
         };
+        let in_messages = |limit| {
+            PaletteSection::new(
+                Section::InMessages,
+                palette
+                    .transcript_hits
+                    .iter()
+                    .take(limit)
+                    .cloned()
+                    .map(RowKind::Message),
+            )
+        };
         let sections = match (palette.tab, query.is_empty()) {
             (Tab::All, true) => vec![
                 recent_files(ALL_TAB_LIMIT),
@@ -726,6 +799,7 @@ impl Shell {
             ],
             (Tab::All, false) => vec![
                 threads(ALL_TAB_LIMIT),
+                in_messages(ALL_TAB_LIMIT),
                 commands(Section::Commands),
                 files(ALL_TAB_LIMIT),
                 in_files(ALL_TAB_LIMIT),
@@ -736,6 +810,8 @@ impl Shell {
             (Tab::Commands, false) => vec![commands(Section::Commands)],
             (Tab::Files, true) => vec![recent_files(FILES_TAB_LIMIT)],
             (Tab::Files, false) => vec![files(FILES_TAB_LIMIT), in_files(CONTENT_TAB_LIMIT)],
+            (Tab::Messages, true) => Vec::new(),
+            (Tab::Messages, false) => vec![in_messages(THREADS_TAB_LIMIT)],
         };
         sections
             .into_iter()
@@ -870,6 +946,11 @@ impl Shell {
             cx.notify();
             return;
         }
+        let query = self
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.search.read(cx).text().trim().to_owned())
+            .unwrap_or_default();
         self.close_command_palette(window, cx);
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
@@ -878,6 +959,13 @@ impl Shell {
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
+            // Land in the chat with the same words found, as T3 does.
+            RowKind::Message(hit) => {
+                self.open_chat(hit.chat_id.clone(), cx);
+                self.transcript.update(cx, |transcript, cx| {
+                    transcript.find_in_chat(hit.chat_id, query, cx)
+                });
+            }
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
             }
@@ -1127,6 +1215,117 @@ impl Shell {
                     theme,
                     cx,
                 )
+            }
+            RowKind::Message(hit) => {
+                let state = self.state.read(cx);
+                let chat = state.chats.iter().find(|chat| chat.id == hit.chat_id)?;
+                let title: SharedString =
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into();
+                // "project · device", as the thread rows name them.
+                let device = (!zeron_proto::is_cloud_device(&chat.device_id, ""))
+                    .then(|| state.device_name(&chat.device_id))
+                    .flatten();
+                let context = state
+                    .space_for_chat(chat)
+                    .map(|space| space.display_name())
+                    .into_iter()
+                    .chain(device)
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let project = (!context.is_empty()).then(|| SharedString::from(context));
+                let ago =
+                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now());
+                let time: SharedString = if ago == "now" {
+                    ago.into()
+                } else {
+                    format!("{ago} ago").into()
+                };
+                let snippet: SharedString = transcript::single_line(&hit.snippet).into();
+                // Matched words bold in the text colour, the rest muted.
+                let bold = popover::search_match_ranges(&snippet, query)
+                    .into_iter()
+                    .map(|range| {
+                        let style = gpui::HighlightStyle {
+                            color: Some(theme.text),
+                            font_weight: Some(gpui::FontWeight::BOLD),
+                            ..Default::default()
+                        };
+                        (range, style)
+                    })
+                    .collect::<Vec<_>>();
+                let small = |text: SharedString| {
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(text)
+                };
+                let target = row.clone();
+                popover::menu_row(theme, active, format!("command-message-{ix}"))
+                    .id(("command-message", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("{title}: {snippet}")))
+                    .items_start()
+                    .py(px(6.0))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_palette_row(target.clone(), window, cx)
+                    }))
+                    .child(
+                        icon(icons::CHAT_ROUND_LINE)
+                            .size(px(16.0))
+                            .flex_none()
+                            .mt(px(1.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            // Title, project, time.
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(div().min_w_0().truncate().child(title))
+                                    .children(
+                                        project.map(|project| {
+                                            small(project).max_w(px(200.0)).truncate()
+                                        }),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(small(time)),
+                            )
+                            // The matched words in context.
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .gap(px(4.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(if hit.from_user {
+                                                theme.accent
+                                            } else {
+                                                crate::changes::add_color(theme)
+                                            })
+                                            .child(if hit.from_user { "You:" } else { "Agent:" }),
+                                    )
+                                    .child(div().min_w_0().truncate().child(
+                                        gpui::StyledText::new(snippet).with_highlights(bold),
+                                    )),
+                            ),
+                    )
+                    .into_any_element()
             }
         })
     }

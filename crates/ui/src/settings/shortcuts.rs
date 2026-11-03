@@ -736,6 +736,7 @@ pub(super) fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
+        | ShortcutId::FindInThread
         | ShortcutId::ArchiveSession => "Sessions",
         ShortcutId::JumpSession(_) => "Jump to session",
     }
