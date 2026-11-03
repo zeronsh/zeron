@@ -56,4 +56,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+zeron-doc.workspace = true
 tempfile.workspace = true

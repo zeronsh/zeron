@@ -186,6 +186,8 @@ mod tests {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    exit_code: None,
+                    output_truncated: false,
                 },
             ],
             created_at: 5,

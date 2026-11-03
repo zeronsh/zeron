@@ -434,6 +434,8 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
         subagent_ref: Some(format!("main--sub--{id}")),
         subagent_status: Some(status),
         subagent_tail: None,
+        exit_code: None,
+        output_truncated: false,
     };
     core.doc_host
         .open("main")

@@ -4577,6 +4577,7 @@ fn part_snapshot_events(
                     is_error: status == "error",
                     output,
                     diff: None,
+                    exit_code: None,
                 });
             }
             events

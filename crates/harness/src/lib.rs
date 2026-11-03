@@ -379,7 +379,8 @@ pub use tool_stop::{ToolStop, ToolStopRequest};
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
-pub mod redact;
+/// Secret redaction, shared with the doc fold (command output tails).
+pub use zeron_proto::redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
