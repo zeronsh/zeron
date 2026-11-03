@@ -144,6 +144,14 @@ impl SessionFixture {
         mcp: serde_json::Value,
         native_only: bool,
     ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
+        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcp":mcp});
+        self.spawn_frame(frame, native_only).await
+    }
+    async fn spawn_frame(
+        &self,
+        frame: serde_json::Value,
+        native_only: bool,
+    ) -> (tokio::process::Child, tokio::process::ChildStdin, Frames) {
         use tokio::io::AsyncWriteExt;
         let mut child = tokio::process::Command::new("node")
             .arg(self.dir.path().join("shim.mjs"))
@@ -160,7 +168,6 @@ impl SessionFixture {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let lines = Frames::new(child.stdout.take().unwrap());
-        let frame = serde_json::json!({"op":"run","prompt":prompt,"cwd":self.dir.path(),"resume":resume.then_some("agent-fixture"),"mcp":mcp});
         stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -572,6 +579,37 @@ async fn mcp_injection_reaches_sdk_on_create_and_resume_with_fresh_identity() {
             serde_json::json!(["user", "team", "mdm", "plugins"])
         );
     }
+}
+
+#[tokio::test]
+async fn plugin_mcp_servers_reach_the_sdk_beside_zeron() {
+    let fixture = SessionFixture::new();
+    let run = serde_json::json!({
+        "op": "run", "prompt": "normal", "cwd": fixture.dir.path(), "resume": null,
+        "mcp": { "name": "zeron", "command": "/opt/zeron", "args": ["mcp"], "env": {} },
+        "extraMcp": [{
+            "name": "plugin-focus", "command": "/data/plugins/.loaded/focus/0123/bin/server",
+            "args": ["--stdio"], "env": { "FOCUS": "1" },
+        }],
+    });
+    let (mut child, stdin, mut lines) = fixture.spawn_frame(run, false).await;
+    assert_eq!(frame(&mut lines).await["ev"], "ready");
+    assert_eq!(frame(&mut lines).await["ev"], "text");
+    assert_eq!(frame(&mut lines).await["status"], "finished");
+    finish(&mut child, stdin).await;
+    let options: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.dir.path().join("mcp-options.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(options["mcpServers"]["zeron"]["command"], "/opt/zeron");
+    let plugin = &options["mcpServers"]["plugin-focus"];
+    assert_eq!(plugin["type"], "stdio");
+    assert_eq!(
+        plugin["command"],
+        "/data/plugins/.loaded/focus/0123/bin/server"
+    );
+    assert_eq!(plugin["args"], serde_json::json!(["--stdio"]));
+    assert_eq!(plugin["env"]["FOCUS"], "1");
 }
 
 #[tokio::test]

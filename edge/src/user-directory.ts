@@ -46,6 +46,20 @@
  * mid-way, and the next request takes it over. The admin lists show who
  * created which org.
  *
+ * Invitations (`POST /auth/orgs/{id}/invitations`): `invite_quota` counts the
+ * addresses each user sent in the current hour, `INVITES_PER_HOUR` at most.
+ * Onboarding (`/onboarding`, onboarding-routes.ts): `onboarding_done` holds
+ * each page a user has finished and when they first did, at most
+ * `MAX_ONBOARDING_PAGES` per user.
+ * Plugin keys (`/plugin-keys`, plugin-keys.ts): `plugin_keys` binds each
+ * plugin signing key (raw ed25519, b64url) to the account that registered
+ * it, at most `PLUGIN_KEYS_PER_DAY` new ones a user a day. Revoked rows stay,
+ * so a key is never re-bound; deleting a user revokes theirs.
+ *
+ * Settings (auth-routes.ts): `PATCH /auth/me` writes the renamed user with the
+ * webhook's own `upsert` right away, and an org's member list reads names,
+ * pictures and usernames through `profiles`.
+ *
  * Writes are one row per sign-up or profile change, so a single instance is
  * not a hotspot.
  */
@@ -66,6 +80,13 @@ const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)"
 /** How long an org-creation claim without an org holds before another
  * request may take it over. */
 export const ORG_CLAIM_STALE_MS = 5 * 60_000;
+
+/** Invitation addresses one user may send an hour. */
+export const INVITES_PER_HOUR = 50;
+/** Onboarding pages stored per user. */
+export const MAX_ONBOARDING_PAGES = 500;
+/** New plugin signing keys one user may register in 24 hours. */
+export const PLUGIN_KEYS_PER_DAY = 20;
 
 /** Availability checks and claims one user may make a minute. */
 const USERNAME_ATTEMPTS_PER_MINUTE = 60;
@@ -100,6 +121,8 @@ export interface DirectoryUser {
   readonly username: string | null;
   /** Badges held, oldest grant first. */
   readonly badges: readonly UserBadge[];
+  /** Onboarding pages finished, first finished first. */
+  readonly onboardingDone: readonly string[];
   /** The org they created through `POST /auth/orgs`, if any. */
   readonly createdOrgId: string | null;
 }
@@ -210,6 +233,40 @@ export interface DirectoryOrganization {
   readonly members: readonly OrganizationMember[];
 }
 
+/** `profiles`: what an org's member list shows of a user. */
+export interface MemberProfile {
+  readonly email: string | null;
+  readonly firstName: string | null;
+  readonly lastName: string | null;
+  readonly profilePictureUrl: string | null;
+  readonly username: string | null;
+  /** What they do, under their name (`PATCH /auth/me {title}`); null for none. */
+  readonly title: string | null;
+  /** Their own photo's key in BLOBS (`avatars/{key}`); null for none. */
+  readonly photoKey: string | null;
+}
+
+/** `registerPluginKey`'s answer. */
+export type PluginKeyRegistration = "registered" | "key_taken" | "key_revoked" | "deleted_user" | "rate_limited";
+
+/** `GET /plugin-keys/:key`: who signed with it, never their user id. */
+export interface PluginKeyLookup {
+  readonly key: string;
+  /** The owner's current username; null if they have none. */
+  readonly username: string | null;
+  /** Whether it's the viewer's own key. */
+  readonly mine: boolean;
+  readonly revoked: boolean;
+}
+
+/** One of the caller's keys in `GET /plugin-keys`. Times are epoch ms. */
+export interface PluginKeyRow {
+  readonly key: string;
+  readonly deviceId: string | null;
+  readonly createdAt: number;
+  readonly revokedAt: number | null;
+}
+
 const fullName = (first: string | null, last: string | null): string | null =>
   [first, last].filter(Boolean).join(" ") || null;
 
@@ -232,6 +289,10 @@ export class UserDirectory extends DurableObject<Env> {
     // An operator's choice of scene and foil for a card (null: the seed's).
     if (!columns.includes("card_scene")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_scene INTEGER");
     if (!columns.includes("card_holo")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN card_holo TEXT");
+    // What they do, and their own photo (Settings → Profile): the edge's,
+    // not WorkOS's, which keeps neither.
+    if (!columns.includes("title")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN title TEXT");
+    if (!columns.includes("photo_key")) this.ctx.storage.sql.exec("ALTER TABLE users ADD COLUMN photo_key TEXT");
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS usernames (
       username TEXT PRIMARY KEY, user_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, retired_at INTEGER,
       CHECK (length(username) BETWEEN 3 AND 20 AND username GLOB '[a-z0-9]*' AND username NOT GLOB '*[^a-z0-9_-]*'))`);
@@ -253,6 +314,15 @@ export class UserDirectory extends DurableObject<Env> {
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, recorded_at INTEGER NOT NULL)`);
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS org_creations (
       user_id TEXT PRIMARY KEY, claim_id TEXT NOT NULL, claimed_at INTEGER NOT NULL, org_id TEXT, created_at INTEGER)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS invite_quota (
+      user_id TEXT PRIMARY KEY, window_start INTEGER NOT NULL, sent INTEGER NOT NULL)`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS onboarding_done (
+      user_id TEXT NOT NULL, page_id TEXT NOT NULL, done_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, page_id))`);
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS plugin_keys (
+      key TEXT PRIMARY KEY, user_id TEXT NOT NULL, device_id TEXT,
+      created_at INTEGER NOT NULL, revoked_at INTEGER)`);
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS plugin_keys_user ON plugin_keys(user_id)");
   }
 
   /** Number every user still without one — the rows recorded before numbers
@@ -380,16 +450,22 @@ export class UserDirectory extends DurableObject<Env> {
   }
 
   /** Tombstone a deleted user: keep id, number and joined date, drop the
-   * profile and badges, and retire their username. Answers that name. */
+   * profile, badges and onboarding, and retire their username. Answers that
+   * name. */
   remove(user: WorkOsUser, deletedAt: string): string | null {
     const username = this.username(user.id);
+    // (Their photo's object goes with the caller: `photoKey` first.)
     this.retireUsername(user.id);
     this.ctx.storage.sql.exec("DELETE FROM user_badges WHERE user_id = ?", user.id);
+    this.ctx.storage.sql.exec("DELETE FROM onboarding_done WHERE user_id = ?", user.id);
+    // Their plugins stop reading as theirs (or anyone's).
+    this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", Date.now(), user.id);
     this.ctx.storage.sql.exec(
       `INSERT INTO users (user_id, created_at, updated_at, deleted_at, recorded_at, user_number)
        VALUES (?, ?, ?, ?, ?, ${NEXT_USER_NUMBER})
        ON CONFLICT (user_id) DO UPDATE SET
          email = NULL, first_name = NULL, last_name = NULL, profile_picture_url = NULL,
+         title = NULL, photo_key = NULL,
          deleted_at = excluded.deleted_at, recorded_at = excluded.recorded_at`,
       user.id,
       user.created_at,
@@ -400,12 +476,69 @@ export class UserDirectory extends DurableObject<Env> {
     return username;
   }
 
+  /** The user's own photo's key, or null (deleted users have none). */
+  photoKey(userId: string): string | null {
+    const [row] = this.ctx.storage.sql.exec("SELECT photo_key FROM users WHERE user_id = ?", userId).toArray();
+    return (row?.photo_key as string | null | undefined) ?? null;
+  }
+
   /** The user's name, or null. */
   username(userId: string): string | null {
     const [row] = this.ctx.storage.sql
       .exec("SELECT username FROM usernames WHERE user_id = ? AND retired_at IS NULL", userId)
       .toArray();
     return (row?.username as string | undefined) ?? null;
+  }
+
+  /** The live profiles (and current usernames) of those of `userIds` the
+   * directory has: an org's member list joins on this before asking WorkOS
+   * for the rest. Keyed by user id; deleted users are left out. */
+  profiles(userIds: readonly string[]): Record<string, MemberProfile> {
+    const found: Record<string, MemberProfile> = {};
+    for (const userId of new Set(userIds)) {
+      const [row] = this.ctx.storage.sql
+        .exec(
+          `SELECT u.email, u.first_name, u.last_name, u.profile_picture_url, u.title, u.photo_key, n.username FROM users u
+           LEFT JOIN usernames n ON n.user_id = u.user_id AND n.retired_at IS NULL
+           WHERE u.user_id = ? AND u.deleted_at IS NULL`,
+          userId
+        )
+        .toArray();
+      if (!row) continue;
+      found[userId] = {
+        email: row.email as string | null,
+        firstName: row.first_name as string | null,
+        lastName: row.last_name as string | null,
+        profilePictureUrl: row.profile_picture_url as string | null,
+        username: row.username as string | null,
+        title: row.title as string | null,
+        photoKey: row.photo_key as string | null
+      };
+    }
+    return found;
+  }
+
+  /** Set a live user's title (null clears it). False when the directory
+   * doesn't have them live (not recorded yet, or deleted). */
+  setTitle(userId: string, title: string | null): boolean {
+    return (
+      [...this.ctx.storage.sql.exec("UPDATE users SET title = ? WHERE user_id = ? AND deleted_at IS NULL RETURNING user_id", title, userId)]
+        .length > 0
+    );
+  }
+
+  /** Set a live user's photo key (null clears it). Answers the key it
+   * replaced, for the caller to delete; undefined when the directory doesn't
+   * have them live. */
+  setPhoto(userId: string, key: string | null): { readonly replaced: string | null } | undefined {
+    let answer: { readonly replaced: string | null } | undefined;
+    this.ctx.storage.transactionSync(() => {
+      const [row] = this.ctx.storage.sql.exec("SELECT photo_key FROM users WHERE user_id = ? AND deleted_at IS NULL", userId).toArray();
+      if (!row) return;
+      this.ctx.storage.sql.exec("UPDATE users SET photo_key = ? WHERE user_id = ?", key, userId);
+      answer = { replaced: (row.photo_key as string | null) ?? null };
+    });
+    return answer;
   }
 
   private retireUsername(userId: string): void {
@@ -577,7 +710,125 @@ export class UserDirectory extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM org_creations WHERE user_id = ? AND claim_id = ? AND org_id IS NULL", userId, claimId);
   }
 
+  /** Count `count` invitation addresses against the user's hour; false (and
+   * nothing counted) when that would pass `INVITES_PER_HOUR`. */
+  takeInviteQuota(userId: string, count: number): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      const [row] = this.ctx.storage.sql.exec("SELECT window_start, sent FROM invite_quota WHERE user_id = ?", userId).toArray();
+      const fresh = !row || now - (row.window_start as number) >= 3_600_000;
+      const sent = fresh ? 0 : (row.sent as number);
+      if (sent + count > INVITES_PER_HOUR) return false;
+      this.ctx.storage.sql.exec(
+        `INSERT INTO invite_quota (user_id, window_start, sent) VALUES (?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET window_start = excluded.window_start, sent = excluded.sent`,
+        userId,
+        fresh ? now : (row.window_start as number),
+        sent + count
+      );
+      return true;
+    });
+  }
+
+  /** The onboarding pages a user finished: page id → ISO time first done. */
+  onboarding(userId: string): Record<string, string> {
+    const done: Record<string, string> = {};
+    for (const row of this.ctx.storage.sql.exec(
+      "SELECT page_id, done_at FROM onboarding_done WHERE user_id = ? ORDER BY done_at, page_id",
+      userId
+    )) {
+      done[row.page_id as string] = new Date(row.done_at as number).toISOString();
+    }
+    return done;
+  }
+
+  /** Record pages as finished, keeping the first time for any already done.
+   * Undefined (and nothing recorded) past `MAX_ONBOARDING_PAGES`. */
+  markOnboarding(userId: string, pageIds: readonly string[]): Record<string, string> | undefined {
+    const recorded = this.ctx.storage.transactionSync(() => {
+      const held = new Set(
+        this.ctx.storage.sql.exec("SELECT page_id FROM onboarding_done WHERE user_id = ?", userId).toArray().map((r) => r.page_id as string)
+      );
+      const fresh = [...new Set(pageIds)].filter((id) => !held.has(id));
+      if (held.size + fresh.length > MAX_ONBOARDING_PAGES) return false;
+      const now = Date.now();
+      for (const pageId of fresh) {
+        this.ctx.storage.sql.exec("INSERT INTO onboarding_done (user_id, page_id, done_at) VALUES (?, ?, ?)", userId, pageId, now);
+      }
+      return true;
+    });
+    return recorded ? this.onboarding(userId) : undefined;
+  }
+
+  /** Bind a plugin signing key (proof already checked) to `userId`. The same
+   * key again from its owner is a no-op that succeeds, so an engine can retry
+   * a registration whose answer it lost; a revoked key stays revoked. */
+  registerPluginKey(userId: string, key: string, deviceId: string | null): PluginKeyRegistration {
+    return this.ctx.storage.transactionSync((): PluginKeyRegistration => {
+      const [row] = this.ctx.storage.sql.exec("SELECT user_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+      if (row) {
+        if (row.user_id !== userId) return "key_taken";
+        return row.revoked_at === null ? "registered" : "key_revoked";
+      }
+      if (this.userRefusal(userId) === "deleted_user") return "deleted_user";
+      const now = Date.now();
+      const today = this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS n FROM plugin_keys WHERE user_id = ? AND created_at > ?", userId, now - 86_400_000)
+        .one().n as number;
+      if (today >= PLUGIN_KEYS_PER_DAY) return "rate_limited";
+      this.ctx.storage.sql.exec(
+        "INSERT INTO plugin_keys (key, user_id, device_id, created_at) VALUES (?, ?, ?, ?)",
+        key,
+        userId,
+        deviceId,
+        now
+      );
+      return "registered";
+    });
+  }
+
+  /** Who a plugin key belongs to, as `viewerId` may see it: never the owner's
+   * user id. Undefined for a key never registered. */
+  pluginKey(key: string, viewerId: string): PluginKeyLookup | undefined {
+    const [row] = this.ctx.storage.sql.exec("SELECT user_id, revoked_at FROM plugin_keys WHERE key = ?", key).toArray();
+    if (!row) return undefined;
+    return {
+      key,
+      username: this.username(row.user_id as string),
+      mine: row.user_id === viewerId,
+      revoked: row.revoked_at !== null
+    };
+  }
+
+  /** A user's plugin keys, oldest first, revoked ones included. */
+  pluginKeys(userId: string): PluginKeyRow[] {
+    return this.ctx.storage.sql
+      .exec("SELECT key, device_id, created_at, revoked_at FROM plugin_keys WHERE user_id = ? ORDER BY created_at, key", userId)
+      .toArray()
+      .map((row) => ({
+        key: row.key as string,
+        deviceId: row.device_id as string | null,
+        createdAt: row.created_at as number,
+        revokedAt: row.revoked_at as number | null
+      }));
+  }
+
+  /** Revoke one of the user's keys (the first revocation's time stays).
+   * False when the key isn't theirs. */
+  revokePluginKey(userId: string, key: string): boolean {
+    const [row] = this.ctx.storage.sql.exec("SELECT user_id FROM plugin_keys WHERE key = ?", key).toArray();
+    if (row?.user_id !== userId) return false;
+    this.ctx.storage.sql.exec("UPDATE plugin_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE key = ?", Date.now(), key);
+    return true;
+  }
+
   list(): DirectoryUser[] {
+    const onboarding = new Map<string, string[]>();
+    for (const row of this.ctx.storage.sql.exec("SELECT user_id, page_id FROM onboarding_done ORDER BY done_at, page_id")) {
+      const done = onboarding.get(row.user_id as string) ?? [];
+      done.push(row.page_id as string);
+      onboarding.set(row.user_id as string, done);
+    }
     const badges = new Map<string, UserBadge[]>();
     for (const row of this.ctx.storage.sql.exec("SELECT * FROM user_badges ORDER BY granted_at, badge_id")) {
       const userId = row.user_id as string;
@@ -608,6 +859,7 @@ export class UserDirectory extends DurableObject<Env> {
         deletedAt: row.deleted_at as string | null,
         username: row.username as string | null,
         badges: badges.get(row.user_id as string) ?? [],
+        onboardingDone: onboarding.get(row.user_id as string) ?? [],
         createdOrgId: row.created_org_id as string | null
       };
     });
@@ -1050,7 +1302,7 @@ export const handleUserDirectoryRoute = async (
     if (!csv) return json({ count: users.length, users });
     return csvResponse(
       "zeron-users.csv",
-      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username,created_org_id",
+      "user_number,user_id,email,name,first_name,last_name,profile_picture_url,joined_at,updated_at,deleted_at,badges,username,created_org_id,onboarding_done",
       users.map((u) => [
         String(u.userNumber),
         u.userId,
@@ -1064,7 +1316,8 @@ export const handleUserDirectoryRoute = async (
         u.deletedAt,
         u.badges.map((b) => b.id).join(";") || null,
         u.username,
-        u.createdOrgId
+        u.createdOrgId,
+        u.onboardingDone.join(";") || null
       ])
     );
   }
@@ -1109,8 +1362,11 @@ export const handleUserDirectoryRoute = async (
       if (!user) return jsonError(400, "bad_request", "Event data must be a WorkOS user.");
       if (event.event !== "user.deleted") return apply(() => directory.upsert(user));
       return apply(async () => {
+        // (Their own photo goes too: auth-routes.ts keeps it at avatars/{key}.)
+        const photoKey = await directory.photoKey(user.id);
         const username = await directory.remove(user, deletedAt);
         if (username) await forgetCard(username);
+        if (photoKey) await env.BLOBS.delete(`avatars/${photoKey}`);
       });
     }
     case "organization.created":

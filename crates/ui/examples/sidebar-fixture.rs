@@ -1,5 +1,8 @@
 //! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout;
 //! ZERON_SIDEBAR_BY_PROJECT groups by project, with a remote clone of the local repository.
+//! ZERON_SIDEBAR_CAPTURE=<dir> saves the window as sidebar.png there and quits (needs the
+//! appshots-fixture feature for render_to_image); its rows' pull requests are open, merged
+//! and closed, for comparing badges.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use zeron_ui::*;
 
@@ -74,7 +77,7 @@ fn main() -> anyhow::Result<()> {
                 let source = chat.source_context.as_ref().unwrap();
                 s.fixture_sidebar_change_request(zeron_proto::CheckoutChangeRequestStatus {
                     checkout_id: source.checkout_id.clone(), device_id: chat.device_id.clone(), cwd: source.repo_root.clone(), branch: source.branch.clone(), updated_at: chrono::Utc::now(),
-                    change_request: Some(zeron_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: zeron_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
+                    change_request: Some(zeron_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: match ix { 2 => zeron_proto::ChangeRequestState::Merged, 4 => zeron_proto::ChangeRequestState::Closed, _ => zeron_proto::ChangeRequestState::Open }, base_ref: "main".into(), head_ref: source.branch.clone(), signals: None }),
                 });
             }
             if by_project {
@@ -89,7 +92,7 @@ fn main() -> anyhow::Result<()> {
             s
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, workos_client_id: None, default_harness: HarnessId::ClaudeCode };
-        let _window = cx.open_window(WindowOptions {
+        let window = cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1100.),px(800.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
@@ -100,6 +103,22 @@ fn main() -> anyhow::Result<()> {
         appearance::reapply_window_background(cx);
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
+        #[cfg(feature = "appshots-fixture")]
+        if let Some(dir) = std::env::var_os("ZERON_SIDEBAR_CAPTURE").map(std::path::PathBuf::from) {
+            let window: gpui::AnyWindowHandle = window.into();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                window.update(cx, |_, w, cx| {
+                    w.draw(cx).clear();
+                    if let Ok(image) = w.render_to_image() {
+                        image.save(dir.join("sidebar.png")).ok();
+                    }
+                }).ok();
+                cx.update(|cx| cx.quit());
+            }).detach();
+        }
+        #[cfg(not(feature = "appshots-fixture"))]
+        let _ = window;
     });
     Ok(())
 }

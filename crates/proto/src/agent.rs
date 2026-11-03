@@ -2,8 +2,72 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// The wire prefix of an agent added from the ACP registry: its harness
+/// slug is `acp.<registry id>` (`acp.gemini`), kept apart from the built-in
+/// slugs (the registry also lists agents Zeron drives itself, `cursor`,
+/// `devin`, …) and safe as a directory name on every platform.
+pub const REGISTRY_SLUG_PREFIX: &str = "acp.";
+
+/// An agent added from the ACP registry, by its interned slug
+/// (`acp.<registry id>`). Interned so [`HarnessId`] stays `Copy` and its
+/// slug `&'static`: the set is bounded by what a device has ever added or
+/// been asked about (the registry lists tens of agents), so the leak is too.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegistryAgent(&'static str);
+
+impl RegistryAgent {
+    /// The agent for a registry id (`gemini`), or `None` for one that isn't
+    /// a registry id (the registry's ids are lowercase letters, digits, `-`,
+    /// `_` and `.`, at most 64 long).
+    pub fn new(registry_id: &str) -> Option<Self> {
+        let valid = !registry_id.is_empty()
+            && registry_id.len() <= 64
+            && registry_id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
+            && registry_id.as_bytes()[0].is_ascii_alphanumeric();
+        valid.then(|| Self(intern(&format!("{REGISTRY_SLUG_PREFIX}{registry_id}"))))
+    }
+
+    /// From a harness slug (`acp.gemini`).
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Self::new(slug.strip_prefix(REGISTRY_SLUG_PREFIX)?)
+    }
+
+    /// The registry's own id (`gemini`).
+    pub fn registry_id(self) -> &'static str {
+        &self.0[REGISTRY_SLUG_PREFIX.len()..]
+    }
+
+    /// The harness slug (`acp.gemini`).
+    pub fn slug(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for RegistryAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+fn intern(slug: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SLUGS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut slugs = SLUGS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = slugs.get(slug) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(slug.to_owned().into_boxed_str());
+    slugs.insert(leaked);
+    leaked
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessId {
     ClaudeCode,
     Codex,
@@ -30,10 +94,47 @@ pub enum HarnessId {
     Muse,
     /// Test harness; never shown in production pickers.
     Mock,
+    /// An agent added from the ACP registry (`acp.<registry id>`), driven by
+    /// the generic ACP harness from its registry entry: every registry
+    /// agent goes through this one path.
+    Registry(RegistryAgent),
+}
+
+impl Serialize for HarnessId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let slug = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        HarnessId::from_slug(&slug).ok_or_else(|| {
+            serde::de::Error::unknown_variant(
+                &slug,
+                &[
+                    "claude-code",
+                    "codex",
+                    "cursor",
+                    "devin",
+                    "grok",
+                    "hermes",
+                    "fx",
+                    "pi",
+                    "opencode",
+                    "antigravity",
+                    "muse",
+                    "mock",
+                    "acp.<registry id>",
+                ],
+            )
+        })
+    }
 }
 
 impl HarnessId {
-    /// Every harness, in declaration order.
+    /// Every built-in harness, in declaration order (a registry agent is
+    /// one a device added: the engine's registry lists those).
     pub const ALL: [HarnessId; 12] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
@@ -64,12 +165,50 @@ impl HarnessId {
             HarnessId::Antigravity => "antigravity",
             HarnessId::Muse => "muse",
             HarnessId::Mock => "mock",
+            HarnessId::Registry(agent) => agent.slug(),
         }
     }
 
     /// Inverse of [`Self::as_str`]; `None` for a slug this build does not know.
     pub fn from_slug(slug: &str) -> Option<HarnessId> {
+        if let Some(agent) = RegistryAgent::from_slug(slug) {
+            return Some(HarnessId::Registry(agent));
+        }
         Self::ALL.into_iter().find(|id| id.as_str() == slug)
+    }
+
+    /// The registry agent this is, if it is one.
+    pub fn registry(self) -> Option<RegistryAgent> {
+        match self {
+            HarnessId::Registry(agent) => Some(agent),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_slug_tests {
+    use super::*;
+
+    #[test]
+    fn registry_agents_round_trip_as_namespaced_slugs() {
+        let id = HarnessId::from_slug("acp.gemini").expect("a registry slug");
+        assert_eq!(id.as_str(), "acp.gemini");
+        assert_eq!(id.registry().map(RegistryAgent::registry_id), Some("gemini"));
+        assert_eq!(serde_json::to_value(id).unwrap(), serde_json::json!("acp.gemini"));
+        let back: HarnessId = serde_json::from_value(serde_json::json!("acp.gemini")).unwrap();
+        assert_eq!(back, id);
+        // Interned: the same slug is the same id, whichever way it came.
+        assert_eq!(RegistryAgent::new("gemini").map(HarnessId::Registry), Some(id));
+        // A built-in's slug stays the built-in, never a registry agent.
+        assert_eq!(HarnessId::from_slug("cursor"), Some(HarnessId::Cursor));
+        let cursor: HarnessId = serde_json::from_value(serde_json::json!("claude-code")).unwrap();
+        assert_eq!(cursor, HarnessId::ClaudeCode);
+        // Not a registry id: refused, as an unknown slug always was.
+        for bad in ["acp.", "acp.Gemini", "acp.../x", "acp.-x", "gemini", "acp.a/b"] {
+            assert_eq!(HarnessId::from_slug(bad), None, "{bad}");
+        }
+        assert!(serde_json::from_value::<HarnessId>(serde_json::json!("nope")).is_err());
     }
 }
 
@@ -399,6 +538,14 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Native MCP servers from the host's plugins (those `on` with `native`
+    /// allowed and an `mcp` entry), each run from the plugin's verified
+    /// snapshot. Drivers add them next to [`Self::mcp`]; a driver that can
+    /// take only one server skips them. Stamped by the HOST engine for local
+    /// runs, like `mcp`: a host must replace whatever a sender put here, never
+    /// run it. Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_mcp: Vec<McpServer>,
     /// Host-resolved environment for the spawned agent process (credential
     /// broker secrets on a Cloud device: `CODEX_HOME`, `GH_TOKEN`,
     /// `ANTHROPIC_API_KEY`, …). Filled by the HOST right before the request
@@ -431,6 +578,7 @@ impl std::fmt::Debug for RunRequest {
             worktree,
             mcp,
             env,
+            extra_mcp,
         } = self;
         f.debug_struct("RunRequest")
             .field("prompt", prompt)
@@ -447,6 +595,7 @@ impl std::fmt::Debug for RunRequest {
             .field("attachments", attachments)
             .field("worktree", worktree)
             .field("mcp", mcp)
+            .field("extra_mcp", extra_mcp)
             .field("env", &env.keys().collect::<Vec<_>>())
             .finish()
     }

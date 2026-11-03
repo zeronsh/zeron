@@ -163,6 +163,24 @@ fn codex_mcp_overrides(mcp: &zeron_proto::McpServer) -> Vec<(String, Value)> {
     ]
 }
 
+/// Dotted `thread/start` config overrides for the plugins' native MCP
+/// servers ([`RunRequest::extra_mcp`]). Unlike Zeron's own server they get no
+/// `default_tools_approval_mode`: their tools are a plugin's, so Codex asks
+/// (or refuses) under the chat's access mode like any user-configured server.
+fn codex_extra_mcp_overrides(extras: &[zeron_proto::McpServer]) -> Vec<(String, Value)> {
+    extras
+        .iter()
+        .flat_map(|mcp| {
+            let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
+            [
+                (key("command"), mcp.command.clone().into()),
+                (key("args"), json!(mcp.args)),
+                (key("env"), json!(mcp.env)),
+            ]
+        })
+        .collect()
+}
+
 /// A ready-to-spawn `codex login` command for the engine's account flow.
 ///
 /// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
@@ -817,6 +835,7 @@ impl Harness for CodexHarness {
         request.worktree = None;
         request.attachments.clear();
         request.mcp = None;
+        request.extra_mcp.clear();
         request.model_options.clear();
         // Its policy never asks; anything that still would is the person's.
         request.auto_approve = false;
@@ -1403,6 +1422,13 @@ async fn run_session(session: Session) {
             if mcp.side_chats_only() {
                 overrides.extend(agent_tools_off());
             }
+        }
+        if !title_only && !request.extra_mcp.is_empty() {
+            p.entry("config")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("thread/start config overrides are an object")
+                .extend(codex_extra_mcp_overrides(&request.extra_mcp));
         }
         p.insert("approvalPolicy".into(), approval_policy.into());
         p.insert("sandbox".into(), sandbox_mode(sandbox).into());
@@ -3084,6 +3110,7 @@ mod tests {
             worktree: None,
             resume: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 
@@ -3391,6 +3418,36 @@ mod mcp_injection_tests {
             overrides["mcp_servers.zeron.default_tools_approval_mode"],
             "approve"
         );
+    }
+    #[test]
+    fn codex_extra_mcp_overrides_leave_approval_to_the_access_mode() {
+        let extra = zeron_proto::McpServer {
+            name: "plugin-focus".into(),
+            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
+            args: vec!["--stdio".into()],
+            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
+        };
+        let overrides: serde_json::Map<String, Value> =
+            codex_extra_mcp_overrides(&[extra]).into_iter().collect();
+        assert_eq!(
+            overrides["mcp_servers.plugin-focus.command"],
+            "/data/plugins/.loaded/focus/0123/bin/server"
+        );
+        assert_eq!(
+            overrides["mcp_servers.plugin-focus.args"],
+            json!(["--stdio"])
+        );
+        assert_eq!(
+            overrides["mcp_servers.plugin-focus.env"],
+            json!({ "FOCUS": "1" })
+        );
+        assert!(
+            !overrides
+                .keys()
+                .any(|k| k.ends_with("default_tools_approval_mode")),
+            "a plugin's tools are never pre-approved"
+        );
+        assert_eq!(overrides.len(), 3);
     }
 }
 

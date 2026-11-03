@@ -62,6 +62,9 @@ enum LatestSource {
     Hermes,
     /// Muse's release channel manifest (see [`MUSE_CHANNELS`]).
     Muse,
+    /// An agent from the ACP registry: the registry's current version
+    /// (`crate::acp_registry`), installed by Zeron.
+    Registry,
     Manual,
 }
 
@@ -124,6 +127,9 @@ impl HomebrewPackage {
 }
 
 enum UpdatePlan {
+    /// An agent from the ACP registry: the registry's build, installed by
+    /// Zeron in a folder of its own.
+    Registry(zeron_proto::RegistryAgent),
     Command {
         executable: PathBuf,
         args: &'static [&'static str],
@@ -166,7 +172,9 @@ impl UpdatePlan {
                     .unwrap_or_else(|_| launcher.clone())
                     .display()
             )),
-            UpdatePlan::AntigravityArchive | UpdatePlan::CodexStandalone(_) => None,
+            UpdatePlan::AntigravityArchive
+            | UpdatePlan::CodexStandalone(_)
+            | UpdatePlan::Registry(_) => None,
         }
     }
 }
@@ -387,6 +395,15 @@ fn provider(id: HarnessId) -> ProviderSpec {
             update_args: None,
             manual_command: "curl -fsSL https://dev.meta.ai/install.sh | sh",
         },
+        // An agent from the ACP registry: its version is its record's, its
+        // latest the registry's, and an update installs the registry's
+        // build (`UpdatePlan::Registry`), never a vendor updater.
+        HarnessId::Registry(_) => ProviderSpec {
+            version_args: &[],
+            latest: LatestSource::Registry,
+            update_args: None,
+            manual_command: "",
+        },
         HarnessId::Mock => ProviderSpec {
             version_args: &["--version"],
             latest: LatestSource::Manual,
@@ -414,6 +431,13 @@ fn update_plan(
     executable: &Path,
     context: PlanContext<'_>,
 ) -> Result<UpdatePlan, String> {
+    if let Some(agent) = harness.registry() {
+        return if crate::acp_registry::from_registry(agent) {
+            Ok(UpdatePlan::Registry(agent))
+        } else {
+            Err("an agent of your own updates itself".into())
+        };
+    }
     if ownership::mise_managed(executable) {
         return Err(ownership::Manual::Mise.instruction().into());
     }
@@ -537,7 +561,10 @@ impl CompatibilityState {
 
 struct Inner {
     registry: Arc<HarnessRegistry>,
-    order: Vec<HarnessId>,
+    /// The harnesses tracked, in Settings' order: the built-in ones from the
+    /// start, and agents from the ACP registry as they're added and removed
+    /// ([`HarnessUpdateCoordinator::track`]).
+    order: Mutex<Vec<HarnessId>>,
     prefs_path: PathBuf,
     prefs: Mutex<Preferences>,
     statuses: Mutex<HashMap<HarnessId, HarnessUpdateStatus>>,
@@ -628,7 +655,10 @@ impl HarnessUpdateCoordinator {
         let order: Vec<_> = registry
             .descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.id != HarnessId::Mock)
+            .filter(|descriptor| {
+                descriptor.id != HarnessId::Mock
+                    && descriptor.id.registry().is_none_or(crate::acp_registry::from_registry)
+            })
             .map(|descriptor| descriptor.id)
             .collect();
         let enabled = registry.enabled_set();
@@ -669,7 +699,7 @@ impl HarnessUpdateCoordinator {
         Self {
             inner: Arc::new(Inner {
                 registry,
-                order,
+                order: Mutex::new(order),
                 prefs_path,
                 prefs: Mutex::new(prefs),
                 statuses: Mutex::new(statuses),
@@ -784,7 +814,7 @@ impl HarnessUpdateCoordinator {
         enabled
             .into_iter()
             .filter(|harness| {
-                self.inner.order.contains(harness)
+                self.order().contains(harness)
                     && self.policy(*harness) != HarnessUpdatePolicy::Off
                     && !self.is_mutating(*harness)
                     && self.status(*harness).phase != HarnessUpdatePhase::Checking
@@ -802,18 +832,65 @@ impl HarnessUpdateCoordinator {
             .collect()
     }
 
+    fn order(&self) -> Vec<HarnessId> {
+        lock(&self.inner.order).clone()
+    }
+
+    /// Tracks an agent just added from the ACP registry: a row of its own,
+    /// checked now and with the rest from then on, its policy as any
+    /// agent's. (Already tracked: checked again, an update having moved it.)
+    pub fn track(&self, harness: HarnessId) {
+        let added = {
+            let mut order = lock(&self.inner.order);
+            let added = !order.contains(&harness);
+            if added {
+                order.push(harness);
+            }
+            added
+        };
+        if added {
+            let enabled = self.inner.registry.enabled_set().contains(&harness);
+            self.mutate(harness, |status| {
+                status.phase = if enabled && status.policy != HarnessUpdatePolicy::Off {
+                    HarnessUpdatePhase::Checking
+                } else {
+                    HarnessUpdatePhase::Dormant
+                };
+            });
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let coordinator = self.clone();
+            tokio::spawn(async move {
+                let _ = coordinator.check_one(harness).await;
+            });
+        }
+    }
+
+    /// Forgets an agent removed from this device.
+    pub fn untrack(&self, harness: HarnessId) {
+        self.cancel(harness);
+        lock(&self.inner.order).retain(|h| *h != harness);
+        let snapshot = {
+            let mut statuses = lock(&self.inner.statuses);
+            statuses.remove(&harness);
+            ordered_snapshot(&lock(&self.inner.order), &statuses)
+        };
+        self.inner.status_tx.send_replace(snapshot);
+    }
+
     pub fn watch(&self) -> watch::Receiver<Vec<HarnessUpdateStatus>> {
         self.inner.status_tx.subscribe()
     }
 
     pub fn snapshot(&self) -> Vec<HarnessUpdateStatus> {
-        ordered_snapshot(&self.inner.order, &lock(&self.inner.statuses))
+        let order = self.order();
+        ordered_snapshot(&order, &lock(&self.inner.statuses))
     }
 
     pub async fn check_all(&self) -> Vec<HarnessUpdateStatus> {
         let enabled = self.inner.registry.enabled_set();
         // Disabled rows remain visible in Settings but never spawn a probe.
-        for id in &self.inner.order {
+        for id in &self.order() {
             let policy = self.policy(*id);
             if (!enabled.contains(id) || policy == HarnessUpdatePolicy::Off)
                 && !self.is_mutating(*id)
@@ -1022,7 +1099,7 @@ impl HarnessUpdateCoordinator {
         };
         let spec = provider(harness);
         let version_lease = self.inner.registry.execution_lease(harness).await;
-        let installed = run_version_command(harness, &executable, spec.version_args).await;
+        let installed = installed_version_of(harness, &executable, spec.version_args).await;
         drop(version_lease);
         let installed = match installed {
             Ok(version) => version,
@@ -1036,7 +1113,11 @@ impl HarnessUpdateCoordinator {
         if let Some(fingerprint) = BinaryFingerprint::of(&executable) {
             lock(&self.inner.checked_binaries).insert(harness, fingerprint);
         }
-        let source = classify_source(&executable);
+        let source = if harness.registry().is_some() {
+            HarnessInstallSource::ManagedByZeron
+        } else {
+            classify_source(&executable)
+        };
         let can_apply = can_apply_update_for(harness, &executable, Some(&installed));
         if self.settle_if_unmonitored(harness) {
             return Ok(());
@@ -1055,6 +1136,9 @@ impl HarnessUpdateCoordinator {
                 .await
                 .map(UpdateCheck::Version),
             LatestSource::Muse => self.muse_latest().await.map(UpdateCheck::Version),
+            LatestSource::Registry => crate::acp_registry::latest_version(harness)
+                .await
+                .map(UpdateCheck::Version),
             LatestSource::Claude => {
                 let channel = if let Some(channel) = claude_cask_channel(&executable) {
                     Some(channel)
@@ -1324,6 +1408,7 @@ impl HarnessUpdateCoordinator {
             LatestSource::Opencode => self.npm_latest(opencode_release_package(installed)).await,
             LatestSource::AntigravityAcp => self.antigravity_acp_latest().await,
             LatestSource::Muse => self.muse_latest().await,
+            LatestSource::Registry => crate::acp_registry::latest_version(harness).await,
             LatestSource::Claude
             | LatestSource::Command(_)
             | LatestSource::Hermes
@@ -1488,7 +1573,7 @@ impl HarnessUpdateCoordinator {
         // silent downgrade. Nothing runs it now: the exclusive lease is held.
         if let Some(latest) = current.latest_version.as_deref()
             && let Ok(installed) =
-                run_version_command(harness, &executable, provider(harness).version_args).await
+                installed_version_of(harness, &executable, provider(harness).version_args).await
             && !version_is_newer(latest, &installed)
         {
             drop(lease);
@@ -1534,6 +1619,10 @@ impl HarnessUpdateCoordinator {
                 self.install_codex_standalone(harness, &current, install, &cancel)
                     .await
             }
+            UpdatePlan::Registry(agent) => match self.begin_install(harness, &cancel) {
+                Ok(()) => crate::acp_registry::install_latest(agent, current.latest_version.as_deref()).await,
+                Err(error) => Err(error),
+            },
             UpdatePlan::Package {
                 owner,
                 launcher,
@@ -1611,7 +1700,7 @@ impl HarnessUpdateCoordinator {
         });
         let verified = match self.executable(harness) {
             Ok(executable) => {
-                run_version_command(harness, &executable, provider(harness).version_args)
+                installed_version_of(harness, &executable, provider(harness).version_args)
                     .await
                     .map(|version| (version, executable))
             }
@@ -1792,7 +1881,7 @@ impl HarnessUpdateCoordinator {
         // Cancel before scheduling checks: checks intentionally skip a provider
         // that already owns its operation slot while waiting for an active run.
         let enabled = self.inner.registry.enabled_set();
-        for harness in &self.inner.order {
+        for harness in &self.order() {
             if !enabled.contains(harness) {
                 self.cancel(*harness);
                 if !self.is_mutating(*harness) {
@@ -1912,7 +2001,7 @@ impl HarnessUpdateCoordinator {
             // Available/Failed phase after Updates: Off.
             status.policy = policy;
             change(status);
-            ordered_snapshot(&self.inner.order, &statuses)
+            ordered_snapshot(&lock(&self.inner.order), &statuses)
         };
         // Keep publication in the same critical section as the state change.
         // Otherwise concurrent providers can publish full snapshots backwards.
@@ -2720,6 +2809,18 @@ fn parse_hermes_update_check(output: &str) -> Result<UpdateCheck, String> {
         }
     }
     Err("Hermes update check returned no recognizable verdict".into())
+}
+
+/// The version installed: an agent from the ACP registry's is its record's
+/// (Zeron installed it), every other CLI's what it says of itself.
+async fn installed_version_of(harness: HarnessId, executable: &Path, args: &[&str]) -> Result<String, String> {
+    if let Some(agent) = harness.registry() {
+        return zeron_harness::acp_registry::record(agent)
+            .map(|record| record.version)
+            .filter(|version| !version.is_empty())
+            .ok_or_else(|| "the agent isn't added on this device".into());
+    }
+    run_version_command(harness, executable, args).await
 }
 
 async fn run_version_command(

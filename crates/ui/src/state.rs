@@ -537,6 +537,7 @@ impl EngineHandle {
                     .iter()
                     .map(|c| c.to_string())
                     .collect(),
+                build: None,
             },
             deferred_state: None,
         }
@@ -594,6 +595,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
                 workspace_scope: WorkspaceScope::Synced,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                build: None,
             })
         }
         Err(err) => Err(err),
@@ -5166,6 +5168,7 @@ mod tests {
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
                     capabilities: zeron_proto::capabilities::current(),
+                    build: None,
                 },
                 state: state_rx,
             }),
@@ -5588,6 +5591,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: base + TimeDelta::minutes(created_min),
         }
     }
@@ -7132,9 +7136,9 @@ mod tests {
     fn project_filter_and_projects_span_a_repository_across_devices() {
         let mut state = AppState::new();
         state.local_device_id = Some("laptop".into());
-        let mut remote = space("remote", "metal", "/w/anara", 1);
+        let mut remote = space("remote", "metal", "/w/marigold", 1);
         remote.repository_id = Some("commit:abc".into());
-        let mut local = space("local", "laptop", "/h/anara", 2);
+        let mut local = space("local", "laptop", "/h/marigold", 2);
         local.repository_id = Some("commit:abc".into());
         let other = space("other", "laptop", "/h/notes", 3);
         state.apply_spaces(vec![remote, local, other]);
@@ -7176,8 +7180,8 @@ mod tests {
 
         // A two-device project tags both hosts; a one-device one keeps the
         // plain host tag.
-        let anara = state.projects().into_iter().next().unwrap();
-        let (tag, _) = state.project_device_tag(&anara, Utc::now());
+        let marigold = state.projects().into_iter().next().unwrap();
+        let (tag, _) = state.project_device_tag(&marigold, Utc::now());
         assert!(tag.starts_with("@ ") && tag.contains(" · "), "{tag}");
         let notes = state.projects().into_iter().nth(1).unwrap();
         assert_eq!(
@@ -8058,14 +8062,14 @@ mod tests {
 
     #[test]
     fn chat_location_joins_project_and_branch() {
-        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
+        let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/marigold"));
         c.branch = Some("zeron/rebalance".into());
         assert_eq!(
             chat_location(&c).as_deref(),
-            Some("soccertcg · zeron/rebalance")
+            Some("marigold · zeron/rebalance")
         );
         c.branch = None;
-        assert_eq!(chat_location(&c).as_deref(), Some("soccertcg"));
+        assert_eq!(chat_location(&c).as_deref(), Some("marigold"));
         c.cwd = None;
         c.branch = Some("main".into());
         assert_eq!(chat_location(&c).as_deref(), Some("main"));

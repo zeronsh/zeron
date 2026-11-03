@@ -19,6 +19,12 @@ fn main() -> anyhow::Result<()> {
             println!("zeron-engine {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        // Which build this binary is (`EngineInfo.build` of an engine it
+        // starts): a client compares it with the one running.
+        Some("--build-id") => {
+            println!("{}", zeron_engine::build_id());
+            Ok(())
+        }
         _ => zeron_app::background::run(),
     }
 }

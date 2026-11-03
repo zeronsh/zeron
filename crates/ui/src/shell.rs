@@ -17380,6 +17380,7 @@ mod exit_regressions {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
+                    icon: None,
                     created_at: Utc::now(),
                 };
                 shell.state.update(cx, |state, cx| {
@@ -17649,6 +17650,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
@@ -17719,6 +17721,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -17805,6 +17808,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -17871,6 +17875,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     state.select_space(Some("repo".into()), cx);
@@ -18237,6 +18242,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                 });

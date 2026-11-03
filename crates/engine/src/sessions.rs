@@ -313,6 +313,8 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Plugins whose native MCP servers local runs get (absent in bare tests).
+    plugins: OnceLock<crate::plugins::Plugins>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -362,6 +364,7 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                plugins: OnceLock::new(),
             }),
         }
     }
@@ -384,6 +387,11 @@ impl SessionsEngine {
     /// at dial time, so it follows token rotation across engine restarts.
     pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
         *lock(&self.inner.ipc_token_file) = Some(path);
+    }
+
+    /// Wire the plugins service: local runs get its native MCP servers.
+    pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
+        let _ = self.inner.plugins.set(plugins);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -1830,6 +1838,7 @@ impl SessionsEngine {
                     resume: None,
                     worktree: None,
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -3523,6 +3532,13 @@ async fn drive_run(
     if request.mcp.is_none() {
         request.mcp = inner.zeron_mcp(&chat_id, side_chats_only);
     }
+    // Plugins' native MCP servers come from this host's own allowed plugins,
+    // run from their verified snapshots — never from what a sender put here.
+    request.extra_mcp = inner
+        .plugins
+        .get()
+        .map(crate::plugins::Plugins::native_mcp_servers)
+        .unwrap_or_default();
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).
@@ -5413,6 +5429,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         }
     }
 

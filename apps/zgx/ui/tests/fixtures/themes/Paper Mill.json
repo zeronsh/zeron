@@ -1,0 +1,14 @@
+// A light theme: `type` says so.
+{
+  "name": "Paper Mill",
+  "type": "light",
+  "colors": {
+    "editor.background": "#fbf7ef",
+    "editor.foreground": "#2b2a28",
+    "focusBorder": "#3b6ea8"
+  },
+  "tokenColors": [
+    { "scope": "comment", "settings": { "foreground": "#8a8578" } },
+    { "scope": "keyword", "settings": { "foreground": "#9c3d54" } }
+  ]
+}

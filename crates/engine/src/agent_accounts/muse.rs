@@ -356,6 +356,7 @@ impl AgentAccounts {
                 Ok(UsageSnapshot {
                     windows,
                     plan_label,
+                    codex_reset_credits: None,
                 }),
                 String::new(),
                 now_ms(),

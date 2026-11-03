@@ -274,6 +274,7 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             checkout_id: git.then(|| format!("co-{id}")),
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: ms(now - ago),
         };
     let zeron = |mut space: Space| {
@@ -493,6 +494,7 @@ pub(crate) fn seed(
                     state,
                     base_ref: "main".into(),
                     head_ref: source.branch.clone(),
+                    signals: None,
                 }),
                 updated_at: Utc::now(),
             });

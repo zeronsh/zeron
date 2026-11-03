@@ -142,6 +142,7 @@ pub(super) fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Antigravity => "Antigravity",
         HarnessId::Muse => "muse",
         HarnessId::Mock => "mock",
+        HarnessId::Registry(agent) => agent.registry_id(),
     }
 }
 
@@ -1338,8 +1339,8 @@ impl AgentAccounts {
             });
             let progress_state = task_state.clone();
             let signed_in = acp
-                .sign_in_with(options, move |progress| match progress {
-                    zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
+                .sign_in_with(options, move |progress| {
+                    if let zeron_harness::acp::SignInProgress::OpenBrowser(url) = progress {
                         let mut state = lock(&progress_state);
                         if state.url.is_none() {
                             state.url = Some(url);

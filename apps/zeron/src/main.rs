@@ -6,6 +6,7 @@
 
 mod auth_cli;
 mod daemon;
+mod plugin_cli;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -58,6 +59,18 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Make, sign, check and list plugins (through the running Zeron).
+    Plugin {
+        #[command(subcommand)]
+        command: plugin_cli::PluginCommand,
+    },
+    /// List, make, use and delete templates: whole replacements of Zeron's
+    /// interface (through the running Zeron). `zeron template use zeron`
+    /// puts Zeron's own back.
+    Template {
+        #[command(subcommand)]
+        command: plugin_cli::TemplateCommand,
+    },
     /// Manage `zeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -116,7 +129,7 @@ fn main() -> anyhow::Result<()> {
         zeron_app::init_logging(
             long_running,
             mode,
-            matches!(&cli.command, Some(Command::Mcp)),
+            matches!(&cli.command, Some(Command::Mcp | Command::Plugin { .. } | Command::Template { .. })),
         );
     }
     if long_running {
@@ -154,6 +167,20 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(quiesce_cli(config.ipc_port, &config.data_dir))
         }
         Some(Command::Mcp) => zeron_app::run_mcp(),
+        Some(Command::Plugin { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(plugin_cli::run(command, config.ipc_port, &config.data_dir))
+        }
+        Some(Command::Template { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(plugin_cli::run_template(
+                command,
+                config.ipc_port,
+                &config.data_dir,
+            ))
+        }
         Some(Command::Engine) => zeron_app::background::run(),
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {

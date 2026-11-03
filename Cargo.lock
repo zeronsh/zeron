@@ -10330,6 +10330,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13186,6 +13197,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "xcb"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13659,12 +13680,14 @@ dependencies = [
  "chrono",
  "dunce",
  "fff-search",
+ "flate2",
  "futures",
  "gethostname",
  "ignore",
  "image",
  "libc",
  "loro",
+ "mlua",
  "notify 7.0.0",
  "portable-pty",
  "reqwest",
@@ -13675,6 +13698,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -13706,9 +13730,11 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bzip2",
  "chrono",
  "deser-hjson",
  "filetime",
+ "flate2",
  "futures",
  "libc",
  "reqwest",
@@ -13717,6 +13743,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

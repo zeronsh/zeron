@@ -9,6 +9,10 @@ const refused = (auth: Verified, method: string, path: string) =>
 
 const REFUSED: [string, string][] = [
   ["GET", "/auth/orgs"],
+  ["POST", "/auth/orgs"],
+  ["POST", "/auth/orgs/org_1/invitations"],
+  ["GET", "/onboarding"],
+  ["POST", "/onboarding"],
   ["GET", "/cloud/o"],
   ["POST", "/cloud/o/enable"],
   ["DELETE", "/cloud/o"],

@@ -56,6 +56,11 @@ impl Origin {
     }
 }
 
+/// A dial failure as an RPC error.
+fn transport(error: anyhow::Error) -> RpcError {
+    RpcError::Transport(format!("{error:#}"))
+}
+
 /// `ListHarnesses` row — the engine's `HarnessDescriptor`, re-declared here
 /// so this crate does not link the engine.
 #[derive(Debug, Clone, Deserialize)]
@@ -217,6 +222,40 @@ impl Zeron {
                     .map_err(|e| anyhow!("{method}: {e}"))
             }
             other => other.map_err(|e| anyhow!("{method}: {e}")),
+        }
+    }
+
+    /// [`Self::call`] keeping the engine's error as is, so a tool can show
+    /// a `Failed` message in its own words (no method prefix) and tell an
+    /// engine that lacks the method apart.
+    pub async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.call(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.call(method, params).await
+            }
+            other => other,
+        }
+    }
+
+    /// A watch stream acknowledged by the engine before it returns, so an
+    /// engine without the method answers `UnknownMethod` instead of a
+    /// silent stream (reconnecting once if the socket is gone).
+    pub async fn subscribe_checked(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<RpcSubscription, RpcError> {
+        let client = self.client().await.map_err(transport)?;
+        match client.subscribe_checked(method, params.clone()).await {
+            Err(RpcError::Closed) => {
+                self.forget_client().await;
+                let client = self.client().await.map_err(transport)?;
+                client.subscribe_checked(method, params).await
+            }
+            other => other,
         }
     }
 
@@ -894,6 +933,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         }
     }

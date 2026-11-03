@@ -447,6 +447,8 @@ impl Harness for CursorHarness {
             "modelOptions": request.model_options,
             "resume": request.resume,
             "mcp": request.mcp,
+            // The plugins' native servers, beside Zeron's own.
+            "extraMcp": request.extra_mcp,
             "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
             "images": images,
             // One send can batch several messages' images; the shim keeps

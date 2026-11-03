@@ -9941,6 +9941,7 @@ impl Composer {
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         env: Default::default(),
+                        extra_mcp: Vec::new(),
                     },
                     message_id: message_id.clone(),
                 };

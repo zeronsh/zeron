@@ -906,6 +906,7 @@ impl WorkspaceHost {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         self.mutate(|doc| doc.upsert_space(&space))?;
@@ -1162,6 +1163,7 @@ impl WorkspaceHost {
                 checkout_id: None,
                 repository_id: None,
                 github_repo: None,
+                icon: None,
                 created_at: Utc::now(),
             })
         })?;
@@ -1209,6 +1211,7 @@ impl WorkspaceHost {
                 // Groups with the clones of the repository on other devices.
                 repository_id: Some(zeron_proto::view::cloud_repository_id(&spaces, github_repo)),
                 github_repo: Some(github_repo.to_string()),
+                icon: None,
                 created_at: Utc::now(),
             })
         })?;
@@ -1217,6 +1220,10 @@ impl WorkspaceHost {
 
     pub fn rename_space(&self, space_id: &str, name: Option<&str>) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_space(space_id, name))?)
+    }
+
+    pub fn set_space_icon(&self, space_id: &str, icon: Option<&zeron_proto::SpaceIcon>) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_space_icon(space_id, icon))?)
     }
 
     /// Hard-delete a space and its chats (registry cascade — one atomic batch).

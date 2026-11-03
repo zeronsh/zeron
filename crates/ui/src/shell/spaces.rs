@@ -7287,6 +7287,7 @@ impl Shell {
                 zeron_proto::view::cloud_repository_id(&self.state.read(cx).spaces, repo)
             }),
             github_repo: github_repo.clone(),
+            icon: None,
             created_at: Utc::now(),
         };
         self.state.update(cx, |s, cx| {

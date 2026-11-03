@@ -52,7 +52,9 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     use Method::*;
     let windows = platform == Platform::Windows;
     match id {
-        Mock => vec![],
+        // A registry agent installs from its registry entry
+        // (`crate::acp_registry`), never through a vendor script.
+        Mock | Registry(_) => vec![],
         Fx if windows => vec![],
         Fx => vec![Shell("curl -fsSL https://fx.sh/setup.sh | bash", "bash")],
         Antigravity => vec![Archive],
@@ -164,7 +166,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
         Muse => "curl -fsSL https://dev.meta.ai/install.sh | sh",
         Fx => "curl -fsSL https://fx.sh/setup.sh | bash",
-        Antigravity | Mock => return None,
+        Antigravity | Mock | Registry(_) => return None,
     })
 }
 
@@ -183,6 +185,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Muse => ("muse", "~/.local/bin"),
         Mock => ("mock", "PATH"),
         Fx => ("fx", "~/.local/bin"),
+        Registry(agent) => (agent.registry_id(), "~/.zeron/agents"),
     }
 }
 
@@ -201,6 +204,7 @@ pub fn installed(id: HarnessId) -> bool {
         Muse => crate::MuseHarness::new().installed(),
         Mock => false,
         Fx => crate::AcpHarness::fx().installed(),
+        Registry(agent) => crate::acp_registry::installed(agent),
     }
 }
 

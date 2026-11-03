@@ -159,6 +159,44 @@ impl Serialize for AuthState {
 // Config + construction
 // ---------------------------------------------------------------------------
 
+/// Which screen the hosted sign-in opens on (AuthKit's `screen_hint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenHint {
+    #[serde(rename = "sign-in")]
+    SignIn,
+    #[serde(rename = "sign-up")]
+    SignUp,
+}
+
+/// How a headed sign-in opens (`SignIn {screenHint?, fresh?}`). The default
+/// is the hosted page's own default, exactly as before these existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInOptions {
+    #[serde(default)]
+    pub screen_hint: Option<ScreenHint>,
+    /// Ask afresh (`max_age=0`): the hosted page doesn't go on as the
+    /// account the browser is still signed into.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
+impl SignInOptions {
+    /// What the options add to the authorize URL's query (empty for none).
+    fn query(&self) -> String {
+        let mut query = String::new();
+        match self.screen_hint {
+            Some(ScreenHint::SignIn) => query.push_str("&screen_hint=sign-in"),
+            Some(ScreenHint::SignUp) => query.push_str("&screen_hint=sign-up"),
+            None => {}
+        }
+        if self.fresh {
+            query.push_str("&max_age=0");
+        }
+        query
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Edge base URL (`/auth/*` routes).
@@ -577,11 +615,28 @@ impl Auth {
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
     /// loopback callback server (bound lazily on an ephemeral port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
+        self.start_sign_in_with(SignInOptions::default()).await
+    }
+
+    /// [`Self::start_sign_in`] with how the hosted page opens: on making an
+    /// account or on signing in, and whether it asks afresh rather than
+    /// going on as the account the browser is already signed into.
+    pub async fn start_sign_in_with(&self, options: SignInOptions) -> Result<String, EngineError> {
         if self.inner.workos.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
         let port = self.ensure_loopback().await?;
-        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback")))
+        Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback"), options))
+    }
+
+    /// The bearer for a local client that calls the edge itself (IPC-only
+    /// `AccessToken`), with its expiry (unix seconds) when the token says.
+    /// Refreshed as [`Self::access_token`] refreshes; the refresh token never
+    /// leaves the engine.
+    pub async fn access_token_with_expiry(&self) -> Result<(String, Option<i64>), TokenError> {
+        let token = self.access_token().await?;
+        let expires_at = jwt_claims(&token).and_then(|claims| claims.exp);
+        Ok((token, expires_at))
     }
 
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
@@ -591,7 +646,10 @@ impl Auth {
             return String::new();
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
-        self.begin_sign_in(&format!("{edge}/auth/cli/callback"))
+        self.begin_sign_in(
+            &format!("{edge}/auth/cli/callback"),
+            SignInOptions::default(),
+        )
     }
 
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
@@ -722,7 +780,7 @@ impl Auth {
 
     // -- internals ----------------------------------------------------------
 
-    fn begin_sign_in(&self, redirect_uri: &str) -> String {
+    fn begin_sign_in(&self, redirect_uri: &str, options: SignInOptions) -> String {
         let state = uuid::Uuid::new_v4().to_string();
         {
             let mut sign_in = lock(&self.inner.sign_in);
@@ -734,11 +792,12 @@ impl Auth {
         }
         let client_id = self.inner.workos.clone().unwrap_or_default();
         format!(
-            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
+            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}{}",
             self.inner.config.workos_api_base.trim_end_matches('/'),
             url_encode(&client_id),
             url_encode(redirect_uri),
-            state
+            state,
+            options.query()
         )
     }
 

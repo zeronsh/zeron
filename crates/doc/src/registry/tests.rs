@@ -293,6 +293,7 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
         checkout_id: None,
         repository_id: None,
         github_repo: None,
+        icon: None,
         created_at: ts(1_500),
     }
 }
@@ -623,6 +624,43 @@ fn delete_chat_tombstones_row_and_session() {
     assert!(ws.read_chats().unwrap().is_empty());
     assert!(ws.read_sessions().unwrap().is_empty());
     assert!(!ws.delete_chat("chat-1").unwrap());
+}
+
+#[test]
+fn a_space_icon_is_set_whole_survives_upserts_and_clears() {
+    use zeron_proto::SpaceIcon;
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project")).unwrap();
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, None);
+
+    let emoji = SpaceIcon { emoji: Some("🚀".into()), image: None, hue: Some("violet".into()) };
+    assert!(ws.set_space_icon("sp-1", Some(&emoji)).unwrap());
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, Some(emoji));
+
+    // Another kind replaces it whole: no emoji left beside the image.
+    let image = SpaceIcon { emoji: None, image: Some("https://edge.test/auth/avatars/ab".into()), hue: None };
+    assert!(ws.set_space_icon("sp-1", Some(&image)).unwrap());
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, Some(image.clone()));
+
+    // An upsert of the row without one (a re-seed, a create) leaves it.
+    ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project")).unwrap();
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, Some(image));
+
+    assert!(ws.set_space_icon("sp-1", None).unwrap());
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, None);
+    assert!(!ws.set_space_icon("nope", None).unwrap());
+}
+
+#[test]
+fn a_malformed_space_icon_is_no_icon_not_a_lost_row() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project")).unwrap();
+    // (As a newer or broken writer might leave it.)
+    ws.write(KIND_SPACES, "sp-1", OpKind::Update, fields([("icon", json!("🚀"))]));
+    let row = ws.space("sp-1").unwrap().expect("the row stays");
+    assert_eq!(row.icon, None);
+    ws.write(KIND_SPACES, "sp-1", OpKind::Update, fields([("icon", json!({ "image": "file:///etc/passwd" }))]));
+    assert_eq!(ws.space("sp-1").unwrap().unwrap().icon, None);
 }
 
 #[test]

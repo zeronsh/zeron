@@ -4,7 +4,9 @@
 //! minutes while the client keeps pinging); responses are serialized through
 //! one writer task so frames never interleave. Notifications from the client
 //! (`notifications/initialized`, `notifications/cancelled`) are accepted and
-//! ignored — there is no server-side state to initialize or cancel.
+//! ignored — there is no server-side state to initialize or cancel. The one
+//! notification the server sends, `notifications/tools/list_changed` (when
+//! the engine's plugin tools change), goes through the same writer.
 
 use std::sync::Arc;
 
@@ -86,6 +88,7 @@ const INVALID_PARAMS: i64 = -32602;
 /// Serve MCP on this process's stdin/stdout until stdin closes.
 pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::channel::<String>(64);
+    let list_watch = spawn_tool_list_watch(tools.clone(), out_tx.clone());
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(line) = out_rx.recv().await {
@@ -121,9 +124,41 @@ pub async fn serve_stdio(tools: Arc<Tools>) -> anyhow::Result<()> {
         };
         let _ = out_tx.send(response.to_string()).await;
     }
+    // The watch holds a writer handle: stop it so the writer can drain.
+    list_watch.abort();
+    let _ = list_watch.await;
     drop(out_tx);
     let _ = writer.await;
     Ok(())
+}
+
+/// The notification a client re-lists its tools on.
+fn list_changed_notification() -> Value {
+    json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })
+}
+
+/// Follow the engine's plugin tools and write `notifications/tools/list_changed`
+/// to `out` (the shared writer) whenever their names change.
+fn spawn_tool_list_watch(
+    tools: Arc<Tools>,
+    out: mpsc::Sender<String>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (changed_tx, mut changed) = mpsc::channel::<()>(1);
+        let watch = tools.watch_plugin_tools(changed_tx);
+        let forward = async {
+            while changed.recv().await.is_some() {
+                if out
+                    .send(list_changed_notification().to_string())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        };
+        tokio::join!(watch, forward);
+    })
 }
 
 /// Classify one inbound message. Requests are answered asynchronously via
@@ -184,7 +219,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                 id,
                 json!({
                     "protocolVersion": version,
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": { "tools": { "listChanged": true } },
                     "serverInfo": {
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
@@ -194,12 +229,12 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
             )
         }
         "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, json!({ "tools": tools.list() })),
+        "tools/list" => ok_response(id, json!({ "tools": tools.list_all().await })),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
             };
-            if !tools.has(name) {
+            if !tools.has(name) && !crate::tools::is_plugin_tool_name(name) {
                 return error_response(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
             }
             let arguments = params
@@ -263,6 +298,85 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::zeron::{Origin, Zeron};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use std::time::Duration;
+    use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
+
+    /// An engine whose plugin tools go from one to two, then stay.
+    struct Watching;
+
+    #[async_trait]
+    impl RpcService for Watching {
+        async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+            let item = |names: &[&str]| {
+                json!({
+                    "device": { "id": "d", "name": "Studio" },
+                    "tools": names.iter().map(|n| json!({
+                        "plugin": "p", "plugin_name": "P", "tool": "t", "mcp_name": n,
+                        "description": "", "input": {}, "open": true,
+                    })).collect::<Vec<_>>(),
+                })
+            };
+            match method {
+                methods::WATCH_PLUGIN_TOOLS => Ok(RpcReply::Stream(
+                    futures::stream::iter(vec![item(&["p__one"]), item(&["p__one", "p__two"])])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                )),
+                methods::LIST_PLUGIN_TOOLS => Ok(RpcReply::Value(item(&["p__one"]))),
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    fn watching_tools() -> Arc<Tools> {
+        Arc::new(Tools::new(Arc::new(Zeron::with_client(
+            memory_client(Arc::new(Watching)),
+            Origin::default(),
+        ))))
+    }
+
+    #[tokio::test]
+    async fn list_changed_goes_out_when_the_plugin_tool_names_change() {
+        let (out_tx, mut out) = mpsc::channel(8);
+        let watch = spawn_tool_list_watch(watching_tools(), out_tx);
+        let frame = tokio::time::timeout(Duration::from_secs(5), out.recv())
+            .await
+            .expect("a notification in time")
+            .expect("writer open");
+        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame, list_changed_notification());
+        assert!(frame.get("id").is_none(), "a notification has no id");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), out.recv())
+                .await
+                .is_err(),
+            "one change, one notification"
+        );
+        watch.abort();
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_list_changed_and_the_listing_names_plugin_tools() {
+        let tools = watching_tools();
+        let init = handle_request(&tools, json!(1), "initialize", json!({})).await;
+        assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], true);
+        let listed = handle_request(&tools, json!(2), "tools/list", json!({})).await;
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"whoami"));
+        assert!(names.contains(&"p__one"));
+        for tool in listed["result"]["tools"].as_array().unwrap() {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        }
+    }
 
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {

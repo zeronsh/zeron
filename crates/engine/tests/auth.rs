@@ -810,6 +810,100 @@ async fn loopback_callback_completes_headed_sign_in() {
 }
 
 #[tokio::test]
+async fn sign_in_options_shape_the_authorize_url() {
+    use zeron_engine::{ScreenHint, SignInOptions};
+    let edge = StubEdge::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // No options: the URL the desktop app has always opened.
+    let plain = auth.start_sign_in().await.expect("authorize url");
+    assert_eq!(query_param(&plain, "screen_hint"), None);
+    assert_eq!(query_param(&plain, "max_age"), None);
+
+    let create = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true,
+        })
+        .await
+        .expect("sign-up url");
+    assert_eq!(
+        query_param(&create, "screen_hint").as_deref(),
+        Some("sign-up")
+    );
+    assert_eq!(query_param(&create, "max_age").as_deref(), Some("0"));
+    assert!(query_param(&create, "state").is_some());
+
+    let existing = auth
+        .start_sign_in_with(SignInOptions {
+            screen_hint: Some(ScreenHint::SignIn),
+            fresh: false,
+        })
+        .await
+        .expect("sign-in url");
+    assert_eq!(
+        query_param(&existing, "screen_hint").as_deref(),
+        Some("sign-in")
+    );
+    assert_eq!(query_param(&existing, "max_age"), None);
+
+    // The `SignIn` params: camelCase, every field optional.
+    let parsed: SignInOptions =
+        serde_json::from_value(serde_json::json!({ "screenHint": "sign-up", "fresh": true }))
+            .expect("params");
+    assert_eq!(
+        parsed,
+        SignInOptions {
+            screen_hint: Some(ScreenHint::SignUp),
+            fresh: true
+        }
+    );
+    let empty: SignInOptions = serde_json::from_value(serde_json::json!({})).expect("empty");
+    assert_eq!(empty, SignInOptions::default());
+}
+
+#[tokio::test]
+async fn access_token_with_expiry_hands_out_the_session_bearer() {
+    let edge = StubEdge::start().await;
+    *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+
+    // Signed out: nothing to hand out.
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
+
+    let url = auth.start_sign_in().await.expect("authorize url");
+    let callback = query_param(&url, "redirect_uri")
+        .expect("redirect")
+        .replace("%3A", ":")
+        .replace("%2F", "/");
+    let state = query_param(&url, "state").expect("state");
+    let ok = reqwest::get(format!("{callback}?code=abc&state={state}"))
+        .await
+        .expect("cb");
+    assert_eq!(ok.status().as_u16(), 200);
+    let mut state_rx = auth.watch_state();
+    wait_for(&mut state_rx, |s| s.is_signed_in()).await;
+
+    // The exchange's access token, its `exp` read out (the stub mints
+    // iat 1000 + 3600), from the cache: no refresh spent on it.
+    let (token, expires_at) = auth.access_token_with_expiry().await.expect("bearer");
+    assert_eq!(token, fake_jwt(3600, Some("org_1")));
+    assert_eq!(expires_at, Some(4600));
+    assert_eq!(edge.state.refreshes.load(Ordering::SeqCst), 0);
+
+    auth.sign_out();
+    assert!(matches!(
+        auth.access_token_with_expiry().await,
+        Err(TokenError::SignedOut)
+    ));
+}
+
+#[tokio::test]
 async fn sign_out_invalidates_pending_and_in_flight_oauth_callbacks() {
     let edge = StubEdge::start().await;
     *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
