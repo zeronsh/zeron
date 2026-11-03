@@ -319,6 +319,26 @@ impl HostRelayConfig {
     }
 }
 
+/// The service as relay clients see it: every method but the local-only
+/// ones ([`crate::local_only`]), which are refused before they reach it.
+struct RelayGuard(Arc<dyn RpcService>);
+
+#[async_trait::async_trait]
+impl RpcService for RelayGuard {
+    async fn handle(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<crate::RpcReply, RpcError> {
+        if crate::local_only(method) {
+            return Err(RpcError::Failed(format!(
+                "{method} is only answered over this device's local IPC"
+            )));
+        }
+        self.0.handle(method, params).await
+    }
+}
+
 /// The host end of the relay: one outbound WebSocket to our own DeviceRoom DO, serving
 /// `service` to every client conn through virtual string-frame connections. Immortal
 /// supervisor: quiet while signed out, reconnects with backoff when the socket drops
@@ -334,6 +354,8 @@ impl HostRelay {
         service: Arc<dyn RpcService>,
         on_nudge: NudgeHandler,
     ) -> Self {
+        // Peers never reach what only a local client may call.
+        let service: Arc<dyn RpcService> = Arc::new(RelayGuard(service));
         let task = tokio::spawn(async move {
             let mut wake = zeron_sync::wake::subscribe();
             let mut online = zeron_sync::wake::subscribe_online();
@@ -1126,6 +1148,56 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn relay_refuses_local_only_methods_and_serves_the_rest() {
+        use crate::{RpcReply, RpcService, methods};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Answers every call with its method name, counting what reached it.
+        struct Echo(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl RpcService for Echo {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, crate::RpcError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(RpcReply::Value(serde_json::json!(method)))
+            }
+        }
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let guard = super::RelayGuard(Arc::new(Echo(reached.clone())));
+        assert!(crate::local_only(methods::ACCESS_TOKEN));
+        match guard
+            .handle(methods::ACCESS_TOKEN, serde_json::json!({}))
+            .await
+        {
+            Err(crate::RpcError::Failed(message)) => assert!(message.contains("local IPC")),
+            _ => panic!("a peer must never get the device's bearer"),
+        }
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            0,
+            "refused before the service"
+        );
+
+        for method in [
+            methods::LIST_HARNESSES,
+            methods::AUTH_STATUS,
+            methods::SIGN_IN,
+        ] {
+            assert!(!crate::local_only(method));
+            match guard.handle(method, serde_json::json!({})).await {
+                Ok(RpcReply::Value(value)) => assert_eq!(value, serde_json::json!(method)),
+                _ => panic!("{method} passes through the relay unchanged"),
+            }
+        }
+        assert_eq!(reached.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};

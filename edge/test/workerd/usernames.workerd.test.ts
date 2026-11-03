@@ -242,7 +242,7 @@ describe("admin usernames", () => {
     const listed = (await (await admin("/admin/users")).json()) as { users: { userId: string; username: string | null }[] };
     expect(listed.users.find((u) => u.userId === "user_house")?.username).toBe("zeron");
     const csv = await (await admin("/admin/users?format=csv")).text();
-    expect(csv).toMatch(/\n\d+,user_house,.*,zeron,\n/);
+    expect(csv).toMatch(/\n\d+,user_house,.*,zeron,,\n/);
   });
 
   it("won't take a name from someone holding it", async () => {

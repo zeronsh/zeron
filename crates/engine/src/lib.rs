@@ -15,7 +15,26 @@ use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use zeron_sync::DocsStore;
 
+pub mod acp_registry;
 pub mod agent_accounts;
+
+/// Which build this engine is: its git commit and when its executable was
+/// built (the file's modification time, in seconds), as
+/// `"<commit>.<seconds>"`. Read once, as the engine starts: a binary replaced
+/// on disk while it runs leaves its id as it was, so a client can compare it
+/// with `zeron-engine --build-id` of the binary there now.
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let built = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        format!("{}.{built}", env!("ZERON_GIT_COMMIT"))
+    })
+}
 pub mod auth;
 mod change_request_store;
 pub mod change_requests;
@@ -37,6 +56,7 @@ pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
 mod model_catalogs;
+pub mod plugins;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -59,7 +79,9 @@ pub mod workspace_search;
 mod worktree_settings;
 
 pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
-pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
+pub use auth::{
+    Auth, AuthConfig, AuthState, AuthUser, OrgMembership, ScreenHint, SignInOptions,
+};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{
     CheckoutDiffSync, DiffFileTextPair, DiffSidecar, DiffSnapshot, TreeSnapshot, TurnSnapshot,
@@ -165,6 +187,8 @@ pub struct EngineCore {
     pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
+    /// Plugins under `{data}/plugins/` (the plugins contract).
+    pub plugins: plugins::Plugins,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -270,6 +294,24 @@ impl EngineCore {
         )?;
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
+        let plugins = plugins::Plugins::new(data_dir, &device_id);
+        plugins.set_workspace(workspace.clone());
+        // A plugin service's `zeron.notify`: as `PostNotification` posts.
+        let viewport_focus = desktop_notify::ViewportFocus::default();
+        {
+            let (data_dir, focus) = (data_dir.to_path_buf(), viewport_focus.clone());
+            plugins.set_notifier(move |source, title, body, session| {
+                let title: String = title.lines().next().unwrap_or_default().trim().chars().take(120).collect();
+                desktop_notify::post_for(&data_dir, &focus, source, &title, body, session).to_owned()
+            });
+        }
+        if let Some(edge) = &edge {
+            plugins.set_directory(Arc::new(plugins::keys::EdgeDirectory::new(
+                &edge.url,
+                edge.token.clone(),
+            )));
+        }
+        sessions.set_plugins(plugins.clone());
         sessions.set_doc_host(doc_host.clone());
         match sessions.recover_stale() {
             Ok(0) => {}
@@ -346,6 +388,9 @@ impl EngineCore {
         registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
             agent_accounts.clone(),
         )));
+        // Agents added from the ACP registry (this engine's own, under its
+        // data dir): harnesses before the update coordinator lists them.
+        acp_registry::start(data_dir, &registry);
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
@@ -361,6 +406,7 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        plugins.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -380,13 +426,14 @@ impl EngineCore {
             harness_updates,
             device_id,
             local_import,
+            plugins,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             cloud: std::sync::Mutex::new(None),
-            viewport_focus: desktop_notify::ViewportFocus::default(),
+            viewport_focus,
             _instance_lock: lock,
         })
     }
@@ -397,6 +444,7 @@ impl EngineCore {
 
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
+        self.plugins.attach_auth(auth.clone());
         *self
             .auth
             .lock()
@@ -426,6 +474,7 @@ impl EngineCore {
     /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         self.doc_host.set_links(links.clone());
+        self.plugins.set_links(links.clone());
         *self
             .links
             .lock()
@@ -522,7 +571,8 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
-        .with_viewport_focus(self.viewport_focus.clone());
+        .with_viewport_focus(self.viewport_focus.clone())
+        .with_plugins(self.plugins.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -586,6 +636,7 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        self.plugins.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -853,6 +904,7 @@ impl Engine {
                 }
                 capabilities
             },
+            build: Some(crate::build_id().to_owned()),
         })
     }
 
@@ -1029,6 +1081,9 @@ impl Engine {
             "{}/releases/harness-compatibility.json",
             config.edge_url.trim_end_matches('/')
         ));
+        // The release channel a macOS app install follows lives in the data
+        // dir (update-channel.json), so this report follows the app's choice.
+        zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
         if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
             let updater_for_tokens = updater.clone();

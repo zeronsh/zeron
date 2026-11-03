@@ -538,6 +538,7 @@ mod tests {
                         state: zeron_proto::ChangeRequestState::Open,
                         base_ref: "main".into(),
                         head_ref: "feature/pr".into(),
+                        signals: None,
                     }),
                     None,
                     zeron_proto::ChatIndicator::Idle,

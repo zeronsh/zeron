@@ -509,6 +509,14 @@ struct AgentAccountParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ConsumeCodexResetCreditParams {
+    account_id: String,
+    credit_id: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
     /// Stamped by the requesting engine when it forwards the start: the
@@ -723,6 +731,14 @@ enum MutateParams {
         #[serde(default)]
         name: Option<String>,
     },
+    /// LWW picture set, whole; `icon: None` (or an empty one) clears back to
+    /// the default tile.
+    #[serde(rename_all = "camelCase")]
+    SetSpaceIcon {
+        space_id: String,
+        #[serde(default)]
+        icon: Option<zeron_proto::SpaceIcon>,
+    },
     /// Hard delete: cascades to every chat (and session row) in the space.
     /// Live runs hosted here are interrupted best-effort.
     #[serde(rename_all = "camelCase")]
@@ -806,6 +822,8 @@ pub struct EngineRpc {
     credentials: Option<crate::credentials::CredentialBroker>,
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
+    /// The plugins service (absent in bare test assemblies).
+    plugins: Option<crate::plugins::Plugins>,
     engine_info: EngineInfo,
 }
 
@@ -839,6 +857,7 @@ impl EngineRpc {
                 }
                 capabilities
             },
+            build: Some(crate::build_id().to_owned()),
         };
         let github = GitHubCli::new().with_store(repos.data_dir());
         Self {
@@ -865,8 +884,15 @@ impl EngineRpc {
             local_import: None,
             credentials: None,
             viewport_focus: Default::default(),
+            plugins: None,
             engine_info,
         }
+    }
+
+    /// Attach the plugins service (the Plugin* methods).
+    pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1552,6 +1578,7 @@ impl EngineRpc {
                         {
                             self.cancel_remote_login(target, &login_id).await;
                             return RpcReply::value(&AgentLoginPoll {
+            code: None,
                                 status: AgentLoginStatus::Error,
                                 message: Some(error.to_string()),
                                 url: None,
@@ -1824,6 +1851,17 @@ impl EngineRpc {
                 .rename_space(&space_id, name.as_deref())
                 .map_err(failed)
                 .map(drop),
+            MutateParams::SetSpaceIcon { space_id, icon } => {
+                let icon = match icon.map(zeron_proto::SpaceIcon::normalized).transpose() {
+                    Ok(icon) => icon.flatten(),
+                    Err(part) => return Err(RpcError::BadParams(format!("invalid icon: {part}"))),
+                };
+                match self.workspace.set_space_icon(&space_id, icon.as_ref()) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(RpcError::Failed(format!("no such project: {space_id}"))),
+                    Err(e) => Err(failed(e)),
+                }
+            }
             MutateParams::DeleteSpace { space_id } => {
                 let chats = self.workspace.read_chats().unwrap_or_default();
                 let mut cloud_chats: Vec<String> = chats
@@ -2112,6 +2150,16 @@ where
     Ok(registry.descriptors())
 }
 
+/// Whether a client asked for the agents added from the ACP registry in a
+/// harness catalog (`includeRegistry`): older clients read harness ids
+/// strictly and would refuse a whole list over one they don't know.
+fn include_registry(params: &serde_json::Value) -> bool {
+    params
+        .get("includeRegistry")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn forward_deadline(method: &str) -> std::time::Duration {
     if method == methods::PREPARE_VOICE_V2 {
         return Duration::from_secs(65);
@@ -2124,7 +2172,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
             Duration::from_secs(15 * 60)
         }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
+        methods::INSTALL_HARNESS | methods::ADD_ACP_AGENT => Duration::from_secs(15 * 60),
+        methods::LIST_ACP_REGISTRY => Duration::from_secs(60),
+        // An agent started, then asked for a session (its own timeouts).
+        methods::GET_ACP_AGENT_SIGN_IN | methods::SIGN_OUT_ACP_AGENT => Duration::from_secs(90),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
@@ -2153,6 +2204,15 @@ fn forwardable(method: &str) -> bool {
         method,
         methods::FORK_SIDE_CHAT
             | methods::LIST_HARNESSES
+            | methods::LIST_ACP_REGISTRY
+            | methods::ADD_ACP_AGENT
+            | methods::REMOVE_ACP_AGENT
+            | methods::GET_ACP_AGENT_ENV
+            | methods::SET_ACP_AGENT_ENV
+            | methods::GET_ACP_AGENT_SIGN_IN
+            | methods::SIGN_OUT_ACP_AGENT
+            | methods::SET_ACP_AGENT_KEY
+            | methods::ADD_OWN_AGENT
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
@@ -2209,6 +2269,7 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_WORKSPACE_FILE
             | methods::DELETE_WORKSPACE_ENTRY
             | methods::MOVE_WORKSPACE_ENTRY
+            | methods::CREATE_WORKSPACE_ENTRY
             | methods::WRITE_WORKSPACE_FILE
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
@@ -2230,6 +2291,9 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_CHANGE_REQUEST
             | methods::GET_CHANGE_REQUEST_DIFF
             | methods::POST_CHANGE_REQUEST_COMMENT
+            | methods::POST_CHANGE_REQUEST_REVIEW_COMMENT
+            | methods::REPLY_CHANGE_REQUEST_THREAD
+            | methods::RESOLVE_CHANGE_REQUEST_THREAD
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -2239,6 +2303,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WRITE_TERMINAL
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
+            | methods::TERMINAL_STATUS
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -2249,6 +2314,7 @@ fn forwardable(method: &str) -> bool {
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
             | methods::RELAY_AGENT_LOGIN_CALLBACK
+            | methods::CONSUME_CODEX_RESET_CREDIT
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -2264,6 +2330,18 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
+            // Plugins are per device (what it runs, what it allowed): Settings
+            // → Plugins' device switcher reviews, allows, installs and removes
+            // them on another of your devices from this one.
+            | methods::LIST_PLUGINS
+            | methods::WATCH_PLUGINS
+            | methods::DECIDE_PLUGIN
+            | methods::SET_PLUGIN_OFF
+            | methods::REMOVE_PLUGIN
+            | methods::INSTALL_PLUGIN
+            | methods::CHECK_PLUGIN_UPDATES
+            | methods::UPDATE_PLUGIN
+            | methods::PLUGIN_STATUS
     )
 }
 
@@ -2283,6 +2361,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::UPDATE_STATUS
             | methods::WATCH_HARNESS_UPDATES
+            | methods::WATCH_PLUGINS
     )
 }
 
@@ -2443,6 +2522,7 @@ impl AuthRpc {
                 | methods::SIGN_IN_HEADLESS
                 | methods::COMPLETE_SIGN_IN
                 | methods::SIGN_OUT
+                | methods::ACCESS_TOKEN
                 | methods::LIST_ORGS
                 | methods::CREATE_ORG
                 | methods::SELECT_ORG
@@ -2456,12 +2536,28 @@ impl RpcService for AuthRpc {
         match method {
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
             methods::SIGN_IN => {
+                // `{screenHint?, fresh?}`; absent (the desktop app's `{}`),
+                // the hosted page opens as it always has.
+                let options: crate::auth::SignInOptions = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
                 let url = self
                     .auth
-                    .start_sign_in()
+                    .start_sign_in_with(options)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "url": url }))
+            }
+            methods::ACCESS_TOKEN => {
+                // Local IPC only: the relay refuses it (`zeron_rpc::local_only`).
+                let (token, expires_at) = self
+                    .auth
+                    .access_token_with_expiry()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "token": token, "expiresAt": expires_at }))
             }
             methods::SIGN_IN_HEADLESS => {
                 let url = self.auth.start_headless_sign_in();
@@ -2557,6 +2653,13 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // A file on this device can't be read there: another device
+            // installs from a link.
+            if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {
+                return Err(RpcError::BadParams(
+                    "Another device installs a plugin from a link (url), not a file on this one".into(),
+                ));
+            }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
                 && crate::cloud_accounts::handles(method)
@@ -2623,6 +2726,21 @@ impl RpcService for EngineRpc {
         // Cloud device + credential vault: IPC-only (never in `forwardable`),
         // acting for this runtime's signed-in user against the edge. Boxed so
         // its state stays out of this dispatcher's already-large frame.
+        if crate::plugins::handles(method) {
+            let Some(plugins) = self.plugins.clone() else {
+                return Err(RpcError::Failed("Plugins aren't available here".into()));
+            };
+            return Box::pin(async move { plugins.dispatch(method, params).await }).await;
+        }
+        if crate::acp_registry::handles(method) {
+            return Box::pin(crate::acp_registry::dispatch(
+                &self.registry,
+                self.harness_updates.as_ref(),
+                method,
+                params,
+            ))
+            .await;
+        }
         if crate::cloud_client::handles(method) {
             return Box::pin(crate::cloud_client::dispatch(
                 self.cloud(),
@@ -2636,7 +2754,9 @@ impl RpcService for EngineRpc {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::LIST_CLOUD_BRANCHES => Box::pin(self.cloud_branches(params)).await,
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
-            methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
+            methods::LIST_HARNESSES => {
+                RpcReply::value(&self.registry.descriptors_for(include_registry(&params)))
+            }
             methods::INSTALL_HARNESS => {
                 let p: ListModelsParams = parse_params(params)?;
                 let installing = self.registry.installs.begin(p.harness)?;
@@ -2690,6 +2810,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
             methods::SET_HARNESS_ENABLED => {
+                let include = include_registry(&params);
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
                 if let Some(coordinator) = &self.harness_updates {
@@ -2697,7 +2818,7 @@ impl RpcService for EngineRpc {
                 }
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
-                RpcReply::value(&self.registry.descriptors())
+                RpcReply::value(&self.registry.descriptors_for(include))
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
@@ -2950,6 +3071,31 @@ impl RpcService for EngineRpc {
                 self.doc_host.persist_fork(&target).map_err(failed)?;
                 self.workspace.import_chat_row(&chat).map_err(failed)?;
                 RpcReply::value(&chat)
+            }
+            methods::POST_NOTIFICATION => {
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    source: String,
+                    title: String,
+                    #[serde(default)]
+                    body: String,
+                    #[serde(default)]
+                    session: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let title: String = p.title.lines().next().unwrap_or_default().trim().chars().take(120).collect();
+                if title.is_empty() || p.source.is_empty() {
+                    return Err(RpcError::BadParams("A notification needs a title and who asked".into()));
+                }
+                let outcome = crate::desktop_notify::post_for(
+                    self.repos.data_dir(),
+                    &self.viewport_focus,
+                    &p.source,
+                    &title,
+                    &p.body,
+                    p.session.as_deref(),
+                );
+                RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
             methods::SET_VIEWPORT_FOCUS => {
                 #[derive(serde::Deserialize)]
@@ -3576,6 +3722,63 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&page)
+            }
+            methods::POST_CHANGE_REQUEST_REVIEW_COMMENT => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    #[serde(flatten)]
+                    line: crate::source_control::ReviewLine,
+                    body: String,
+                }
+                let p: P = parse_params(params)?;
+                if !p.line.valid() {
+                    return Err(RpcError::BadParams(
+                        "A line comment needs a file, a line from 1, LEFT or RIGHT, and a 40-character commit".into(),
+                    ));
+                }
+                if !crate::source_control::valid_comment_body(&p.body) {
+                    return Err(RpcError::BadParams("Comment must contain 1–60000 bytes".into()));
+                }
+                let comment = self
+                    .github
+                    .post_review_comment(&p.url, &p.line, &p.body)
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&comment)
+            }
+            methods::REPLY_CHANGE_REQUEST_THREAD | methods::RESOLVE_CHANGE_REQUEST_THREAD => {
+                #[derive(Deserialize)]
+                struct P {
+                    url: String,
+                    thread: String,
+                    #[serde(default)]
+                    body: String,
+                    #[serde(default)]
+                    resolved: Option<bool>,
+                }
+                let p: P = parse_params(params)?;
+                if !crate::source_control::valid_node_id(&p.thread) {
+                    return Err(RpcError::BadParams("Which review thread: its id".into()));
+                }
+                if method == methods::REPLY_CHANGE_REQUEST_THREAD {
+                    if !crate::source_control::valid_comment_body(&p.body) {
+                        return Err(RpcError::BadParams("Comment must contain 1–60000 bytes".into()));
+                    }
+                    let comment = self
+                        .github
+                        .reply_to_thread(&p.url, &p.thread, &p.body)
+                        .await
+                        .map_err(change_request_rpc_error)?;
+                    return RpcReply::value(&comment);
+                }
+                let resolved = p.resolved.ok_or_else(|| RpcError::BadParams("resolved: true or false".into()))?;
+                let now = self
+                    .github
+                    .set_thread_resolved(&p.url, &p.thread, resolved)
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&serde_json::json!({ "resolved": now }))
             }
             methods::POST_CHANGE_REQUEST_COMMENT => {
                 #[derive(Deserialize)]
@@ -4306,6 +4509,15 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::from)?;
                 RpcReply::value(&outcome)
             }
+            methods::CREATE_WORKSPACE_ENTRY => {
+                let request: zeron_proto::CreateWorkspaceEntryRequest = parse_params(params)?;
+                let outcome = self
+                    .workspace_files
+                    .create_entry(request)
+                    .await
+                    .map_err(RpcError::from)?;
+                RpcReply::value(&outcome)
+            }
             methods::WRITE_WORKSPACE_FILE => {
                 let request: zeron_proto::WriteWorkspaceFileRequest = parse_params(params)?;
                 let outcome = tokio::time::timeout(
@@ -4584,6 +4796,14 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::TERMINAL_STATUS => {
+                let p: TerminalIdParams = parse_params(params)?;
+                let status = self
+                    .terminals
+                    .status(&p.terminal_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&status)
+            }
             methods::LIST_AGENT_ACCOUNTS => {
                 let p: ListAgentAccountsParams = parse_params(params)?;
                 let snapshot = self
@@ -4612,6 +4832,15 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
+            }
+            methods::CONSUME_CODEX_RESET_CREDIT => {
+                let p: ConsumeCodexResetCreditParams = parse_params(params)?;
+                let outcome = self
+                    .agent_accounts
+                    .consume_codex_reset_credit(&p.account_id, &p.credit_id, &p.idempotency_key)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&outcome)
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
@@ -5353,6 +5582,8 @@ mod tests {
         assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
+        // The bearer is for local clients only, never a remote device's ask.
+        assert!(!forwardable(methods::ACCESS_TOKEN));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
@@ -5367,6 +5598,8 @@ mod tests {
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
         assert!(forwardable(methods::DELETE_WORKSPACE_ENTRY));
         assert!(forwardable(methods::MOVE_WORKSPACE_ENTRY));
+        assert!(forwardable(methods::CREATE_WORKSPACE_ENTRY));
+        assert!(forwardable(methods::TERMINAL_STATUS));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
         assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
         assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));
@@ -5392,6 +5625,13 @@ mod tests {
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
         assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
+        for method in [
+            methods::POST_CHANGE_REQUEST_REVIEW_COMMENT,
+            methods::REPLY_CHANGE_REQUEST_THREAD,
+            methods::RESOLVE_CHANGE_REQUEST_THREAD,
+        ] {
+            assert!(forwardable(method) && !is_stream_method(method), "{method}");
+        }
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));

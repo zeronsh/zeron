@@ -321,6 +321,7 @@ mod project_tests {
             checkout_id: None,
             repository_id: repository.map(str::to_string),
             github_repo: None,
+            icon: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
         }
     }

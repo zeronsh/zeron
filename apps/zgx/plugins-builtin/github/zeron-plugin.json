@@ -1,0 +1,25 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "version": "1.0.0",
+  "description": "Your sessions' pull requests: each one's state beside its title in the sidebar, and the pull request itself in a chat's panel.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.add",
+    "sessions.read",
+    "files.read",
+    "panel.tabs",
+    "navigate",
+    "links.open",
+    "pages.add",
+    "notifications",
+    "network",
+    "github",
+    "commands",
+    "clipboard"
+  ],
+  "commands": [
+    "gh"
+  ]
+}

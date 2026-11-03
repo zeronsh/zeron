@@ -10470,13 +10470,24 @@ impl Shell {
                     ],
                 ),
                 Prompt::Result => match update.available() {
-                    None => (
-                        "Zeron is up to date".into(),
-                        format!("Version {current} is the newest release.").into(),
-                        vec![UpdatePromptButton::Close("OK")],
-                    ),
+                    None => match update.held() {
+                        Some((latest, why)) => (
+                            format!("Zeron {latest} can't be installed yet").into(),
+                            why.to_owned().into(),
+                            vec![UpdatePromptButton::Close("OK")],
+                        ),
+                        None => (
+                            "Zeron is up to date".into(),
+                            format!("Version {current} is the newest release.").into(),
+                            vec![UpdatePromptButton::Close("OK")],
+                        ),
+                    },
                     Some(latest) => {
-                        let title: SharedString = format!("Zeron {latest} is available").into();
+                        let title: SharedString = if update.switching() {
+                            format!("Zeron {latest} (Stable) is available").into()
+                        } else {
+                            format!("Zeron {latest} is available").into()
+                        };
                         if let Some(blocker) = update.blocker() {
                             (
                                 title,
@@ -10599,12 +10610,74 @@ impl Shell {
                 }
             });
         }
+        let channel_row = self.render_update_channel_row(&update, &theme, cx);
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(&theme, &title))
             .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
+            .children(channel_row)
             .child(row)
             .into_any_element();
         Some(popover::modal("update-prompt-dialog", viewport, card))
+    }
+
+    /// "Get beta updates" in the Check for Updates dialog (macOS app installs):
+    /// the beta channel, the next Zeron's interface, for testers. Turning it
+    /// off returns to Stable, even to an older version.
+    fn render_update_channel_row(
+        &self,
+        update: &Entity<crate::app_update::AppUpdate>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (on, note) = {
+            let update = update.read(cx);
+            if !update.offers_channels() {
+                return None;
+            }
+            (update.beta(), update.channel_note().cloned())
+        };
+        let explain: SharedString = note.unwrap_or_else(|| {
+            if on {
+                "You're getting beta updates. Turn this off to go back to Stable.".into()
+            } else {
+                format!("Try the next Zeron early. Needs macOS {} or later.", zeron_update::channel::BETA_MINIMUM_MACOS).into()
+            }
+        });
+        Some(
+            div()
+                .mt(px(14.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(crate::settings::widgets::row_title(theme, "Get beta updates"))
+                        .child(popover::dialog_body(theme, explain)),
+                )
+                .child(
+                    crate::settings::widgets::toggle_switch(theme, on, "update-beta")
+                        .id("update-beta-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Get beta updates")
+                        .aria_toggled(if on {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                update.update(cx, |update, cx| update.set_beta(!on, cx));
+                            }
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The sidebar's bottom row: account menu on the left, settings toggle on
@@ -17380,6 +17453,7 @@ mod exit_regressions {
                     git_checked_at: None,
                     checkout_id: None,
                     repository_id: None,
+                    icon: None,
                     created_at: Utc::now(),
                 };
                 shell.state.update(cx, |state, cx| {
@@ -17649,6 +17723,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     // Boot opened an existing project session after loading defaults.
@@ -17719,6 +17794,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -17805,6 +17881,7 @@ mod exit_regressions {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: Utc::now(),
         };
         window
@@ -17871,6 +17948,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                     state.select_space(Some("repo".into()), cx);
@@ -18237,6 +18315,7 @@ mod exit_regressions {
                         checkout_id: None,
                         repository_id: None,
                         github_repo: None,
+                        icon: None,
                         created_at: Utc::now(),
                     }]);
                 });

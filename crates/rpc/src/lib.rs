@@ -47,6 +47,29 @@ pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
+    /// The ACP registry's agents as the target device sees them (`{refresh?}`
+    /// → `{agents, fetchedAt, offline, platform}`), and adding (or
+    /// updating) and removing one there (`{id}`).
+    pub const LIST_ACP_REGISTRY: &str = "ListAcpRegistry";
+    pub const ADD_ACP_AGENT: &str = "AddAcpAgent";
+    pub const REMOVE_ACP_AGENT: &str = "RemoveAcpAgent";
+    /// An added agent's own environment on the target device (`{id}` →
+    /// `{env}`, `KEY=VALUE` a line; set with `{id, env}`): kept there,
+    /// owner-only, never synced.
+    pub const GET_ACP_AGENT_ENV: &str = "GetAcpAgentEnv";
+    pub const SET_ACP_AGENT_ENV: &str = "SetAcpAgentEnv";
+    /// An added agent's sign-in on the target device, asked of it without
+    /// signing in (`{id, refresh?}` → `{signedIn, account?, canSignOut,
+    /// methods}`), and signing it out there (`{id}`, ACP's `logout`).
+    pub const GET_ACP_AGENT_SIGN_IN: &str = "GetAcpAgentSignIn";
+    pub const SIGN_OUT_ACP_AGENT: &str = "SignOutAcpAgent";
+    /// One variable of an added agent's own environment on the target device
+    /// (`{id, var, value}`; an empty value forgets it): the key a sign-in
+    /// method reads from there. Replies `{ok}`; the value never comes back.
+    pub const SET_ACP_AGENT_KEY: &str = "SetAcpAgentKey";
+    /// An agent of your own on the target device (`{name, command, env}`),
+    /// run through the same generic ACP harness as the registry's.
+    pub const ADD_OWN_AGENT: &str = "AddOwnAgent";
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
@@ -131,8 +154,8 @@ pub mod methods {
     /// Spaces registry (device+folder pairs) from the workspace doc.
     pub const WATCH_SPACES: &str = "WatchSpaces";
     /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
-    /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
-    /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// Params are tagged `{op: createChat|createSpace|renameSpace|setSpaceIcon|
+    /// deleteSpace|renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
     pub const MUTATE: &str = "Mutate";
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
@@ -156,6 +179,12 @@ pub mod methods {
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
     pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
     pub const SIGN_OUT: &str = "SignOut";
+    /// The signed-in session's current bearer, for a local client that calls
+    /// the edge as the user itself (zgx's account calls): `{}` →
+    /// `{token, expiresAt?}` (unix seconds). Refreshed as the engine's own
+    /// calls refresh; the refresh token never leaves the engine. Local IPC
+    /// only ([`crate::local_only`]): the device-room relay refuses it.
+    pub const ACCESS_TOKEN: &str = "AccessToken";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
@@ -201,6 +230,8 @@ pub mod methods {
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
     pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
+    /// An empty file or folder at a new path (never replacing one).
+    pub const CREATE_WORKSPACE_ENTRY: &str = "CreateWorkspaceEntry";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
@@ -220,6 +251,8 @@ pub mod methods {
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
+    /// Whether closing a terminal would end a program running in it.
+    pub const TERMINAL_STATUS: &str = "TerminalStatus";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -233,6 +266,14 @@ pub mod methods {
     pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
     pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
+    /// `{url, path, line, side: "LEFT" | "RIGHT", commitId, body}` → the
+    /// comment: a new review thread on one line of the changes.
+    pub const POST_CHANGE_REQUEST_REVIEW_COMMENT: &str = "PostChangeRequestReviewComment";
+    /// `{url, thread, body}` → the comment: a reply in a review thread.
+    pub const REPLY_CHANGE_REQUEST_THREAD: &str = "ReplyChangeRequestThread";
+    /// `{url, thread, resolved}` → `{resolved}`: a review thread resolved or
+    /// opened again.
+    pub const RESOLVE_CHANGE_REQUEST_THREAD: &str = "ResolveChangeRequestThread";
     pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     /// Permanently restore one chat-owned checkout to its current HEAD and
@@ -251,6 +292,7 @@ pub mod methods {
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
+    pub const CONSUME_CODEX_RESET_CREDIT: &str = "ConsumeCodexResetCredit";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
@@ -370,6 +412,181 @@ pub mod methods {
     /// of `repo` (`owner/name`) can start from, through the user's GitHub
     /// connection (the vault calls GitHub), the default first.
     pub const LIST_CLOUD_BRANCHES: &str = "ListCloudBranches";
+
+    // ── Plugins (the plugins contract; local IPC only but PluginDeliver) ──
+    /// `{}` → `{dirs: {plugins, templates}, plugins: PluginItem[]}`, by name.
+    pub const LIST_PLUGINS: &str = "ListPlugins";
+    /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
+    /// each change.
+    pub const WATCH_PLUGINS: &str = "WatchPlugins";
+    /// `{id, allow, hash}` → `PluginItem`.
+    pub const DECIDE_PLUGIN: &str = "DecidePlugin";
+    /// `{id, off}` → `PluginItem` (an allowed plugin only).
+    pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
+    /// `{id}` → `{}`: the folder moves to `plugins/.removed/`.
+    pub const REMOVE_PLUGIN: &str = "RemovePlugin";
+    /// `{id, name, description?, permissions?}` → `PluginItem`.
+    pub const NEW_PLUGIN: &str = "NewPlugin";
+    /// `{id}` → `PluginItem`, or `{path}` → `VerifyPlugin`'s reply; both
+    /// with `files` (how many files the signature covers).
+    pub const SIGN_PLUGIN: &str = "SignPlugin";
+    /// `{path}` → `{author, status, hash, error?}`.
+    pub const VERIFY_PLUGIN: &str = "VerifyPlugin";
+    /// `{}` → `{device: {id, name}, tools: [..]}`.
+    pub const LIST_PLUGIN_TOOLS: &str = "ListPluginTools";
+    /// `{}` → stream of `ListPluginTools`' reply.
+    pub const WATCH_PLUGIN_TOOLS: &str = "WatchPluginTools";
+    /// `{mcp_name | plugin+tool, args, chatId?}` → `{ok: true, value}`.
+    pub const CALL_PLUGIN_TOOL: &str = "CallPluginTool";
+    /// `{}` → stream (the app) of `{callId, plugin, tool, args, chatId?}`;
+    /// the latest subscriber wins.
+    pub const SERVE_PLUGIN_TOOLS: &str = "ServePluginTools";
+    /// `{callId, ok, value?, error?}` → `{}`.
+    pub const PLUGIN_TOOL_RESULT: &str = "PluginToolResult";
+    /// `{plugin, to: deviceId | "*", data}` → `{results: {deviceId: outcome}}`.
+    pub const PLUGIN_SEND: &str = "PluginSend";
+    /// Peer to peer over the device link: `{plugin, from, author_key?, data}`
+    /// → `{outcome}`. The one plugin method a peer may call.
+    pub const PLUGIN_DELIVER: &str = "PluginDeliver";
+    /// The app (a plugin's window): `{plugin, method, args?, device?,
+    /// timeout?}` → `{ok: true, value}` | `{ok: false, reason, message}`.
+    /// Its service on this device, or on `device` (sent there as
+    /// [`SERVE_PLUGIN_CALL`] with the plugin's version and signing key).
+    /// `method: "@watch"` has `device`'s service events reach this device's
+    /// windows while they're open.
+    pub const CALL_PLUGIN_SERVICE: &str = "CallPluginService";
+    /// Peer to peer over the device link: `{plugin, version, authorKey?,
+    /// from, method, args?, timeout?}` → as `CallPluginService`. Refused
+    /// with a reason unless the plugin is installed, on and allowed here,
+    /// in the same version, by the same author. A peer may call it.
+    pub const SERVE_PLUGIN_CALL: &str = "ServePluginCall";
+    /// `{}` → stream (the app) of `{plugin, from: {id, name}, data, at}`.
+    pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
+    /// `{}` → `{key, registered}`.
+    pub const PLUGIN_SIGNING_KEY: &str = "PluginSigningKey";
+    /// Templates (whole replacements of Zeron's interface): `{}` → `{dir,
+    /// active, templates: [{id, name, description, author, version,
+    /// zeron_version, builtin, active, status: "ok" | "errors" | "out_of_date"
+    /// | "broken", error?, dir, preview?, imported?: {key, author}}], pending:
+    /// [{pending, id, name, key, author, hash, ignored, …}]}`, Zeron's own
+    /// first. "out_of_date":
+    /// its `zeron_version` isn't this Zeron's (a real update since it was made).
+    pub const LIST_TEMPLATES: &str = "ListTemplates";
+    /// `{id, name?, from?}` → `{id, dir, files: [rel], map}`: a full copy of
+    /// Zeron's app (overlaid with `from`'s files) to edit.
+    pub const CREATE_TEMPLATE: &str = "CreateTemplate";
+    /// `{id}` → `{active}`: the template the window runs (the app switches
+    /// live).
+    pub const USE_TEMPLATE: &str = "UseTemplate";
+    /// `{id}` → `{id, active, root_error?, file_errors: {rel: error},
+    /// out_of_date: [rel], files, inherits}`.
+    pub const TEMPLATE_STATUS: &str = "TemplateStatus";
+    /// `{id}` → `{deleted, active}`: set aside in the templates folder's
+    /// `.removed`.
+    pub const DELETE_TEMPLATE: &str = "DeleteTemplate";
+    /// `{id, path}` → `{id, path, files, key}`: the template as a signed
+    /// package (`path`, a `.zeron-template` file), signed with this device's
+    /// plugin key in the template domain. Never-templated files are left out.
+    pub const EXPORT_TEMPLATE: &str = "ExportTemplate";
+    /// `{path}` → yours (signed by this device's key): installed,
+    /// `{installed, name, author, ignored}`; anyone else's: kept for you to
+    /// allow in Zeron, `{pending, id, name, …, key, author, hash, ignored,
+    /// needs_consent: true}`. Unsigned or tampered packages are refused.
+    pub const IMPORT_TEMPLATE: &str = "ImportTemplate";
+    /// `{pending, allow, hash}` → `{installed, name, author}` or
+    /// `{declined}`: the consent window's answer for a waiting package
+    /// (checked again; `hash` is the package as shown). Only Zeron's consent
+    /// window calls it.
+    pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
+    /// Each template installed from a link checked there for a newer
+    /// version (`{id?}`): `{updates, errors}`.
+    pub const CHECK_TEMPLATE_UPDATES: &str = "CheckTemplateUpdates";
+    /// The update found for a template, installed in its place (`{id}`).
+    pub const UPDATE_TEMPLATE: &str = "UpdateTemplate";
+    /// `{}` → `{screens: [{module, file, title, description, elements}],
+    /// map}`: each screen's named elements (`#id`, `.class`) from its source;
+    /// `DescribeElements` is the live window's.
+    pub const DESCRIBE_APP: &str = "DescribeApp";
+    /// `{}` → `{elements: [{selector, place, about, provides, present}],
+    /// everywhere, how}`: where plugins can place their nodes, as the main
+    /// window running now has it (it writes the map as its template
+    /// changes).
+    pub const DESCRIBE_ELEMENTS: &str = "DescribeElements";
+    /// `{id, snapshot?}` → `{id, name, status, error?, permissions, allowed,
+    /// open, on_in_window?, placements?: [{at, how, count, regions}],
+    /// problem?, hidden?, failed?, pages?, snapshot?}`: where a plugin's nodes
+    /// landed in the window, for an agent to check its work (and, with
+    /// `snapshot`, a picture of the window cut to them).
+    pub const PLUGIN_STATUS: &str = "PluginStatus";
+    /// `{dir}` → the list: the app's folder of Zeron's own plugins, scanned
+    /// with yours (allowed what they ask, on unless turned off, never
+    /// removed).
+    pub const SET_BUILTIN_PLUGINS: &str = "SetBuiltinPlugins";
+    /// `{path}` (a `.zeron-plugin` file) or `{url, ref?, folder?}` (a
+    /// package link, a GitHub release, a git repository) → `{plugin,
+    /// update, from?, added, removed, waiting}`: someone else's plugin
+    /// installed, verified first; it waits for you in the app (`waiting`)
+    /// unless it's signed by your own key. Over an installed one only when
+    /// the same key signed both (an update).
+    pub const INSTALL_PLUGIN: &str = "InstallPlugin";
+    /// `{id?}` → `{updates: [{id, name, version, added, removed,
+    /// refused?}], errors: [{id, name, error}]}`: each installed plugin's
+    /// source checked for a new version (listed on its item as `update`).
+    pub const CHECK_PLUGIN_UPDATES: &str = "CheckPluginUpdates";
+    /// `{id}` → as `InstallPlugin`: the update found for it installed
+    /// (checked first when none was found yet). Refused when someone else
+    /// signed it or it was changed; new permissions wait for you again.
+    pub const UPDATE_PLUGIN: &str = "UpdatePlugin";
+    /// `{id, to?}` → `{path}`: a plugin as a `.zeron-plugin` package (an
+    /// own plugin is re-signed first), into the folder or file `to`.
+    pub const EXPORT_PLUGIN: &str = "ExportPlugin";
+    /// `{source, title, body, session?}` → `{outcome: "posted" | "off" |
+    /// "held" | "paced" | "unavailable"}`: a banner asked for (a plugin's),
+    /// shown as the engine's own are, under the same Settings, at most a few
+    /// a minute for each `source`; clicking it opens `session`.
+    pub const POST_NOTIFICATION: &str = "PostNotification";
+}
+
+/// Methods answered only over this device's own local IPC, never to a peer
+/// device through the device-room relay ([`HostRelay`] refuses them): they
+/// hand the caller this device's credentials.
+pub fn local_only(method: &str) -> bool {
+    matches!(
+        method,
+        methods::ACCESS_TOKEN
+            // Plugins: authoring, tools and the window's channel stay this
+            // device's. Your other devices may list, review, allow, turn
+            // off, install and remove plugins here (the account's own
+            // devices: Settings → Plugins' device switcher), deliver a
+            // message, and call a service (`ServePluginCall`).
+            | methods::NEW_PLUGIN
+            | methods::SIGN_PLUGIN
+            | methods::VERIFY_PLUGIN
+            | methods::LIST_PLUGIN_TOOLS
+            | methods::WATCH_PLUGIN_TOOLS
+            | methods::CALL_PLUGIN_TOOL
+            | methods::SERVE_PLUGIN_TOOLS
+            | methods::PLUGIN_TOOL_RESULT
+            | methods::PLUGIN_SEND
+            | methods::CALL_PLUGIN_SERVICE
+            | methods::WATCH_PLUGIN_CHANNEL
+            | methods::PLUGIN_SIGNING_KEY
+            | methods::LIST_TEMPLATES
+            | methods::CREATE_TEMPLATE
+            | methods::USE_TEMPLATE
+            | methods::TEMPLATE_STATUS
+            | methods::DELETE_TEMPLATE
+            | methods::EXPORT_TEMPLATE
+            | methods::IMPORT_TEMPLATE
+            | methods::DECIDE_TEMPLATE
+            | methods::CHECK_TEMPLATE_UPDATES
+            | methods::UPDATE_TEMPLATE
+            | methods::DESCRIBE_APP
+            | methods::DESCRIBE_ELEMENTS
+            | methods::SET_BUILTIN_PLUGINS
+            | methods::POST_NOTIFICATION
+            | methods::EXPORT_PLUGIN
+    )
 }
 
 /// Stable capability error codes transported without provider stderr.
@@ -554,6 +771,53 @@ mod tests {
                 )),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
+        }
+    }
+
+    #[test]
+    fn plugin_methods_are_local_only_but_managing_delivering_and_serving() {
+        for method in [
+            methods::NEW_PLUGIN,
+            methods::SIGN_PLUGIN,
+            methods::VERIFY_PLUGIN,
+            methods::LIST_PLUGIN_TOOLS,
+            methods::WATCH_PLUGIN_TOOLS,
+            methods::CALL_PLUGIN_TOOL,
+            methods::SERVE_PLUGIN_TOOLS,
+            methods::PLUGIN_TOOL_RESULT,
+            methods::PLUGIN_SEND,
+            methods::CALL_PLUGIN_SERVICE,
+            methods::WATCH_PLUGIN_CHANNEL,
+            methods::PLUGIN_SIGNING_KEY,
+            methods::LIST_TEMPLATES,
+            methods::CREATE_TEMPLATE,
+            methods::USE_TEMPLATE,
+            methods::TEMPLATE_STATUS,
+            methods::DELETE_TEMPLATE,
+            methods::EXPORT_TEMPLATE,
+            methods::IMPORT_TEMPLATE,
+            methods::DECIDE_TEMPLATE,
+            methods::CHECK_TEMPLATE_UPDATES,
+            methods::UPDATE_TEMPLATE,
+            methods::DESCRIBE_APP,
+        ] {
+            assert!(local_only(method), "{method}");
+        }
+        assert!(!local_only(methods::PLUGIN_DELIVER));
+        assert!(!local_only(methods::SERVE_PLUGIN_CALL));
+        // Your other devices manage this one's plugins (Settings → Plugins).
+        for method in [
+            methods::LIST_PLUGINS,
+            methods::WATCH_PLUGINS,
+            methods::DECIDE_PLUGIN,
+            methods::SET_PLUGIN_OFF,
+            methods::REMOVE_PLUGIN,
+            methods::INSTALL_PLUGIN,
+            methods::CHECK_PLUGIN_UPDATES,
+            methods::UPDATE_PLUGIN,
+            methods::PLUGIN_STATUS,
+        ] {
+            assert!(!local_only(method), "{method}");
         }
     }
 

@@ -2547,6 +2547,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: provider.map(str::to_string),
+            codex_reset_credits: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2595,6 +2596,7 @@ mod tests {
 
     fn poll(status: AgentLoginStatus, message: Option<&str>, url: Option<&str>) -> AgentLoginPoll {
         AgentLoginPoll {
+            code: None,
             status,
             message: message.map(str::to_string),
             url: url.map(str::to_string),
@@ -2699,6 +2701,7 @@ mod tests {
             switchable,
             saved_at: None,
             provider: Some("openai".into()),
+            codex_reset_credits: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2773,6 +2776,7 @@ mod tests {
                         switchable: true,
                         saved_at: None,
                         provider: None,
+                        codex_reset_credits: None,
                     }],
                     warnings: vec![],
                 });
@@ -2847,6 +2851,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            codex_reset_credits: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,

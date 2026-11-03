@@ -82,7 +82,8 @@ SUITE_INPUTS: dict[str, list[str]] = {
 # The workspace packages each suite builds and tests (their dependencies are added).
 SUITE_PACKAGES: dict[str, list[str]] = {
     "core": ["zeron-harness", "zeron-engine", "zeron-sync", "zeron-update", "zeron-doc", "zeron-preview",
-             "zeron-mcp", "zeron-proto", "zeron-rpc", "zeron-orb", "zeron-voice-session", "zeron-voice-media"],
+             "zeron-mcp", "zeron-proto", "zeron-rpc", "zeron-orb", "zeron-voice-session", "zeron-voice-media",
+             "zeron-cli", "zeron-launch", "zeron-notify"],
     "ui": ["zeron-ui"],
     "voice": ["zeron-audio", "zeron-voice-media"],
     "windows": ["zeron-ui", "zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine",

@@ -1,0 +1,20 @@
+{
+  "id": "notes-tool",
+  "name": "Notes tool",
+  "version": "1.0.0",
+  "description": "Gives your agents two small tools: counting words, and the chat you have open.",
+  "entry": "init.luau",
+  "permissions": ["tools", "sessions.read"],
+  "tools": [
+    {
+      "name": "count_words",
+      "description": "Count the words, lines and characters in a text.",
+      "input": { "type": "object", "properties": { "text": { "type": "string", "description": "The text to count." } }, "required": ["text"] }
+    },
+    {
+      "name": "open_chat",
+      "description": "Which chat the person has open in Zeron right now (its title), or none.",
+      "input": { "type": "object", "properties": {} }
+    }
+  ]
+}

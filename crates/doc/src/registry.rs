@@ -1135,6 +1135,12 @@ impl RegistryDoc {
             ("githubRepo", opt_str(space.github_repo.as_deref())),
             ("createdAt", json!(space.created_at.timestamp_millis())),
         ]);
+        // (Its icon only when it has one: an upsert never clears a picture
+        // set meanwhile from another device.)
+        let mut set = set;
+        if let Some(icon) = &space.icon {
+            set.insert("icon".into(), json!(icon));
+        }
         self.write(KIND_SPACES, &space.id.clone(), OpKind::Upsert, set);
         Ok(())
     }
@@ -1168,6 +1174,17 @@ impl RegistryDoc {
             OpKind::Update,
             fields([("name", opt_str(name))]),
         );
+        Ok(true)
+    }
+
+    /// LWW picture set from any device, whole (emoji, image and hue in one
+    /// field); `None` clears back to the default tile. `false` when no row.
+    pub fn set_space_icon(&mut self, space_id: &str, icon: Option<&zeron_proto::SpaceIcon>) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_SPACES, space_id) {
+            return Ok(false);
+        }
+        let value = icon.map_or(Value::Null, |icon| json!(icon));
+        self.write(KIND_SPACES, space_id, OpKind::Update, fields([("icon", value)]));
         Ok(true)
     }
 

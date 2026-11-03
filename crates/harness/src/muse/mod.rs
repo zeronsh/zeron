@@ -305,4 +305,5 @@ fn launch_matches(live: &RunRequest, next: &RunRequest) -> bool {
         && live.sandbox == next.sandbox
         && live.env == next.env
         && live.mcp == next.mcp
+        && live.extra_mcp == next.extra_mcp
 }

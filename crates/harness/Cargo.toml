@@ -43,6 +43,10 @@ semver = "1"
 chrono.workspace = true
 filetime = "0.2"
 zip.workspace = true
+# ACP registry builds ship as .tar.gz / .tar.bz2 as well as .zip.
+tar = "0.4"
+flate2 = "1"
+bzip2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

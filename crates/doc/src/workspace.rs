@@ -685,13 +685,21 @@ pub(crate) struct RawSpace {
     #[serde(default)]
     repository_id: Option<String>,
     github_repo: Option<String>,
+    /// (Read leniently: a malformed icon is no icon, never a lost row.)
+    #[serde(default)]
+    icon: Option<serde_json::Value>,
     #[serde(default)]
     created_at: i64,
 }
 
 impl From<RawSpace> for Space {
     fn from(raw: RawSpace) -> Self {
+        let icon = raw
+            .icon
+            .and_then(|v| serde_json::from_value::<zeron_proto::SpaceIcon>(v).ok())
+            .and_then(|icon| icon.normalized().ok().flatten());
         Space {
+            icon,
             id: raw.id,
             device_id: raw.device_id,
             path: raw.path,
@@ -931,6 +939,7 @@ mod tests {
             checkout_id: None,
             repository_id: None,
             github_repo: None,
+            icon: None,
             created_at: ts(1_500),
         }
     }

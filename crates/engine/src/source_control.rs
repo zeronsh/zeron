@@ -527,30 +527,145 @@ impl GitHubCli {
         }
         // Evict after the server accepted the write, even if its reply cannot
         // be decoded. A read already in flight may predate it: keep it out too.
-        let key = format!("false:{url}:");
-        let mut cache = self.pr_cache.lock().await;
-        cache.entries.retain(|entry| !entry.0.starts_with(&key));
-        cache.in_flight.retain(|entry, _| !entry.starts_with(&key));
-        drop(cache);
+        self.evict_detail(&url).await;
         if output.stdout_truncated {
             return Err(ChangeRequestError::Decode);
         }
         let value: serde_json::Value =
             serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        rest_comment(&value)
+    }
+
+    /// The pull request's detail no longer as cached (a write changed it).
+    async fn evict_detail(&self, url: &str) {
+        let key = format!("false:{url}:");
+        let mut cache = self.pr_cache.lock().await;
+        cache.entries.retain(|entry| !entry.0.starts_with(&key));
+        cache.in_flight.retain(|entry, _| !entry.starts_with(&key));
+    }
+
+    /// A comment on one line of a pull request's changes, starting a review
+    /// thread there (GitHub's `POST pulls/{n}/comments`). Explicit user
+    /// submission only; never retried after an ambiguous failure.
+    pub async fn post_review_comment(
+        &self,
+        url: &str,
+        line: &ReviewLine,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if !line.valid() || !valid_comment_body(body) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let parsed = reqwest::Url::parse(&url).map_err(|_| ChangeRequestError::Decode)?;
+        let parts: Vec<_> = parsed.path().trim_matches('/').split('/').collect();
+        let endpoint = format!("repos/{}/{}/pulls/{}/comments", parts[0], parts[1], parts[3]);
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                args: vec!["api".into(), "--method".into(), "POST".into(), endpoint, "--input".into(), "-".into()],
+                stdin: Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "body": body,
+                        "commit_id": line.commit_id,
+                        "path": line.path,
+                        "line": line.line,
+                        "side": line.side,
+                    }))
+                    .map_err(|_| ChangeRequestError::Decode)?,
+                ),
+                ..github_request()
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        self.evict_detail(&url).await;
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        rest_comment(&value)
+    }
+
+    /// A reply in a review thread (GitHub's
+    /// `addPullRequestReviewThreadReply`, by the thread's id).
+    pub async fn reply_to_thread(
+        &self,
+        url: &str,
+        thread: &str,
+        body: &str,
+    ) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if !valid_node_id(thread) || !valid_comment_body(body) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let value = self
+            .graphql_write(
+                "mutation($thread:ID!,$body:String!) { addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}) { comment { id url body createdAt author { login } } } }",
+                serde_json::json!({ "thread": thread, "body": body }),
+            )
+            .await;
+        self.evict_detail(&url).await;
+        let value = value?;
+        let c = &value["data"]["addPullRequestReviewThreadReply"]["comment"];
         Ok(zeron_proto::ChangeRequestComment {
-            id: value["node_id"].as_str().unwrap_or_default().into(),
-            url: value["html_url"].as_str().unwrap_or_default().into(),
+            id: c["id"].as_str().unwrap_or_default().into(),
+            url: c["url"].as_str().unwrap_or_default().into(),
             viewer_did_author: true,
-            body: value["body"]
-                .as_str()
-                .ok_or(ChangeRequestError::Decode)?
-                .into(),
-            author: zeron_proto::ChangeRequestActor {
-                login: value["user"]["login"].as_str().unwrap_or_default().into(),
-            },
-            created_at: value["created_at"].as_str().unwrap_or_default().into(),
+            body: c["body"].as_str().ok_or(ChangeRequestError::Decode)?.into(),
+            author: zeron_proto::ChangeRequestActor { login: c["author"]["login"].as_str().unwrap_or_default().into() },
+            created_at: c["createdAt"].as_str().unwrap_or_default().into(),
             ..Default::default()
         })
+    }
+
+    /// A review thread resolved, or opened again (GitHub's
+    /// `resolveReviewThread` / `unresolveReviewThread`): whether it's
+    /// resolved now.
+    pub async fn set_thread_resolved(&self, url: &str, thread: &str, resolved: bool) -> Result<bool, ChangeRequestError> {
+        let url = validated_pull_request_url(url)?;
+        if !valid_node_id(thread) {
+            return Err(ChangeRequestError::Decode);
+        }
+        let mutation = if resolved { "resolveReviewThread" } else { "unresolveReviewThread" };
+        let value = self
+            .graphql_write(
+                &format!("mutation($thread:ID!) {{ {mutation}(input:{{threadId:$thread}}) {{ thread {{ isResolved }} }} }}"),
+                serde_json::json!({ "thread": thread }),
+            )
+            .await;
+        self.evict_detail(&url).await;
+        value?["data"][mutation]["thread"]["isResolved"].as_bool().ok_or(ChangeRequestError::Decode)
+    }
+
+    /// One GraphQL write, its body on stdin.
+    async fn graphql_write(&self, query: &str, variables: serde_json::Value) -> PrResult {
+        let output = self
+            .runner
+            .run(ProcessRequest {
+                args: vec!["api".into(), "graphql".into(), "--input".into(), "-".into()],
+                stdin: Some(
+                    serde_json::to_vec(&serde_json::json!({ "query": query, "variables": variables }))
+                        .map_err(|_| ChangeRequestError::Decode)?,
+                ),
+                ..github_request()
+            })
+            .await
+            .map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        if output.stdout_truncated {
+            return Err(ChangeRequestError::Decode);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        if value.get("errors").is_some() {
+            return Err(ChangeRequestError::Decode);
+        }
+        Ok(value)
     }
 
     async fn fetch_revision_diff(&self, url: &str, head: &str, base: &str) -> PrResult {
@@ -1054,6 +1169,34 @@ impl GitHubCli {
         serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)
     }
 
+    /// Where an open pull request's review and checks stand (`gh pr view
+    /// --json reviewDecision,reviewRequests,statusCheckRollup`), and whether
+    /// a review is requested of the signed-in account. `None` on any failure.
+    async fn signals_for(&self, source: &CheckoutSourceContext, url: &str) -> Option<zeron_proto::ChangeRequestSignals> {
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args: vec![
+                "pr".into(),
+                "view".into(),
+                url.into(),
+                "--json".into(),
+                "reviewDecision,reviewRequests,statusCheckRollup".into(),
+            ],
+            stdin: None,
+            cwd: Some(source.checkout_root.clone()),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout: GITHUB_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+        };
+        let output = self.runner.run(request).await.ok()?;
+        if !output.success || output.stdout_truncated {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let viewer = self.store_account().await;
+        Some(signals_from(&value, viewer.as_deref()))
+    }
+
     /// Resolve the remote's default branch through the provider API.
     ///
     /// This deliberately never uses Git remote transport (`git ls-remote`)
@@ -1146,12 +1289,20 @@ impl ChangeRequestProvider for GitHubCli {
                 }
                 None => None,
             };
-            return select_pull_request(
+            let mut found = select_pull_request(
                 self.provider(),
                 source,
                 default_branch.as_deref(),
                 candidates,
-            );
+            )?;
+            // An open one's review and checks, asked of that one alone (the
+            // list stays light); missing them never fails the watch.
+            if let Some(summary) = found.as_mut()
+                && summary.state == zeron_proto::ChangeRequestState::Open
+            {
+                summary.signals = self.signals_for(source, &summary.url).await;
+            }
+            return Ok(found);
         }
         Ok(None)
     }
@@ -1869,6 +2020,36 @@ fn select_pull_request(
         .transpose()
 }
 
+/// An open pull request's signals from `gh pr view`'s JSON: its review
+/// decision, whether `viewer` (the signed-in login) is among the requested
+/// reviewers, and its checks' rollup.
+pub(crate) fn signals_from(value: &serde_json::Value, viewer: Option<&str>) -> zeron_proto::ChangeRequestSignals {
+    use zeron_proto::ChangeRequestReviewDecision as Decision;
+    let review_decision = match value["reviewDecision"].as_str().unwrap_or_default() {
+        "APPROVED" => Decision::Approved,
+        "CHANGES_REQUESTED" => Decision::ChangesRequested,
+        "REVIEW_REQUIRED" => Decision::ReviewRequired,
+        _ => Decision::Unknown,
+    };
+    let review_requested_of_viewer = viewer.map(|login| {
+        value["reviewRequests"].as_array().into_iter().flatten().any(|r| {
+            r["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(login))
+        })
+    });
+    let checks: Vec<zeron_proto::ChangeRequestCheck> = value["statusCheckRollup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| serde_json::from_value(c.clone()).ok())
+        .collect();
+    let ci = if value["statusCheckRollup"].is_array() {
+        zeron_proto::change_request_assessment::ChangeRequestCi::from_checks(&checks).state
+    } else {
+        zeron_proto::change_request_assessment::CiState::Unknown
+    };
+    zeron_proto::ChangeRequestSignals { review_decision, review_requested_of_viewer, ci }
+}
+
 fn to_summary(
     provider: &str,
     pull_request: GhPullRequest,
@@ -1894,6 +2075,7 @@ fn to_summary(
         state: pull_request.state.into(),
         base_ref: pull_request.base_ref_name,
         head_ref: pull_request.head_ref_name,
+        signals: None,
     })
 }
 
@@ -1950,6 +2132,56 @@ fn to_list_item(
         mergeability: pull_request.mergeable.into(),
         created_at: pull_request.created_at,
         updated_at: pull_request.updated_at,
+    })
+}
+
+/// Where a line comment goes: a file of the pull request, a line of it on
+/// one side of the diff (`RIGHT`, the new; `LEFT`, the old), at the commit
+/// the diff shows.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewLine {
+    pub path: String,
+    pub line: u64,
+    pub side: String,
+    pub commit_id: String,
+}
+
+impl ReviewLine {
+    pub fn valid(&self) -> bool {
+        !self.path.is_empty()
+            && self.path.len() <= 4096
+            && !self.path.starts_with('/')
+            && !self.path.contains(['\0', '\n'])
+            && self.line >= 1
+            && matches!(self.side.as_str(), "LEFT" | "RIGHT")
+            && self.commit_id.len() == 40
+            && self.commit_id.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+}
+
+/// A comment's words: something, at most 60,000 bytes.
+pub fn valid_comment_body(body: &str) -> bool {
+    !body.trim().is_empty() && body.len() <= 60_000
+}
+
+/// A GitHub node id (a review thread's).
+pub fn valid_node_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 200 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'=')
+}
+
+/// A comment as GitHub's REST API returns one.
+fn rest_comment(value: &serde_json::Value) -> Result<zeron_proto::ChangeRequestComment, ChangeRequestError> {
+    Ok(zeron_proto::ChangeRequestComment {
+        id: value["node_id"].as_str().unwrap_or_default().into(),
+        url: value["html_url"].as_str().unwrap_or_default().into(),
+        viewer_did_author: true,
+        body: value["body"].as_str().ok_or(ChangeRequestError::Decode)?.into(),
+        author: zeron_proto::ChangeRequestActor {
+            login: value["user"]["login"].as_str().unwrap_or_default().into(),
+        },
+        created_at: value["created_at"].as_str().unwrap_or_default().into(),
+        ..Default::default()
     })
 }
 
@@ -2170,6 +2402,98 @@ mod tests {
                 .pop_front()
                 .expect("missing fake process response")
         }
+    }
+
+    const PR: &str = "https://github.com/acme/zeron/pull/7";
+
+    fn line(path: &str, line: u64, side: &str, commit: &str) -> ReviewLine {
+        ReviewLine { path: path.into(), line, side: side.into(), commit_id: commit.into() }
+    }
+
+    fn stdin_json(request: &ProcessRequest) -> serde_json::Value {
+        serde_json::from_slice(request.stdin.as_deref().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_line_comment_posts_to_the_pull_request_s_review_comments() {
+        let reply = br#"{"node_id":"PRRC_1","html_url":"https://github.com/acme/zeron/pull/7#discussion_r1","body":"Why?","user":{"login":"ada"},"created_at":"2026-11-01T12:00:00Z"}"#;
+        let runner = FakeProcessRunner::with_responses([command_success(reply.to_vec())]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let commit = "a".repeat(40);
+        let comment = github.post_review_comment(PR, &line("src/a.rs", 11, "RIGHT", &commit), "Why?").await.unwrap();
+        assert_eq!((comment.body.as_str(), comment.author.login.as_str()), ("Why?", "ada"));
+        let request = &runner.requests()[0];
+        assert_eq!(request.args, ["api", "--method", "POST", "repos/acme/zeron/pulls/7/comments", "--input", "-"]);
+        assert_eq!(
+            stdin_json(request),
+            serde_json::json!({ "body": "Why?", "commit_id": commit, "path": "src/a.rs", "line": 11, "side": "RIGHT" })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_and_resolving_go_by_the_thread_s_id() {
+        let replied = br#"{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_2","url":"u","body":"Fixed.","createdAt":"t","author":{"login":"ada"}}}}}"#;
+        let resolved = br#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#;
+        let reopened = br#"{"data":{"unresolveReviewThread":{"thread":{"isResolved":false}}}}"#;
+        let runner = FakeProcessRunner::with_responses([
+            command_success(replied.to_vec()),
+            command_success(resolved.to_vec()),
+            command_success(reopened.to_vec()),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let comment = github.reply_to_thread(PR, "PRRT_kwDO1", "Fixed.").await.unwrap();
+        assert_eq!(comment.body, "Fixed.");
+        assert!(github.set_thread_resolved(PR, "PRRT_kwDO1", true).await.unwrap());
+        assert!(!github.set_thread_resolved(PR, "PRRT_kwDO1", false).await.unwrap());
+        let requests = runner.requests();
+        assert_eq!(requests[0].args, ["api", "graphql", "--input", "-"]);
+        let asked = stdin_json(&requests[0]);
+        assert!(asked["query"].as_str().unwrap().contains("addPullRequestReviewThreadReply"));
+        assert_eq!(asked["variables"], serde_json::json!({ "thread": "PRRT_kwDO1", "body": "Fixed." }));
+        assert!(stdin_json(&requests[1])["query"].as_str().unwrap().contains("resolveReviewThread(input"));
+        assert!(stdin_json(&requests[2])["query"].as_str().unwrap().contains("unresolveReviewThread"));
+    }
+
+    #[tokio::test]
+    async fn a_bad_line_or_thread_never_reaches_github() {
+        let runner = FakeProcessRunner::with_responses([]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let commit = "a".repeat(40);
+        for bad in [
+            line("", 1, "RIGHT", &commit),
+            line("/etc/passwd", 1, "RIGHT", &commit),
+            line("a.rs", 0, "RIGHT", &commit),
+            line("a.rs", 1, "MIDDLE", &commit),
+            line("a.rs", 1, "LEFT", "main"),
+        ] {
+            assert!(!bad.valid(), "{bad:?}");
+            assert!(github.post_review_comment(PR, &bad, "x").await.is_err());
+        }
+        assert!(github.post_review_comment(PR, &line("a.rs", 1, "LEFT", &commit), "  ").await.is_err());
+        assert!(github.reply_to_thread(PR, "not an id!", "x").await.is_err());
+        assert!(github.set_thread_resolved("https://evil.example/a/b/pull/1", "PRRT_1", true).await.is_err());
+        assert!(runner.requests().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn an_open_pull_request_s_review_and_checks_are_read_from_gh() {
+        use zeron_proto::ChangeRequestReviewDecision as Decision;
+        use zeron_proto::change_request_assessment::CiState;
+        let value = serde_json::json!({
+            "reviewDecision": "CHANGES_REQUESTED",
+            "reviewRequests": [ { "__typename": "User", "login": "Ada" }, { "__typename": "Team", "name": "core" } ],
+            "statusCheckRollup": [
+                { "__typename": "CheckRun", "name": "tests", "status": "COMPLETED", "conclusion": "FAILURE" },
+                { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS" },
+            ],
+        });
+        let s = signals_from(&value, Some("ada"));
+        assert_eq!((s.review_decision, s.review_requested_of_viewer, s.ci), (Decision::ChangesRequested, Some(true), CiState::Failed));
+        assert_eq!(signals_from(&value, Some("lin")).review_requested_of_viewer, Some(false));
+        assert_eq!(signals_from(&value, None).review_requested_of_viewer, None, "the account can't be told");
+        let quiet = signals_from(&serde_json::json!({ "reviewDecision": "", "reviewRequests": [], "statusCheckRollup": [] }), Some("ada"));
+        assert_eq!((quiet.review_decision, quiet.ci), (Decision::Unknown, CiState::NoChecks));
+        assert_eq!(signals_from(&serde_json::json!({}), None).ci, CiState::Unknown, "no rollup told");
     }
 
     struct ExecutableGhRunner {
@@ -2529,6 +2853,26 @@ mod tests {
             (
                 methods::POST_CHANGE_REQUEST_COMMENT,
                 json!({"url": url, "body": "x".repeat(60_001)}),
+            ),
+            (
+                methods::POST_CHANGE_REQUEST_REVIEW_COMMENT,
+                json!({"url": url, "path": "a.rs", "line": 0, "side": "RIGHT", "commitId": "a".repeat(40), "body": "x"}),
+            ),
+            (
+                methods::POST_CHANGE_REQUEST_REVIEW_COMMENT,
+                json!({"url": url, "path": "a.rs", "line": 3, "side": "RIGHT", "commitId": "main", "body": "x"}),
+            ),
+            (
+                methods::POST_CHANGE_REQUEST_REVIEW_COMMENT,
+                json!({"url": url, "path": "a.rs", "line": 3, "side": "RIGHT", "commitId": "a".repeat(40), "body": " "}),
+            ),
+            (
+                methods::REPLY_CHANGE_REQUEST_THREAD,
+                json!({"url": url, "thread": "not an id!", "body": "x"}),
+            ),
+            (
+                methods::RESOLVE_CHANGE_REQUEST_THREAD,
+                json!({"url": url, "thread": "PRRT_1"}),
             ),
         ] {
             let error = client.call(method, params).await.unwrap_err();
@@ -3049,7 +3393,8 @@ mod tests {
         Result<Option<ChangeRequestSummary>, ChangeRequestError>,
         Arc<FakeProcessRunner>,
     ) {
-        let runner = FakeProcessRunner::with_responses([response]);
+        // (An open one's signals are asked after: unanswered here.)
+        let runner = FakeProcessRunner::with_responses([response, command_failure("no signals")]);
         let github = GitHubCli::with_runner(runner.clone());
         let result = github.find_for_branch(source).await;
         (result, runner)
@@ -3072,8 +3417,15 @@ mod tests {
         assert_eq!(summary.number, 90);
         assert_eq!(summary.state, ChangeRequestState::Open);
         assert_eq!(summary.provider, "github");
+        assert_eq!(summary.signals, None, "signals unanswered: none, and the watch goes on");
         let requests = runner.requests();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 2);
+        // Then the open one's review and checks, alone.
+        assert_eq!(requests[1].cwd.as_deref(), Some(Path::new("/checkout")));
+        assert_eq!(
+            requests[1].args,
+            ["pr", "view", summary.url.as_str(), "--json", "reviewDecision,reviewRequests,statusCheckRollup"]
+        );
         assert_eq!(requests[0].program, "gh");
         assert_eq!(requests[0].cwd.as_deref(), Some(Path::new("/checkout")));
         assert_eq!(
@@ -4149,6 +4501,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         let runner = FakeProcessRunner::with_responses([
             command_success(b"[]".to_vec()),
             command_success(json),
+            command_failure("no signals"),
         ]);
         let github = GitHubCli::with_runner(runner.clone());
 
@@ -4156,7 +4509,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 
         assert_eq!(result.number, 100);
         let requests = runner.requests();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].args[3], "acme:feature/status");
         assert_eq!(requests[1].args[3], "feature/status");
     }
@@ -4318,7 +4671,23 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         let (result, runner) = resolve_with(&source, command_success(json)).await;
 
         assert_eq!(result.unwrap().unwrap().number, 90);
-        assert_eq!(runner.requests().len(), 1);
+        assert_eq!(runner.requests().len(), 2, "the list, then the open one's signals; no default-branch lookup");
+    }
+
+    #[tokio::test]
+    async fn an_open_pull_request_carries_its_review_and_checks() {
+        let source = source("feature/status", "acme", Some("main"));
+        let list = serde_json::to_vec(&vec![pull_request(90, "OPEN", "acme", "feature/status", "2026-08-15T12:00:00Z")]).unwrap();
+        let view = br#"{"reviewDecision":"REVIEW_REQUIRED","reviewRequests":[{"__typename":"User","login":"ada"}],"statusCheckRollup":[{"__typename":"CheckRun","name":"tests","status":"COMPLETED","conclusion":"FAILURE"}]}"#;
+        let runner = FakeProcessRunner::with_responses([command_success(list), command_success(view.to_vec()), command_success("ada\n")]);
+        let github = GitHubCli::with_runner(runner.clone());
+        let summary = github.find_for_branch(&source).await.unwrap().unwrap();
+        let signals = summary.signals.expect("signals");
+        assert_eq!(signals.review_decision, zeron_proto::ChangeRequestReviewDecision::ReviewRequired);
+        assert_eq!(signals.ci, zeron_proto::change_request_assessment::CiState::Failed);
+        if std::env::var_os("GH_TOKEN").is_none() && std::env::var_os("GITHUB_TOKEN").is_none() {
+            assert_eq!(signals.review_requested_of_viewer, Some(true), "requested of the signed-in account");
+        }
     }
 
     #[tokio::test]

@@ -300,6 +300,7 @@ fn change_request_lookup(root: &std::path::Path) -> Arc<StaticChangeRequestLooku
             state: ChangeRequestState::Open,
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
+            signals: None,
         },
         resolves: AtomicUsize::new(0),
     })
@@ -996,6 +997,7 @@ async fn target_device_id_routes_over_the_relay() {
             worktree: None,
             resume: None,
             env: Default::default(),
+            extra_mcp: Vec::new(),
         },
         message_id: "m-a-1".into(),
     })
@@ -2084,6 +2086,13 @@ async fn workspace_entry_mutations_are_forwarded_to_the_owning_plain_folder() {
     })).await.unwrap();
     assert_eq!(deleted["status"], "applied");
     assert!(!folder.join("renamed.txt").exists());
+    // Made on the host, from the viewer.
+    let created=client.call(methods::CREATE_WORKSPACE_ENTRY,serde_json::json!({
+        "spaceId":"mutation-space","targetDeviceId":"mutation-host","operationId":"remote-create",
+        "expectedCheckoutId":page["checkoutId"],"path":"made.txt","kind":"file"
+    })).await.unwrap();
+    assert_eq!(created["status"], "applied");
+    assert_eq!(std::fs::read(folder.join("made.txt")).unwrap(), b"");
     viewer.shutdown().await;
     host.shutdown().await;
 }

@@ -488,6 +488,7 @@ mod tests {
             state: ChangeRequestState::Open,
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
+            signals: None,
         }
     }
 

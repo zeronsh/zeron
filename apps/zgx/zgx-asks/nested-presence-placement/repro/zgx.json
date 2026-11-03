@@ -1,0 +1,27 @@
+{
+	"title": "Nested presence placement",
+	"width": 480,
+	"height": 320,
+	"app_id": "nested-presence-placement",
+	"expose": {
+		"hooks": {
+			"#slot-bare": "override",
+			"#slot-root": "override",
+			"#slot-child": "override",
+			"#slot-nested-root": "override",
+			"#slot-nested-child": "override"
+		}
+	},
+	"plugins": {
+		"swap": {
+			"path": "plugins/swap",
+			"allow": [
+				"override:#slot-bare",
+				"override:#slot-root",
+				"override:#slot-child",
+				"override:#slot-nested-root",
+				"override:#slot-nested-child"
+			]
+		}
+	}
+}

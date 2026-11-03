@@ -11,6 +11,8 @@
 #   zeron-preview  every test binary (preview-tests)
 #   zeron-doc      lib + persistence and memory regressions + attachments_roundtrip
 #   zeron-sync, zeron-update   lib only (session-sync-regressions)
+#   zeron-cli, zeron-launch, zeron-notify   `zeron`'s command line, the engine
+#                  helper's start-up and the zeron:// links, shared by the apps
 #   zeron-engine   lib + the integration tests named below. Engine has many other
 #                  integration binaries (live agents etc.) that no workflow ran, so
 #                  they are listed instead of globbed to avoid compiling them.
@@ -45,6 +47,7 @@ done
 exec cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
   -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview \
   -p zeron-mcp -p zeron-proto -p zeron-rpc -p zeron-orb -p zeron-voice-session -p zeron-voice-media \
+  -p zeron-cli -p zeron-launch -p zeron-notify \
   --features zeron-harness/native-fixture \
   --lib --bins "${tests[@]}" \
   -E 'not ((package(zeron-proto) & not test(voice)) | (package(zeron-rpc) & kind(lib)))' "$@"
