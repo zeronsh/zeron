@@ -89,6 +89,22 @@ function M.cancel(id: string)
 	ui.invoke("agents.cancel", id)
 end
 
+-- An agent from the ACP registry signed in by a way it offers (one of its
+-- `login_methods`).
+function M.sign_in_with(id: string, method: string)
+	ui.call("agents.sign_in", { id = id, method = method }):after(function() end, quietly())
+end
+
+-- A key such an agent reads from its environment (`var`), kept there.
+function M.set_key(id: string, var: string, value: string)
+	ui.call("agents.set_key", { id = id, var = var, value = value }):after(function() end, quietly())
+end
+
+-- An agent from the ACP registry signed out (its own `logout`).
+function M.sign_out(id: string)
+	ui.call("agents.sign_out", id):after(function() end, quietly())
+end
+
 -- The page a sign-in under way opened (`login_page`), opened again.
 function M.open_page(id: string)
 	ui.invoke("agents.open_page", id)

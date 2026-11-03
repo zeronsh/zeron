@@ -103,6 +103,11 @@ local HOUR = 3600
 local DAY = 24 * HOUR
 local NOW = os.time()
 
+-- The registry icons the app has heard of (src/agents.rs `agent_icons`).
+ui.shared("agent_icons", {} :: { [string]: string }):set({
+	["acp.factory-droid"] = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M8 1l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
+})
+
 local model = {
 	here = "mac",
 	devices = {
@@ -659,6 +664,16 @@ ui.command {
 		model.projects = {}
 		model.chats = {}
 		model.archived = {}
+		publish()
+	end,
+}
+-- A session on an agent from the ACP registry, named by its harness alone
+-- (its icon among `agent_icons`).
+ui.command {
+	id = "registry_session",
+	title = "A session on Factory Droid",
+	run = function()
+		table.insert(model.chats, { id = "reg1", title = "Moved to Factory Droid", project = "atlas", device = "mac", updated = NOW - 3 * HOUR, created = NOW - 6 * HOUR, agent = "acp.factory-droid", harness = "acp.factory-droid" })
 		publish()
 	end,
 }

@@ -223,6 +223,7 @@ agents_stub.sign_in = function(id: string)
 			a.login = "waiting"
 			a.login_note = "Your code is WDJB-MJHT. Check it matches on the page that opened, then confirm."
 			a.login_page = "https://auth.example.com/device?user_code=WDJB-MJHT"
+			a.login_code = "WDJB-MJHT"
 		end
 		table.insert(list, a)
 	end
@@ -321,6 +322,64 @@ tapi.view = function(props: any): Node
 		return view_before(props)
 	end
 	return ui.column { id = "sign-in-terminal", label = "Terminal", grow = 1, ui.text { "terminal", literal = true } }
+end
+
+-- A registry agent's sign-in as it says it is: Gemini CLI signed in
+-- already (as whom, and offering a sign-out), and signed out by it.
+local function set_sign_in(id: string, fields: { [string]: any })
+	local now = table.clone(agents.now:peek())
+	local list = {}
+	for _, one in now.list or {} do
+		local a = table.clone(one)
+		if a.id == id then
+			for k, v in fields do
+				a[k] = v
+			end
+		end
+		table.insert(list, a)
+	end
+	now.list = list
+	agents.now:set(now)
+end
+ui.command {
+	id = "registry_stub.signed_in",
+	title = "Gemini CLI says it's signed in",
+	run = function()
+		set_sign_in("acp.gemini", { signed_in = true, signed_in_as = "ada@example.com", can_sign_out = true })
+	end,
+}
+-- The ways Gemini CLI offers to sign in, as it says them: its own, another
+-- it signs in itself, and a key it reads from its environment.
+ui.command {
+	id = "registry_stub.methods",
+	title = "Gemini CLI offers its ways to sign in",
+	run = function()
+		set_sign_in("acp.gemini", {
+			signed_in = false,
+			login_methods = {
+				{ id = "oauth-personal", name = "Log in with Google", kind = "agent" },
+				{ id = "vertex-ai", name = "Vertex AI", description = "Use your Google Cloud project.", kind = "agent" },
+				{
+					id = "gemini-api-key",
+					name = "Gemini API key",
+					kind = "env_var",
+					var = "GEMINI_API_KEY",
+					link = "https://aistudio.google.com/apikey",
+				},
+			},
+		})
+	end,
+}
+agents_stub.sign_in_with = function(id: string, method: string)
+	calls:push(`agents.sign_in_with:{id}:{method}`)
+end
+agents_stub.set_key = function(id: string, var: string, value: string)
+	-- (The key itself is never recorded.)
+	calls:push(`agents.set_key:{id}:{var}:{#value}`)
+end
+agents_stub.sign_out = function(id: string)
+	calls:push(`agents.sign_out:{id}`)
+	set_sign_in(id, { signed_in = false, signed_in_as = false, can_sign_out = true })
 end
 
 -- The sign-in's page, opened again.

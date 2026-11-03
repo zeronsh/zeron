@@ -503,6 +503,8 @@ enum SpawnedCompletion {
 struct TaskLoginState {
     url: Option<String>,
     message: Option<String>,
+    /// A device code it showed, said apart for the app to show plainly.
+    code: Option<String>,
     outcome: Option<Result<(), String>>,
     /// The device a remote login's callback is forwarded for.
     requester: Option<String>,
@@ -2408,6 +2410,7 @@ impl AgentAccounts {
                 }
                 Some(LoginFlow::Claude { .. }) => {
                     return Ok(AgentLoginPoll {
+                code: None,
                         status: AgentLoginStatus::Pending,
                         message: None,
                         url: None,
@@ -2457,6 +2460,7 @@ impl AgentAccounts {
             }
             self.cancel_login(login_id);
             return Ok(AgentLoginPoll {
+                code: None,
                 status: AgentLoginStatus::Done,
                 message: None,
                 url: None,
@@ -2466,6 +2470,7 @@ impl AgentAccounts {
         if completion == SpawnedCompletion::ExitSuccess && exited == Some(Some(0)) {
             self.cancel_login(login_id);
             return Ok(AgentLoginPoll {
+                code: None,
                 status: AgentLoginStatus::Done,
                 message: None,
                 url: None,
@@ -2492,6 +2497,7 @@ impl AgentAccounts {
             // A CLI's last words can carry an authorize url, a device code or
             // worse — never hand them to the UI (or a log) raw.
             return Ok(AgentLoginPoll {
+                code: None,
                 status: AgentLoginStatus::Error,
                 message: Some(zeron_harness::redact::redact_output(&message)),
                 url: None,
@@ -2519,6 +2525,7 @@ impl AgentAccounts {
                 .register(login_id, port, requester, FLOW_TTL);
         }
         Ok(AgentLoginPoll {
+                code: None,
             status: AgentLoginStatus::Pending,
             message: message.map(|code| format!("Enter the code {code} when asked.")),
             url,
@@ -2547,6 +2554,7 @@ impl AgentAccounts {
                             .register(login_id, port, requester, FLOW_TTL);
                     }
                     return Some(AgentLoginPoll {
+                        code: state.code.clone(),
                         status: AgentLoginStatus::Pending,
                         message: state.message.clone(),
                         url: state.url.clone(),
@@ -2554,12 +2562,14 @@ impl AgentAccounts {
                     });
                 }
                 Some(Ok(())) => AgentLoginPoll {
+                code: None,
                     status: AgentLoginStatus::Done,
                     message: None,
                     url: None,
                     callback_port: None,
                 },
                 Some(Err(message)) => AgentLoginPoll {
+                code: None,
                     status: AgentLoginStatus::Error,
                     message: Some(zeron_harness::redact::redact_output(message)),
                     url: None,

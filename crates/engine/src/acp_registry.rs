@@ -173,8 +173,33 @@ pub(crate) fn handles(method: &str) -> bool {
             | methods::REMOVE_ACP_AGENT
             | methods::GET_ACP_AGENT_ENV
             | methods::SET_ACP_AGENT_ENV
+            | methods::GET_ACP_AGENT_SIGN_IN
+            | methods::SIGN_OUT_ACP_AGENT
+            | methods::SET_ACP_AGENT_KEY
             | methods::ADD_OWN_AGENT
     )
+}
+
+/// How long an agent's sign-in, as it last said it, stands.
+const SIGN_IN_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Each added agent's sign-in as it last said it (asking starts it).
+fn sign_ins()
+-> &'static Mutex<std::collections::HashMap<RegistryAgent, (std::time::Instant, zeron_harness::acp::RegistrySignIn)>> {
+    static SIGN_INS: OnceLock<
+        Mutex<std::collections::HashMap<RegistryAgent, (std::time::Instant, zeron_harness::acp::RegistrySignIn)>>,
+    > = OnceLock::new();
+    SIGN_INS.get_or_init(Default::default)
+}
+
+/// A sign-in or sign-out ran: what the agent said before no longer stands.
+pub(crate) fn forget_sign_in(agent: RegistryAgent) {
+    sign_ins().lock().unwrap_or_else(PoisonError::into_inner).remove(&agent);
+}
+
+fn harness_of(agent: RegistryAgent) -> Result<zeron_harness::AcpHarness, RpcError> {
+    let record = reg::record(agent).ok_or_else(|| RpcError::Failed(format!("{} isn't added here", agent.registry_id())))?;
+    Ok(zeron_harness::AcpHarness::registry(agent, &record.name))
 }
 
 #[derive(Deserialize)]
@@ -187,6 +212,21 @@ struct EnvParams {
     id: String,
     #[serde(default)]
     env: String,
+}
+
+#[derive(Deserialize)]
+struct KeyParams {
+    id: String,
+    var: String,
+    #[serde(default)]
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct SignInParams {
+    id: String,
+    #[serde(default)]
+    refresh: bool,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +311,55 @@ pub(crate) async fn dispatch(
             let p: EnvParams = parse(params)?;
             let env = reg::set_user_env(agent_of(&p.id)?, &p.env).map_err(|e| RpcError::Failed(e.to_string()))?;
             RpcReply::value(&json!({ "env": reg::env_text(&env) }))
+        }
+        methods::GET_ACP_AGENT_SIGN_IN => {
+            let p: SignInParams = parse(params)?;
+            let agent = agent_of(&p.id)?;
+            let kept = sign_ins().lock().unwrap_or_else(PoisonError::into_inner).get(&agent).cloned();
+            if let Some((at, state)) = kept.filter(|(at, _)| !p.refresh && at.elapsed() < SIGN_IN_FRESH) {
+                let _ = at;
+                return RpcReply::value(&state);
+            }
+            let state = harness_of(agent)?
+                .registry_sign_in_state()
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+            sign_ins()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(agent, (std::time::Instant::now(), state.clone()));
+            RpcReply::value(&state)
+        }
+        methods::SIGN_OUT_ACP_AGENT => {
+            let p: IdParams = parse(params)?;
+            let agent = agent_of(&p.id)?;
+            let outcome = harness_of(agent)?.sign_out_registry().await;
+            forget_sign_in(agent);
+            outcome.map_err(|e| RpcError::Failed(e.to_string()))?;
+            tracing::info!(agent = agent.registry_id(), "registry agent signed out");
+            RpcReply::value(&json!({ "ok": true }))
+        }
+        methods::SET_ACP_AGENT_KEY => {
+            let p: KeyParams = parse(params)?;
+            let agent = agent_of(&p.id)?;
+            let valid = !p.var.is_empty()
+                && p.var.len() <= 64
+                && p.var.starts_with(|c: char| c.is_ascii_uppercase())
+                && p.var.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            let value = p.value.trim();
+            if !valid || value.chars().any(char::is_control) || value.len() > 4096 {
+                return Err(RpcError::BadParams("not a key".into()));
+            }
+            let mut env = reg::user_env(agent);
+            if value.is_empty() {
+                env.remove(&p.var);
+            } else {
+                env.insert(p.var.clone(), value.to_owned());
+            }
+            reg::set_user_env(agent, &reg::env_text(&env)).map_err(|e| RpcError::Failed(e.to_string()))?;
+            forget_sign_in(agent);
+            tracing::info!(agent = agent.registry_id(), var = %p.var, set = !value.is_empty(), "registry agent key set");
+            RpcReply::value(&json!({ "ok": true }))
         }
         methods::ADD_OWN_AGENT => {
             let p: OwnParams = parse(params)?;

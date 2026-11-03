@@ -27,7 +27,6 @@
 
 mod about;
 mod acp_registry;
-mod agent_logos;
 mod agents;
 mod appshots;
 mod auth;
@@ -547,9 +546,6 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     math::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
-    // Agents' real logos (src/agent_logos.rs): every window, before the
-    // scripts read them.
-    agent_logos::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)
     // and GitHub for Cloud (src/github.rs): every window but the intro's.
     if entry != "intro.luau" {

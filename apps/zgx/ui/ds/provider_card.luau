@@ -33,6 +33,7 @@ local Callout = require("@self/banner").Callout
 local progress = require("@self/progress")
 local skeleton = require("@self/skeleton")
 local TextField = require("@self/text_field")
+local Links = require("@self/links")
 local Dialog = require("@self/dialog").Dialog
 local RadioGroup = require("@self/radio")
 local PrivateText = require("@self/private_text")
@@ -216,6 +217,33 @@ export type CardProps = {
 	-- whether there is one, and what opens it again.
 	login_page: (() -> boolean)?,
 	on_open_page: (() -> ())?,
+	-- A device code the sign-in under way showed, to check on that page:
+	-- said plainly in the row.
+	login_code: (() -> string?)?,
+	-- An agent that signs in on its own (`sign_in_only`), as it says it is:
+	-- signed in (nil until it's said), as whom when it says, and signing it
+	-- out where it offers that.
+	signed_in: (() -> boolean?)?,
+	signed_in_as: (() -> string?)?,
+	can_sign_out: (() -> boolean)?,
+	signing_out: (() -> boolean)?,
+	on_sign_out: (() -> ())?,
+	-- The ways it offers to sign in (once it's said): the first it signs in
+	-- itself is the sign-in row; any other is a row of its own, by that
+	-- method (`on_sign_in_with`), and one that reads a key from its
+	-- environment (kind "env_var") takes the key here (`on_key`).
+	login_methods: (() -> { LoginMethod })?,
+	on_sign_in_with: ((method: string) -> ())?,
+	on_key: ((var: string, value: string) -> ())?,
+}
+
+export type LoginMethod = {
+	id: string,
+	name: string,
+	description: string?,
+	kind: string,
+	var: string?,
+	link: string?,
 }
 
 local function key(a: Account): string
@@ -504,16 +532,199 @@ local function rule(): Node
 	return ui.div { h = 1, w_full = true, shrink = 0, bg = "$zeron.settings.rule", aria_hidden = true }
 end
 
+-- A key an agent reads from its environment, pasted: kept in its
+-- environment on its device (`on_key`), never shown again.
+local function key_row(provider: Provider, method: LoginMethod, c: CardProps): Node
+	return ui.component(function(): Node
+		local open = ui.use_state(false)
+		local key = ui.use_state("")
+		local var = method.var or ""
+		local function save()
+			local value = string.gsub(key:peek(), "^%s*(.-)%s*$", "%1")
+			if value ~= "" and c.on_key then
+				c.on_key(var, value)
+				key:set("")
+				open:set(false)
+			end
+		end
+		return ui.presence(function(): boolean
+			return open:get()
+		end, function(shown: boolean): Node
+			if not shown then
+				return Settings.Row {
+					label = locale.t("ds.provider_card.use_key", { method = method.name }),
+					description = locale.t("ds.provider_card.use_key_hint", { name = provider.name, var = var }),
+					lead = M.disc(Icon { name = "keyboard", size = 16 }),
+					on_click = function()
+						open:set(true)
+					end,
+				}
+			end
+			return Settings.Row {
+				label = locale.t("ds.provider_card.paste_key", { method = method.name }),
+				description = locale.t("ds.provider_card.paste_key_hint", { name = provider.name, var = var }),
+				lead = M.disc(Icon { name = "keyboard", size = 16 }),
+				stacked = true,
+				control = ui.row {
+					w_full = true,
+					gap = "$space.2",
+					items = "center",
+					ui.div {
+						grow = 1,
+						min_w = 0,
+						TextField {
+							value = key,
+							name = locale.t("ds.provider_card.key_name", { var = var }),
+							placeholder = var,
+							password = true,
+							size = "sm",
+							autofocus = true,
+							on_commit = function()
+								save()
+							end,
+						},
+					},
+					if method.link
+						then Button {
+							locale.t("ds.provider_card.get_key"),
+							tone = "ghost",
+							size = "sm",
+							on_click = function()
+								Links.open(method.link :: string)
+							end,
+						}
+						else nil,
+					Button {
+						locale.t("ds.provider_card.cancel"),
+						tone = "ghost",
+						size = "sm",
+						on_click = function()
+							key:set("")
+							open:set(false)
+						end,
+					},
+					Button {
+						locale.t("ds.provider_card.save_key"),
+						tone = "secondary",
+						size = "sm",
+						disabled = function(): boolean
+							return string.match(key:get(), "%S") == nil
+						end,
+						on_click = save,
+					},
+				},
+			}
+		end)
+	end)()
+end
+
+-- An agent that signs in on its own, by the ways it offers: `first` (its
+-- sign-in row) for the first it signs in itself, then a row for each
+-- other way (by its name), a key for one that reads a key. (Rebuilt only
+-- when the ways it offers change.)
+local function method_rows(provider: Provider, c: CardProps, first: Node): Node
+	local function methods(): { LoginMethod }
+		return if c.login_methods then c.login_methods() else {}
+	end
+	return ui.presence(function(): string
+		local ids = {}
+		for _, m in methods() do
+			table.insert(ids, `{m.kind}:{m.id}`)
+		end
+		return table.concat(ids, "\0")
+	end, function(_key: string): Node
+		local list = methods()
+		local rows: { Node } = {}
+		local first_used = false
+		local signs_in = false
+		for _, m in list do
+			if m.kind ~= "env_var" then
+				signs_in = true
+			end
+		end
+		if signs_in or #list == 0 then
+			table.insert(rows, first)
+		end
+		for _, m in list do
+			if m.kind == "env_var" then
+				if m.var then
+					table.insert(rows, rule())
+					table.insert(rows, key_row(provider, m, c))
+				end
+			elseif not first_used then
+				first_used = true
+			else
+				table.insert(rows, rule())
+				table.insert(rows, Settings.Row {
+					label = m.name,
+					description = m.description,
+					lead = M.disc(Icon { name = "lock-keyhole-unlocked", size = 16 }),
+					on_click = function()
+						if c.on_sign_in_with then
+							c.on_sign_in_with(m.id)
+						end
+					end,
+				})
+			end
+		end
+		return ui.column { w_full = true, table.unpack(rows) }
+	end)
+end
+
 -- The card's foot: connect the first account, or add another (Zeron's
 -- labels), leading into the sign-in.
-local function add(provider: Provider, empty: () -> boolean, on_add: (() -> ())?, sign_in_only: boolean?): Node
+local function add(provider: Provider, empty: () -> boolean, on_add: (() -> ())?, sign_in_only: boolean?, c: CardProps?): Node
 	if sign_in_only then
-		return Settings.Row {
-			label = locale.t("ds.provider_card.sign_in", { name = provider.name }),
-			description = locale.t("ds.provider_card.sign_in_hint"),
-			lead = M.disc(Icon { name = "lock-keyhole-unlocked", size = 16 }),
-			on_click = on_add or function() end,
-		}
+		local function sign_in(): Node
+			local row = Settings.Row {
+				label = locale.t("ds.provider_card.sign_in", { name = provider.name }),
+				description = locale.t("ds.provider_card.sign_in_hint"),
+				lead = M.disc(Icon { name = "lock-keyhole-unlocked", size = 16 }),
+				on_click = on_add or function() end,
+			}
+			if not (c and c.login_methods) then
+				return row
+			end
+			return method_rows(provider, c :: CardProps, row)
+		end
+		if not (c and c.signed_in) then
+			return sign_in()
+		end
+		local card = c :: CardProps
+		-- Signed in, as it says (it was before you asked, or a sign-in just
+		-- finished): who as, and the way out.
+		return ui.presence(function(): string
+			return if (card.signed_in :: any)() == true then "in" else "out"
+		end, function(state: string): Node
+			if state ~= "in" then
+				return sign_in()
+			end
+			return Settings.Row {
+				label = locale.t("ds.provider_card.signed_in", { name = provider.name }),
+				description = function(): string
+					local who = if card.signed_in_as then card.signed_in_as() else nil
+					return if who
+						then locale.s("ds.provider_card.signed_in_as", { who = who })
+						else locale.s("ds.provider_card.signed_in_hint")
+				end,
+				lead = M.disc(Icon { name = "check", size = 16 }),
+				control = ui.show(function(): boolean
+					return card.can_sign_out ~= nil and card.can_sign_out()
+				end, Button {
+					locale.t("ds.provider_card.sign_out"),
+					tone = "secondary",
+					size = "sm",
+					busy = function(): boolean
+						return card.signing_out ~= nil and card.signing_out()
+					end,
+					on_click = function()
+						if card.on_sign_out then
+							card.on_sign_out()
+						end
+					end,
+				}),
+			}
+		end)
 	end
 	return Settings.Row {
 		label = function()
@@ -530,10 +741,18 @@ local function waiting(provider: Provider, settle: (next: string) -> (), note: (
 	local function page(): boolean
 		return c ~= nil and c.login_page ~= nil and c.login_page()
 	end
+	local function code(): string?
+		return if c and c.login_code then c.login_code() else nil
+	end
 	return Settings.Row {
 		label = locale.t("ds.provider_card.signing_in_to", { name = provider.name }),
+		-- (With a code, the line says what to do with it; the code is said
+		-- on its own, beside the buttons.)
 		description = if note
 			then function(): string
+				if code() then
+					return locale.s("ds.provider_card.code_check")
+				end
 				return note() or locale.s("ds.provider_card.signing_in_hint")
 			end
 			else locale.t("ds.provider_card.signing_in_hint"),
@@ -541,6 +760,19 @@ local function waiting(provider: Provider, settle: (next: string) -> (), note: (
 		control = ui.row {
 			gap = "$space.2",
 			items = "center",
+			ui.show(function(): boolean
+				return code() ~= nil
+			end, ui.text {
+				function(): string
+					return code() or ""
+				end,
+				id = "pairing-code",
+				font = "$font.mono",
+				text_size = "$font.size.lg",
+				weight = "$font.weight.semibold",
+				color = "$text.primary",
+				selectable = true,
+			}),
 			Button {
 				locale.t("ds.provider_card.cancel"),
 				tone = "ghost",
@@ -749,7 +981,7 @@ function M.Card(c: CardProps): Node
 		end
 		return add(provider, function()
 			return #accounts() == 0
-		end, c.on_add, c.sign_in_only)
+		end, c.on_add, c.sign_in_only, c)
 	end
 	local given = c.foot
 	local kind: () -> string = if type(given) == "function"

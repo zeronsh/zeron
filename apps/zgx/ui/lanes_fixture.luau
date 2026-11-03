@@ -130,6 +130,15 @@ stub_sessions.fork = function(source: string, _parent: string?, id: string?): an
 	end
 	return settled(true, id)
 end
+-- A side chat on an agent from the ACP registry (named by its harness
+-- alone, its icon among `agent_icons`).
+ui.command { id = "side_on_registry", title = "A side chat on Factory Droid", run = function()
+	ui.shared("agent_icons", {} :: { [string]: string }):set({
+		["acp.factory-droid"] = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="currentColor" d="M8 1l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>',
+	})
+	children[1].agent = "acp.factory-droid"
+	publish()
+end }
 ui.command { id = "fork_hold", title = "Forks wait", run = function()
 	fork_hold:set(true)
 end }

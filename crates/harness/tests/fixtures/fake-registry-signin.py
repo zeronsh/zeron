@@ -14,6 +14,14 @@
           run bare.
   kimi    one method in the older `_meta["terminal-auth"]` form, its own
           `command` and `args: ["login"]`: a device code printed, then done.
+  droid-signed-in  as droid, but signed in already (until `logout`, which
+          leaves $FAKE_STATE/signed-out): a session starts at once.
+  signed-in-email  signed in, and says who as: its session's `_meta`
+          carries an email.
+  elicit  `authenticate` asks the client to open its page (ACP's
+          `elicitation/create`, `url` mode) when the client said it can
+          (clientCapabilities.elicitation.url), and is signed in once that's
+          accepted.
   gemini  `authenticate` opens its page with the system's `open` (never
           $BROWSER) and waits for its loopback callback; a request that
           isn't the callback ends the sign-in.
@@ -28,7 +36,10 @@ import time
 
 mode = os.environ.get("FAKE_SIGNIN", "droid")
 code = None
-signed_in = False
+state = os.environ.get("FAKE_STATE", "")
+signed_out_file = os.path.join(state, "signed-out") if state else None
+signed_in = mode == "signed-in-email" or (
+    mode == "droid-signed-in" and not (signed_out_file and os.path.exists(signed_out_file)))
 stale = mode == "droid-stale"
 if len(sys.argv) > 1 and sys.argv[1] == "login":
     print("Please visit the following URL to finish authorization.", flush=True)
@@ -52,12 +63,14 @@ for line in sys.stdin:
         continue
     method, mid = message.get("method"), message.get("id")
     if method == "initialize":
+        can_elicit = "url" in ((message.get("params") or {}).get("clientCapabilities") or {}).get("elicitation", {})
         caps = {"loadSession": True}
-        if mode in ("droid", "droid-stale", "droid-cli"):
+        if mode in ("droid", "droid-stale", "droid-cli", "droid-signed-in"):
             caps["_meta"] = {"terminal-auth": True}
-        if mode in ("droid", "droid-stale"):
+        if mode in ("droid", "droid-stale", "droid-signed-in"):
             caps["auth"] = {"logout": {}}
-            methods = [{"id": "device-pairing", "name": "Login"}, {"id": "api-key", "name": "API key"}]
+            methods = [{"id": "device-pairing", "name": "Login"}, {"id": "api-key", "name": "API key",
+                        "description": "Authenticate using a Factory API key set in the FACTORY_API_KEY environment variable."}]
         elif mode == "kimi":
             methods = [{"id": "login", "name": "Login with Kimi account", "_meta": {"terminal-auth": {
                 "command": os.path.abspath(sys.argv[0]), "args": ["login"], "label": "Login", "env": {}, "type": "terminal"}}}]
@@ -71,6 +84,14 @@ for line in sys.stdin:
             while not os.path.exists(paired):
                 time.sleep(0.05)
             signed_in = True
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif mode == "elicit":
+            if can_elicit:
+                send({"jsonrpc": "2.0", "id": "e-1", "method": "elicitation/create", "params": {
+                    "mode": "url", "elicitationId": "el-1", "message": "Approve this device",
+                    "url": "https://auth.example.com/approve?device=fake"}})
+                answer = json.loads(sys.stdin.readline())
+                signed_in = answer.get("id") == "e-1" and (answer.get("result") or {}).get("action") == "accept"
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif mode == "gemini":
             server = socket.socket()
@@ -92,17 +113,22 @@ for line in sys.stdin:
     elif method == "session/new":
         if mode == "droid-stale" and stale:
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Authentication required: Authentication failed. Please log in using /login or set a valid FACTORY_API_KEY environment variable."}})
-        elif mode in ("droid", "droid-stale") and not signed_in:
+        elif mode in ("droid", "droid-stale", "droid-signed-in") and not signed_in:
             code = "WXYZ-9876"
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": f"Authentication required: \n\nYour code: {code}\n\nClick the \"Login\" button to authenticate."}})
         elif mode == "droid-cli":
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Authentication required: Please log in using /login"}})
-        elif mode == "gemini" and not signed_in:
+        elif mode in ("gemini", "elicit") and not signed_in:
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Authentication required"}})
+        elif mode == "signed-in-email":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "s-1", "_meta": {"account": {"email": "ada@example.com"}}}})
         else:
             send({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "s-1"}})
     elif method == "logout":
         stale = False
+        signed_in = False
+        if signed_out_file and mode == "droid-signed-in":
+            open(signed_out_file, "w").close()
         send({"jsonrpc": "2.0", "id": mid, "result": {}})
     elif mid is not None:
         send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "unsupported"}})

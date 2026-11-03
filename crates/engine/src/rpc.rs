@@ -1578,6 +1578,7 @@ impl EngineRpc {
                         {
                             self.cancel_remote_login(target, &login_id).await;
                             return RpcReply::value(&AgentLoginPoll {
+            code: None,
                                 status: AgentLoginStatus::Error,
                                 message: Some(error.to_string()),
                                 url: None,
@@ -2173,6 +2174,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         }
         methods::INSTALL_HARNESS | methods::ADD_ACP_AGENT => Duration::from_secs(15 * 60),
         methods::LIST_ACP_REGISTRY => Duration::from_secs(60),
+        // An agent started, then asked for a session (its own timeouts).
+        methods::GET_ACP_AGENT_SIGN_IN | methods::SIGN_OUT_ACP_AGENT => Duration::from_secs(90),
         // A full fleet of enabled providers is checked two at a time; each
         // provider may need both a CLI probe and a network request.
         methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
@@ -2206,6 +2209,9 @@ fn forwardable(method: &str) -> bool {
             | methods::REMOVE_ACP_AGENT
             | methods::GET_ACP_AGENT_ENV
             | methods::SET_ACP_AGENT_ENV
+            | methods::GET_ACP_AGENT_SIGN_IN
+            | methods::SIGN_OUT_ACP_AGENT
+            | methods::SET_ACP_AGENT_KEY
             | methods::ADD_OWN_AGENT
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL

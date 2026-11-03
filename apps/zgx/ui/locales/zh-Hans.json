@@ -916,7 +916,19 @@
       "resets_unlisted": "Zeron 暂时无法列出它们。请关闭后稍后再试。",
       "use_reset_confirm": "使用重置",
       "open_terminal": "打开终端",
-      "open_page": "再次打开页面"
+      "open_page": "再次打开页面",
+      "signed_in": "已登录 {name}",
+      "signed_in_as": "已登录为 {who}。",
+      "signed_in_hint": "它的聊天使用此登录。",
+      "sign_out": "退出登录",
+      "code_check": "请确认此代码与打开的页面上的代码一致，然后在页面上确认。",
+      "use_key": "使用 {method}",
+      "use_key_hint": "为 {name} 粘贴密钥。它保存在此设备上，作为 {var}。",
+      "paste_key": "粘贴你的 {method}",
+      "paste_key_hint": "{name} 以 {var} 读取它。它保存在此设备上，不会再次显示。",
+      "key_name": "{var}",
+      "get_key": "获取密钥",
+      "save_key": "保存"
     },
     "command_palette": {
       "scope": {

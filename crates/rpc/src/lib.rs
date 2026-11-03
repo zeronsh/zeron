@@ -58,6 +58,15 @@ pub mod methods {
     /// owner-only, never synced.
     pub const GET_ACP_AGENT_ENV: &str = "GetAcpAgentEnv";
     pub const SET_ACP_AGENT_ENV: &str = "SetAcpAgentEnv";
+    /// An added agent's sign-in on the target device, asked of it without
+    /// signing in (`{id, refresh?}` → `{signedIn, account?, canSignOut,
+    /// methods}`), and signing it out there (`{id}`, ACP's `logout`).
+    pub const GET_ACP_AGENT_SIGN_IN: &str = "GetAcpAgentSignIn";
+    pub const SIGN_OUT_ACP_AGENT: &str = "SignOutAcpAgent";
+    /// One variable of an added agent's own environment on the target device
+    /// (`{id, var, value}`; an empty value forgets it): the key a sign-in
+    /// method reads from there. Replies `{ok}`; the value never comes back.
+    pub const SET_ACP_AGENT_KEY: &str = "SetAcpAgentKey";
     /// An agent of your own on the target device (`{name, command, env}`),
     /// run through the same generic ACP harness as the registry's.
     pub const ADD_OWN_AGENT: &str = "AddOwnAgent";

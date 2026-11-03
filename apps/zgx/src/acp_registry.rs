@@ -69,19 +69,6 @@ thread_local! {
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let registry = REGISTRY.with(Rc::clone);
     registry.shared.borrow_mut().push(host.shared("acp_registry", registry.value()));
-    // Once connected, the registry read in the background: its agents' sites
-    // and repositories, for their logos (src/agent_logos.rs), wherever they
-    // show (the picker, the sidebar), Providers opened or not.
-    if registry.shared.borrow().len() == 1 {
-        let weak = Rc::downgrade(&registry);
-        engine::get().on_connect(move |_| {
-            if let Some(r) = weak.upgrade()
-                && r.look.get() == Look::Looking
-            {
-                engine::get().spawn(async move { r.load(false).await });
-            }
-        });
-    }
 
     let r = registry.clone();
     host.action("acp_registry.load", move |refresh| {
@@ -231,21 +218,7 @@ impl Registry {
         match engine::get().call("ListAcpRegistry", params).await {
             Ok(reply) if self.loading.get() == run => {
                 *self.agents.borrow_mut() = reply["agents"].as_array().cloned().unwrap_or_default();
-                // Their logos, looked for once each (src/agent_logos.rs).
-                let links: Vec<(String, Option<String>, Option<String>)> = self
-                    .agents
-                    .borrow()
-                    .iter()
-                    .filter(|a| !a["own"].as_bool().unwrap_or(false))
-                    .filter_map(|a| {
-                        Some((
-                            a["id"].as_str()?.to_string(),
-                            a["website"].as_str().map(str::to_owned),
-                            a["repository"].as_str().map(str::to_owned),
-                        ))
-                    })
-                    .collect();
-                crate::agent_logos::want(links);
+                crate::agents::remember_listing_icons(&self.agents.borrow());
                 self.offline.set(reply["offline"].as_bool().unwrap_or(false));
                 self.look.set(Look::Ready);
                 self.publish();

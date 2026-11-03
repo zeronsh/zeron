@@ -916,7 +916,19 @@
       "resets_unlisted": "Zeron couldn't list them just now. Close this and try again in a moment.",
       "use_reset_confirm": "Use reset",
       "open_terminal": "Open a terminal",
-      "open_page": "Open the page again"
+      "open_page": "Open the page again",
+      "signed_in": "Signed in to {name}",
+      "signed_in_as": "Signed in as {who}.",
+      "signed_in_hint": "Its chats use this sign-in.",
+      "sign_out": "Sign out",
+      "code_check": "Check this code matches the one on the page that opened, then confirm there.",
+      "use_key": "Use {method}",
+      "use_key_hint": "Paste a key for {name}. It's kept on this device, as {var}.",
+      "paste_key": "Paste your {method}",
+      "paste_key_hint": "{name} reads it as {var}. It's kept on this device and never shown again.",
+      "key_name": "{var}",
+      "get_key": "Get a key",
+      "save_key": "Save"
     },
     "command_palette": {
       "scope": {

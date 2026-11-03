@@ -446,7 +446,7 @@ impl Sessions {
                 ("updated", Value::from(updated as f64)),
                 ("created", Value::from(created as f64)),
                 ("harness", opt(harness)),
-                ("agent", harness.and_then(crate::agents::mark).map_or(Value::Nil, Value::from)),
+                ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                     // An agent from the ACP registry: its icon, as listed.
                     (
                         "agent_icon",
@@ -493,7 +493,7 @@ impl Sessions {
                     ("updated", Value::from(updated as f64)),
                     ("created", Value::from(created as f64)),
                     ("harness", opt(harness)),
-                    ("agent", harness.and_then(crate::agents::mark).map_or(Value::Nil, Value::from)),
+                    ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                     // An agent from the ACP registry: its icon, as listed.
                     (
                         "agent_icon",

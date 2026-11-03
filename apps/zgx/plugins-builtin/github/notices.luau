@@ -5,8 +5,8 @@
 --   - changes requested;
 --   - its checks failing;
 --   - merged, or closed without merging.
--- Every session's pull request is followed (watch.luau asks GitHub each
--- minute), not only the rows showing.
+-- Every session's pull request is followed (as watch.luau hears it move),
+-- not only the rows showing.
 --
 -- What each was is kept (`zeron.store`), and a pull request first seen (at
 -- launch, a new session, a reload) is only noted: nothing old rings.
@@ -41,21 +41,15 @@ end
 
 return function(zeron: any, watch: any)
 	local seen = zeron.store("pr_seen", {} :: { [string]: Seen })
-	local watching: { [string]: () -> any } = {}
 
-	-- Every session's pull request, watched as sessions come, and each one
-	-- read (one effect: it follows both the sessions and what's heard).
-	ui.effect(function()
-		for id in zeron.sessions() do
-			if not watching[id] then
-				watching[id] = watch.read(id)
-			end
-		end
+	-- Sessions `ids`' pull requests as they stand, each compared with what
+	-- it was: said if worth saying, kept either way.
+	local function saw(ids: { string })
 		local before = seen:peek() or {}
 		local after = table.clone(before)
 		local changed = false
-		for id, read in watching do
-			local pr = read()
+		for _, id in ids do
+			local pr = watch.current(id)
 			if pr then
 				local now: Seen = { number = pr.number, state = pr.state or "open", review = pr.review, asked = pr.requested_of_you, ci = pr.ci }
 				local was = before[id]
@@ -71,7 +65,7 @@ return function(zeron: any, watch: any)
 					-- (First seen, or another pull request: noted, never said.)
 					local said = if was and was.number == now.number then news(was, now) else nil
 					if said then
-						local session = zeron.context_of("session", id)
+						local session = zeron.context_of("session", id) or {}
 						zeron.notify({
 							title = zeron.s("notices.title", { number = now.number, said = zeron.s(`notices.{said}`) }),
 							body = session.title or pr.title or "",
@@ -84,5 +78,23 @@ return function(zeron: any, watch: any)
 		if changed then
 			seen:set(after)
 		end
+	end
+
+	-- Every session's, as gh tells the watch it moved (a listener: nothing
+	-- here follows any row's state).
+	watch.on_change(function(id: string)
+		saw({ id })
+	end)
+	-- And what the engine tells of those it watches, as it moves (one
+	-- effect, here at the top).
+	ui.effect(function()
+		local ok, all = pcall(zeron.github.heard)
+		local ids: { string } = {}
+		for id, pr in (if ok and type(all) == "table" then all else {}) do
+			if type(pr) == "table" then
+				table.insert(ids, id)
+			end
+		end
+		saw(ids)
 	end)
 end

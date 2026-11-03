@@ -2140,9 +2140,14 @@ impl Bridge {
                 // while its row is away (Settings, another page): back, its
                 // badge is there at once, and the new watch brings it up to
                 // date. Only past a bound do the unwatched ones go.
+                let kept = gh.prs.len();
                 if gh.prs.len() > MAX_KEPT_PRS {
                     gh.prs.retain(|id, _| keep.contains(id.as_str()));
                 }
+                // (Published only as what's kept changed: rows coming into
+                // view as a list scrolls ask this often, and each publish
+                // runs every reader of it.)
+                let trimmed = gh.prs.len() != kept;
                 for (id, params) in &wanted {
                     let key = github::watch_key(params);
                     if gh.watches.get(id).is_some_and(|w| w.key == key) {
@@ -2150,6 +2155,9 @@ impl Bridge {
                     }
                     let watch = Self::pr_watch(&b, &rpc, &plugin, id, &key, params);
                     gh.watches.insert(id.clone(), PrWatch { key, params: params.clone(), watch: Some(watch), retry: github::Retry::new() });
+                }
+                if !trimmed {
+                    return;
                 }
                 gh.shared.clone().map(|s| (s, json_value(&Json::Object(gh.prs.clone()))))
             };

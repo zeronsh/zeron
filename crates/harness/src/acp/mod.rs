@@ -1301,6 +1301,136 @@ enum AuthMethod {
     },
 }
 
+/// A registry agent's sign-in as it says it is
+/// ([`AcpHarness::registry_sign_in_state`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySignIn {
+    pub signed_in: bool,
+    /// Who it's signed in as, when it says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// It offers ACP's `logout`.
+    pub can_sign_out: bool,
+    pub methods: Vec<AuthMethodInfo>,
+}
+
+/// One way an agent offers to sign in (`initialize`'s `authMethods`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// "agent" (it signs in itself), "terminal" (a command, typed into) or
+    /// "env_var" (a key it reads from its environment).
+    pub kind: String,
+    /// The environment variable(s) an `env_var` method reads.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vars: Vec<String>,
+    /// Where to get the key, when the agent says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+/// The methods `initialize` offers, each with its kind. (A method without a
+/// `type` is the agent's own; one with `_meta["terminal-auth"]` a terminal
+/// one.)
+fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
+    initialized
+        .get("authMethods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str).filter(|id| !id.is_empty() && id.len() <= 128)?;
+            let kind = m
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| m.pointer("/_meta/terminal-auth").map(|_| "terminal"))
+                .unwrap_or("agent");
+            if !matches!(kind, "agent" | "terminal" | "env_var") {
+                return None;
+            }
+            let description = m.get("description").and_then(Value::as_str);
+            // An agent method that says it's a key read from the environment
+            // (Factory Droid's "…set in the FACTORY_API_KEY environment
+            // variable"): a key to paste, as an `env_var` method is.
+            let named_var = (kind == "agent").then(|| description.and_then(env_var_named)).flatten();
+            let kind = if named_var.is_some() { "env_var" } else { kind };
+            let vars = match m.get("vars").and_then(Value::as_array) {
+                Some(vars) => vars
+                    .iter()
+                    .filter_map(|v| v.get("name").and_then(Value::as_str).or_else(|| v.as_str()))
+                    .map(str::to_owned)
+                    .collect(),
+                None => m
+                    .get("varName")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(named_var)
+                    .map(|v| vec![v])
+                    .unwrap_or_default(),
+            };
+            Some(AuthMethodInfo {
+                id: id.to_owned(),
+                name: m.get("name").and_then(Value::as_str).unwrap_or(id).to_owned(),
+                description: m.get("description").and_then(Value::as_str).map(str::to_owned),
+                kind: kind.to_owned(),
+                vars,
+                link: m
+                    .get("link")
+                    .and_then(Value::as_str)
+                    .filter(|l| l.starts_with("https://"))
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// The environment variable a method's description says it reads a key
+/// from (`FOO_API_KEY`, `FOO_TOKEN`), when it says "environment variable".
+fn env_var_named(description: &str) -> Option<String> {
+    let lower = description.to_ascii_lowercase();
+    if !(lower.contains("environment variable") || lower.contains("env var")) {
+        return None;
+    }
+    description
+        .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .find(|word| {
+            word.len() >= 4
+                && word.len() <= 64
+                && word.contains('_')
+                && word.starts_with(|c: char| c.is_ascii_uppercase())
+                && (word.ends_with("KEY") || word.ends_with("TOKEN"))
+        })
+        .map(str::to_owned)
+}
+
+/// Who an agent says it's signed in as, in a `_meta` it sends: an email,
+/// else an account or user name, at most a level down.
+fn account_in(meta: Option<&Value>) -> Option<String> {
+    fn find(value: &Value, depth: u8) -> Option<String> {
+        let object = value.as_object()?;
+        for want in ["email", "account", "user", "username", "login"] {
+            for (key, v) in object {
+                let key = key.to_ascii_lowercase().replace(['_', '-'], "");
+                if (key == want || key == format!("{want}email") || key == format!("{want}name"))
+                    && let Some(text) = v.as_str().map(str::trim).filter(|t| !t.is_empty() && t.len() <= 200)
+                {
+                    return Some(text.to_owned());
+                }
+            }
+        }
+        if depth == 0 {
+            return None;
+        }
+        object.values().find_map(|v| find(v, depth - 1))
+    }
+    find(meta?, 1)
+}
+
 /// The method `wanted` names, else the first the agent runs itself, else the
 /// first run as a command. (A method without a `type` is the agent's own;
 /// `env_var` methods, gone from the protocol, are passed over.)
@@ -1317,7 +1447,11 @@ fn choose_auth_method(initialized: &Value, wanted: Option<&str>) -> Option<AuthM
             .and_then(Value::as_str)
             .or_else(|| m.pointer("/_meta/terminal-auth").map(|_| "terminal"))
             .unwrap_or("agent");
+        // (A key it reads from its environment isn't signed in this way:
+        // it's pasted, and kept in the agent's environment.)
+        let reads_a_key = m.get("description").and_then(Value::as_str).and_then(env_var_named).is_some();
         match kind {
+            "agent" if reads_a_key && wanted.is_none() => None,
             "agent" => Some(AuthMethod::Agent(id.to_owned())),
             "terminal" => {
                 let legacy = m.pointer("/_meta/terminal-auth").filter(|v| v.is_object());
@@ -1885,6 +2019,8 @@ impl AcpHarness {
         // them: as the protocol now says it, and as older agents read it.
         params["clientCapabilities"]["auth"] = json!({ "terminal": true });
         params["clientCapabilities"]["_meta"]["terminal-auth"] = json!(true);
+        // A page it asks to have opened (`elicitation/create`, `url` mode).
+        params["clientCapabilities"]["elicitation"] = json!({ "url": {} });
         let initialized = match tokio::time::timeout(self.handshake_timeout, client.request("initialize", params)).await {
             Ok(Ok(initialized)) => initialized,
             Ok(Err(error)) => {
@@ -1943,16 +2079,20 @@ impl AcpHarness {
                 // then opens the page and waits for the pairing).
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 let can_log_out = initialized.pointer("/agentCapabilities/auth/logout").is_some();
+                let pages = on_progress.clone();
+                let on_page = move |url: String| pages(SignInProgress::OpenBrowser(url));
+                let on_page: &(dyn Fn(String) + Send + Sync) = &on_page;
                 let mut verified: Result<(), HarnessError> = Ok(());
                 for round in 0..2 {
                     let first = tokio::time::timeout(
                         self.model_discovery_timeout * 3,
-                        request_draining(
+                        request_draining_with(
                             &client,
                             &mut incoming,
                             AccessMode::FullAccess,
                             "session/new",
                             json!({ "cwd": home, "mcpServers": [] }),
+                            Some(on_page),
                         ),
                     )
                     .await;
@@ -1971,12 +2111,13 @@ impl AcpHarness {
                         }
                         _ => {}
                     }
-                    let flow = request_draining(
+                    let flow = request_draining_with(
                         &client,
                         &mut incoming,
                         AccessMode::FullAccess,
                         "authenticate",
                         json!({ "methodId": id }),
+                        Some(on_page),
                     );
                     let result = match tokio::time::timeout(SIGN_IN_TIMEOUT, flow).await {
                         Ok(outcome) => outcome.map(|_| ()),
@@ -1989,12 +2130,13 @@ impl AcpHarness {
                     // `authenticate` at once and sign nothing in.
                     verified = match result {
                         Ok(()) => {
-                            let probe = request_draining(
+                            let probe = request_draining_with(
                                 &client,
                                 &mut incoming,
                                 AccessMode::FullAccess,
                                 "session/new",
                                 json!({ "cwd": home, "mcpServers": [] }),
+                            Some(on_page),
                             );
                             match tokio::time::timeout(self.model_discovery_timeout * 3, probe).await {
                                 Ok(Err(error)) if still_signed_out(&error) => Err(error),
@@ -2015,12 +2157,13 @@ impl AcpHarness {
                     if !(rejected && can_log_out && round == 0) {
                         break;
                     }
-                    let logout = request_draining(
+                    let logout = request_draining_with(
                         &client,
                         &mut incoming,
                         AccessMode::FullAccess,
                         "logout",
                         json!({}),
+                        Some(on_page),
                     );
                     if !matches!(tokio::time::timeout(SIGN_OUT_TIMEOUT, logout).await, Ok(Ok(_))) {
                         break;
@@ -2049,6 +2192,111 @@ impl AcpHarness {
                 client.close_stdin_for_teardown();
                 shutdown_child(&mut child, self.kill_grace).await;
                 self.terminal_sign_in(terminal, &exe, &args, &command, &on_progress).await
+            }
+        }
+    }
+
+    /// Whether a registry agent is signed in, asked without signing it in:
+    /// `initialize`, then a session (ACP's own test; one refused with
+    /// `auth_required` is signed out). Who it's signed in as, when it says
+    /// (an email or account in its `_meta`), and the ways it offers to
+    /// sign in. Errs when it can't tell (it didn't start, it timed out).
+    pub async fn registry_sign_in_state(&self) -> Result<RegistrySignIn, HarnessError> {
+        let (mut child, client, mut incoming, initialized) = self.start_registry().await?;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let session = tokio::time::timeout(
+            self.model_discovery_timeout * 3,
+            request_draining(
+                &client,
+                &mut incoming,
+                AccessMode::FullAccess,
+                "session/new",
+                json!({ "cwd": home, "mcpServers": [] }),
+            ),
+        )
+        .await;
+        client.close_stdin_for_teardown();
+        shutdown_child(&mut child, self.kill_grace).await;
+        let display_name = self.spec.display_name;
+        let signed_in = match session {
+            Ok(Ok(started)) => Some(started),
+            Ok(Err(error)) if still_signed_out(&error) => None,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(HarnessError::Protocol(format!("{display_name} didn't say whether it's signed in")));
+            }
+        };
+        let account = signed_in
+            .as_ref()
+            .and_then(|started| account_in(started.get("_meta")))
+            .or_else(|| account_in(initialized.get("_meta")))
+            .or_else(|| account_in(initialized.pointer("/agentInfo/_meta")));
+        Ok(RegistrySignIn {
+            signed_in: signed_in.is_some(),
+            account,
+            can_sign_out: initialized.pointer("/agentCapabilities/auth/logout").is_some(),
+            methods: auth_methods(&initialized),
+        })
+    }
+
+    /// Signs a registry agent out (ACP's `logout`, where it offers one).
+    pub async fn sign_out_registry(&self) -> Result<(), HarnessError> {
+        let (mut child, client, mut incoming, initialized) = self.start_registry().await?;
+        let display_name = self.spec.display_name;
+        let outcome = if initialized.pointer("/agentCapabilities/auth/logout").is_none() {
+            Err(HarnessError::Protocol(format!("{display_name} doesn't offer signing out")))
+        } else {
+            let logout = request_draining(&client, &mut incoming, AccessMode::FullAccess, "logout", json!({}));
+            match tokio::time::timeout(SIGN_OUT_TIMEOUT, logout).await {
+                Ok(outcome) => outcome.map(|_| ()),
+                Err(_) => Err(HarnessError::Protocol(format!("{display_name} didn't finish signing out"))),
+            }
+        };
+        client.close_stdin_for_teardown();
+        shutdown_child(&mut child, self.kill_grace).await;
+        outcome
+    }
+
+    /// A registry agent started and initialized as a sign-in client
+    /// (terminal sign-ins offered), its output discarded.
+    async fn start_registry(&self) -> Result<(tokio::process::Child, RpcClient, mpsc::Receiver<Incoming>, Value), HarnessError> {
+        let display_name = self.spec.display_name;
+        let (exe, args) = self.resolve_program(false).await?;
+        let mut cmd = Command::new(&exe);
+        cmd.args(&args);
+        crate::compose_child_path(&mut cmd, &exe);
+        if let Some(home) = std::env::var_os("HOME") {
+            cmd.current_dir(home);
+        }
+        self.registry_environment(&mut cmd);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
+        })?;
+        let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            _ => {
+                shutdown_child(&mut child, self.kill_grace).await;
+                return Err(HarnessError::Protocol("agent child has no stdio".into()));
+            }
+        };
+        let mut params = initialize_params(self.spec.id);
+        params["clientCapabilities"]["auth"] = json!({ "terminal": true });
+        params["clientCapabilities"]["_meta"]["terminal-auth"] = json!(true);
+        match tokio::time::timeout(self.handshake_timeout, client.request("initialize", params)).await {
+            Ok(Ok(initialized)) => Ok((child, client, incoming, initialized)),
+            Ok(Err(error)) => {
+                client.close_stdin_for_teardown();
+                shutdown_child(&mut child, self.kill_grace).await;
+                Err(error)
+            }
+            Err(_) => {
+                client.close_stdin_for_teardown();
+                shutdown_child(&mut child, self.kill_grace).await;
+                Err(HarnessError::Protocol(format!("{display_name} didn't start")))
             }
         }
     }
@@ -4485,6 +4733,42 @@ async fn request_draining(
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
+    request_draining_with(client, incoming, access, method, params, None).await
+}
+
+/// A sign-in's page an agent asks for (ACP's `elicitation/create`, its `url`
+/// mode): a web page, reported to `on_page` and accepted (the person asked
+/// to sign in; the page is the app's to open, as any sign-in page); anything
+/// else declined.
+fn answer_elicitation(client: &RpcClient, id: &Value, params: &Value, on_page: &(dyn Fn(String) + Send + Sync)) {
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|u| u.starts_with("https://") && u.len() <= 4096 && !u.chars().any(char::is_whitespace));
+    let known = params
+        .get("elicitationId")
+        .and_then(Value::as_str)
+        .is_some_and(|e| !e.trim().is_empty() && e.len() <= 128);
+    match url {
+        Some(url) if known && params.get("mode").and_then(Value::as_str) == Some("url") => {
+            on_page(url.to_owned());
+            client.respond(id, json!({ "action": "accept" }));
+        }
+        _ => client.respond(id, json!({ "action": "decline" })),
+    }
+}
+
+/// [`request_draining`], answering the agent's page requests
+/// (`elicitation/create`) with `on_page` when given.
+async fn request_draining_with(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    access: AccessMode,
+    method: &'static str,
+    params: Value,
+    on_page: Option<&(dyn Fn(String) + Send + Sync)>,
+) -> Result<Value, HarnessError> {
     let loading_session = matches!(method, "session/new" | "session/load" | "session/resume");
     let requested_session = params
         .get("sessionId")
@@ -4492,6 +4776,11 @@ async fn request_draining(
         .map(str::to_owned);
     let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
+        Incoming::Request { id, method, params } if method == "elicitation/create" && on_page.is_some() => {
+            if let Some(on_page) = on_page {
+                answer_elicitation(client, &id, &params, on_page);
+            }
+        }
         Incoming::Request { id, method, params } => {
             if method == "session/request_permission"
                 && params.get("sessionId").and_then(Value::as_str) != requested_session.as_deref()

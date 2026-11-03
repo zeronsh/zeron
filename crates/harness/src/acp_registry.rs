@@ -1280,6 +1280,19 @@ mod tests {
         assert!(clean_svg("not svg").is_none());
     }
 
+    #[tokio::test]
+    async fn icons_come_only_from_the_registrys_cdn_and_small() {
+        // (Refused before any request: another host, plain http.)
+        if std::env::var("ZERON_ACP_REGISTRY_LOOPBACK").is_err() {
+            assert!(fetch_icon("https://example.com/gemini.svg").await.is_none());
+            assert!(fetch_icon("http://cdn.agentclientprotocol.com/registry/v1/latest/gemini.svg").await.is_none());
+            assert!(fetch_icon("https://cdn.agentclientprotocol.com.example.com/gemini.svg").await.is_none());
+        }
+        // Too big to be an icon.
+        let big = format!("<svg>{}</svg>", " ".repeat(MAX_ICON_BYTES));
+        assert!(clean_svg(&big).is_none());
+    }
+
     #[test]
     fn tar_archives_unpack_inside_and_refuse_links() {
         let dir = tempfile::tempdir().unwrap();

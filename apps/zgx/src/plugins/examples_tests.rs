@@ -637,6 +637,188 @@ fn github_asks_many_repositories_at_once_and_only_as_often_as_they_matter() {
     assert_eq!(app.error(), None);
 }
 
+/// Wheeling the sidebar down at scale while pull requests arrive: every
+/// frame, the rows only move up. (The user saw it jump back a step every
+/// few steps.) Returns each frame's backward moves, in points.
+fn sidebar_backsteps(steps: usize) -> (Vec<(usize, f32)>, TestApp) {
+    let (mut app, _heard, github) = github_at_scale(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));
+    // As rows come into view, GitHub has their pull requests, and the
+    // engine (watching what shows) tells them too.
+    let engine = app.host.shared("plugin.github.github", json_value(&json!({})));
+    // (The host keeps what its watches last said, hundreds of sessions'.)
+    let mut told = serde_json::Map::new();
+    for n in 1..=500usize {
+        let (i, k) = ((n - 1) / 3 + 1, (n - 1) % 3 + 1);
+        let number = (i * 10 + k) as u64;
+        told.insert(format!("s{n}"), json!({ "number": number, "title": format!("PR {i}-{k}"), "url": format!("https://github.com/o/r{i}/pull/{number}"), "state": "open", "base": "main", "head": format!("r{i}-{k}"), "ci": "pending", "review": "unknown" }));
+    }
+    engine.set(json_value(&serde_json::Value::Object(told.clone())));
+    app.frames(10);
+    let mut arrive = |app: &mut TestApp, names: &[(String, f32)]| {
+        for (name, _) in names {
+            let n: usize = name.trim_start_matches("Session ").parse().unwrap();
+            let (i, k) = ((n - 1) / 3 + 1, (n - 1) % 3 + 1);
+            let b = format!("r{i}-{k}");
+            let number = (i * 10 + k) as u64;
+            github.borrow_mut()["branches"][&b] = branch_pr(number, "OPEN", json!({ "headRefName": b, "title": format!("PR {i}-{k}") }));
+            told.insert(format!("s{n}"), json!({ "number": number, "title": format!("PR {i}-{k}"), "url": format!("https://github.com/o/r{i}/pull/{number}"), "state": "open", "base": "main", "head": b, "ci": "pending", "review": "unknown" }));
+        }
+        engine.set(json_value(&serde_json::Value::Object(told.clone())));
+        let _ = app;
+    };
+    let rows = |app: &mut TestApp| -> Vec<(String, f32)> {
+        (1..=1500)
+            .filter_map(|n| {
+                let t = format!("#shell-sidebar >> role:button \"Session {n}\"");
+                app.find(&t)?;
+                let b = app.bounds(&t);
+                (b.y > 0. && b.y < 800.).then(|| (format!("Session {n}"), b.y))
+            })
+            .collect()
+    };
+    let mut back = Vec::new();
+    let mut frame = 0;
+    for _ in 0..steps {
+        let before = rows(&mut app);
+        arrive(&mut app, &before);
+        let before = rows(&mut app);
+        let Some((anchor, _)) = before.get(before.len() / 2).cloned() else { break };
+        app.scroll(&format!("#shell-sidebar >> role:button \"{anchor}\""), 24.);
+        // (Frame to frame: a row lower than it was the frame before moved
+        // back; the wheel's own step, too little, is a step not taken.)
+        let mut last = before.clone();
+        let mut moved = false;
+        for _ in 0..12 {
+            app.frames(1);
+            frame += 1;
+            let now = rows(&mut app);
+            for (name, y) in &now {
+                if let Some((_, was)) = last.iter().find(|(n, _)| n == name) {
+                    if *y > *was + 0.5 {
+                        back.push((frame, *y - *was));
+                    }
+                    if *y < *was - 0.5 {
+                        moved = true;
+                    }
+                    break;
+                }
+            }
+            last = now;
+        }
+        let after = rows(&mut app);
+        if let (Some((n, y0)), true) = (before.first(), moved || before.is_empty()) {
+            if let Some((_, y1)) = after.iter().find(|(m, _)| m == n) {
+                if *y1 > *y0 - 0.5 {
+                    back.push((frame, *y1 - *y0));
+                }
+            }
+        }
+    }
+    (back, app)
+}
+
+#[test]
+fn the_sidebar_never_scrolls_back_as_pull_requests_arrive() {
+    let (back, mut app) = sidebar_backsteps(40);
+    // (It went down the list, badges in its rows.)
+    assert!(app.texts().iter().any(|t| t == "Session 25"), "{:?}", app.texts());
+    assert!(app.texts().iter().filter(|t| t.parse::<u32>().is_ok()).count() >= 10);
+    assert!(back.is_empty(), "the sidebar moved back while wheeled down: {back:?}");
+    assert_eq!(app.error(), None);
+}
+
+/// The GitHub plugin's watch (watch.luau, pulls, gh, the SDK) in a plugin
+/// of the test's own, whose text in each sidebar row counts how often it's
+/// read: `a1:<number>:<reads>`. (`GITHUB_ISOLATION_FROM`: another
+/// watch.luau, and with it the SDK's whole-map `watch_pr`, to see the test
+/// fail on the design before.)
+fn counting_watch() -> Item {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins-builtin/github");
+    let dir = std::env::temp_dir().join(format!("zgx-counting-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    struct At(PathBuf);
+    impl At {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    let dir = At(dir);
+    for f in ["pulls.luau", "gh.luau", "zeron-plugin.json"] {
+        std::fs::copy(src.join(f), dir.path().join(f)).unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("locales")).unwrap();
+    for f in ["en.json", "zh-Hans.json"] {
+        std::fs::copy(src.join("locales").join(f), dir.path().join("locales").join(f)).unwrap();
+    }
+    let before = std::env::var("GITHUB_ISOLATION_FROM").ok();
+    let watch = before.as_ref().map(PathBuf::from).unwrap_or_else(|| src.join("watch.luau"));
+    std::fs::copy(watch, dir.path().join("watch.luau")).unwrap();
+    let mut sdk = std::fs::read_to_string(src.join("zeron.luau")).unwrap();
+    if before.is_some() {
+        sdk = sdk.replace("\t\tlocal mine = ui.computed(function(): any\n\t\t\tlocal pr = (github_heard:get() or {})[session]\n\t\t\treturn if pr == false then nil else pr\n\t\tend)\n\t\treturn function(): any\n\t\t\treturn mine:get()\n\t\tend", "\t\treturn function(): any\n\t\t\tlocal pr = (github_heard:get() or {})[session]\n\t\t\treturn if pr == false then nil else pr\n\t\tend");
+    }
+    std::fs::write(dir.path().join("zeron.luau"), sdk).unwrap();
+    std::fs::write(
+        dir.path().join("init.luau"),
+        r#"local zeron = require("./zeron")("github")
+local pulls = require("./pulls")(zeron)
+local watch = require("./watch")(zeron, pulls)
+local reads: { [string]: number } = {}
+zeron.place {
+	at = ".session-title",
+	after = function(): Node
+		local id = zeron.need("session").id
+		local pr = watch.pr(id)
+		return ui.text {
+			class = "pr-reads",
+			function(): string
+				reads[id] = (reads[id] or 0) + 1
+				local now = pr()
+				return `{id}:{if now then now.number else "-"}:{reads[id]}`
+			end,
+		}
+	end,
+}
+"#,
+    )
+    .unwrap();
+    from(dir.path().to_path_buf(), "github")
+}
+
+/// Row `id`'s text from the counting watch: its number and its reads.
+fn reads_of(app: &mut TestApp, id: &str) -> Option<(String, u32)> {
+    let text = app.texts().into_iter().find(|t| t.starts_with(&format!("{id}:")))?;
+    let mut parts = text.split(':').skip(1);
+    Some((parts.next()?.to_string(), parts.next()?.parse().ok()?))
+}
+
+#[test]
+fn a_pull_request_moving_tells_only_its_own_row() {
+    let item = counting_watch();
+    let items = vec![item];
+    let github = world(json!({ "viewer": "ada", "repository": "zeronsh/zgx", "branches": {} }));
+    let (mut app, _heard) = shell_with(items.clone(), github.clone());
+    publish_records(&app, &items);
+    assert!(app.wait_until(|app| reads_of(app, "a1").is_some() && reads_of(app, "a2").is_some()), "{:?}", app.texts());
+    app.frames(120);
+    let (_, a2) = reads_of(&mut app, "a2").unwrap();
+    // The engine tells a1's pull request: a1's row reads it; a2's isn't told.
+    app.host.shared("plugin.github.github", json_value(&json!({}))).set(json_value(&json!({ "a1": {
+        "number": 77, "title": "From the engine", "url": "https://github.com/zeronsh/zgx/pull/77", "state": "open", "base": "main", "head": "fix/build", "ci": "passed", "review": "approved",
+    } })));
+    assert!(app.wait_until(|app| reads_of(app, "a1").is_some_and(|(n, _)| n == "77")), "{:?}", app.texts());
+    app.frames(30);
+    assert_eq!(reads_of(&mut app, "a2").unwrap().1, a2, "a2's row was read again for a1's pull request (the engine's)");
+    // gh tells a2's: a2's row reads it; a1's isn't told.
+    let (_, a1) = reads_of(&mut app, "a1").unwrap();
+    github.borrow_mut()["branches"]["docs"] = branch_pr(7, "OPEN", json!({ "headRefName": "docs" }));
+    assert!(refresh_until(&mut app, |app| reads_of(app, "a2").is_some_and(|(n, _)| n == "7")), "{:?}", app.texts());
+    app.frames(30);
+    assert_eq!(reads_of(&mut app, "a1").unwrap().1, a1, "a1's row was read again for a2's pull request (gh's)");
+    assert_eq!(app.error(), None);
+}
+
 #[test]
 fn github_runs_two_gh_at_once_at_most() {
     let (mut app, heard, github) = github_at_scale(json!({ "viewer": "ada", "repos_by_cwd": true, "branches": {} }));

@@ -85,6 +85,32 @@ local shared = {
 	folded = ui.persist("shell_sidebar_folded", {} :: { [string]: boolean }),
 }
 
+-- Scroll probe (for now: "it jumps back a step every few steps"): the
+-- list's offset moving back within a moment of moving down is printed
+-- (`sidebar-probe:` on the app's stderr), with how often the sidebar was
+-- built and the sessions changed. It reads and prints; it writes nothing.
+local probe = { last = 0, at = 0, dir = 0, builds = 0, built_at = 0, sessions_at = 0 }
+ui.effect(function()
+	sessions.now:get()
+	probe.sessions_at = ui.now()
+end)
+ui.effect(function()
+	local offset = shared.offset:get()
+	local t = ui.now()
+	local d = offset - probe.last
+	if d < -0.5 and probe.dir > 0 and t - probe.at < 300 then
+		print(
+			`sidebar-probe: back {math.floor(-d + 0.5)} pt to {math.floor(offset)} ({math.floor(t - probe.at)} ms after a step down);`
+				.. ` sidebar built {probe.builds}x, last {math.floor(t - probe.built_at)} ms ago;`
+				.. ` sessions changed {math.floor(t - probe.sessions_at)} ms ago`
+		)
+	end
+	if math.abs(d) > 0.5 then
+		probe.dir = if d > 0 then 1 else -1
+	end
+	probe.last, probe.at = offset, t
+end)
+
 -- The same, field by field.
 local function same(a: any, b: any): boolean
 	if type(a) ~= "table" or type(b) ~= "table" then
@@ -1163,6 +1189,8 @@ local function rename_dialog(): Node
 end
 
 M.Sidebar = ui.component(function(props: Props): Node
+	probe.builds += 1
+	probe.built_at = ui.now()
 	-- (Made again, a reload: no row is rested on yet.)
 	if not props.island then
 		M.card:set(nil)

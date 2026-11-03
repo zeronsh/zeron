@@ -7,6 +7,11 @@
 //!   { state = "looking" | "ready" | "unavailable",
 //!     list = { { id, name, mark?, installed, can_install, enabled,
 //!                version?, installing, login = "idle" | "waiting" | "failed",
+//!                login_code? (a device code to check on the page opened),
+//!                signed_in?, signed_in_as?, can_sign_out, signing_out,
+//!                login_methods = { { id, name, description?, kind, var?,
+//!                link? } }
+//!                (an agent from the ACP registry, as it says it is),
 //!                accounts = { { id, email, plan, session, week, active } } } } }
 //! Each agent carries all it shows, so a page keys its rows by `id` and an
 //! account by its `id`, and they update in place. (`session` and `week` are
@@ -18,6 +23,13 @@
 //!                                  opened on its sign-in, settled once the
 //!                                  account is there; cancelled, failed
 //!   agents.cancel(id) (an action)  gives up that sign-in
+//!   agents.sign_in({ id, method }) the same, by the method an agent from the
+//!                                  ACP registry offers (`login_methods`)
+//!   agents.set_key({ id, var, value })  a key such an agent reads from its
+//!                                  environment (a `login_methods` kind
+//!                                  "env_var"), kept there; failed
+//!   agents.sign_out(id)            signs an agent from the ACP registry out
+//!                                  (its own `logout`); failed
 //!   agents.complete({ id, code })  finishes a sign-in that asked for a code
 //!                                  pasted back (its `login` "code": Claude's,
 //!                                  when no loopback port was free)
@@ -101,6 +113,22 @@ struct Login {
     command: Option<String>,
     /// The page the sign-in opened (to open again from the card).
     page: Option<String>,
+    /// A device code it showed, to check against that page.
+    pairing: Option<String>,
+}
+
+/// An agent from the ACP registry's sign-in, as it says it is
+/// (`GetAcpAgentSignIn`, on the device shown).
+#[derive(Default, Clone)]
+struct SignIn {
+    signed_in: bool,
+    /// Who as, when it says.
+    account: Option<String>,
+    can_sign_out: bool,
+    signing_out: bool,
+    /// The ways it offers to sign in (`initialize`'s `authMethods`, each with
+    /// its kind: agent, terminal or env_var).
+    methods: Vec<Json>,
 }
 
 struct Agents {
@@ -121,6 +149,8 @@ struct Agents {
     target: RefCell<Option<String>>,
     installing: RefCell<Vec<String>>,
     logins: RefCell<HashMap<String, Login>>,
+    /// Registry agents' sign-ins, by harness, once they've said.
+    sign_ins: RefCell<HashMap<String, SignIn>>,
     updates: RefCell<Option<Watch>>,
     /// Asked for at least once: a new connection looks again.
     wanted: Cell<bool>,
@@ -157,20 +187,61 @@ thread_local! {
     /// harness lists have carried them: for the sidebar's rows, whose chats
     /// name only their harness.
     static REGISTRY_ICONS: RefCell<HashMap<String, String>> = RefCell::default();
+    /// The same, published to every window's scripts as `agent_icons`
+    /// (`{ ["acp.<id>"] = svg }`): ds/agent_mark finds an agent's icon there
+    /// by its harness, so no caller has to carry it.
+    static ICONS_SHARED: RefCell<Vec<Shared>> = RefCell::default();
 }
 
 /// Keeps the icons a harness list carries (agents from the ACP registry).
 pub(crate) fn remember_icons(list: &[Json]) {
-    REGISTRY_ICONS.with(|icons| {
+    remember(list.iter().filter_map(|h| Some((h["id"].as_str()?.to_owned(), h["icon"].as_str()?.to_owned()))));
+}
+
+/// Keeps the icons the ACP registry's listing carries (`id`, no `acp.`).
+pub(crate) fn remember_listing_icons(list: &[Json]) {
+    remember(list.iter().filter_map(|a| Some((format!("acp.{}", a["id"].as_str()?), a["icon"].as_str()?.to_owned()))));
+}
+
+fn remember(found: impl Iterator<Item = (String, String)>) {
+    let changed = REGISTRY_ICONS.with(|icons| {
         let mut icons = icons.borrow_mut();
-        for h in list {
-            if let (Some(id), Some(icon)) = (h["id"].as_str(), h["icon"].as_str())
-                && id.starts_with("acp.")
-            {
-                icons.insert(id.to_owned(), icon.to_owned());
+        let mut changed = false;
+        for (id, icon) in found {
+            if id.starts_with("acp.") && !icon.is_empty() && icons.get(&id) != Some(&icon) {
+                icons.insert(id, icon);
+                changed = true;
             }
         }
+        changed
     });
+    if changed {
+        let value = icons_value();
+        ICONS_SHARED.with(|shared| {
+            for s in shared.borrow().iter() {
+                s.set(value.clone());
+            }
+        });
+    }
+}
+
+fn icons_value() -> Value {
+    let map: serde_json::Map<String, Json> =
+        REGISTRY_ICONS.with(|icons| icons.borrow().iter().map(|(k, v)| (k.clone(), json!(v))).collect());
+    Value::from_json(&Json::Object(map).to_string()).unwrap_or(Value::Nil)
+}
+
+/// The icons asked for once connected: the harnesses here (cheap, cached),
+/// then the registry's listing (every agent it has, added anywhere).
+async fn learn_icons() {
+    if let Ok(Json::Array(list)) = engine::get().call("ListHarnesses", json!({ "includeRegistry": true })).await {
+        remember_icons(&list);
+    }
+    if let Ok(reply) = engine::get().call("ListAcpRegistry", json!({ "refresh": false })).await
+        && let Some(list) = reply["agents"].as_array()
+    {
+        remember_listing_icons(list);
+    }
 }
 
 /// A registry agent's icon, as last listed.
@@ -185,9 +256,11 @@ thread_local! {
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let agents = AGENTS.with(Rc::clone);
     agents.shared.borrow_mut().push(host.shared("agents", agents.value()));
+    ICONS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agent_icons", icons_value())));
     if agents.shared.borrow().len() == 1 {
         let weak = Rc::downgrade(&agents);
         engine::get().on_connect(move |rpc| {
+            engine::get().spawn(learn_icons());
             let Some(agents) = weak.upgrade() else { return };
             // Versions, as the engine's updater knows them.
             agents.watch_updates(rpc);
@@ -240,12 +313,31 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         engine::get().spawn(async move { a.load().await });
     });
     let a = agents.clone();
-    host.async_action("agents.sign_in", move |id| {
+    host.async_action("agents.sign_in", move |args| {
         let a = a.clone();
-        async move { a.sign_in(text(&id)).await.map_err(String::from) }
+        // `id`, or `{ id, method }` (a registry agent's method of its choosing).
+        let (id, method) = match args.field("id") {
+            Some(id) => (text(&id), args.field("method").map(text).filter(|m| !m.is_empty())),
+            None => (text(&args), None),
+        };
+        async move { a.sign_in(id, method).await.map_err(String::from) }
+    });
+    let a = agents.clone();
+    host.async_action("agents.set_key", move |args| {
+        let a = a.clone();
+        let id = args.field("id").map(text).unwrap_or_default();
+        let var = args.field("var").map(text).unwrap_or_default();
+        let value = args.field("value").map(text).unwrap_or_default();
+        async move { a.set_key(id, var, value).await.map_err(String::from) }
     });
     let a = agents.clone();
     host.action("agents.cancel", move |id| a.cancel(&text(&id)));
+    // A registry agent signed out (its own `logout`).
+    let a = agents.clone();
+    host.async_action("agents.sign_out", move |id| {
+        let a = a.clone();
+        async move { a.sign_out(text(&id)).await.map_err(String::from) }
+    });
     // The page a sign-in under way opened, again (a closed tab, a browser
     // that didn't come forward).
     let a = agents.clone();
@@ -326,6 +418,20 @@ fn harness_and_account(args: &Value) -> (String, String) {
     )
 }
 
+/// A sign-in method as the card reads it: `{ id, name, description?, kind,
+/// var?, link? }` (`var`: the variable a key method reads).
+fn method_value(m: &Json) -> Value {
+    let field = |key: &str| m[key].as_str().map_or(Value::Nil, Value::from);
+    Value::record([
+        ("id", field("id")),
+        ("name", field("name")),
+        ("description", field("description")),
+        ("kind", field("kind")),
+        ("var", m["vars"].get(0).and_then(Json::as_str).map_or(Value::Nil, Value::from)),
+        ("link", field("link")),
+    ])
+}
+
 /// The design system's mark for a harness (ds/mark.luau's names).
 pub(crate) fn mark(id: &str) -> Option<&'static str> {
     Some(match id {
@@ -341,6 +447,18 @@ pub(crate) fn mark(id: &str) -> Option<&'static str> {
         "muse" => "muse",
         _ => return None,
     })
+}
+
+/// ds.Mark's name for an agent wherever one is named (a chat's row, the
+/// switch seam, a model's chip): a built-in's mark, else an agent from the
+/// ACP registry's harness itself (`acp.<id>`), which ds.Mark draws as its
+/// registry icon, found by that alone.
+pub(crate) fn glyph(id: &str) -> Option<String> {
+    match mark(id) {
+        Some(mark) => Some(mark.to_owned()),
+        None if id.starts_with("acp.") => Some(id.to_owned()),
+        None => None,
+    }
 }
 
 /// The sign-in an agent's Add account starts: an agent signing into several
@@ -383,6 +501,7 @@ impl Agents {
             target: RefCell::default(),
             installing: RefCell::default(),
             logins: RefCell::default(),
+            sign_ins: RefCell::default(),
             updates: RefCell::default(),
             wanted: Cell::new(false),
             loading: Cell::new(0),
@@ -403,6 +522,7 @@ impl Agents {
         let installing = self.installing.borrow();
         let accounts = self.accounts.borrow();
         let logins = self.logins.borrow();
+        let sign_ins = self.sign_ins.borrow();
         let resets = self.resets.borrow();
         let account_value = |account: &Json| {
             let reset = account["id"].as_str().and_then(|id| resets.get(id));
@@ -475,6 +595,35 @@ impl Agents {
                             .filter(|_| login != "idle")
                             .map_or(Value::Nil, Value::from),
                     ),
+                    (
+                        "login_code",
+                        logins
+                            .get(id)
+                            .and_then(|l| l.pairing.as_deref())
+                            .filter(|_| login == "waiting")
+                            .map_or(Value::Nil, Value::from),
+                    ),
+                    // A registry agent's sign-in, once it's said (nil until).
+                    (
+                        "signed_in",
+                        sign_ins.get(id).map_or(Value::Nil, |s| Value::Bool(s.signed_in)),
+                    ),
+                    (
+                        "signed_in_as",
+                        sign_ins.get(id).and_then(|s| s.account.as_deref()).map_or(Value::Nil, Value::from),
+                    ),
+                    ("can_sign_out", Value::Bool(sign_ins.get(id).is_some_and(|s| s.can_sign_out))),
+                    ("signing_out", Value::Bool(sign_ins.get(id).is_some_and(|s| s.signing_out))),
+                    (
+                        "login_methods",
+                        Value::List(
+                            sign_ins
+                                .get(id)
+                                .map(|s| s.methods.iter().map(method_value).collect::<Vec<_>>())
+                                .unwrap_or_default()
+                                .into(),
+                        ),
+                    ),
                     ("accounts", Value::List(rows.into())),
                 ])
             })
@@ -545,6 +694,7 @@ impl Agents {
         self.update_status.borrow_mut().clear();
         self.installing.borrow_mut().clear();
         self.logins.borrow_mut().clear();
+        self.sign_ins.borrow_mut().clear();
         // (A reset under way finishes on its device; its word isn't this
         // one's. Keys stay: the same credit is the same request anywhere.)
         self.resets.borrow_mut().clear();
@@ -599,6 +749,92 @@ impl Agents {
         }
         self.load_accounts(false).await;
         self.load_accounts(true).await;
+        // Each registry agent's sign-in, asked of it (it's started for
+        // that, so after the rest, and only those switched on).
+        let registry: Vec<String> = self
+            .harnesses
+            .borrow()
+            .iter()
+            .filter(|h| h["enabled"].as_bool().unwrap_or(true) && h["installed"].as_bool().unwrap_or(true))
+            .filter_map(|h| h["id"].as_str().filter(|id| id.starts_with("acp.")).map(str::to_owned))
+            .collect();
+        for id in registry {
+            let agents = self.clone();
+            engine::get().spawn(async move { agents.load_sign_in(id, false).await });
+        }
+    }
+
+    /// A registry agent's sign-in, as it says it is (`refresh`: asked again,
+    /// not as it last said).
+    async fn load_sign_in(self: Rc<Self>, id: String, refresh: bool) {
+        let Some(registry_id) = id.strip_prefix("acp.") else { return };
+        let asked_of = self.target.borrow().clone();
+        let said = engine::get()
+            .call("GetAcpAgentSignIn", self.addressed(json!({ "id": registry_id, "refresh": refresh })))
+            .await;
+        if *self.target.borrow() != asked_of {
+            return;
+        }
+        match said {
+            Ok(state) => {
+                let signing_out = self.sign_ins.borrow().get(&id).is_some_and(|s| s.signing_out);
+                self.sign_ins.borrow_mut().insert(
+                    id,
+                    SignIn {
+                        signed_in: state["signedIn"].as_bool().unwrap_or(false),
+                        account: state["account"].as_str().map(str::to_owned),
+                        can_sign_out: state["canSignOut"].as_bool().unwrap_or(false),
+                        signing_out,
+                        methods: state["methods"].as_array().cloned().unwrap_or_default(),
+                    },
+                );
+                self.publish();
+            }
+            // (Not told: the row offers the sign-in, as before.)
+            Err(error) => eprintln!("zeron-zgx: agents: {id} didn't say whether it's signed in: {error}"),
+        }
+    }
+
+    /// A key a registry agent reads from its environment (`var`), kept in
+    /// its environment on the device shown; then it's asked again whether
+    /// it's signed in.
+    async fn set_key(self: Rc<Self>, id: String, var: String, value: String) -> Result<Value, Outcome> {
+        let Some(registry_id) = id.strip_prefix("acp.").map(str::to_owned) else { return Err("failed") };
+        let params = json!({ "id": registry_id, "var": var, "value": value.trim() });
+        match engine::get().call("SetAcpAgentKey", self.addressed(params)).await {
+            Ok(_) => {
+                self.clone().load_sign_in(id, true).await;
+                Ok(Value::Nil)
+            }
+            Err(error) => {
+                eprintln!("zeron-zgx: agents: {id}'s key wasn't kept: {error}");
+                Err(fail(&error))
+            }
+        }
+    }
+
+    /// Signs a registry agent out (its own `logout`), then asks again.
+    async fn sign_out(self: Rc<Self>, id: String) -> Result<Value, Outcome> {
+        let Some(registry_id) = id.strip_prefix("acp.").map(str::to_owned) else { return Err("failed") };
+        if let Some(state) = self.sign_ins.borrow_mut().get_mut(&id) {
+            state.signing_out = true;
+        }
+        self.publish();
+        let outcome = engine::get().call("SignOutAcpAgent", self.addressed(json!({ "id": registry_id }))).await;
+        if let Some(state) = self.sign_ins.borrow_mut().get_mut(&id) {
+            state.signing_out = false;
+        }
+        self.publish();
+        match outcome {
+            Ok(_) => {
+                self.clone().load_sign_in(id, true).await;
+                Ok(Value::Nil)
+            }
+            Err(error) => {
+                eprintln!("zeron-zgx: agents: {id} didn't sign out: {error}");
+                Err(fail(&error))
+            }
+        }
     }
 
     async fn load_accounts(&self, fresh_usage: bool) {
@@ -686,7 +922,7 @@ impl Agents {
 
     /// A new account: the engine's sign-in (`StartAgentLogin`), its page
     /// opened, then asked after (`PollAgentLogin`) until it lands or fails.
-    async fn sign_in(self: Rc<Self>, id: String) -> Result<Value, Outcome> {
+    async fn sign_in(self: Rc<Self>, id: String, method: Option<String>) -> Result<Value, Outcome> {
         // The device it's on, for all of it (the page may show another).
         let device = self.target.borrow().clone();
         let device = device.as_deref();
@@ -700,6 +936,7 @@ impl Agents {
             login.note = None;
             login.command = None;
             login.page = None;
+            login.pairing = None;
             login.target = device.map(Into::into);
             login.generation
         };
@@ -707,6 +944,10 @@ impl Agents {
         let mut params = json!({ "harness": id });
         if let Some(provider) = login_provider(&id) {
             params["provider"] = json!(provider);
+        }
+        // (A registry agent's method of its choosing, in the same field.)
+        if let Some(method) = method.filter(|_| id.starts_with("acp.")) {
+            params["provider"] = json!(method);
         }
         let start = match engine::get().call("StartAgentLogin", addressed_to(device, params)).await {
             Ok(start) => start,
@@ -785,6 +1026,11 @@ impl Agents {
             match poll["status"].as_str() {
                 Some("done") => {
                     self.load_accounts(false).await;
+                    if id.starts_with("acp.") {
+                        // (Before it settles: the row goes from the sign-in
+                        // to signed in, not back to the sign-in first.)
+                        self.clone().load_sign_in(id.clone(), true).await;
+                    }
                     self.settle(&id, generation, false);
                     self.load_accounts(true).await;
                     return Ok(Value::Nil);
@@ -806,6 +1052,17 @@ impl Agents {
                 // code to type in is said.
                 _ => {
                     open(poll["url"].as_str());
+                    let code = poll["code"].as_str().map(str::to_owned);
+                    let changed = match self.logins.borrow_mut().get_mut(&id) {
+                        Some(login) if login.generation == generation && login.pairing != code => {
+                            login.pairing = code;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if changed {
+                        self.publish();
+                    }
                     self.note(&id, generation, poll["message"].as_str());
                 }
             }

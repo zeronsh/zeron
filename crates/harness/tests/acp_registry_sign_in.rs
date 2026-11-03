@@ -11,6 +11,14 @@
 //! - one whose sign-in is its own `command` in the older `_meta` form
 //!   (Kimi's `kimi login`): that command, not the ACP launch with `login`
 //!   after it; its device page reported;
+//! - one signed in already (what the user hit on Nov 3: the sign-in found a
+//!   session and ended at once, no page): said signed in when asked, without
+//!   signing in, and signed out by its `logout`;
+//! - one that says who it's signed in as (an email in its session's
+//!   `_meta`);
+//! - one that asks for its page to be opened (ACP's `elicitation/create`,
+//!   `url` mode), which only a client that says it can is asked: the page
+//!   reported, accepted, signed in;
 //! - one that opens its page with the system's `open`, never `$BROWSER`
 //!   (Gemini CLI): the page recorded for the app to open (no browser here),
 //!   and the callback it waits for finishes it.
@@ -35,12 +43,15 @@ fn agents() -> &'static Path {
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let root = tempfile::tempdir().unwrap();
-        for mode in ["droid", "droid-stale", "droid-cli", "kimi", "gemini"] {
+        for mode in ["droid", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini"] {
             let dir = root.path().join(format!("fake-{mode}"));
             std::fs::create_dir_all(&dir).unwrap();
+            let state = dir.join("state");
+            std::fs::create_dir_all(&state).unwrap();
             let record = serde_json::json!({
                 "id": format!("fake-{mode}"), "name": format!("Fake {mode}"), "version": "1.0.0", "kind": "binary",
-                "program": fixture(), "args": ["--acp"], "env": { "FAKE_SIGNIN": mode }, "verified": true
+                "program": fixture(), "args": ["--acp"],
+                "env": { "FAKE_SIGNIN": mode, "FAKE_STATE": state }, "verified": true
             });
             std::fs::write(dir.join("agent.json"), record.to_string()).unwrap();
         }
@@ -193,4 +204,58 @@ async fn a_page_opened_with_the_systems_opener_is_recorded_and_its_callback_fini
     run.outcome.expect("its callback finishes it");
     let recorded = std::fs::read_to_string(url_file).unwrap();
     assert!(recorded.contains("https://accounts.example.com/auth?redirect_uri="), "{recorded}");
+}
+
+fn harness(mode: &str) -> AcpHarness {
+    agents();
+    AcpHarness::registry(RegistryAgent::new(&format!("fake-{mode}")).unwrap(), &format!("Fake {mode}"))
+}
+
+#[tokio::test]
+async fn an_agent_signed_in_already_says_so_and_signs_out_by_its_logout() {
+    let agent = harness("droid-signed-in");
+    let state = agent.registry_sign_in_state().await.expect("it says");
+    assert!(state.signed_in, "{state:?}");
+    assert!(state.can_sign_out);
+    assert_eq!(state.account, None, "it doesn't say who");
+    let ids: Vec<(&str, &str)> = state.methods.iter().map(|m| (m.id.as_str(), m.kind.as_str())).collect();
+    // (Its key method says it reads FACTORY_API_KEY: a key to paste.)
+    assert_eq!(ids, [("device-pairing", "agent"), ("api-key", "env_var")]);
+    assert_eq!(state.methods[1].vars, ["FACTORY_API_KEY"]);
+    // What the Providers row did on Nov 3: a sign-in that finds a session
+    // and ends at once, no page and no code. Signed in, as it says.
+    let (run, url_file) = sign_in("droid-signed-in", |url, _| panic!("no page to open: {url}")).await;
+    run.outcome.expect("signed in already");
+    assert!(std::fs::read_to_string(url_file).unwrap().trim().is_empty());
+    // Signed out by its `logout`: it says so next time it's asked.
+    agent.sign_out_registry().await.expect("signed out");
+    let state = agent.registry_sign_in_state().await.expect("it says");
+    assert!(!state.signed_in, "{state:?}");
+}
+
+#[tokio::test]
+async fn a_signed_out_agent_says_so_without_starting_a_sign_in() {
+    let state = harness("droid").registry_sign_in_state().await.expect("it says");
+    assert!(!state.signed_in);
+}
+
+#[tokio::test]
+async fn who_an_agent_is_signed_in_as_is_read_from_what_it_sends() {
+    let state = harness("signed-in-email").registry_sign_in_state().await.expect("it says");
+    assert!(state.signed_in);
+    assert_eq!(state.account.as_deref(), Some("ada@example.com"));
+    assert!(!state.can_sign_out, "it offers no logout");
+}
+
+#[tokio::test]
+async fn a_page_the_agent_asks_to_open_is_reported_accepted_and_signs_it_in() {
+    let (run, _) = sign_in("elicit", |_, _| {}).await;
+    run.outcome.expect("accepted: signed in");
+    assert!(
+        run.progress
+            .iter()
+            .any(|p| matches!(p, SignInProgress::OpenBrowser(u) if u == "https://auth.example.com/approve?device=fake")),
+        "its page, to open: {:?}",
+        run.progress
+    );
 }

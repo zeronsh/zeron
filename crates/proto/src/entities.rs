@@ -1554,6 +1554,10 @@ pub struct AgentLoginPoll {
     /// poll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_port: Option<u16>,
+    /// A device code the sign-in showed, to check against the page it
+    /// opened (said as it is, apart from `message`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

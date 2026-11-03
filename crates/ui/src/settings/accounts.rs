@@ -2596,6 +2596,7 @@ mod tests {
 
     fn poll(status: AgentLoginStatus, message: Option<&str>, url: Option<&str>) -> AgentLoginPoll {
         AgentLoginPoll {
+            code: None,
             status,
             message: message.map(str::to_string),
             url: url.map(str::to_string),

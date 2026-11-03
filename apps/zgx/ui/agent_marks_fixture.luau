@@ -1,10 +1,10 @@
 -- Agents' marks, light and dark side by side, as each place draws them
 -- (ds.AgentMark): Providers' cards (32), the registry's rows (32), the model
 -- picker's tabs and rows (16 and 14, bare) and the sidebar's rows (14,
--- bare). Zeron's own agents beside agents from the ACP registry, each in its
--- real logo as the app finds it (`agent_logos`, src/agent_logos.rs; kept in
--- the engine data dir's agent-logos/), else its registry icon in plain ink
--- (assets/icons/registry); and one of your own with no icon. For captures
+-- bare). Zeron's own agents in their bundled brand marks beside agents from
+-- the ACP registry in the registry's own icons (assets/icons/registry), in
+-- the theme's ink; one whose icon didn't come (the registry's glyph); and
+-- one of your own (its initial). For captures and tests
 -- (`fixture=agent_marks_fixture.luau`).
 
 ui.theme.strict("warn")
@@ -17,6 +17,7 @@ local BUILT_IN: { Agent } = {
 	{ name = "Claude Code", seed = "claude-code", mark = "claude", by = "Anthropic" },
 	{ name = "Codex", seed = "codex", mark = "openai", by = "OpenAI" },
 	{ name = "Cursor", seed = "cursor", mark = "cursor", by = "Cursor" },
+	{ name = "Antigravity", seed = "antigravity", mark = "antigravity", by = "Google" },
 }
 local function registry(id: string, name: string, by: string): Agent
 	return { name = name, seed = id, src = `assets/icons/registry/{id}.svg`, by = by }
@@ -35,6 +36,8 @@ local REGISTRY: { Agent } = {
 	registry("auggie", "Auggie CLI", "Augment Code"),
 	registry("deepagents", "DeepAgents", "LangChain"),
 	registry("amp-acp", "Amp", "Sourcegraph"),
+	-- (Its icon didn't come: the registry's glyph.)
+	{ name = "Corust Agent", seed = "corust-agent", by = "Corust" },
 }
 local OWN: Agent = { name = "Halcyon agent", seed = "own.halcyon-agent", by = "Yours" }
 

@@ -61,6 +61,8 @@ impl AgentAccounts {
         }));
         let task_state = state.clone();
         let task_home = home.clone();
+        tracing::info!(agent = agent.registry_id(), login_id = %login_id, "registry agent sign-in started");
+        let log_id = login_id.clone();
         let handle = tokio::spawn(async move {
             // The page the browser was asked for, once it's asked.
             let watch_state = task_state.clone();
@@ -99,8 +101,10 @@ impl AgentAccounts {
                             text.push('\n');
                         }
                         if let Some(code) = super::scan_device_code(&text) {
-                            lock(&progress_state).message =
+                            let mut state = lock(&progress_state);
+                            state.message =
                                 Some(format!("Your code is {code}. Check it matches on the page that opened, then confirm."));
+                            state.code = Some(code);
                         }
                     }
                 })
@@ -116,6 +120,26 @@ impl AgentAccounts {
                     }
                 });
             watcher.abort();
+            {
+                let state = lock(&task_state);
+                match &outcome {
+                    Ok(()) => tracing::info!(
+                        agent = agent.registry_id(),
+                        login_id = %log_id,
+                        browser = state.url.is_some(),
+                        code = state.code.is_some(),
+                        "registry agent sign-in done"
+                    ),
+                    Err(error) => tracing::warn!(
+                        agent = agent.registry_id(),
+                        login_id = %log_id,
+                        browser = state.url.is_some(),
+                        error = %error.lines().next().unwrap_or_default().chars().take(200).collect::<String>(),
+                        "registry agent sign-in failed"
+                    ),
+                }
+            }
+            crate::acp_registry::forget_sign_in(agent);
             let _ = std::fs::remove_dir_all(&task_home);
             lock(&task_state).outcome = Some(outcome);
         });

@@ -6200,7 +6200,6 @@ dependencies = [
  "tokio",
  "tungstenite",
  "ureq 2.12.1",
- "url",
  "zatex",
  "zeron-cli",
  "zeron-launch",

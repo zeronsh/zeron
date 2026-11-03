@@ -813,7 +813,7 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
         harnesses.push(Value::record([
             ("id", Value::from(id)),
             ("label", Value::from(h["name"].as_str().unwrap_or(id))),
-            ("mark", Value::from(mark(id))),
+            ("mark", Value::from(mark(id).as_str())),
             // An agent added from the ACP registry draws its own icon.
             ("icon", h["icon"].as_str().map_or(Value::Nil, Value::from)),
         ]));
@@ -972,8 +972,8 @@ fn effort_label(level: &str) -> &str {
 
 /// ds.Mark's name for a harness. The mock agent (development only) borrows
 /// Pi's.
-fn mark(id: &str) -> &'static str {
-    crate::agents::mark(id).unwrap_or("pi")
+fn mark(id: &str) -> String {
+    crate::agents::glyph(id).unwrap_or_else(|| "pi".into())
 }
 
 // -- a window's open chat -----------------------------------------------------
@@ -2479,7 +2479,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 let mark = part[harness].as_str().and_then(switch_mark);
                 (
                     Value::from(single_line(part[name].as_str().unwrap_or_default()).as_str()),
-                    mark.map_or(Value::Nil, Value::from),
+                    mark.map_or(Value::Nil, |m| Value::from(m.as_str())),
                 )
             };
             let (from, from_mark) = side("from", "fromHarness");
@@ -2500,11 +2500,11 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
 
 /// A switch side's mark: its agent's, the mock drawn as Claude, as the
 /// shipping app's `harness_brand_icon`.
-fn switch_mark(harness: &str) -> Option<&'static str> {
+fn switch_mark(harness: &str) -> Option<String> {
     if harness == "mock" {
-        return Some("claude");
+        return Some("claude".into());
     }
-    crate::agents::mark(harness)
+    crate::agents::glyph(harness)
 }
 
 /// A name on one line (the shipping app's `single_line`).

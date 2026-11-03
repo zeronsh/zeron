@@ -531,7 +531,8 @@ return function(id: string): any
 	-- that session's pull request watched while the node shows (the engine
 	-- pushes changes; nothing polls) and returns a function reading it:
 	-- `{ number, title, url, state = "open" | "merged" | "closed", base,
-	-- head }`, or nil for none (or not heard yet).
+	-- head }`, or nil for none (or not heard yet). It follows that session
+	-- alone: another's moving tells it nothing.
 	local github_heard = ui.shared(`{prefix}.github`, {} :: any)
 	local watched: { [string]: number } = {}
 	local asking = false
@@ -671,10 +672,22 @@ return function(id: string): any
 			watched[session] = if n > 0 then n else nil
 			soon()
 		end)
-		return function(): any
+		-- (That session's entry alone: a pull request moving for another
+		-- session changes nothing the caller reads, so its node isn't told.)
+		local mine = ui.computed(function(): any
 			local pr = (github_heard:get() or {})[session]
 			return if pr == false then nil else pr
+		end)
+		return function(): any
+			return mine:get()
 		end
+	end
+
+	-- Every watched session's pull request as last heard (`{ [session] =
+	-- pr | false }`), read as a state is: for the plugin's own bookkeeping
+	-- (what to notify of), never for a row's drawing (`watch_pr`'s, its own).
+	function M.github.heard(): any
+		return github_heard:get() or {}
 	end
 
 	-- A program its manifest names (`"commands": ["gh"]`, "commands"), run

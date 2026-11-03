@@ -22,9 +22,11 @@
 --
 --   watch.pr(session_id)   in a build function: a function reading that
 --                          session's pull request as it changes (nil: none),
---                          the session asked often while the build stands
---   watch.read(session_id) the same reader, the session not marked shown
---   watch.sessions()       every session's, by id (`{ [id] = pr | false }`)
+--                          the session asked often while the build stands.
+--                          It follows that session alone: another's moving
+--                          tells it nothing.
+--   watch.on_change(fn)    `fn(session_id)` as a session's is heard to move
+--   watch.current(id)      that session's as it stands (nil: none), unread
 
 -- The watch's beat (seconds): what's due is asked on it. Between asks, in
 -- beats: a session on screen or working; one touched lately; how lately
@@ -69,15 +71,26 @@ end
 
 return function(zeron: any, pulls: any)
 	local M = {}
-	-- Each session's pull request (or false: none), as last heard.
-	local heard = ui.state("github_watch", {} :: { [string]: any })
+	-- Each session's pull request (or false: none) as gh last told it: in
+	-- plain Lua for the watch's own work, and for what draws it in a state
+	-- of each session's own (`cell`), so one moving tells its own badge and
+	-- nothing else.
+	local known: { [string]: any } = {}
+	local cells: { [string]: any } = {}
+	local function cell(id: string): any
+		local c = cells[id]
+		if not c then
+			c = ui.state(`github_pr.{id}`, if known[id] == nil then false else known[id])
+			cells[id] = c
+		end
+		return c
+	end
+	local listeners: { (id: string) -> () } = {}
 	-- Each folder's repository (or false: none), and each session's.
 	local repos: { [string]: any } = {}
 	local viewer: string? = nil
-	-- What shows each session now (its badge, its card, its panel), and
-	-- what the engine says of it there.
+	-- What shows each session now (its badge, its card, its panel).
 	local shown: { [string]: number } = {}
-	local engine: { [string]: () -> any } = {}
 	-- The beat it is, and when each session was last asked of GitHub.
 	local beat = 0
 	local asked_at: { [string]: number } = {}
@@ -171,17 +184,26 @@ return function(zeron: any, pulls: any)
 	end
 
 	local function publish(changes: { [string]: any })
-		local now = table.clone(heard:peek())
-		local moved = false
+		local moved: { string } = {}
 		for id, pr in changes do
-			if ui.json.encode(now[id] or false) ~= ui.json.encode(pr) then
-				now[id] = pr
-				moved = true
+			if ui.json.encode(known[id] or false) ~= ui.json.encode(pr) then
+				known[id] = pr
+				if cells[id] then
+					cells[id]:set(pr)
+				end
+				table.insert(moved, id)
 			end
 		end
-		if moved then
-			heard:set(now)
-			pulls.keep("watch", now)
+		if #moved > 0 then
+			pulls.keep("watch", known)
+			for _, id in moved do
+				for _, listen in listeners do
+					local ok, why = pcall(listen, id)
+					if not ok then
+						print(`github: a pull request's listener failed: {why}`)
+					end
+				end
+			end
 		end
 	end
 
@@ -192,10 +214,16 @@ return function(zeron: any, pulls: any)
 		return if type(b) == "string" and b ~= "" then b else nil
 	end
 
+	-- What the engine told of session `id` (a table), if anything.
+	local function engine_of(id: string): any
+		local ok, all = pcall(zeron.github.heard)
+		local e = ok and type(all) == "table" and all[id] or nil
+		return if type(e) == "table" then e else nil
+	end
 	-- Whether the engine watches session `id` and has told its pull request
 	-- (it shows: the engine watches what shows).
 	local function engine_has(id: string): boolean
-		return (shown[id] or 0) > 0 and engine[id] ~= nil and engine[id]() ~= nil
+		return (shown[id] or 0) > 0 and engine_of(id) ~= nil
 	end
 
 	-- How often session `id` is asked (in beats), or nil: not at all.
@@ -251,6 +279,8 @@ return function(zeron: any, pulls: any)
 							break
 						end
 					end
+					-- (gh's own answer: what the engine tells is laid over it
+					-- where it's read, so the two never take turns.)
 					changes[s.id] = if found then record(found) else false
 				end
 			end
@@ -442,8 +472,8 @@ return function(zeron: any, pulls: any)
 
 	-- What was heard last time, at once; then GitHub.
 	pulls.cached("watch", function(value: any?)
-		if type(value) == "table" and next(heard:peek()) == nil then
-			heard:set(value)
+		if type(value) == "table" and next(known) == nil then
+			publish(value)
 		end
 	end)
 	soon()
@@ -482,45 +512,42 @@ return function(zeron: any, pulls: any)
 
 	function M.pr(session: string): () -> any
 		-- (On screen while this build stands: asked often; seen at once
-		-- if it hadn't been lately.)
+		-- if it hadn't been lately. Plain counts: nothing is written.)
 		shown[session] = (shown[session] or 0) + 1
 		local first = shown[session] == 1
 		pcall(ui.on_cleanup, function()
 			local n = (shown[session] or 1) - 1
 			shown[session] = if n > 0 then n else nil
 		end)
-		-- What the engine says of it, where Zeron's sign-in lets it watch
-		-- ("github"): pushed as it moves, and laid into what's heard.
-		local ok, theirs = pcall(zeron.github.watch_pr, session)
-		if ok and type(theirs) == "function" then
-			engine[session] = theirs
-			ui.effect(function()
-				local e = theirs()
-				if e then
-					publish({ [session] = from_engine(e, heard:peek()[session]) })
-				end
-			end)
-		end
 		if first and beat - (asked_at[session] or -math.huge) >= HOT then
 			soon()
 		end
+		-- Its own state, and what the engine says of it alone (where
+		-- Zeron's sign-in lets it watch, "github": pushed as it moves). The
+		-- engine's stands; gh adds a draft, which the engine doesn't say.
+		local mine = cell(session)
+		local ok, theirs = pcall(zeron.github.watch_pr, session)
+		local engine: (() -> any)? = if ok and type(theirs) == "function" then theirs :: any else nil
 		return function(): any
-			local pr = heard:get()[session]
-			return if pr == false then nil else pr
+			local m = mine:get()
+			local e = engine and engine()
+			if e then
+				return from_engine(e, m)
+			end
+			return if m == false then nil else m
 		end
 	end
 
-	-- That session's pull request as heard, without its showing: what reads
-	-- every session's (notices.luau) doesn't make each one asked often.
-	function M.read(session: string): () -> any
-		return function(): any
-			local pr = heard:get()[session]
-			return if pr == false then nil else pr
-		end
+	function M.on_change(listen: (id: string) -> ())
+		table.insert(listeners, listen)
 	end
 
-	function M.sessions(): { [string]: any }
-		return heard:get()
+	function M.current(id: string): any
+		local e = engine_of(id)
+		if e then
+			return from_engine(e, known[id])
+		end
+		return if known[id] then known[id] else nil
 	end
 
 	-- (For the tests: how round would ask, and the quota as heard.)

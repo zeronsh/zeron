@@ -264,6 +264,33 @@ local function card(row: State<agents.Agent>): Node
 		on_open_page = function()
 			agents.open_page(id)
 		end,
+		login_code = function(): string?
+			return (row:get() :: any).login_code
+		end,
+		signed_in = function(): boolean?
+			return (row:get() :: any).signed_in
+		end,
+		signed_in_as = function(): string?
+			return (row:get() :: any).signed_in_as
+		end,
+		can_sign_out = function(): boolean
+			return (row:get() :: any).can_sign_out == true
+		end,
+		signing_out = function(): boolean
+			return (row:get() :: any).signing_out == true
+		end,
+		on_sign_out = function()
+			agents.sign_out(id)
+		end,
+		login_methods = function()
+			return (row:get() :: any).login_methods or {}
+		end,
+		on_sign_in_with = function(method: string)
+			agents.sign_in_with(id, method)
+		end,
+		on_key = function(var: string, value: string)
+			agents.set_key(id, var, value)
+		end,
 		on_terminal = function()
 			local command = (row:peek() :: any).login_command
 			if command then
