@@ -145,3 +145,56 @@ test("Fusion is picked like any model, its options then under it", function()
 	expect(sidekick).never.to_be_nil()
 	expect(app:error()).to_be(nil)
 end)
+
+-- Moving between tabs (opened out) keeps the panel as it is: the same
+-- panel, the same size every frame, only its list changing. (The list's
+-- window took each tab's height, easing to it: on Wayland a popup that
+-- changes size is a new `xdg_popup`, and the compositor faded each one in
+-- and the last out, so the menu flickered see-through, two of it
+-- overlapping, on every switch.)
+test("moving between tabs keeps the panel's size, its list changing in place", function()
+	local app = mount("picker_fixture.luau")
+	app:resize(600, 700)
+	settle(app)
+	app:click('role:button "Model"')
+	settle(app)
+	app:click(".folded")
+	settle(app)
+	-- The panel: its node and its box, as the tree has it.
+	local function panel(): (string?, string?)
+		for line in app:tree():gmatch("[^\n]+") do
+			local id, size = line:match("@(%d+) dialog %S+ (%d+x%d+)")
+			if id then
+				return id, size
+			end
+		end
+		return nil, nil
+	end
+	local id, size = panel()
+	expect(id).never.to_be_nil()
+	-- The reasoning (its title and its slider), once.
+	local reasoning = app:count('"REASONING"')
+	-- Claude's two models, Codex's two, the starred (none), Devin's two:
+	-- frame by frame through each switch, the same panel at the same size.
+	for _, tab in { "Codex", "Starred", "Devin", "Claude" } do
+		app:click(`role:tab "{tab}"`)
+		for _ = 1, 20 do
+			app:frames(1)
+			local now_id, now_size = panel()
+			expect(`{tab}: @{now_id} {now_size}`).to_be(`{tab}: @{id} {size}`)
+			expect(app:count('"REASONING"')).to_be(reasoning)
+		end
+	end
+	-- Its list is the tab's: Claude's models again.
+	expect(app:has('role:option ~"Sonnet"')).to_be(true)
+	expect(app:has('role:option ~"GPT"')).to_be(false)
+	-- A search that finds nothing keeps it too.
+	app:type('role:textbox "Search"', "zz")
+	for _ = 1, 20 do
+		app:frames(1)
+		local now_id, now_size = panel()
+		expect(`search: @{now_id} {now_size}`).to_be(`search: @{id} {size}`)
+	end
+	expect(app:has('role:option ~"Sonnet"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)

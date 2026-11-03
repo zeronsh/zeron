@@ -4,7 +4,7 @@
 --
 -- `FadeText { title, grow = 1, text_size = "$font.size.md" }` (the first entry:
 -- a string, a message, a state or a function). Text props style it; `grow`, `shrink`,
--- `w`, `w_full`, `min_w`, `max_w` and the margins go to its box. `fade`: the
+-- `basis`, `w`, `w_full`, `min_w`, `max_w` and the margins go to its box. `fade`: the
 -- fade's length (24 points); `roll = true`: a RollText (it rolls as it
 -- changes).
 
@@ -14,6 +14,7 @@ local RollText = require("@self/roll_text")
 local BOX = {
 	grow = true,
 	shrink = true,
+	basis = true,
 	w = true,
 	w_full = true,
 	min_w = true,

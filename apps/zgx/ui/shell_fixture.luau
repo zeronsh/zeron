@@ -750,6 +750,44 @@ ui.command {
 		publish()
 	end,
 }
+-- Three more projects on this Mac: Cobalt and Dune with every session
+-- archived (empty: folded into the sidebar's "2 empty projects"), and Ember,
+-- just added, with none at all (not empty: a new chat is about to start
+-- in it) (tests/sidebar_empty_projects).
+ui.command {
+	id = "empty_projects",
+	title = "Two projects with only archived sessions, one just added",
+	run = function()
+		table.insert(model.projects, { id = "cobalt", name = "Cobalt", device = "mac", path = "/work/cobalt", git = true })
+		table.insert(model.projects, { id = "dune", name = "Dune", device = "box", path = "/srv/dune", git = true })
+		table.insert(model.projects, { id = "ember", name = "Ember", device = "mac", path = "/work/ember", git = true })
+		table.insert(model.archived, { id = "c1", title = "Old Cobalt work", project = "cobalt", device = "mac", updated = NOW - 72 * HOUR, created = NOW - 80 * HOUR, agent = "claude" })
+		table.insert(model.archived, { id = "d1", title = "Old Dune work", project = "dune", device = "box", updated = NOW - 96 * HOUR, created = NOW - 100 * HOUR, agent = "claude" })
+		publish()
+	end,
+}
+-- Sixty projects with every session archived (Gone 1…60): the fold opened
+-- is a long run of headers, built only as they show.
+ui.command {
+	id = "many_empty_projects",
+	title = "Sixty projects with only archived sessions",
+	run = function()
+		for i = 1, 60 do
+			table.insert(model.projects, { id = `g{i}`, name = `Gone {i}`, device = "mac", path = `/work/g{i}`, git = true })
+			table.insert(model.archived, { id = `ga{i}`, title = `Gone work {i}`, project = `g{i}`, device = "mac", updated = NOW - (200 + i) * HOUR, created = NOW - (210 + i) * HOUR, agent = "claude" })
+		end
+		publish()
+	end,
+}
+-- A session starts in Cobalt (another device's, say): it has one again.
+ui.command {
+	id = "cobalt_arrives",
+	title = "A session starts in Cobalt",
+	run = function()
+		table.insert(model.chats, 1, { id = "c2", title = "Back in Cobalt", project = "cobalt", device = "mac", status = "working", updated = os.time(), created = os.time(), agent = "claude" })
+		publish()
+	end,
+}
 -- Proj 6's session (its oldest group) asks you something.
 ui.command {
 	id = "proj6_asks",
@@ -767,6 +805,17 @@ ui.command {
 	title = "Atlas has a session on devbox",
 	run = function()
 		table.insert(model.chats, { id = "a5", title = "Profile on the box", project = "atlas", device = "box", updated = NOW - 30 * 60, created = NOW - 40 * 60, agent = "claude" })
+		publish()
+	end,
+}
+-- Atlas's folder on devbox too, a project of its own there (the same
+-- repository on another computer): a new chat in Atlas on devbox starts in
+-- it (tests/sidebar_device_new_chat).
+ui.command {
+	id = "atlas_twin_on_box",
+	title = "Atlas has a folder on devbox too",
+	run = function()
+		table.insert(model.projects, { id = "atlas-box", name = "Atlas", device = "box", path = "/srv/atlas", git = true })
 		publish()
 	end,
 }

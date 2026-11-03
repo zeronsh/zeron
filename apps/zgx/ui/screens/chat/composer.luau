@@ -105,6 +105,12 @@ local function Composer(): Node
 	-- Moved as it switches between them (ds.Composer's `snap`): its form and
 	-- size there at once, not eased.
 	local snap = ui.state("chat_composer_snap", 0)
+	-- Whether its model picker is open: the composer is held where it is
+	-- while it is (the picker hangs from its chip; a new chat's composer,
+	-- re-centring as its draft grows or shrinks, moved the chip and the
+	-- picker with it on every frame of its glide), and goes to its place
+	-- as the picker closes.
+	local model_open = ui.state("chat_model_open", false)
 	local function shown_new(): boolean
 		return form_new:get()
 	end
@@ -157,7 +163,9 @@ local function Composer(): Node
 						end
 					end
 					checkout:set(d.checkout)
-					device:set(d.device)
+					-- (A device asked of this new chat, a device's "+" in the
+					-- sidebar, over the one last used.)
+					device:set(route.take_device() or d.device)
 					project:set(route.current:peek().project)
 				end
 			elseif s then
@@ -199,6 +207,26 @@ local function Composer(): Node
 		if now.name == "home" and project:peek() ~= now.project then
 			project:set(now.project)
 		end
+	end)
+	-- A device asked of a new chat already showing (a device's "+" in the
+	-- sidebar, the composer here): picked, with the route's project. (One
+	-- asked on the way here from a session is the arrival's, above.)
+	ui.effect(function()
+		local pick = route.device_pick:get()
+		if pick == nil or session_id:peek() ~= nil or was:peek() ~= nil then
+			return
+		end
+		local d = route.take_device()
+		ui.batch(function()
+			-- (None: the device's own pick, screens/chat/where.)
+			local p = route.current:peek().project
+			if project:peek() ~= p then
+				project:set(p)
+			end
+			if d and device:peek() ~= d then
+				device:set(d)
+			end
+		end)
 	end)
 	-- Out: a choice made here changes the session, or is what the next new
 	-- chat starts with.
@@ -923,6 +951,7 @@ local function Composer(): Node
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
 			open_model = shared.open_model,
+			model_open = model_open,
 			tray = TRAY,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
@@ -1212,6 +1241,7 @@ local function Composer(): Node
 	-- (Kept state, as this file's others: the composer is made in a plain
 	-- function, not a component.)
 	local place = ui.state("chat_composer_place", 0)
+	-- (Held where it is while its model picker is open: `model_open`.)
 	local was_new: boolean? = nil
 	local gliding: any = nil
 	local snap_until = 0
@@ -1226,6 +1256,15 @@ local function Composer(): Node
 		end
 		gliding = anime.animate(place, { value = y, duration = GLIDE.duration, ease = GLIDE.ease })
 	end
+	-- Made again (as the window opens on its last session, the composer is
+	-- built twice), a glide begun here must not land after: `place` is kept,
+	-- and it would put a session's composer where a new chat's stood.
+	ui.on_cleanup(function()
+		if gliding then
+			gliding:cancel()
+			gliding = nil
+		end
+	end)
 	ui.effect(function()
 		local y = target_y()
 		local nc = new_chat()
@@ -1237,6 +1276,9 @@ local function Composer(): Node
 			snap:set(snap:peek() + 1)
 		end
 		form_new:set(nc)
+		if model_open:get() and not switched then
+			return
+		end
 		glide_to(y)
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
@@ -1300,6 +1342,7 @@ local function Composer(): Node
 				drop_when = composer_zone.drop_when,
 				on_drag_over = composer_zone.on_drag_over,
 				on_drag_leave = composer_zone.on_drag_leave,
+				on_hover = composer_zone.on_hover,
 				on_drop = composer_zone.on_drop,
 				-- (A new chat with nowhere to work: its page asks for a project in
 				-- its place, as Zeron's first launch does. Hidden here, inside

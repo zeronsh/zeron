@@ -27,6 +27,7 @@ local ToolDetail = require("@self/tool_detail")
 local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local IconButton = require("@self/icon_button").IconButton
+local FoldButton = require("@self/fold_button")
 
 export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
@@ -52,10 +53,12 @@ export type Tool = {
 	-- No result yet: while its reply is still written, it's running, and
 	-- with `stop_tool` its row has a stop of its own.
 	running: boolean?,
-	-- What its row opens to beyond its call (ds/tool_detail): its output's
-	-- summary, its files' counts, an older doc's diff, and the refs of its
-	-- whole output and diff.
+	-- What its row opens to beyond its call (ds/tool_detail): its output
+	-- (as the harness gave it, escapes and all, growing while it runs), a
+	-- command's exit code, its files' counts, an older doc's diff, and the
+	-- refs of its whole output and diff.
 	output: string?,
+	exit_code: number?,
 	output_ref: string?,
 	output_bytes: number?,
 	diff_ref: string?,
@@ -220,7 +223,7 @@ local THOUGHT_LINES = 4
 local THOUGHT_FADE = 1.5
 -- The button, and the room it takes under the words (folded, under their
 -- faded foot; open, under their last line).
-local THOUGHT_BUTTON = 20
+local THOUGHT_BUTTON = FoldButton.HEIGHT
 local THOUGHT_ROOM = THOUGHT_BUTTON + 6
 -- The gap ds/markdown leaves between a small text's blocks (`$space.3`):
 -- taken off the words' height to count their lines.
@@ -358,31 +361,13 @@ local function thought_row(now: () -> Tool, below: () -> boolean): Node
 				-- fill, at the words' left edge, in the room under them.
 				ui.show(
 					long,
-					ui.button {
+					FoldButton.FoldButton {
 						label = label,
-						expanded = is_open,
-						absolute = true,
-						left = 0,
-						bottom = 0,
-						h = THOUGHT_BUTTON,
-						px = "$zeron.space.tight",
-						items = "center",
-						rounded = "$radius.sm",
-						bg = "$zeron.secondary.bg",
-						color = "$text.secondary",
-						hover = { bg = "$zeron.secondary.hover", color = "$text.primary" },
-						active = { bg = "$zeron.secondary.active", color = "$text.primary" },
-						focus = control.ring,
-						cursor = "pointer",
-						selectable = false,
+						open = is_open,
 						on_click = function()
 							set_open(not is_open())
 						end,
-						ui.text {
-							label,
-							text_size = "$font.size.xs",
-							weight = "$font.weight.medium",
-						},
+						place = { absolute = true, left = 0, bottom = 0 },
 					}
 				),
 			},

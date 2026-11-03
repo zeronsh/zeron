@@ -215,17 +215,17 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.write", move |arg| {
         let f = f.clone();
-        async move { f.write(arg).await }
+        async move { crate::plugins::preview::refuse("files.write")?; f.write(arg).await }
     });
     let f = files.clone();
     host.async_action("files.move", move |arg| {
         let f = f.clone();
-        async move { f.move_entry(arg).await }
+        async move { crate::plugins::preview::refuse("files.move")?; f.move_entry(arg).await }
     });
     let f = files.clone();
     host.async_action("files.delete", move |arg| {
         let f = f.clone();
-        async move { f.delete(arg).await }
+        async move { crate::plugins::preview::refuse("files.delete")?; f.delete(arg).await }
     });
     let f = files.clone();
     host.async_action("files.search", move |arg| {
@@ -240,7 +240,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let f = files.clone();
     host.async_action("files.create", move |arg| {
         let f = f.clone();
-        async move { f.create(arg).await }
+        async move { crate::plugins::preview::refuse("files.create")?; f.create(arg).await }
     });
     let f = files.clone();
     host.async_action("files.reveal", move |arg| {
@@ -376,12 +376,62 @@ fn local_artwork(root: &Path) -> Option<PathBuf> {
 /// engine's `MAX_WORKSPACE_IMAGE_BYTES` and `WORKSPACE_IMAGE_CHUNK_BYTES`).
 const IMAGE_MAX: usize = 8 * 1024 * 1024;
 const IMAGE_CHUNK: usize = 384 * 1024;
+/// The most of a sent or named picture read from another device: the
+/// shipping app's attachments' (crates/ui attachments.rs
+/// `MAX_ATTACHMENT_BYTES`), so any picture sent from it shows.
+const PICTURE_MAX: usize = 24 * 1024 * 1024;
 
-/// Where images read from other devices are kept: the system's temporary
-/// folder, which it clears. (What's there a day old goes as the first is
-/// kept, each launch.)
-fn image_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("zeron-zgx-images")
+/// Where images read from other devices are kept: the app's own data
+/// folder, never the system's shared temporary one (on Linux anyone's,
+/// where another user could leave a file in a picture's place). What's
+/// there a day old goes as the first is kept, each launch.
+fn image_dir() -> Result<std::path::PathBuf, String> {
+    engine::data_dir()
+        .map(|d| d.join("picture-cache"))
+        .ok_or_else(|| "The image couldn't be kept here.".to_string())
+}
+
+/// A sent or named picture as its chunks come (`ReadAttachmentChunk`,
+/// `ReadChatImageChunk`): every chunk the same kind of picture, each one
+/// bringing bytes and moving on, the whole at most `PICTURE_MAX`. So it's
+/// read whole or refused however small the engine's chunks are, and
+/// never read forever.
+#[derive(Default)]
+struct PictureRead {
+    bytes: Vec<u8>,
+    mime: String,
+    offset: u64,
+}
+
+impl PictureRead {
+    /// One chunk taken: `Ok(true)` once the picture is whole.
+    fn take(&mut self, chunk: &Json) -> Result<bool, String> {
+        use base64::Engine as _;
+        let mime = chunk["mimeType"].as_str().unwrap_or("");
+        if !matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
+            || (!self.mime.is_empty() && self.mime != mime)
+        {
+            return Err("That isn't a picture this can show.".into());
+        }
+        mime.clone_into(&mut self.mime);
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(chunk["data"].as_str().unwrap_or(""))
+            .map_err(|_| "The image came back garbled.".to_string())?;
+        self.bytes.extend_from_slice(&data);
+        if self.bytes.len() > PICTURE_MAX {
+            return Err("The image is too large to show.".into());
+        }
+        if chunk["done"].as_bool().unwrap_or(false) {
+            return Ok(true);
+        }
+        // (A chunk that brings nothing, or doesn't move on, would never end.)
+        let next = chunk["nextOffset"].as_u64().unwrap_or(0);
+        if data.is_empty() || next <= self.offset {
+            return Err("The image changed while it was read.".into());
+        }
+        self.offset = next;
+        Ok(false)
+    }
 }
 
 /// `bytes` kept as a file named by their hash (one already there is the
@@ -390,7 +440,7 @@ fn keep_image(hash: &str, mime: &str, bytes: &[u8]) -> Result<std::path::PathBuf
     thread_local! {
         static PRUNED: Cell<bool> = const { Cell::new(false) };
     }
-    let dir = image_dir();
+    let dir = image_dir()?;
     if !PRUNED.with(|p| p.replace(true))
         && let Ok(entries) = std::fs::read_dir(&dir)
     {
@@ -795,7 +845,7 @@ impl Files {
     /// A picture a reply names: read through the engine, which reads it
     /// only from strictly inside the chat's folder, never through a link,
     /// and only a PNG, JPEG, WebP or GIF whose first bytes say so; a chunk
-    /// at a time, at most `IMAGE_MAX`; kept here as a file named by a hash
+    /// at a time, at most `PICTURE_MAX`; kept here as a file named by a hash
     /// of its bytes (one already there is the same picture).
     async fn chat_image(&self, arg: Value) -> Result<Value, String> {
         self.picture(arg, "ReadChatImageChunk").await
@@ -812,7 +862,6 @@ impl Files {
     /// A picture's bytes, a chunk at a time by `method`, kept as a file here
     /// named by a hash of them: `{ src, size }`.
     async fn picture(&self, arg: Value, method: &str) -> Result<Value, String> {
-        use base64::Engine as _;
         use std::hash::{Hash, Hasher};
         let mut params = self.params(arg.field("target")).await?;
         if !params.contains_key("chatId") {
@@ -827,44 +876,22 @@ impl Files {
             return Err("That picture isn't a path on the chat's device.".into());
         }
         params.insert("path".into(), Json::String(path));
-        let mut bytes = Vec::new();
-        let mut mime = String::new();
-        let mut offset = 0u64;
-        for _ in 0..=IMAGE_MAX / IMAGE_CHUNK + 1 {
-            params.insert("offset".into(), json!(offset));
+        let mut read = PictureRead::default();
+        loop {
+            params.insert("offset".into(), json!(read.offset));
             let chunk = self.call(method, params.clone()).await?;
-            let this_mime = chunk["mimeType"].as_str().unwrap_or("").to_owned();
-            if !matches!(this_mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif")
-                || (!mime.is_empty() && mime != this_mime)
-            {
-                return Err("That isn't a picture this can show.".into());
+            if read.take(&chunk)? {
+                break;
             }
-            mime = this_mime;
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(chunk["data"].as_str().unwrap_or(""))
-                .map_err(|_| "The image came back garbled.".to_string())?;
-            bytes.extend_from_slice(&data);
-            if bytes.len() > IMAGE_MAX {
-                return Err("The image is too large to show.".into());
-            }
-            if chunk["done"].as_bool().unwrap_or(false) {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                bytes.hash(&mut hasher);
-                let hash = format!("r{:016x}{:x}", hasher.finish(), bytes.len());
-                let size = bytes.len() as u64;
-                let file = keep_image(&hash, &mime, &bytes)?;
-                return Ok(Value::record([
-                    ("src", Value::from(file.to_string_lossy().as_ref())),
-                    ("size", num(Some(size))),
-                ]));
-            }
-            let next = chunk["nextOffset"].as_u64().unwrap_or(0);
-            if next <= offset {
-                return Err("The image changed while it was read.".into());
-            }
-            offset = next;
         }
-        Err("The image is too large to show.".into())
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        read.bytes.hash(&mut hasher);
+        let hash = format!("r{:016x}{:x}", hasher.finish(), read.bytes.len());
+        let file = keep_image(&hash, &read.mime, &read.bytes)?;
+        Ok(Value::record([
+            ("src", Value::from(file.to_string_lossy().as_ref())),
+            ("size", num(Some(read.bytes.len() as u64))),
+        ]))
     }
 
     /// Lines holding the query (the engine's `SearchWorkspaceContent`, the
@@ -1253,6 +1280,64 @@ fn make(root: &Path, relative: &str, dir: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::make;
+
+    /// A picture's chunk as the engine sends it (`ReadAttachmentChunk`).
+    fn chunk(mime: &str, data: &[u8], next: u64, done: bool) -> serde_json::Value {
+        use base64::Engine as _;
+        serde_json::json!({
+            "mimeType": mime,
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+            "nextOffset": next,
+            "done": done,
+        })
+    }
+
+    /// Feeds `size` bytes in `step`-sized chunks, as the engine would.
+    fn read_all(size: usize, step: usize) -> Result<super::PictureRead, String> {
+        let mut read = super::PictureRead::default();
+        let mut at = 0usize;
+        loop {
+            let end = (at + step).min(size);
+            let data = vec![7u8; end - at];
+            if read.take(&chunk("image/png", &data, end as u64, end == size))? {
+                return Ok(read);
+            }
+            assert_eq!(read.offset, end as u64);
+            at = end;
+        }
+    }
+
+    /// A sent screenshot of a few megabytes is read whole in the engine's
+    /// 45 KB chunks (it was called too large past about 1 MB when the
+    /// chunks were counted), up to the shipping app's 24 MB; past that,
+    /// refused.
+    #[test]
+    fn a_picture_is_read_whole_in_any_chunks_up_to_the_most() {
+        let read = read_all(1_700_000, 45_000).unwrap();
+        assert_eq!(read.bytes.len(), 1_700_000);
+        assert_eq!(read.mime, "image/png");
+        assert_eq!(read_all(super::PICTURE_MAX, 1 << 20).unwrap().bytes.len(), super::PICTURE_MAX);
+        assert_eq!(
+            read_all(super::PICTURE_MAX + 1, 1 << 20).err().as_deref(),
+            Some("The image is too large to show.")
+        );
+    }
+
+    /// A chunk that brings nothing or doesn't move on is refused at once
+    /// (never read forever), as is a picture changing its kind midway or
+    /// one this can't show.
+    #[test]
+    fn a_picture_read_that_stalls_or_changes_is_refused() {
+        let mut read = super::PictureRead::default();
+        assert!(read.take(&chunk("image/png", &[], 10, false)).is_err());
+        let mut read = super::PictureRead::default();
+        assert_eq!(read.take(&chunk("image/png", &[1; 10], 10, false)), Ok(false));
+        assert!(read.take(&chunk("image/png", &[1; 10], 10, false)).is_err());
+        let mut read = super::PictureRead::default();
+        assert_eq!(read.take(&chunk("image/png", &[1; 10], 10, false)), Ok(false));
+        assert!(read.take(&chunk("image/jpeg", &[1; 10], 20, true)).is_err());
+        assert!(super::PictureRead::default().take(&chunk("image/svg+xml", b"<svg/>", 6, true)).is_err());
+    }
 
     /// A repository's artwork is found where the shipping app looks, from
     /// the work tree's root even for a project in a subfolder; one too big,

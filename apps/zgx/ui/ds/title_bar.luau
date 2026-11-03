@@ -63,6 +63,25 @@ local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
 -- `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
 
+-- How far in from the window's right edge the window's own buttons reach:
+-- Windows' caption buttons, and on Linux the buttons zgx draws where the
+-- desktop's `button-layout` asks (GNOME's `appmenu:close`, close at the
+-- right). 0 where they stand at the left (macOS's traffic lights, which
+-- TOGGLE_IN already clears), are not reported, or there are none. A plugin
+-- reads no `ui.window.controls`: 0.
+local function window_buttons_right(): number
+	local window = ui.window :: any
+	local area_state, controls_state = window.titlebar_area, window.controls
+	if area_state == nil or controls_state == nil then
+		return 0
+	end
+	local area, buttons = area_state:get(), controls_state:get()
+	if area and buttons and buttons.x >= area.x + area.width then
+		return buttons.width
+	end
+	return 0
+end
+
 -- A bar control: the design system's icon button at the island's size,
 -- a quiet glyph, a wash under the pointer; when it can't (nothing to go
 -- back or forward to), muted and still. Its tooltip hangs below it: above
@@ -212,7 +231,9 @@ local TitleBar = ui.component(function(props: Props): Node
 		local actions_island: ContainerProps = {
 			id = "titlebar-actions-island",
 			absolute = true,
-			right = m.inset,
+			right = function(): number
+				return m.inset + window_buttons_right()
+			end,
 			w = function(): number
 				return row_w() + side * 2
 			end,
@@ -227,7 +248,8 @@ local TitleBar = ui.component(function(props: Props): Node
 		island.glass(actions_island)
 		table.insert(bar, ui.div(actions_island))
 		-- The page's controls, as far in from the right as the row runs past
-		-- its last control at the left.
+		-- its last control at the left, and clear of the window's own
+		-- buttons where they stand at the right.
 		table.insert(
 			bar,
 			ui.row {
@@ -238,7 +260,9 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end,
 				absolute = true,
-				right = ROW_PAD,
+				right = function(): number
+					return ROW_PAD + window_buttons_right()
+				end,
 				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
@@ -262,7 +286,7 @@ local function controls_end(): number
 	return TOGGLE_IN + m.control + m.group + m.control + m.gap + m.control + ROW_PAD
 end
 
-local M = setmetatable({ control = control, controls_end = controls_end }, {
+local M = setmetatable({ control = control, controls_end = controls_end, window_buttons_right = window_buttons_right }, {
 	__call = function(_, props: Props): Node
 		return TitleBar(props)
 	end,

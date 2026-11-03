@@ -65,6 +65,7 @@ export type Name =
 	| "split-columns"
 	| "volume-loud"
 	| "moon"
+	| "sun"
 	| "terminal"
 	| "document"
 	| "file-diff"

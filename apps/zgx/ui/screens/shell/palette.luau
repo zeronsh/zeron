@@ -22,6 +22,9 @@ local boundary = require("@app/screens/shell/boundary")
 local paths = require("@app/screens/files/paths")
 local files_api = require("@app/screens/files/api")
 local templates = require("@app/screens/templates/state")
+local themes = require("@app/screens/themes/state")
+local keys = require("@app/screens/shell/keys")
+local host = require("@app/screens/settings/host")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -176,6 +179,44 @@ local function template_items(): { Item }
 			end,
 			run = function()
 				templates.use(id)
+			end,
+		})
+	end
+	return out
+end
+
+-- Every theme Zeron can wear, Zeron's first: picking one wears it for each
+-- scheme it has, as the Themes page's Use does. One worn for every scheme
+-- it can be is checked.
+local function theme_items(): { Item }
+	local out: { Item } = {}
+	for _, e in themes.entries:get() do
+		local id = e.id
+		local function now(): any
+			for _, it in themes.entries:get() do
+				if it.id == id then
+					return it
+				end
+			end
+			return nil
+		end
+		table.insert(out, {
+			id = `use-theme:{id}`,
+			label = locale.s("shell.palette.use_theme", { name = e.name }),
+			section = locale.s("shell.palette.themes"),
+			scope = "settings",
+			icon = "palette-search",
+			keywords = "theme colours colors palette",
+			verb = locale.s("shell.palette.use"),
+			checked = function(): boolean
+				local it = now()
+				return it ~= nil and themes.full(it)
+			end,
+			run = function()
+				local it = now()
+				if it then
+					themes.use(it)
+				end
 			end,
 		})
 	end
@@ -396,6 +437,36 @@ local function root(): { Item }
 			end
 		end
 	end
+	-- The app itself, for when something has left it in a bad state:
+	-- relaunched whole (the engine keeps running, the chat open comes back),
+	-- or its interface's scripts evaluated again in place. (Their keys, if
+	-- Settings → Shortcuts gave them any.)
+	local function key_of(id: string): string?
+		local combo = keys.combo(id)
+		return if combo ~= "" then combo else nil
+	end
+	table.insert(out, {
+		id = "a-reload",
+		label = locale.s("shell.palette.reload_zeron"),
+		section = locale.s("shell.palette.app"),
+		icon = "restart",
+		shortcut = key_of("shell.reload"),
+		keywords = "reload restart relaunch refresh quit app",
+		run = function()
+			host.invoke("app.relaunch")
+		end,
+	})
+	table.insert(out, {
+		id = "a-reload-interface",
+		label = locale.s("shell.palette.reload_interface"),
+		section = locale.s("shell.palette.app"),
+		icon = "refresh",
+		shortcut = key_of("shell.reload_interface"),
+		keywords = "reload refresh scripts ui window",
+		run = function()
+			host.invoke("app.reload_interface")
+		end,
+	})
 	-- Where settings go: each of its pages.
 	for _, id in settings.pages:get() do
 		local page = settings.page(id)
@@ -420,6 +491,9 @@ local function root(): { Item }
 	table.insert(out, { id = "t-theme", label = locale.s("shell.palette.theme"), section = locale.s("shell.palette.settings"), scope = "settings", icon = "palette-search", keywords = "dark light appearance", page = theme_page })
 	table.insert(out, { id = "t-frosted", label = locale.s("shell.palette.frosted_glass"), section = locale.s("shell.palette.settings"), icon = "moon", keywords = "material translucent opaque window appearance", toggle = material.frosted })
 	for _, t in template_items() do
+		table.insert(out, t)
+	end
+	for _, t in theme_items() do
 		table.insert(out, t)
 	end
 	for _, s in session_items() do

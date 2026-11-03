@@ -10,8 +10,11 @@
 --   toast.show { title = "Commit failed", body = "pre-commit hook exited 1",
 --     tone = "danger", action = { label = "Show output", run = … } }
 --   toast.Host {}   -- once, in the window's root
+--   toast.Host { front = is_up }   -- in a full-window modal (the lightbox)
 --
--- `show` returns the toast's id, which `dismiss(id)` puts away.
+-- `show` returns the toast's id, which `dismiss(id)` puts away. Use this,
+-- never zgx's `ui.toast`: that one's stack is a zgx layer, which zgx draws
+-- the modal dim behind (the whole window tinted while a toast shows).
 
 local motion = require("@self/motion")
 local Icon = require("@self/icon")
@@ -53,6 +56,9 @@ local hovered = ui.state("ds_toasts_hovered", false)
 -- (Kept as state, as the stack is: a hot reload keeps the toasts showing,
 -- so a new one mustn't take one of their ids.)
 local next_id = ui.state("ds_toasts_next", 0)
+-- How many hosts in front (`front`) are up: while one is, the stack shows
+-- there, over the modal that holds it, and not under it.
+local fronts = ui.state("ds_toasts_fronts", 0)
 -- What the action of each toast runs (functions can't live in state: a
 -- toast kept across a hot reload loses its action's button).
 local runs: { [number]: () -> () } = {}
@@ -216,9 +222,15 @@ end)
 -- The stack, in the bottom corner of what holds it: put one in the
 -- window's root (an overlay), over the page; `show` fills it. (It is
 -- not a zgx layer, which would raise it over dialogs too: zgx draws the
--- modal dim behind a layer for now.)
-function M.Host(_props: { [any]: any }?): Node
+-- modal dim behind a layer for now.) A modal over the whole window (the
+-- lightbox) puts one in itself, `front` saying whether it's up (a closed
+-- modal keeps what it built): while it is, the stack shows there, and the
+-- root's stands aside.
+local function Stack(up: () -> boolean): Node
 	local visible = ui.computed(function(): { any }
+		if not up() then
+			return {}
+		end
 		local list = toasts:get()
 		local out = {}
 		for i = math.max(1, #list - MAX + 1), #list do
@@ -245,6 +257,31 @@ function M.Host(_props: { [any]: any }?): Node
 			hovered:set(inside)
 		end,
 	})
+end
+
+local Front = ui.component(function(props: { up: () -> boolean }): Node
+	local up = ui.computed(props.up)
+	ui.effect(function()
+		if up:get() then
+			fronts:set(fronts:peek() + 1)
+			ui.on_cleanup(function()
+				fronts:set(math.max(0, fronts:peek() - 1))
+			end)
+		end
+	end)
+	return Stack(function(): boolean
+		return up:get()
+	end)
+end)
+
+function M.Host(props: { front: (() -> boolean)?, [any]: any }?): Node
+	local front = if props then props.front else nil
+	if front then
+		return Front { up = front }
+	end
+	return Stack(function(): boolean
+		return fronts:get() == 0
+	end)
 end
 
 return M

@@ -34,9 +34,17 @@ export type Attachment = { kind: "image" | "file", name: string, src: string?, m
 -- device reads them from there, screens/chat/reply_images'
 -- `for_attachments`; without it, each path as it is.)
 -- (`find`: a find's marks in its text, ds/markdown's.)
+-- (`now`: the message as it is now, when it changes after it's drawn. A
+-- prompt sent from here is first this Mac's copy (`here`, src/chat.rs
+-- `Pending`), its pictures the files it was sent from, here; then the
+-- chat's, its pictures the uploads its device keeps, read from there as
+-- `pictures` says, even while it still waits for its reply. Each picture
+-- follows the `n`th of them.)
+export type Now = { attachments: { Attachment }?, here: boolean? }
 export type Props = {
 	text: string,
 	attachments: { Attachment }?,
+	now: (() -> Now?)?,
 	id: string?,
 	open: ((target: string) -> ())?,
 	-- Their context menus where they aren't the web's (ds/markdown's).
@@ -54,22 +62,28 @@ local OPENED = ui.state("user_message_opened", {} :: { [string]: boolean })
 -- clip when `cover` crops it top and bottom (a portrait image). A click (or
 -- Enter) opens it in the lightbox, growing from here; ← → go through the
 -- message's other pictures.
-local function thumb(a: Attachment, group: string, images: () -> { Lightbox.Item }, index: number, pictures: ReplyPicture.Pictures?): Node
+local function thumb(a: Attachment, source: () -> (string, boolean), group: string, images: () -> { Lightbox.Item }, index: number, pictures: ReplyPicture.Pictures?): Node
 	-- Where it shows from (read from the chat's device first, there): the
 	-- frame holds its place meanwhile; one that can't be read says so.
+	-- This Mac's own file (a prompt on its way) shows as it is: the chat's
+	-- device never had it.
 	-- (Its file gone since it was sent, or not a picture: `ui.image`'s
-	-- `on_error` says so, and it shows as one that can't be.)
-	local broken = ui.use_state(false)
+	-- `on_error` says so, and that file shows as one that can't be.)
+	local broken = ui.use_state("")
 	local function picture(): ReplyPicture.Picture
-		local p = if pictures then pictures.resolve(a.src or "") or { state = "failed" } else { state = "ready", src = a.src }
-		if p.state == "ready" and broken:get() then
+		local src, own = source()
+		local p = if pictures and not own then pictures.resolve(src) or { state = "failed" } else { state = "ready", src = src }
+		if p.state == "ready" and broken:get() == p.src then
 			return { state = "failed" }
 		end
 		return p
 	end
 	if pictures then
 		ui.effect(function()
-			pictures.fetch(a.src or "")
+			local src, own = source()
+			if not own then
+				pictures.fetch(src)
+			end
 		end)
 	end
 	return Lightbox.Thumb {
@@ -101,7 +115,10 @@ local function thumb(a: Attachment, group: string, images: () -> { Lightbox.Item
 				w_full = true,
 				h_full = true,
 				on_error = function()
-					broken:set(true)
+					local p = picture()
+					if p.state == "ready" and p.src then
+						broken:set(p.src)
+					end
 				end,
 			},
 			ui.show(
@@ -200,12 +217,34 @@ return ui.component(function(props: Props): Node
 	-- (Where each shows from as it opens: a picture read from another
 	-- device is its file here.)
 	local pictures = props.pictures
+	-- Where its `n`th picture shows from now, and whether that's this
+	-- Mac's own file (`now`'s): as drawn, without it.
+	local function source(n: number, a: Attachment): (string, boolean)
+		local m = if props.now then props.now() else nil
+		if not m then
+			return a.src or "", false
+		end
+		local own = m.here == true
+		local k = 0
+		for _, b in m.attachments or {} do
+			if b.kind == "image" and b.src and b.src ~= "" then
+				k += 1
+				if k == n then
+					return b.src, own
+				end
+			end
+		end
+		return a.src or "", own
+	end
 	local function images(): { Lightbox.Item }
 		local out: { Lightbox.Item } = {}
+		local n = 0
 		for _, a in props.attachments or {} do
 			if a.kind == "image" and a.src and a.src ~= "" then
-				local p = if pictures then pictures.resolve(a.src) else nil
-				local src = if p and p.state == "ready" and p.src then p.src else a.src
+				n += 1
+				local at, own = source(n, a)
+				local p = if pictures and not own then pictures.resolve(at) else nil
+				local src = if p and p.state == "ready" and p.src then p.src else at
 				table.insert(out, { src = src, name = a.name, path = if string.sub(src, 1, 1) == "/" then src else nil })
 			end
 		end
@@ -219,6 +258,10 @@ return ui.component(function(props: Props): Node
 	for _, a in props.attachments or {} do
 		if a.kind == "image" and a.src and a.src ~= "" then
 			shown += 1
+			local n = shown
+			local function from(): (string, boolean)
+				return source(n, a)
+			end
 			local shot = a.appshot
 			if shot then
 				-- An Appshot: its picture over "{App} · Appshot" and the
@@ -228,12 +271,12 @@ return ui.component(function(props: Props): Node
 					gap = "$zeron.space.hair",
 					shrink = 0,
 					label = locale.t("ds.user_message.appshot_label", { app = shot.app, title = shot.title or shot.app }),
-					thumb(a, group, images, shown, pictures),
+					thumb(a, from, group, images, shown, pictures),
 					ui.text { locale.t("ds.user_message.appshot", { app = shot.app }), literal = true, truncate = true, text_size = "$font.size.xs", color = "$text.tertiary" },
 					ui.text { shot.title or shot.app, literal = true, truncate = true, text_size = "$font.size.sm", color = "$text.secondary" },
 				})
 			else
-				table.insert(attachments, thumb(a, group, images, shown, pictures))
+				table.insert(attachments, thumb(a, from, group, images, shown, pictures))
 			end
 		else
 			table.insert(attachments, chip(a))

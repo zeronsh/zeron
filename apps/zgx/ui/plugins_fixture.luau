@@ -68,6 +68,18 @@ local function publish()
 	})
 end
 
+-- The engine answering `setup_incomplete` (the account's setup isn't
+-- finished: no organization chosen), as the host says it; then set up,
+-- the list arriving.
+ui.command {
+	id = "setup_incomplete",
+	title = "Fixture: the account's setup isn't finished",
+	run = function()
+		state.now:set({ state = "setup", list = {} } :: any)
+	end,
+}
+ui.command { id = "set_up", title = "Fixture: setup finished", run = publish }
+
 -- What the page asks, answered here.
 local said: { string } = {}
 local calls = ui.state("calls", "")

@@ -158,6 +158,14 @@ function M.tasks(): { Dock.Task }
 		{ id = "k1", kind = "terminal", name = "cargo test -p zeron-ui", detail = "composer::queue", since = ago(134) },
 		{ id = "k2", kind = "process", name = "vite dev", detail = ":5173", since = ago(1812) },
 		{ id = "k3", kind = "agent", name = "Reviewing the diff", detail = "14 files read", since = ago(41) },
+		-- A described command: its name, then the command itself, long.
+		{
+			id = "k4",
+			kind = "process",
+			name = "Build with the webkitgtk feature",
+			detail = "cd ~/dev/zeron/apps/zgx && cargo build --release -j 4 --features webkitgtk 2>&1 | tee build.log",
+			since = ago(420),
+		},
 	}
 end
 

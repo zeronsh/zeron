@@ -156,6 +156,11 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
             ("waiting", Value::from(self.waiting)),
+            // (This device's own copy: its pictures are the files it was
+            // sent from, here, which the chat's device never had. The
+            // chat's copy, once it comes, is marked `waiting` too until
+            // its reply begins, so that can't tell them apart.)
+            ("here", Value::Bool(true)),
             ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
             ("copy", copy_value(&words)),
         ])
@@ -296,7 +301,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.send")?; v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -311,7 +316,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
-        async move { v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.respond")?; v.respond(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     // A question's Back: its page before again, with what was picked there.
     let back = which.clone();
@@ -327,7 +332,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
         let v = v.clone();
-        async move { v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
+        async move { crate::plugins::preview::refuse("chat.queue")?; v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {
@@ -3412,31 +3417,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let ask = asked(&open.entries).and_then(|p| ask_value(p, answered)).unwrap_or(Value::Nil);
     let session = chats.sessions.borrow().get(&open.id).cloned().unwrap_or(Json::Null);
     let live = chats.running(&open.id);
-    let tasks: Vec<Value> = if live {
-        session["backgroundTasks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| {
-                let command = t["command"].as_str().unwrap_or_default();
-                let name = t["description"].as_str().filter(|d| !d.is_empty()).unwrap_or(command);
-                let mut fields = vec![
-                    ("id", s(&t["id"])),
-                    ("kind", Value::from("process")),
-                    ("name", Value::from(name)),
-                ];
-                if name != command {
-                    fields.push(("detail", Value::from(command)));
-                }
-                if let Some(since) = seconds(&t["startedAt"]) {
-                    fields.push(("since", Value::Num(since as f64)));
-                }
-                Value::record(fields)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let tasks = background_tasks(&session);
     let queue: Vec<Value> = open
         .queue
         .iter()
@@ -3484,6 +3465,40 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         fields.push(("branch", Value::from(branch)));
     }
     Value::record(fields)
+}
+
+/// The processes the chat's agent left running in the background, oldest
+/// first: listed while its session row is fresh, whatever the turn does
+/// (the shipping app's `view::background_tasks`). They outlive the turn
+/// that started them, and the engine's heartbeat keeps the row fresh while
+/// they run; gating them on a live turn emptied the tray each time a turn
+/// ended and filled it again as the next began.
+fn background_tasks(session: &Json) -> Vec<Value> {
+    if stale(&session["updatedAt"]) {
+        return Vec::new();
+    }
+    let s = |j: &Json| j.as_str().map(Value::from).unwrap_or(Value::Nil);
+    session["backgroundTasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            let command = t["command"].as_str().unwrap_or_default();
+            let name = t["description"].as_str().filter(|d| !d.is_empty()).unwrap_or(command);
+            let mut fields = vec![
+                ("id", s(&t["id"])),
+                ("kind", Value::from("process")),
+                ("name", Value::from(name)),
+            ];
+            if name != command {
+                fields.push(("detail", Value::from(command)));
+            }
+            if let Some(since) = seconds(&t["startedAt"]) {
+                fields.push(("since", Value::Num(since as f64)));
+            }
+            Value::record(fields)
+        })
+        .collect()
 }
 
 /// The plan: the latest todo list the agent wrote.
@@ -4536,5 +4551,36 @@ mod tests {
         // Failed, then shown on another try: the stumble isn't drawn.
         let retried = blocks(&reply(vec![mcp("s1", true), mcp("s2", false), image("i1", "a.png")]));
         assert_eq!(kinds(&retried), ["images"]);
+    }
+
+    #[test]
+    fn background_tasks_outlive_the_turn_and_go_with_a_stale_row() {
+        use super::{Value, background_tasks, now_seconds};
+        let fresh = (now_seconds() * 1000) as f64;
+        let row = |status: &str, updated: f64| {
+            serde_json::json!({
+                "chatId": "c1", "status": status, "updatedAt": updated,
+                "backgroundTasks": [
+                    { "id": "b1", "command": "cargo test", "startedAt": fresh },
+                    { "id": "b2", "command": "npm run dev", "description": "Dev server" },
+                ],
+            })
+        };
+        let ids = |tasks: &[Value]| -> Vec<String> {
+            tasks.iter().map(|t| crate::auth::text(t.field("id").unwrap())).collect()
+        };
+        // Working, the turn ended (idle, completed) or waiting: the same rows,
+        // each time, so the tray neither empties nor fills again.
+        for status in ["working", "idle", "completed", "awaitingInput", "failed"] {
+            assert_eq!(ids(&background_tasks(&row(status, fresh))), ["b1", "b2"], "{status}");
+        }
+        let tasks = background_tasks(&row("idle", fresh));
+        assert_eq!(tasks[1].field("name"), Some(&Value::from("Dev server")));
+        assert_eq!(tasks[1].field("detail"), Some(&Value::from("npm run dev")));
+        assert_eq!(tasks[0].field("detail"), None);
+        // A row gone quiet (its engine stopped beating): they went with it.
+        let quiet = fresh - 120_000.;
+        assert!(background_tasks(&row("idle", quiet)).is_empty());
+        assert!(background_tasks(&serde_json::Value::Null).is_empty());
     }
 }

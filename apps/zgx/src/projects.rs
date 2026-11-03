@@ -65,7 +65,7 @@ pub fn install(host: &ScriptHost) {
         let _ = call("ReleaseHomeFolderSearch", json!({}), &arg).await;
         Ok(Value::Nil)
     });
-    host.async_action("projects.clone", |arg| async move {
+    host.async_action("projects.clone", |arg| async move { crate::plugins::preview::refuse("projects.clone")?;
         let url = field(&arg, "url").ok_or("Type the repository's address")?;
         let parent = field(&arg, "parent").ok_or("Choose where to clone it")?;
         let repo = call("CloneRepo", json!({ "url": url, "parent": parent }), &arg).await?;

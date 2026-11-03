@@ -1465,6 +1465,8 @@ return ui.overlay {
 	ds.toast.Host {},
 	-- A link's context menu, as the shell hangs it (ds/menu_at).
 	require("@ds/menu_at").Host {},
+	-- What's said for a moment, as the shell has it (ds/toast).
+	ds.toast.Host {},
 	-- In the title bar's strip, what a drag may come from: the files pane's
 	-- files (their paths), and something else (a sidebar section).
 	ui.row {

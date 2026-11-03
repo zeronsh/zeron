@@ -1193,7 +1193,7 @@ local function component(props: Props): Node
 			-- Its level, as an icon button's text: wider, the same states.
 			IconButton {
 				label = locale.t("ds.file_viewer.fit_or_actual"),
-				tooltip = locale.s("ds.file_viewer.fit_or_actual_tip"),
+				tooltip = locale.s("ds.file_viewer.fit_or_actual_tip", { fit = ui.shortcut_text("cmd+0"), actual = ui.shortcut_text("cmd+1") }),
 				size = "lg",
 				w = 52,
 				on_click = zoom("toggle"),
