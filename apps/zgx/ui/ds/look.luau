@@ -5,6 +5,7 @@
 -- (ds/material); a window takes it through `theme` (`look.theme()`).
 
 local palettes = require("@self/palettes")
+local material = require("@self/material")
 local locale = require("@self/locale")
 
 local M = {}
@@ -172,6 +173,15 @@ function M.window_theme(): { [string]: any }?
 			for k, v in part do
 				(out :: any)[k] = v
 			end
+		end
+	end
+	-- And its glass's tint where the desktop blurs less than macOS's does
+	-- (ds/material).
+	local glass = material.glass_theme()
+	if glass then
+		out = out or {}
+		for k, v in glass do
+			(out :: any)[k] = v
 		end
 	end
 	return out
