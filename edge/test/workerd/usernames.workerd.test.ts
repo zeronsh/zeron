@@ -619,24 +619,47 @@ describe("V3 BETA", () => {
     });
   });
 
-  it("isn't earned by a first name an operator sets after the cutoff, nor granted or revoked by hand", async () => {
+  it("isn't earned by a first name an operator sets after the cutoff, nor handed out by an operator", async () => {
     await signUp("user_v3late");
     at(V3_BETA_CUTOFF_MS + SECOND);
     await admin("/admin/usernames/set", { userId: "user_v3late", username: "latecomer" });
     expect(await badgesOf("latecomer")).toEqual([]);
     for (const [path, body] of [
-      ["/admin/badges/grant", { badgeId: "v3-beta", userIds: ["user_v3late"] }],
       ["/admin/badges/grant", { badgeId: "v3-beta", userIds: "all" }],
-      ["/admin/badges/revoke", { badgeId: "v3-beta", userIds: ["user_v3late"] }],
       ["/admin/badges", { id: "v3-beta", name: "Renamed" }]
     ] as const) {
       const res = await admin(path, body);
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ error: "earned_badge" });
     }
+    // Granting to a listed user awards it only if they earned it.
+    expect(await (await admin("/admin/badges/grant", { badgeId: "v3-beta", userIds: ["user_v3late"] })).json()).toEqual({ granted: 0 });
     expect(await badgesOf("latecomer")).toEqual([]);
     const defined = ((await (await admin("/admin/badges")).json()) as { badges: { id: string; name: string }[] }).badges;
     expect(defined.find((b) => b.id === "v3-beta")).toMatchObject({ name: "V3 BETA" });
+  });
+
+  it("stays revoked through renames and restarts, until an operator grants it back", async () => {
+    await signUp("user_v3waived");
+    at(V3_BETA_CUTOFF_MS - HOUR);
+    await claim("user_v3waived", "waivedone");
+    expect(await badgesOf("waivedone")).toEqual([V3]);
+    const revoke = await admin("/admin/badges/revoke", { badgeId: "v3-beta", userIds: ["user_v3waived"] });
+    expect(await revoke.json()).toEqual({ revoked: 1 });
+    // Read the stored grants: public cards are cached for up to a minute.
+    const held = async () => (await listed("user_v3waived")).badges.map((b) => b.id);
+    expect(await held()).toEqual([]);
+    // A rename (which re-runs the award) and a restart (which backfills) keep it off.
+    await admin("/admin/usernames/set", { userId: "user_v3waived", username: "waivedtwo" });
+    expect(await held()).toEqual([]);
+    await runInDurableObject(directory(), (_instance: UserDirectory, state) => {
+      expect(new UserDirectory(state, env as never).card("waivedtwo")?.badges).toEqual([]);
+    });
+    // Granting lifts the waiver and awards it, dated by the claim.
+    const grant = await admin("/admin/badges/grant", { badgeId: "v3-beta", userIds: ["user_v3waived"] });
+    expect(await grant.json()).toEqual({ granted: 1 });
+    expect(await held()).toEqual(["v3-beta"]);
+    expect((await listed("user_v3waived")).badges.find((b) => b.id === "v3-beta")?.grantedAt).toBe(V3_BETA_CUTOFF_MS - HOUR);
   });
 
   it("sits in the same place on every card, however the grants were ordered", async () => {
