@@ -656,6 +656,13 @@
       "view_named": "View {name}",
       "done": "Done"
     },
+    "mermaid": {
+      "show_source": "Show source",
+      "show_diagram": "Show diagram",
+      "failed": "Couldn't draw this diagram: {reason}",
+      "view": "View diagram",
+      "name": "Mermaid diagram"
+    },
     "math": {
       "style": {
         "fira": "Sans",

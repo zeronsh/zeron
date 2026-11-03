@@ -45,6 +45,7 @@ mod images;
 mod links;
 mod pasted;
 mod math;
+mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
@@ -544,6 +545,8 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     });
     // LaTeX math laid out for `ds/math` (src/math.rs): every window.
     math::install(&host);
+    // Mermaid diagrams drawn for `ds/mermaid` (src/mermaid.rs).
+    mermaid::install(&host);
     // A slider's detents tapped under the trackpad (src/haptics.rs).
     haptics::install(&host);
     // The engine's account (src/auth.rs), this Mac's agents (src/agents.rs)
