@@ -502,6 +502,16 @@ impl SessionsEngine {
             .is_some_and(|h| h.turn.stop_background_process(task_id))
     }
 
+    /// Stop one call of the chat's live turn — a command, or the subagent a
+    /// call spawned — while the turn goes on. The driver answers what came
+    /// of it; a chat with no live runtime has nothing running to stop.
+    pub async fn stop_tool_call(&self, chat_id: &str, call_id: &str) -> zeron_harness::ToolStop {
+        let Some(turn) = lock(&self.inner.runs).get(chat_id).map(|h| h.turn.clone()) else {
+            return zeron_harness::ToolStop::NotRunning;
+        };
+        turn.stop_tool_call(call_id).await
+    }
+
     /// The tail of one background process's output; `None` when no live
     /// runtime lists it.
     pub async fn background_task_output(

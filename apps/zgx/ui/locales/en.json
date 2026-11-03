@@ -651,7 +651,10 @@
         "capacity": "{n} token capacity",
         "waiting": "Waiting for context usage",
         "unreported": "Context usage not reported by this agent yet"
-      }
+      },
+      "stop_background": "Stop background tasks and subagents",
+      "stop_background_count": "Stop background tasks and subagents ({n} running)",
+      "stopping_background": "Stopping background tasks and subagents"
     },
     "markdown": {
       "fit_content": "Fit content",
@@ -699,7 +702,11 @@
       "show_all_lines": "Show all {n} lines",
       "open_subagent": "Open subagent {title}",
       "subagent": "Subagent",
-      "worked_for": "Worked for {secs}s · {summary}"
+      "worked_for": "Worked for {secs}s · {summary}",
+      "stop": "Stop",
+      "stop_named": "Stop {name}",
+      "stopping": "Stopping",
+      "stopped": "Stopped"
     },
     "transcript": {
       "copy_message": "Copy message",
@@ -816,7 +823,8 @@
       "stop_all": "Stop all",
       "running": "Running",
       "queued_messages": "Queued messages",
-      "queued": "Queued"
+      "queued": "Queued",
+      "stopping": "Stopping"
     },
     "composer_mentions": {
       "files": "Files",
@@ -1027,6 +1035,19 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "subagents": {
+      "count": "{n, plural, one {# subagent} other {# subagents}}",
+      "working_n": "{n} working",
+      "done": "done",
+      "working": "Working",
+      "finished": "Finished",
+      "failed": "Failed",
+      "stop": "Stop",
+      "stop_named": "Stop {title}",
+      "stopping": "Stopping",
+      "open": "Open",
+      "open_named": "Open {title}"
     }
   },
   "settings": {
@@ -2657,6 +2678,13 @@
       "couldnt_stop_task": "Couldn't stop that process",
       "commands_or_skills": "commands or skills",
       "drop_to_mention": "Drop to mention"
+    },
+    "stop": {
+      "stopped": "Stopped {name}",
+      "not_running": "{name} had already finished",
+      "unsupported": "This agent can't stop that on its own",
+      "failed": "Couldn't stop {name}",
+      "some_unsupported": "{n, plural, one {# couldn't be stopped} other {# couldn't be stopped}}"
     }
   },
   "panel": {
@@ -2862,7 +2890,8 @@
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
       "port_closed": "Closed",
-      "previews_unavailable": "Local previews aren't available right now"
+      "previews_unavailable": "Local previews aren't available right now",
+      "stop_subagent": "Stop subagent {title}"
     }
   },
   "files": {

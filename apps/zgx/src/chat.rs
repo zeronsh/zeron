@@ -310,6 +310,9 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     // A background process of the chat's stopped, on its host (the shipping
     // app's `stop_background_task`): whether it's stopping.
     host.async_action("chat.stop_task", move |args| async move { stop_task(args).await.map_err(String::from) });
+    // One call of the chat's live turn stopped while the turn goes on (a
+    // hung command, a subagent), on its host: `{ outcome, reason? }`.
+    host.async_action("chat.stop_call", move |args| async move { stop_call(args).await.map_err(String::from) });
     let pick = which.clone();
     host.async_action("chat.respond", move |args| {
         let v = pick(&args);
@@ -1744,6 +1747,42 @@ async fn stop_task(args: Value) -> Result<Value, Outcome> {
     Ok(Value::Bool(answer["stopping"].as_bool() == Some(true)))
 }
 
+/// `StopToolCall` for `{ session, call }` (a tool call's id, or a
+/// subagent's spawn), routed to the chat's host: what came of it, as
+/// `{ outcome = "stopping" | "notRunning" | "unsupported", reason? }`.
+async fn stop_call(args: Value) -> Result<Value, Outcome> {
+    let id = args.field("session").map(text).unwrap_or_default();
+    let call = args.field("call").map(text).unwrap_or_default();
+    if id.is_empty() || call.is_empty() {
+        return Err("missing");
+    }
+    let chats = CHATS.with(Rc::clone);
+    let mut params = json!({ "chatId": id, "callId": call });
+    if let Some(t) = chats.chat(&id).and_then(|c| chats.target(&c)) {
+        params["targetDeviceId"] = json!(t);
+    }
+    let answer = engine::get()
+        .call("StopToolCall", params)
+        .await
+        .map_err(|e| engine::outcome(&e))?;
+    Ok(stop_call_answer(&answer))
+}
+
+/// The engine's answer as the scripts read it. An engine from before the
+/// method answers nothing they know: that reads as unsupported.
+fn stop_call_answer(answer: &Json) -> Value {
+    let outcome = match answer["outcome"].as_str() {
+        Some(o @ ("stopping" | "notRunning" | "unsupported")) => o,
+        _ if answer["stopping"].as_bool() == Some(true) => "stopping",
+        _ => "unsupported",
+    };
+    let mut fields = vec![("outcome", Value::from(outcome))];
+    if let Some(reason) = answer["reason"].as_str().filter(|r| !r.is_empty()) {
+        fields.push(("reason", Value::from(reason)));
+    }
+    Value::record(fields)
+}
+
 async fn command(chat: &str, command: Json) -> Result<(), Outcome> {
     engine::get()
         .call("QueueCommand", json!({ "chatId": chat, "command": command }))
@@ -2431,14 +2470,17 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|p| !display_tool(p))
+                .filter(|p| !display_tool(p) && !is_agent(p))
                 .filter_map(tool)
                 .collect();
+            // Its subagents: the block at its top (ds/subagents), apart from
+            // its tools.
+            let subs = subagents(entry);
             // A settled reply with nothing to show (only an empty thought,
             // say) has no row, as in the shipping app: drawn, it would be an
             // empty lane whose time floats over the next reply.
             let shown = blocks(entry);
-            if !streaming && matches!(&shown, Value::List(list) if list.is_empty()) {
+            if !streaming && subs.is_empty() && matches!(&shown, Value::List(list) if list.is_empty()) {
                 return None;
             }
             let mut fields = vec![
@@ -2447,6 +2489,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("text", Value::from(entry_text(entry).as_str())),
                 ("tools", Value::List(tools.into())),
                 ("blocks", shown),
+                ("subagents", Value::List(subs.into())),
                 ("streaming", Value::Bool(streaming)),
                 ("started", Value::Num(created)),
             ];
@@ -2563,13 +2606,22 @@ fn blocks(entry: &Json) -> Value {
             .enumerate()
             .filter_map(|(i, p)| tool_live(p, live && i + 1 == group.len()))
             .collect();
-        out.push(Value::record([
+        let mut fields = vec![
             ("id", Value::from(format!("g:{first}").as_str())),
             ("kind", Value::from("tools")),
             ("summary", Value::from(group_summary(group).as_str())),
             ("live", Value::Bool(streaming && group_last == last_ix)),
             ("tools", Value::List(tools.into())),
-        ]));
+        ];
+        // Its line without the chats it created through Zeron, for a reply
+        // whose subagent block shows them (ds/transcript leaves their rows
+        // out then): empty when they were all it did.
+        if group.iter().any(|p| zeron_spawn(p)) {
+            let rest: Vec<&Json> = group.iter().copied().filter(|p| !zeron_spawn(p)).collect();
+            let bare = if rest.is_empty() { String::new() } else { group_summary(&rest) };
+            fields.push(("summary_bare", Value::from(bare.as_str())));
+        }
+        out.push(Value::record(fields));
         group.clear();
     };
     // The pictures an agent showed one after another (`show_image`, a
@@ -2586,6 +2638,11 @@ fn blocks(entry: &Json) -> Value {
         if display_tool(part) && display_failed_block(part, &parts[ix + 1..]).is_none() {
             continue;
         }
+        // A subagent's spawn is the reply's subagent block's (`subagents`),
+        // in no group or count.
+        if is_agent(part) {
+            continue;
+        }
         out.extend(images_block(&mut pictures));
         match kind {
             // A display tool (`show_visual`, `show_image`) is its output
@@ -2598,18 +2655,12 @@ fn blocks(entry: &Json) -> Value {
                 }
             }
             Some("tool") => {
-                if group.first().is_some_and(|head| is_agent(head) != is_agent(part)) {
-                    flush(&mut out, &mut group, group_last);
-                }
                 group.push(part);
                 group_last = ix;
             }
             Some("reasoning") => {
                 if part["text"].as_str().unwrap_or_default().trim().is_empty() {
                     continue;
-                }
-                if group.first().is_some_and(|head| is_agent(head)) {
-                    flush(&mut out, &mut group, group_last);
                 }
                 group.push(part);
                 group_last = ix;
@@ -2671,7 +2722,8 @@ fn compact_blocks(entry: &Json) -> Option<Value> {
         })
     };
     // (A display tool is no work: its output shows in the reply.)
-    let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p);
+    // (Nor is a subagent's spawn: the reply's subagent block shows it.)
+    let worked_tool = |p: &Json| p["kind"].as_str() == Some("tool") && !display_tool(p) && !is_agent(p);
     let is_work = |ix: usize, p: &Json| {
         worked_tool(p) || thought(p) || (said(p) && reply_start.is_none_or(|start| ix < start))
     };
@@ -2888,6 +2940,80 @@ fn subagent_title(call: &Json) -> String {
         .unwrap_or_else(|| "Subagent".into())
 }
 
+/// A chat made through the Zeron MCP server (`create_chat`, `create_chats`):
+/// a child of this chat, a subagent when the engine says so (its row's
+/// `childKind`). Its row leaves a reply's tool group where the reply's
+/// subagent block shows what it made (ds/transcript, `summary_bare`).
+fn zeron_spawn(part: &Json) -> bool {
+    if part["kind"].as_str() != Some("tool") {
+        return false;
+    }
+    let call = &part["call"];
+    let (server, name) = match call["kind"].as_str() {
+        Some("mcp") => (call["server"].as_str().unwrap_or_default(), call["tool"].as_str()),
+        Some("unknown") => ("", call["name"].as_str()),
+        _ => return false,
+    };
+    let Some(name) = name else { return false };
+    // (A harness that names MCP tools whole: `mcp__zeron__create_chat`.)
+    let tool = name.rsplit("__").next().unwrap_or(name);
+    matches!(tool, "create_chat" | "create_chats") && (server == "zeron" || name.contains("zeron"))
+}
+
+/// A reply's subagents as its subagent block lists them (ds/subagents): each
+/// spawn, in order, by its call's id, with the doc it runs in, how it stands
+/// (the engine's `subagentStatus`, else read from its call: no result yet
+/// while the reply is written is running), its title, the model and type it
+/// was given, and once done, its result's first line.
+fn subagents(entry: &Json) -> Vec<Value> {
+    let streaming = entry["status"].as_str() == Some("streaming");
+    entry["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| is_agent(p))
+        .filter_map(|part| {
+            let id = part["id"].as_str()?;
+            let failed = part["isError"].as_bool() == Some(true);
+            let answered = part.get("isError").is_some_and(|e| !e.is_null());
+            let status = match part["subagentStatus"].as_str() {
+                Some(s @ ("running" | "done" | "failed")) => s,
+                _ if failed => "failed",
+                _ if !answered && streaming => "running",
+                _ => "done",
+            };
+            let input = &part["call"]["input"];
+            let model = ["model", "modelId", "model_id", "subagent_model"]
+                .iter()
+                .find_map(|k| input[*k].as_str().map(str::trim).filter(|m| !m.is_empty()));
+            let kind = input["subagent_type"].as_str().map(str::trim).filter(|t| !t.is_empty());
+            let result = (status != "running")
+                .then(|| part["output"].as_str())
+                .flatten()
+                .and_then(|o| o.lines().map(str::trim).find(|l| !l.is_empty()))
+                .map(single_line);
+            let mut fields = vec![
+                ("id", Value::from(id)),
+                ("status", Value::from(status)),
+                ("title", Value::from(subagent_title(&part["call"]).as_str())),
+            ];
+            if let Some(doc) = part["subagentRef"].as_str().filter(|r| !r.is_empty()) {
+                fields.push(("ref", Value::from(doc)));
+            }
+            if let Some(model) = model {
+                fields.push(("model", Value::from(model)));
+            }
+            if let Some(kind) = kind {
+                fields.push(("type", Value::from(kind)));
+            }
+            if let Some(result) = result.filter(|r| !r.is_empty()) {
+                fields.push(("result", Value::from(result.as_str())));
+            }
+            Some(Value::record(fields))
+        })
+        .collect()
+}
+
 /// A subagent's call (its own group, as the shipping app's agent chips).
 fn is_agent(part: &Json) -> bool {
     let call = &part["call"];
@@ -3061,6 +3187,16 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
     }
     if part["isError"].as_bool() == Some(true) {
         fields.push(("failed", Value::Bool(true)));
+    }
+    // A chat it made through Zeron (a subagent, maybe): ds/transcript leaves
+    // its row out where the reply's subagent block shows that chat.
+    if zeron_spawn(part) {
+        fields.push(("zeron_spawn", Value::Bool(true)));
+    }
+    // No result yet (the doc writes `isError` only with one): still running
+    // while its reply is (ds/activity's stop reads both).
+    if part["kind"].as_str() == Some("tool") && part.get("isError").is_none_or(Json::is_null) {
+        fields.push(("running", Value::Bool(true)));
     }
     // A subagent's spawn: the doc it runs in (its lane, a panel tab of its
     // own), how it stands, and its tab's title (the shipping app's).
@@ -3588,6 +3724,65 @@ mod tests {
         assert!(super::tool(&read).unwrap().field("subagent").is_none());
     }
 
+    #[test]
+    fn a_reply_s_subagents_leave_its_tool_groups_for_its_subagent_block() {
+        let text = |v: &Value, k: &str| v.field(k).map(crate::auth::text);
+        let exec = |id: &str| json!({ "id": id, "kind": "tool", "isError": false, "call": { "kind": "exec", "command": "ls" } });
+        let spawn = |id: &str, extra: Json| {
+            let mut p = json!({ "id": id, "kind": "tool",
+                "call": { "kind": "unknown", "name": "Agent: map the parser", "input": { "model": "haiku", "subagent_type": "Explore" } } });
+            for (k, v) in extra.as_object().unwrap() {
+                p[k] = v.clone();
+            }
+            p
+        };
+        let zeron = json!({ "id": "z1", "kind": "tool", "isError": false, "call": { "kind": "mcp", "server": "zeron", "tool": "create_chats", "input": null } });
+        let entry = json!({ "id": "a1", "role": "assistant", "status": "streaming", "createdAt": 1000.0, "parts": [
+            exec("e1"),
+            spawn("s1", json!({ "subagentRef": "doc-1", "subagentStatus": "running" })),
+            exec("e2"),
+            zeron,
+            spawn("s2", json!({ "isError": false, "output": "\nFound 3 callers.\nMore." })),
+            { "id": "t", "kind": "text", "text": "Waiting on them." },
+        ] });
+        let msg = message(&entry, None).unwrap();
+        // One group for the work around the spawns, which aren't in it.
+        let blocks = msg.field("blocks").unwrap().list();
+        assert_eq!(blocks.len(), 2);
+        let ids: Vec<String> = blocks[0].field("tools").unwrap().list().iter().filter_map(|t| text(t, "id")).collect();
+        assert_eq!(ids, vec!["e1", "e2", "z1"]);
+        assert_eq!(text(&blocks[0], "summary").as_deref(), Some("Ran 2 commands · called 1 tool"));
+        // Without the chats made through Zeron, for a reply that shows them.
+        assert_eq!(text(&blocks[0], "summary_bare").as_deref(), Some("Ran 2 commands"));
+        assert!(matches!(blocks[0].field("tools").unwrap().list()[2].field("zeron_spawn"), Some(Value::Bool(true))));
+        assert!(msg.field("tools").unwrap().list().iter().all(|t| text(t, "kind").as_deref() != Some("agent")));
+        // The block's: each spawn, in order, as it stands.
+        let subs = msg.field("subagents").unwrap().list();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(text(&subs[0], "id").as_deref(), Some("s1"));
+        assert_eq!(text(&subs[0], "ref").as_deref(), Some("doc-1"));
+        assert_eq!(text(&subs[0], "status").as_deref(), Some("running"));
+        assert_eq!(text(&subs[0], "title").as_deref(), Some("map the parser"));
+        assert_eq!(text(&subs[0], "model").as_deref(), Some("haiku"));
+        assert_eq!(text(&subs[0], "type").as_deref(), Some("Explore"));
+        assert!(subs[0].field("result").is_none());
+        // No status from the engine: its call's result says done.
+        assert_eq!(text(&subs[1], "status").as_deref(), Some("done"));
+        assert_eq!(text(&subs[1], "result").as_deref(), Some("Found 3 callers."));
+        // A group of only Zeron's calls has nothing left bare.
+        let only = json!({ "id": "a2", "role": "assistant", "status": "complete", "parts": [
+            { "id": "z2", "kind": "tool", "isError": false, "call": { "kind": "unknown", "name": "mcp__zeron__create_chat" } },
+        ] });
+        let msg = message(&only, None).unwrap();
+        assert_eq!(text(&msg.field("blocks").unwrap().list()[0], "summary_bare").as_deref(), Some(""));
+        // A settled reply that only spawned is still shown, for its block.
+        let spawned = json!({ "id": "a3", "role": "assistant", "status": "complete", "parts": [spawn("s3", json!({ "isError": true }))] });
+        let msg = message(&spawned, None).unwrap();
+        assert_eq!(text(&msg.field("subagents").unwrap().list()[0], "status").as_deref(), Some("failed"));
+        // Another server's create_chat isn't Zeron's.
+        assert!(!zeron_spawn(&json!({ "kind": "tool", "call": { "kind": "mcp", "server": "other", "tool": "create_chat" } })));
+    }
+
     /// A side chat made here and sent to at once (before the engine's list
     /// has it): its sender knows it as it was made, its parent's agent and
     /// folder, never a config with no agent (which the engine refuses as
@@ -4089,6 +4284,28 @@ mod tests {
         let claude = json!({ "id": "opus", "options": [{ "id": "fastMode", "label": "Fast", "defaultChoice": "off", "choices": [{ "id": "off", "label": "Off" }, { "id": "on", "label": "On" }] }] });
         assert_eq!(fast_option(&claude), Some(("fastMode".into(), "on".into(), "off".into())));
         assert!(model_value("claude-code", &claude).field("options").is_none());
+    }
+
+    #[test]
+    fn a_tool_without_its_result_reads_as_running_and_a_stop_answer_reads_plainly() {
+        let running = |v: &Value| matches!(v.field("running"), Some(Value::Bool(true)));
+        let call = json!({ "kind": "exec", "command": "npm run serve" });
+        let open = tool(&json!({ "id": "c1", "kind": "tool", "call": call })).expect("a tool");
+        assert!(running(&open), "no isError yet: still running");
+        let ended = tool(&json!({ "id": "c1", "kind": "tool", "call": call, "isError": true })).expect("a tool");
+        assert!(!running(&ended));
+        let ok = tool(&json!({ "id": "c1", "kind": "tool", "call": call, "isError": false })).expect("a tool");
+        assert!(!running(&ok));
+
+        let outcome = |v: &Value| v.field("outcome").map(crate::auth::text);
+        let reason = |v: &Value| v.field("reason").map(crate::auth::text);
+        let stopping = stop_call_answer(&json!({ "stopping": true, "outcome": "stopping" }));
+        assert_eq!(outcome(&stopping).as_deref(), Some("stopping"));
+        let refused = stop_call_answer(&json!({ "stopping": false, "outcome": "unsupported", "reason": "Not this tool." }));
+        assert_eq!(outcome(&refused).as_deref(), Some("unsupported"));
+        assert_eq!(reason(&refused).as_deref(), Some("Not this tool."));
+        // An engine without the method's outcome: unsupported, never stopping.
+        assert_eq!(outcome(&stop_call_answer(&json!({}))).as_deref(), Some("unsupported"));
     }
 
     #[test]

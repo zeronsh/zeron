@@ -33,6 +33,7 @@ local Tooltip = require("@self/tooltip")
 -- Side chats and subagents listed as the sidebar lists sessions.
 local SessionRow = require("@self/session_row")
 local Tile = require("@self/tile")
+local IconButton = require("@self/icon_button").IconButton
 
 local M = {}
 
@@ -231,6 +232,10 @@ export type LanesProps = {
 	menu: ((lane: Lane) -> { any }?)?,
 	-- A glyph leading each lane instead of its harness's mark (a port's).
 	icon: ((lane: Lane) -> Icon.Name?)?,
+	-- Stop under the pointer, in the corner, while `stoppable` (a running
+	-- subagent); nil, none. `on_archive` wins where both are given.
+	on_stop: ((lane: Lane) -> ())?,
+	stoppable: ((lane: Lane) -> boolean)?,
 	-- Each lane's tooltip (a port's command line); nil, none.
 	tooltip: ((lane: Lane) -> string)?,
 }
@@ -644,6 +649,21 @@ function M.Lanes(props: LanesProps): Node
 			tree = tree_of(now),
 		}
 	end
+	-- A lane's stop, named for it (its title follows it).
+	local function stop_button(lane: () -> Lane): Node
+		return IconButton {
+			icon = "stop",
+			label = function(): string
+				return locale.s("panel.home.stop_subagent", { title = lane().title })
+			end,
+			tooltip = locale.s("ds.activity.stop"),
+			size = "sm",
+			tone = "quiet",
+			on_click = function()
+				(props.on_stop :: (Lane) -> ())(lane())
+			end,
+		}
+	end
 	local function row(first: Item, _index: State<number>, now: State<any>): Node
 		local gkey = first.gkey
 		if first.kind == "group" then
@@ -768,6 +788,12 @@ function M.Lanes(props: LanesProps): Node
 					then SessionRow.corner_button("ds.sidebar.archive", "archive-minimalistic", function()
 						(props.on_archive :: (Lane) -> ())(lane())
 					end)
+					elseif props.on_stop then stop_button(lane)
+					else nil,
+				action_shown = if not props.on_archive and props.on_stop and props.stoppable
+					then function(): boolean
+						return (props.stoppable :: (Lane) -> boolean)(lane())
+					end
 					else nil,
 			},
 		}

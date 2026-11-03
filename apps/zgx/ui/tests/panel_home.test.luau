@@ -362,6 +362,20 @@ test("the side chats and subagents lists open their lanes' tabs", function()
 	end)).to_be(true)
 end)
 
+test("a running subagent's lane stops it alone, by its spawn's call; a finished one has no stop", function()
+	local app = home()
+	app:hover('role:button "Open subagent scan the repo"')
+	app:frames(5)
+	app:click('role:button "Stop subagent scan the repo"')
+	expect(eventually(app, function(): boolean
+		return calls(app):find("stop_call:chat-1:t1", 1, true) ~= nil
+	end)).to_be(true)
+	app:hover('role:button "Open subagent read the docs"')
+	app:frames(5)
+	expect(app:has('role:button "Stop subagent read the docs"')).to_be(false)
+	expect(app:error()).to_be(nil)
+end)
+
 test("hundreds of lanes: the first five and those needing you, then Show N more; shown whole, only the rows in view are built", function()
 	local app = home()
 	app:command("many")

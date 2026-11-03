@@ -61,6 +61,8 @@ export type Task = {
 	since: number?,
 	-- Done: how it ended ("exited 0").
 	ended: string?,
+	-- Asked to stop and not gone yet: "Stopping" in place of its Stop.
+	stopping: boolean?,
 }
 export type Tray = "todos" | "tasks" | "queue"
 export type Props = {
@@ -716,7 +718,20 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		},
 		ui.show(
 			function()
-				return not ended()
+				return not ended() and row:get().stopping == true
+			end,
+			ui.text {
+				locale.t("ds.composer_dock.stopping"),
+				role = "status",
+				shrink = 0,
+				pr = "$space.1",
+				text_size = "$font.size.xs",
+				color = "$text.tertiary",
+			}
+		),
+		ui.show(
+			function()
+				return not ended() and row:get().stopping ~= true
 			end,
 			IconButton {
 				icon = "stop",

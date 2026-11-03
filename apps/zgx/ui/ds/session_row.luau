@@ -228,6 +228,9 @@ export type CornerProps = {
 	-- What the pointer finds there (archive, unarchive); nil, the corner
 	-- stays as it is under the pointer.
 	action: Node?,
+	-- Whether the action is there now (a stop, only while it runs); nil,
+	-- always.
+	action_shown: (() -> boolean)?,
 }
 
 -- The corner as a row wears it: its state (or time) at rest; under the
@@ -242,6 +245,10 @@ function M.Corner(props: CornerProps): Node
 		return nil
 	end
 	local action = props.action
+	local action_shown = props.action_shown
+	local function has_action(): boolean
+		return action ~= nil and (action_shown == nil or action_shown())
+	end
 	return ui.overlay {
 		shrink = 0,
 		relative = true,
@@ -251,7 +258,7 @@ function M.Corner(props: CornerProps): Node
 		justify = "center",
 		ui.div {
 			opacity = function(): number
-				return if (action ~= nil and hovered:get()) or jump() ~= nil then 0 else 1
+				return if (has_action() and hovered:get()) or jump() ~= nil then 0 else 1
 			end,
 			pointer_events = "none",
 			M.standing(props.cur),
@@ -273,7 +280,7 @@ function M.Corner(props: CornerProps): Node
 		if action
 			then ui.show(
 				function(): boolean
-					return hovered:get() and jump() == nil
+					return hovered:get() and jump() == nil and has_action()
 				end,
 				-- (The button 3 points past the corner's 16 either side.)
 				ui.div { absolute = true, right = -3, top = -3, action }
@@ -775,6 +782,8 @@ export type RowProps = {
 	lead: Node?,
 	-- What the pointer finds in its corner (archive), as the sidebar's rows.
 	action: Node?,
+	-- Whether it's there now (Corner's `action_shown`).
+	action_shown: (() -> boolean)?,
 	-- Its title in the primary ink at rest (a settings page's rows, read as
 	-- its other rows are), not the sidebar's quieter one.
 	primary: boolean?,
@@ -863,7 +872,7 @@ function M.Row(props: RowProps): Node
 				M.subagents(function(): number
 					return cur().subagents or 0
 				end),
-				M.Corner { cur = cur, hovered = hovered, jump = props.jump, action = props.action }
+				M.Corner { cur = cur, hovered = hovered, jump = props.jump, action = props.action, action_shown = props.action_shown }
 			),
 			-- Pulled up under the title: the line's own inset is the row's.
 			ui.div {
