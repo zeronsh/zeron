@@ -285,7 +285,7 @@ pub struct Bridge {
     /// Has the templates folder looked at (and watched) again, as it moves.
     rewatch: RefCell<Option<zgx::task::LatestSender<()>>>,
     tasks: TaskSpawner,
-    watches: RefCell<Vec<Watch>>,
+    watches: RefCell<Vec<crate::engine::rpc::SetUpWatch>>,
     pub(crate) consent: RefCell<Option<consent::Consent>>,
     reviewed: Cell<bool>,
     /// Another device's plugins, shown by Settings → Plugins' switcher
@@ -330,6 +330,76 @@ pub fn expose_own(host: &ScriptHost, id: &str) {
     }
     // What's behind a token an element gave it, as its records allow.
     tokens::serve(host, id, &host.shared(&format!("plugin.{id}.records"), Value::Nil));
+}
+
+/// The plugin watches on connection `rpc`. The engine answers them (and
+/// every plugin call) `setup_incomplete` while the account's setup isn't
+/// finished (no organization chosen): then they're asked again once it is
+/// (`auth::set_up`), on the same connection, so plugins load as setup
+/// finishes, with no relaunch. Settings → Plugins says so meanwhile.
+fn connect(b: &Rc<Bridge>, rpc: &Rpc) {
+    // Zeron's own plugins, shipped beside the app's scripts: the engine
+    // scans them with yours (each connection: an engine started again
+    // forgets).
+    let builtin = builtin_dir();
+    if builtin.is_dir() {
+        b.tasks.spawn(async move {
+            let asked = crate::auth::after_setup(|| {
+                let builtin = builtin.clone();
+                async move { call("SetBuiltinPlugins", json!({ "dir": builtin })).await }
+            });
+            if let Err(error) = asked.await {
+                eprintln!("zeron-zgx: Zeron's own plugins weren't loaded: {error}");
+            }
+        });
+    }
+    // Asked again once setup is finished (`Rpc::watch_set_up`), the page
+    // saying so meanwhile (`wait_for_setup`).
+    let wait = |b: &Rc<Bridge>| {
+        let me = Rc::downgrade(b);
+        move |again: crate::engine::rpc::Again| {
+            if let Some(b) = me.upgrade() {
+                b.wait_for_setup(again);
+            }
+        }
+    };
+    let mut watches = Vec::new();
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "WatchPlugins",
+        json!({}),
+        move |item| {
+            if let Some(b) = me.upgrade() {
+                b.heard(&item);
+            }
+        },
+        wait(b),
+    ));
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "ServePluginTools",
+        json!({}),
+        move |call| {
+            if let Some(b) = me.upgrade() {
+                b.tool_call(&call);
+            }
+        },
+        wait(b),
+    ));
+    let me = Rc::downgrade(b);
+    watches.push(rpc.watch_set_up(
+        "WatchPluginChannel",
+        json!({}),
+        move |message| {
+            if let Some(b) = me.upgrade() {
+                b.message(&message);
+            }
+        },
+        wait(b),
+    ));
+    *b.watches.borrow_mut() = watches;
+    // Another device's, if Settings → Plugins shows one.
+    remote::load(b);
 }
 
 /// The plugins in `before` gone from `now`: removed, or there again from
@@ -460,39 +530,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     let weak = Rc::downgrade(&bridge);
     engine::get().on_connect(move |rpc| {
         let Some(b) = weak.upgrade() else { return };
-        // Zeron's own plugins, shipped beside the app's scripts: the engine
-        // scans them with yours (each connection: an engine started again
-        // forgets).
-        let builtin = builtin_dir();
-        if builtin.is_dir() {
-            b.tasks.spawn(async move {
-                if let Err(error) = call("SetBuiltinPlugins", json!({ "dir": builtin })).await {
-                    eprintln!("zeron-zgx: Zeron's own plugins weren't loaded: {error}");
-                }
-            });
-        }
-        let mut watches = Vec::new();
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("WatchPlugins", json!({}), move |item| {
-            if let Some(b) = me.upgrade() {
-                b.heard(&item);
-            }
-        }));
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("ServePluginTools", json!({}), move |call| {
-            if let Some(b) = me.upgrade() {
-                b.tool_call(&call);
-            }
-        }));
-        let me = Rc::downgrade(&b);
-        watches.push(rpc.watch("WatchPluginChannel", json!({}), move |message| {
-            if let Some(b) = me.upgrade() {
-                b.message(&message);
-            }
-        }));
-        *b.watches.borrow_mut() = watches;
-        // Another device's, if Settings → Plugins shows one.
-        remote::load(&b);
+        connect(&b, rpc);
     });
 
     // Your templates, looked at as they change: as the kernel says they
@@ -1069,6 +1107,15 @@ impl Bridge {
         if let (Some(p), Some(t)) = (frame["dirs"]["plugins"].as_str(), frame["dirs"]["templates"].as_str()) {
             *self.dirs.borrow_mut() = Some((PathBuf::from(p), PathBuf::from(t)));
         }
+        // The engine's word on the account's signing keys (a key added on
+        // another device, this device's revoked): said by the host, once.
+        for notice in frame["key_notices"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(words)) = (notice["id"].as_str(), notice["words"].as_str())
+                && self.told.borrow_mut().insert(format!("key-notice:{id}"))
+            {
+                host_bar::notice(words.to_owned());
+            }
+        }
         // Each one newly waiting for you: said once.
         for item in &list {
             if matches!(item.status(), "pending" | "tampered") {
@@ -1209,6 +1256,27 @@ impl Bridge {
     }
 
     /// `blame`, after this turn.
+    /// A plugin watch answered `setup_incomplete`: Settings → Plugins says
+    /// to finish setting up, and once the account is set up (an
+    /// organization chosen) it's watched `again`, and the list follows.
+    fn wait_for_setup(self: &Rc<Self>, again: crate::engine::rpc::Again) {
+        if self.state.get() != "setup" {
+            eprintln!("zeron-zgx: plugins: waiting for the account's setup to be finished");
+            self.state.set("setup");
+            self.publish_page();
+        }
+        let me = Rc::downgrade(self);
+        self.tasks.spawn(async move {
+            crate::auth::set_up().await;
+            let Some(b) = me.upgrade() else { return };
+            if b.state.get() == "setup" {
+                b.state.set("loading");
+                b.publish_page();
+            }
+            again();
+        });
+    }
+
     fn later_blame(&self, error: String) {
         let me = Rc::downgrade(&self.me());
         self.tasks.spawn(async move {
@@ -2836,7 +2904,7 @@ impl Bridge {
                 async move {
                     // (A preview can't switch templates: preview.rs.)
                     preview::refuse("templates.use")?;
-                    call("UseTemplate", json!({ "id": text(&id) })).await?;
+                    template_call("UseTemplate", json!({ "id": text(&id) })).await?;
                     // Chosen here, on Zeron's own Templates page (never a
                     // template's: screens/templates is never templated):
                     // out of safe mode, and no notice of the switch.
@@ -2861,7 +2929,7 @@ impl Bridge {
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let name = text(&name).trim().chars().take(60).collect::<String>();
                     let new_id = live::new_id(&root, &name);
-                    call("CreateTemplate", json!({ "id": new_id, "name": name, "from": live::BUILTIN })).await?;
+                    template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": live::BUILTIN })).await?;
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
@@ -2878,7 +2946,7 @@ impl Bridge {
                     let root = b.templates_dir().ok_or("Templates aren't available right now")?;
                     let from = text(&id);
                     let (new_id, name) = live::copy_name(&root, &from);
-                    call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
+                    template_call("CreateTemplate", json!({ "id": new_id, "name": name, "from": from })).await?;
                     b.look();
                     b.rewatch();
                     Ok(Value::from(new_id.as_str()))
@@ -2891,7 +2959,7 @@ impl Bridge {
                 let me = me.clone();
                 async move {
                     preview::refuse("templates.delete")?;
-                    call("DeleteTemplate", json!({ "id": text(&id) })).await?;
+                    template_call("DeleteTemplate", json!({ "id": text(&id) })).await?;
                     // One made later under its id isn't one you kept.
                     if let Some(path) = preview::approvals_path() {
                         preview::forget_at(&path, &text(&id));
@@ -2916,7 +2984,7 @@ impl Bridge {
             if !path.is_empty() && !path.ends_with(".zeron-template") {
                 path.push_str(".zeron-template");
             }
-            call("ExportTemplate", json!({ "id": id, "path": path })).await.map(|v| json_value(&v))
+            template_call("ExportTemplate", json!({ "id": id, "path": path })).await.map(|v| json_value(&v))
         });
         host.async_action("templates.import", {
             let me = me.clone();
@@ -2931,7 +2999,7 @@ impl Bridge {
                         (None, Some(url)) => json!({ "url": url }),
                         _ => return Err("Choose a template file or paste a link".into()),
                     };
-                    let reply = call("ImportTemplate", params).await?;
+                    let reply = template_call("ImportTemplate", params).await?;
                     if let Some(b) = me.upgrade() {
                         if let Some(name) = reply["pending"].as_str() {
                             // Shown now: no "waiting" toast for it as well.
@@ -2952,7 +3020,7 @@ impl Bridge {
             move |_| {
                 let me = me.clone();
                 async move {
-                    let reply = call("CheckTemplateUpdates", json!({})).await?;
+                    let reply = template_call("CheckTemplateUpdates", json!({})).await?;
                     if let Some(b) = me.upgrade() {
                         b.look();
                     }
@@ -2966,7 +3034,7 @@ impl Bridge {
                 let me = me.clone();
                 async move {
                     preview::refuse("templates.update")?;
-                    let reply = call("UpdateTemplate", json!({ "id": text(&id) })).await?;
+                    let reply = template_call("UpdateTemplate", json!({ "id": text(&id) })).await?;
                     if let Some(b) = me.upgrade() {
                         // A new version with new code waits for you, as an
                         // import does: in Zeron's own consent window.
@@ -3073,6 +3141,13 @@ pub fn slug(name: &str) -> String {
     }
     let out: String = out.trim_end_matches('-').chars().take(40).collect();
     out.trim_end_matches('-').to_string()
+}
+
+/// A template call: asked again once the account's setup is finished if
+/// the engine answered `setup_incomplete` (no organization chosen yet), so
+/// the templates page works as soon as setup does.
+async fn template_call(method: &str, params: Json) -> Result<Json, String> {
+    crate::auth::after_setup(|| call(method, params.clone())).await
 }
 
 async fn call(method: &str, params: Json) -> Result<Json, String> {

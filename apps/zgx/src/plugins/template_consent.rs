@@ -74,7 +74,7 @@ fn fetch(shared: Shared, last: Last, pending: String, generation: Rc<Cell<u64>>,
     }
     engine::get().spawn(async move {
         for attempt in 0..=RECHECKS {
-            let list = engine::get().call("ListTemplates", json!({})).await;
+            let list = crate::auth::after_setup(|| async { engine::get().call("ListTemplates", json!({})).await }).await;
             if generation.get() != at {
                 return;
             }
@@ -262,12 +262,20 @@ fn host(
             // (`ReviewTemplate`, the engine authority's).
             let mut params = json!({ "pending": name, "allow": allow, "hash": hash });
             if allow {
-                match engine::get().call("ReviewTemplate", json!({ "pending": name, "hash": hash })).await {
+                match crate::auth::after_setup(|| {
+                    let asked = json!({ "pending": name, "hash": hash });
+                    async move { engine::get().call("ReviewTemplate", asked).await }
+                })
+                .await {
                     Ok(reply) => params["review"] = reply["review"].clone(),
                     Err(error) => eprintln!("zeron-zgx: templates: no review for {name}: {error}"),
                 }
             }
-            let result = engine::get().call("DecideTemplate", params).await;
+            let result = crate::auth::after_setup(|| {
+                let asked = params.clone();
+                async move { engine::get().call("DecideTemplate", asked).await }
+            })
+            .await;
             // Allowed in this window: installed as you were shown it, so it
             // runs with Zeron's powers (its files as installed).
             if let Ok(reply) = &result

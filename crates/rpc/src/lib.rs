@@ -486,6 +486,10 @@ pub mod methods {
     pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
     /// `{}` → `{key, registered}`.
     pub const PLUGIN_SIGNING_KEY: &str = "PluginSigningKey";
+    /// Another of your devices says it revoked a signing key: this device
+    /// looks up its own key at once (nothing in the call is trusted; it only
+    /// hastens the regular check). Answered to peers; not to agents.
+    pub const CHECK_PLUGIN_KEY: &str = "CheckPluginKey";
     /// Templates (whole replacements of Zeron's interface): `{}` → `{dir,
     /// active, templates: [{id, name, description, author, version,
     /// zeron_version, builtin, active, status: "ok" | "errors" | "out_of_date"

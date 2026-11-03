@@ -47,14 +47,27 @@ pub fn notice(words: String) {
 /// The strip, and the menu bar where there's no system one: above the
 /// scripts' view.
 pub fn view(cx: &mut WindowContext) -> View {
-    let now = cx.ui.runtime.signal(preview::current());
+    let strip = strip(&cx.ui.runtime);
+    column().child(strip).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
+}
+
+/// The main window's root: the host's `chrome` above the scripts' view,
+/// which takes the rest of the window, its full width and every point the
+/// chrome leaves (the scripts' root, `#shell`, sizes itself to it).
+pub fn compose(chrome: View, scripts: View) -> View {
+    column().w_full().h_full().child(chrome).child(scripts.grow().min_h(0.))
+}
+
+/// The preview's bar and the notice, as they come and go.
+fn strip(runtime: &zgx::reactive::Runtime) -> View {
+    let now = runtime.signal(preview::current());
     let heard = now.clone();
     preview::on_change(move |p| {
         heard.set(p.cloned());
     });
-    let notice_ = cx.ui.runtime.signal(None::<String>);
+    let notice_ = runtime.signal(None::<String>);
     NOTICE.with(|n| *n.borrow_mut() = Some(notice_.clone()));
-    let strip = switch(
+    switch(
         move || (now.get(), notice_.get()),
         |(preview, notice), _| {
             let mut out = column();
@@ -81,6 +94,62 @@ pub fn view(cx: &mut WindowContext) -> View {
             }
             out
         },
-    );
-    column().child(strip).children((!zgx_desktop::has_native_app_menu()).then(|| cx.app_menu_bar()))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zgx_script::{ScriptHost, testing::TestApp};
+
+    /// The shell's fixture under the host's strip, as the main window
+    /// composes them (`compose`).
+    fn mount() -> TestApp {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/shell_fixture.luau");
+        let chrome: std::rc::Rc<RefCell<Option<View>>> = Default::default();
+        let made = chrome.clone();
+        let app = TestApp::wrapped(
+            move |runtime| {
+                *made.borrow_mut() = Some(strip(runtime));
+                ScriptHost::new(runtime, path)
+            },
+            move |scripts| compose(chrome.borrow_mut().take().unwrap(), scripts),
+        );
+        app.frames(30);
+        assert_eq!(app.error(), None, "the shell failed");
+        app
+    }
+
+    fn bounds(app: &mut TestApp, selector: &str) -> zgx::scene::Rect {
+        let node = app.find(selector).unwrap_or_else(|| panic!("no {selector}"));
+        app.ui.scene.borrow().transformed_bounds(node)
+    }
+
+    /// The scripts' root fills the window under the host's strip: at
+    /// launch, after a resize, with the strip shown (a template in preview)
+    /// and hidden.
+    #[test]
+    fn the_shell_fills_the_window_under_the_host_s_strip() {
+        preview::set(None);
+        let mut app = mount();
+        for (w, h) in [(1624., 836.), (900., 600.), (1240., 820.)] {
+            app.ui.scene.borrow_mut().resize(w, h);
+            app.frames(6);
+            let shell = bounds(&mut app, "#shell");
+            assert_eq!((shell.x, shell.y, shell.width, shell.height), (0., 0., w, h), "no strip, {w}×{h}");
+
+            preview::set(Some(preview::Preview { id: "sleek".into(), name: "Sleek".into() }));
+            app.frames(6);
+            let shell = bounds(&mut app, "#shell");
+            let strip = bounds(&mut app, "role:button \"Keep…\"");
+            assert!(strip.y < shell.y && shell.y > 0., "the strip above the shell: {strip:?} {shell:?}");
+            assert_eq!((shell.x, shell.width), (0., w), "full width under the strip, {w}×{h}");
+            assert!((shell.y + shell.height - h).abs() < 0.5, "down to the window's foot, {w}×{h}: {shell:?}");
+
+            preview::set(None);
+            app.frames(6);
+            let shell = bounds(&mut app, "#shell");
+            assert_eq!((shell.y, shell.height), (0., h), "the strip gone, the shell whole again, {w}×{h}");
+        }
+    }
 }

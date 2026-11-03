@@ -69,6 +69,10 @@ pub const BUILTIN_AUTHOR: &str = "zeron";
 /// `keys::CACHE_TTL_SECS` are looked up again (a key revoked elsewhere
 /// stops counting within the hour).
 const NEW_KEYS_EVERY: Duration = Duration::from_secs(15 * 60);
+/// A peer's word (`CheckPluginKey`) looks this device's key up at most this often.
+const OWN_KEY_CHECK_APART: Duration = Duration::from_secs(5);
+/// Until those checks can run (auth not ready, the edge not answering).
+const KEYS_RETRY: Duration = Duration::from_secs(30);
 
 const RESCAN_DEBOUNCE: Duration = Duration::from_millis(200);
 const RESIGN_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -122,6 +126,7 @@ pub fn handles(method: &str) -> bool {
             | methods::SERVE_PLUGIN_CALL
             | methods::WATCH_PLUGIN_CHANNEL
             | methods::PLUGIN_SIGNING_KEY
+            | methods::CHECK_PLUGIN_KEY
             | methods::LIST_TEMPLATES
             | methods::CREATE_TEMPLATE
             | methods::USE_TEMPLATE
@@ -227,6 +232,13 @@ struct Inner {
     /// Signing keys added on the account's other devices that this device
     /// noticed (`PluginSigningKey`'s `new_keys`).
     new_keys: Mutex<Vec<keys::KeyRow>>,
+    /// What the host says about the account's signing keys (a key added on
+    /// another device, this device's revoked): `{id, kind, words}`, carried
+    /// on the plugin list for the app's own strip, newest last.
+    key_notices: Mutex<Vec<serde_json::Value>>,
+    /// When this device's own key was last looked up on a peer's word
+    /// (`CheckPluginKey`): at most every few seconds.
+    own_key_checked: Mutex<Option<Instant>>,
 }
 
 type StepUpFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -483,6 +495,8 @@ impl Plugins {
                 folders: Mutex::new(None),
                 step_up: Mutex::new(None),
                 new_keys: Mutex::new(Vec::new()),
+                key_notices: Mutex::new(Vec::new()),
+                own_key_checked: Mutex::new(None),
             }),
         };
         plugins.inner.services.set_hooks(Arc::new(ServiceHooks {
@@ -535,6 +549,28 @@ impl Plugins {
         self.set_account(move || for_account.user_id());
         let for_step_up = auth.clone();
         *lock(&self.inner.step_up) = Some(Arc::new(move || for_step_up.step_up()));
+        // Signed in on an engine with no edge of its own (local mode, where
+        // the first sign-in happens): its keys are looked up and registered
+        // with the edge it signs in against.
+        if self.directory().is_none() && auth.workos_enabled() {
+            self.set_directory(Arc::new(keys::EdgeDirectory::new(auth.edge_url(), Arc::new(auth.clone()))));
+        }
+        // A fresh ticket (a sign-in, before it's announced and the app
+        // restarts the engine; a step-up): this device's key registered with
+        // it while it's here.
+        // Through the edge it signs in against, with the session's own
+        // bearer: the engine may have no edge of its own (local mode, where
+        // the first sign-in happens), and the sign-in isn't announced yet.
+        let weak = Arc::downgrade(&self.inner);
+        let fresh: Arc<dyn KeyDirectory> = Arc::new(keys::EdgeDirectory::new(auth.edge_url(), auth.session_bearer()));
+        auth.on_fresh_ticket(Arc::new(move |account: String| {
+            let (weak, fresh) = (weak.clone(), fresh.clone());
+            Box::pin(async move {
+                if let Some(inner) = weak.upgrade() {
+                    Plugins { inner }.register_key_through(fresh.as_ref(), &account).await;
+                }
+            })
+        }));
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -552,7 +588,7 @@ impl Plugins {
                 lock(&plugins.inner.lookup_failed).clear();
                 plugins.settle_revokes().await;
                 plugins.register_key().await;
-                plugins.look_for_new_keys().await;
+                plugins.check_keys().await;
                 plugins.kick(Kick::Rescan);
             }
         });
@@ -628,13 +664,16 @@ impl Plugins {
             }
         });
         let weak = Arc::downgrade(&self.inner);
+        // At start (as soon as auth and the edge answer: retried every
+        // half minute until they do), then every 15 minutes.
         let new_keys = runtime.spawn(async move {
             loop {
-                tokio::time::sleep(NEW_KEYS_EVERY).await;
                 let Some(inner) = weak.upgrade() else { return };
                 let plugins = Plugins { inner };
-                plugins.look_for_new_keys().await;
+                let checked = plugins.check_keys().await;
                 plugins.kick(Kick::Rescan);
+                drop(plugins);
+                tokio::time::sleep(if checked { NEW_KEYS_EVERY } else { KEYS_RETRY }).await;
             }
         });
         lock(&self.inner.tasks).extend([worker, setup, renew, new_keys]);
@@ -802,13 +841,39 @@ impl Plugins {
     /// Register this device's key for the signed-in account (retried next
     /// start, or next sign-in, when it fails).
     async fn register_key(&self) {
-        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+        if let Some(account) = self.account() {
+            self.register_key_as(&account).await;
+        }
+    }
+
+    /// [`Self::register_key`] in the background, when this device's key
+    /// isn't registered for the account signed in.
+    fn spawn_register(&self) {
+        let (Some(account), Ok(runtime)) = (self.account(), tokio::runtime::Handle::try_current()) else {
             return;
         };
+        let registered = signing::load_key(&self.inner.data_dir)
+            .is_some_and(|key| keys::Registration::load(&self.inner.data_dir).covers(&key.public(), &account));
+        if !registered {
+            let this = self.clone();
+            runtime.spawn(async move { this.register_key().await });
+        }
+    }
+
+    /// [`Self::register_key`] for `account` (a sign-in not yet announced).
+    async fn register_key_as(&self, account: &str) {
+        if let Some(directory) = self.directory() {
+            self.register_key_through(directory.as_ref(), account).await;
+        }
+    }
+
+    /// Register this device's key for `account` through `directory`.
+    async fn register_key_through(&self, directory: &dyn KeyDirectory, account: &str) {
+        let account = account.to_owned();
         let step_up = lock(&self.inner.step_up).clone().and_then(|f| f());
         match keys::ensure_registered(
             &self.inner.data_dir,
-            directory.as_ref(),
+            directory,
             &self.inner.device_id,
             &account,
             step_up.as_deref(),
@@ -844,33 +909,163 @@ impl Plugins {
 
     /// Look for signing keys added on the account's other devices since
     /// last time; each is posted as a notice and kept for `PluginSigningKey`.
-    async fn look_for_new_keys(&self) {
+    async fn look_for_new_keys(&self) -> bool {
         let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
-            return;
+            return false;
         };
         match keys::new_keys_elsewhere(&self.inner.data_dir, directory.as_ref(), &self.inner.device_id, &account).await {
             Ok(rows) => {
-                let notify = lock(&self.inner.notifier).clone();
                 for row in &rows {
                     let named = self.device_name(&row.device_id);
                     let device = if named == row.device_id || named.trim().is_empty() { "another device".to_owned() } else { named };
                     tracing::info!(device = %row.device_id, fingerprint = %row.fingerprint, "plugins: a new signing key on the account");
-                    if let Some(notify) = &notify {
-                        notify(
-                            "zeron",
-                            "A new signing key",
-                            &format!(
-                                "A new signing key was added to your account on {device}. If that wasn't you, revoke it in Settings → Account. (Fingerprint {}.)",
-                                row.fingerprint
-                            ),
-                            None,
-                        );
-                    }
+                    self.key_notice(
+                        &format!("key-added:{}", row.key),
+                        "key_added",
+                        "A new signing key",
+                        &format!(
+                            "A new signing key was added to your account on {device}. If that wasn't you, revoke it in Settings → Account. (Fingerprint {}.)",
+                            row.fingerprint
+                        ),
+                    );
                 }
                 lock(&self.inner.new_keys).extend(rows);
+                true
             }
-            Err(error) => tracing::debug!(%error, "plugins: couldn't look for new signing keys"),
+            Err(error) => {
+                tracing::info!(%error, "plugins: couldn't look for new signing keys yet");
+                false
+            }
         }
+    }
+
+    /// Whether this device's key is still registered: one revoked from
+    /// another device (or gone from the edge) stops being yours at once. The
+    /// key is deleted, a fresh one made (registered with the next sign-in's
+    /// ticket), plugins it signed checked again like anyone's, your own
+    /// plugins re-signed and asked about again, and you're told.
+    async fn check_own_key(&self) -> bool {
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        let Some(key) = signing::load_key(&self.inner.data_dir).map(|k| k.public()) else {
+            return true;
+        };
+        let registered = keys::Registration::load(&self.inner.data_dir).covers(&key, &account);
+        *lock(&self.inner.own_key_checked) = Some(Instant::now());
+        let revoked = match directory.lookup(&key).await {
+            // Revoked on this account (whatever this device's file says).
+            Ok(keys::Lookup::Found { revoked: true, mine: true, .. }) => true,
+            // Registered here, and now gone or someone else's.
+            Ok(keys::Lookup::Found { mine: false, .. }) | Ok(keys::Lookup::Unknown) => registered,
+            Ok(keys::Lookup::Found { .. }) => false,
+            Err(error) => {
+                tracing::info!(%error, "plugins: couldn't check this device's signing key yet");
+                return false;
+            }
+        };
+        if revoked {
+            self.own_key_revoked(&key).await;
+        }
+        true
+    }
+
+    async fn own_key_revoked(&self, key: &str) {
+        tracing::warn!("plugins: this device's signing key was revoked elsewhere; making a new one");
+        // Revoked already: nothing to revoke, just never sign with it again.
+        signing::delete_key(&self.inner.data_dir);
+        let _ = std::fs::remove_file(self.inner.data_dir.join(keys::REGISTRATION_FILE));
+        let cached = {
+            let mut cache = lock(&self.inner.cache);
+            if let Some(account) = self.account() {
+                cache.0.insert(key.to_owned(), keys::CachedKey::from_lookup(&keys::Lookup::Unknown, &account, now_secs()));
+            }
+            cache.clone()
+        };
+        cached.save(&self.inner.data_dir);
+        // What runs outside their sandbox was allowed your own plugins as
+        // you: asked again (what stays inside it is kept).
+        let _ = self.update_state(|state| {
+            let own: Vec<String> = state.own.iter().cloned().collect();
+            for id in own {
+                if let Some(d) = state.decisions.get_mut(&id) {
+                    let inside = capability::inside_sandbox(&d.allowed_record());
+                    d.permissions.retain(|p| !capability::OUTSIDE_SANDBOX.contains(&p.as_str()));
+                    d.grants = Some(inside);
+                }
+            }
+        });
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if signing::load_or_create_key(&this.inner.data_dir).is_ok() {
+                this.resign_all_own();
+            }
+        })
+        .await;
+        lock(&self.inner.new_keys).retain(|row| row.key != key);
+        let here = if cfg!(target_os = "macos") { "This Mac's" } else { "This device's" };
+        self.key_notice(
+            &format!("key-revoked:{key}"),
+            "own_key_revoked",
+            "Signing key revoked",
+            &format!(
+                "{here} signing key was revoked from another device. Plugins it signed no longer count as yours; your own plugins' programs, services and other code-running powers wait for you to allow them again. Sign in again to register a new key."
+            ),
+        );
+        self.register_key().await;
+        self.kick(Kick::Rescan);
+    }
+
+    /// Tell `device` a key was revoked, so it checks its own now rather
+    /// than at its next regular check (best effort: offline, it checks then).
+    fn tell_key_revoked(&self, device: String) {
+        let (Some(links), Ok(runtime)) = (lock(&self.inner.links).clone(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        runtime.spawn(async move {
+            let told = tokio::time::timeout(DELIVER_TIMEOUT, async {
+                links.client(&device).await?.call(methods::CHECK_PLUGIN_KEY, serde_json::json!({})).await
+            })
+            .await;
+            if !matches!(told, Ok(Ok(_))) {
+                tracing::info!(%device, "plugins: couldn't tell the device its key was revoked; it checks on its own");
+            }
+        });
+    }
+
+    /// Said by the host (the app's strip, from the plugin list) and as a
+    /// desktop banner: once per `id`.
+    fn key_notice(&self, id: &str, kind: &str, title: &str, words: &str) {
+        {
+            let mut notices = lock(&self.inner.key_notices);
+            if notices.iter().any(|n| n["id"] == id) {
+                return;
+            }
+            notices.push(serde_json::json!({ "id": id, "kind": kind, "words": words }));
+            let excess = notices.len().saturating_sub(20);
+            notices.drain(..excess);
+        }
+        self.publish_list();
+        if let Some(notify) = lock(&self.inner.notifier).clone() {
+            notify("zeron", title, words, None);
+        }
+    }
+
+    /// A peer said it revoked a key (`CheckPluginKey`): this device's own
+    /// looked up now, unless it was a moment ago.
+    async fn check_own_key_soon(&self) {
+        let recent = lock(&self.inner.own_key_checked).is_some_and(|at| at.elapsed() < OWN_KEY_CHECK_APART);
+        if !recent {
+            self.check_own_key().await;
+        }
+    }
+
+    /// The account's key checks: this device's own key's standing, and keys
+    /// added on other devices. Whether they could run (signed in, edge up).
+    async fn check_keys(&self) -> bool {
+        let own = self.check_own_key().await;
+        let others = self.look_for_new_keys().await;
+        own && others
     }
 
     // ── Scanning ────────────────────────────────────────────────────────────
@@ -1022,12 +1217,14 @@ impl Plugins {
     fn list_value(&self) -> serde_json::Value {
         let entries = lock(&self.inner.entries);
         let items: Vec<&scan::PluginItem> = entries.iter().map(|e| &e.item).collect();
+        let key_notices = lock(&self.inner.key_notices).clone();
         serde_json::json!({
             "dirs": {
                 "plugins": self.inner.plugins_dir.display().to_string(),
                 "templates": self.inner.data_dir.join(TEMPLATES_DIR).display().to_string(),
             },
             "plugins": items,
+            "key_notices": key_notices,
         })
     }
 
@@ -1633,6 +1830,9 @@ impl Plugins {
                 .await
                 .map_err(|_| failed("Couldn't sign it"))?
                 .map_err(failed)?;
+                // Signed with a key the edge doesn't know yet: registered
+                // now if a fresh sign-in's ticket is here (else at the next).
+                self.spawn_register();
                 match id {
                     Some(id) => {
                         self.rescan().await;
@@ -1970,6 +2170,14 @@ impl Plugins {
                 map["guide_summary"] = serde_json::json!(guides::PLUGINS_SUMMARY);
                 RpcReply::value(&map)
             }
+            methods::CHECK_PLUGIN_KEY => {
+                // Nothing in it is trusted: it only hastens the check.
+                let this = self.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move { this.check_own_key_soon().await });
+                }
+                RpcReply::value(&serde_json::json!({ "checking": true }))
+            }
             methods::PLUGIN_SIGNING_KEY => {
                 // Settings → Account: the account's keys (`keys: true`), and
                 // revoking one (`revoke: <key>`; this device's own is also
@@ -1988,7 +2196,16 @@ impl Plugins {
                     if own.as_deref() == Some(revoke.as_str()) {
                         self.retire_signing_key().await;
                     } else {
+                        // Whose device it's on, to tell it at once.
+                        let device = directory
+                            .keys_since(0)
+                            .await
+                            .ok()
+                            .and_then(|(rows, _)| rows.into_iter().find(|r| r.key == revoke).map(|r| r.device_id));
                         directory.revoke(&revoke).await.map_err(|_| failed("Couldn't revoke it: the edge can't be reached"))?;
+                        if let Some(device) = device.filter(|d| !d.is_empty() && *d != self.inner.device_id) {
+                            self.tell_key_revoked(device);
+                        }
                     }
                     lock(&self.inner.new_keys).retain(|row| row.key != revoke);
                     // Plugins it signed are checked again: no longer verified.

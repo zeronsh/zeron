@@ -523,8 +523,12 @@ pub fn set_watermark(data_dir: &Path, account: &str, at: i64) {
     let _ = crate::runner::write_private_atomic(&data_dir.join(WATERMARK_FILE), &bytes);
 }
 
+/// How far back the first look reaches (no watermark yet: a new engine, or
+/// a new account here): keys added in the last day are still news.
+pub const FIRST_LOOK_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// The keys added on the account's other devices since this device last
-/// looked (none the first time: that only sets where to look from).
+/// looked (the first time, in the last day).
 pub async fn new_keys_elsewhere(
     data_dir: &Path,
     directory: &dyn KeyDirectory,
@@ -533,13 +537,11 @@ pub async fn new_keys_elsewhere(
 ) -> Result<Vec<KeyRow>, String> {
     let since = watermark(data_dir, account);
     let (rows, now) = directory.keys_since(since.unwrap_or(0)).await?;
-    let fresh = match since {
-        None => Vec::new(),
-        Some(since) => rows
-            .into_iter()
-            .filter(|r| r.device_id != device_id && r.created_at > since && r.revoked_at.is_none())
-            .collect(),
-    };
+    let since = since.unwrap_or_else(|| now.max(chrono::Utc::now().timestamp_millis()) - FIRST_LOOK_MS);
+    let fresh = rows
+        .into_iter()
+        .filter(|r| r.device_id != device_id && r.created_at > since && r.revoked_at.is_none())
+        .collect();
     if now > 0 {
         set_watermark(data_dir, account, now);
     }

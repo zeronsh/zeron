@@ -479,3 +479,147 @@ async fn r13_a_key_revoked_elsewhere_stops_counting_within_the_ttl() {
     assert_eq!((now["status"].as_str(), now["author"]["kind"].as_str()), (Some("tampered"), Some("unknown")), "{now}");
     assert!(now.get("snapshot").is_none());
 }
+
+// ── Staging pass (Nov 3): registration, start-up checks, own key revoked ──
+
+/// A sign-in's ticket is gone once the app restarts the engine: the key is
+/// registered with it while the sign-in isn't announced yet (`account()`
+/// still says nobody), and a signing needing it registers again.
+#[tokio::test]
+async fn r13_the_key_registers_with_a_fresh_ticket_before_sign_in_is_announced() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    f.plugins.set_directory(fake.clone());
+    f.plugins.set_account(|| None);
+    *lock(&f.plugins.inner.step_up) = Some(Arc::new(|| Some("ticket-1".to_string())));
+    f.plugins.register_key_as("user-1").await;
+    let key = signing::load_key(&f.data).unwrap().public();
+    assert_eq!(fake.registered.lock().unwrap().clone(), vec![key.clone()]);
+    assert_eq!(fake.step_ups.lock().unwrap().clone(), vec![Some("ticket-1".to_string())]);
+    assert!(keys::Registration::load(&f.data).covers(&key, "user-1"));
+}
+
+/// Keys added on other devices were found only on a sign-in change, never
+/// at start; the very first look also found nothing by design.
+#[tokio::test]
+async fn r13_new_keys_on_other_devices_are_noticed_at_start() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    f.plugins.set_directory(fake.clone());
+    f.plugins.set_account(|| Some("user-1".into()));
+    let notices: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = notices.clone();
+    f.plugins.set_notifier(move |_, _, body, _| {
+        seen.lock().unwrap().push(body.to_owned());
+        "posted".into()
+    });
+    let now = chrono::Utc::now().timestamp_millis();
+    fake.now.store(now, Ordering::SeqCst);
+    fake.rows.lock().unwrap().push(keys::KeyRow {
+        key: "B-KEY".into(), fingerprint: "abcd".into(), device_id: "dev-2".into(), created_at: now - 60_000, revoked_at: None,
+    });
+    f.plugins.start();
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reply = call(&f.plugins, methods::PLUGIN_SIGNING_KEY, serde_json::json!({})).await.unwrap();
+            if reply["new_keys"].as_array().is_some_and(|k| !k.is_empty()) {
+                return reply;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("noticed at start");
+    assert_eq!(found["new_keys"][0]["key"], "B-KEY");
+    assert!(notices.lock().unwrap().iter().any(|n| n.contains("A new signing key was added")));
+    f.plugins.shutdown();
+}
+
+/// After this device's key was revoked from another device, it kept
+/// `registered: true` and its plugins kept verifying as yours; a running
+/// engine only noticed at its next start, and said so in a log line alone.
+#[tokio::test]
+async fn r13_this_devices_key_revoked_elsewhere_stops_being_yours() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    f.plugins.set_directory(fake.clone());
+    f.plugins.set_account(|| Some("user-1".into()));
+    let banners: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = banners.clone();
+    f.plugins.set_notifier(move |_, _, body, _| {
+        seen.lock().unwrap().push(body.to_owned());
+        "posted".into()
+    });
+    shim::register(&f.plugins).await;
+    let old = signing::load_key(&f.data).unwrap();
+    fake.keys.lock().unwrap().insert(old.public(), shim::found(Some("me"), true));
+    // Your own plugin running a program, allowed; and a package signed
+    // here, installed.
+    call(&f.plugins, methods::NEW_PLUGIN, serde_json::json!({ "id": "mine", "name": "Mine", "permissions": ["ui.add"] })).await.unwrap();
+    let dir = f.plugins.plugins_dir().join("mine");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+    manifest["permissions"] = serde_json::json!(["ui.add", "commands"]);
+    manifest["commands"] = serde_json::json!(["git"]);
+    std::fs::write(dir.join(MANIFEST_FILE), signing::pretty(&manifest)).unwrap();
+    f.plugins.auto_resign("mine");
+    assert_eq!(allow(&f.plugins, "mine").await["status"], "on");
+    install(&f, "signed.zeron-plugin", &package(&old, "signed", "1.0.0", serde_json::json!({ "permissions": ["ui.add"] }))).await.unwrap();
+    assert_eq!(item(&f.plugins, "signed").await["author"]["kind"], "you");
+    // Still live: a peer's word changes nothing.
+    call(&f.plugins, methods::CHECK_PLUGIN_KEY, serde_json::json!({})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(signing::load_key(&f.data).unwrap().public(), old.public());
+
+    // Revoked from another device, which tells this one (`CheckPluginKey`).
+    fake.keys.lock().unwrap().insert(old.public(), Lookup::Found { username: Some("me".into()), mine: true, revoked: true, verified: Some(false) });
+    *lock(&f.plugins.inner.own_key_checked) = None;
+    call(&f.plugins, methods::CHECK_PLUGIN_KEY, serde_json::json!({})).await.unwrap();
+    let new = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(key) = signing::load_key(&f.data).map(|k| k.public()).filter(|k| *k != old.public()) {
+                return key;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("rotated at once");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let status = call(&f.plugins, methods::PLUGIN_SIGNING_KEY, serde_json::json!({})).await.unwrap();
+    assert_eq!(status["key"], new);
+    let signed = item(&f.plugins, "signed").await;
+    assert_ne!(signed["author"]["kind"], "you", "{signed}");
+    assert_eq!(signed["status"], "tampered");
+    // Its code-running powers ask again; what stays in its sandbox is kept.
+    let mine = item(&f.plugins, "mine").await;
+    assert_eq!(mine["status"], "pending", "{mine}");
+    assert_eq!(mine["allowed"], serde_json::json!(["ui.add"]));
+    assert_eq!(mine["ask"], serde_json::json!(["commands"]));
+    assert_eq!(scan::inspect(&dir, true).sig, SigCheck::Valid(new.clone()), "re-signed with the new key");
+    // Said by the host (the list the app draws its strip from) and as a banner.
+    let list = call(&f.plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+    let notice = list["key_notices"].as_array().unwrap().iter().find(|n| n["kind"] == "own_key_revoked").cloned().expect("a host notice");
+    assert!(notice["words"].as_str().unwrap().contains("signing key was revoked from another device"));
+    assert!(banners.lock().unwrap().iter().any(|n| n.contains("signing key was revoked from another device")));
+    // Not registered with the new key when the edge wants a fresh sign-in.
+    fake.register_answers.lock().unwrap().push(Err(keys::RegisterError::StepUp));
+    let _ = std::fs::remove_file(f.data.join(keys::REGISTRATION_FILE));
+    shim::register(&f.plugins).await;
+    let status = call(&f.plugins, methods::PLUGIN_SIGNING_KEY, serde_json::json!({})).await.unwrap();
+    assert_eq!(status["registered"], false);
+}
+
+/// Revoking another device's key from Settings tells that device at once.
+#[tokio::test]
+async fn r13_revoking_a_devices_key_tells_that_device() {
+    let f = fixture();
+    let fake = Arc::new(FakeDirectory::default());
+    f.plugins.set_directory(fake.clone());
+    f.plugins.set_account(|| Some("user-1".into()));
+    fake.rows.lock().unwrap().push(keys::KeyRow {
+        key: "B-KEY".into(), fingerprint: "bbbb".into(), device_id: "dev-2".into(), created_at: 1, revoked_at: None,
+    });
+    // No device links here: the word can't go, the revoke still happens.
+    call(&f.plugins, methods::PLUGIN_SIGNING_KEY, serde_json::json!({ "revoke": "B-KEY" })).await.unwrap();
+    assert_eq!(shim::revoked(&fake), vec!["B-KEY".to_string()]);
+}

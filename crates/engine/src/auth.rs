@@ -329,10 +329,21 @@ struct AuthInner {
     /// ([`Auth::start_step_up`]): their exchange keeps the ticket and
     /// nothing else.
     step_up_states: Mutex<std::collections::HashSet<String>>,
+    /// [`Auth::on_fresh_ticket`].
+    fresh_ticket: Mutex<Option<FreshTicketHook>>,
 }
 
 /// The longest a step-up ticket is kept.
 const STEP_UP_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long a sign-in waits on what must happen while its ticket is fresh
+/// ([`Auth::on_fresh_ticket`]) before it's announced anyway.
+const FRESH_TICKET_WAIT: Duration = Duration::from_secs(8);
+
+/// What runs when an interactive sign-in (or step-up) brings a fresh ticket,
+/// given the signed-in user's id: before a sign-in is announced, so before
+/// the app restarts the engine and the in-memory ticket is gone.
+pub type FreshTicketHook =
+    Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Why [`Auth::delete_account`] didn't.
 #[derive(Debug)]
@@ -474,6 +485,7 @@ impl Auth {
                 runner_rejected: std::sync::atomic::AtomicBool::new(false),
                 step_up: Mutex::new(None),
                 step_up_states: Mutex::new(std::collections::HashSet::new()),
+                fresh_ticket: Mutex::new(None),
             }),
         }
     }
@@ -523,6 +535,11 @@ impl Auth {
             }
         }
         Self::new(config)
+    }
+
+    /// The edge this auth signs in against.
+    pub fn edge_url(&self) -> &str {
+        &self.inner.config.edge_url
     }
 
     pub fn workos_enabled(&self) -> bool {
@@ -733,7 +750,23 @@ impl Auth {
             ));
         };
         let result = self.exchange_code(code).await?;
-        self.finish_exchange(state, result, generation)
+        self.finish_exchange(state, result, generation).await
+    }
+
+    /// What must run while a sign-in's step-up ticket is fresh (registering
+    /// this device's plugin signing key): awaited, briefly, before the
+    /// sign-in is announced, and again on each step-up.
+    pub fn on_fresh_ticket(&self, hook: FreshTicketHook) {
+        *lock(&self.inner.fresh_ticket) = Some(hook);
+    }
+
+    async fn run_fresh_ticket(&self, user_id: String) {
+        let hook = lock(&self.inner.fresh_ticket).clone();
+        if let Some(hook) = hook
+            && tokio::time::timeout(FRESH_TICKET_WAIT, hook(user_id)).await.is_err()
+        {
+            tracing::warn!("auth: what a fresh sign-in runs took too long; signing in anyway");
+        }
     }
 
     /// The step-up ticket of the last interactive sign-in, while it's
@@ -812,15 +845,23 @@ impl Auth {
 
     /// A code exchanged: a step-up keeps its ticket if it's the account
     /// signed in now (and changes nothing else); a sign-in signs in.
-    fn finish_exchange(&self, state: &str, result: SignInResult, generation: u64) -> Result<(), EngineError> {
+    async fn finish_exchange(&self, state: &str, result: SignInResult, generation: u64) -> Result<(), EngineError> {
         if lock(&self.inner.step_up_states).remove(state) {
             if self.user_id().as_deref() != Some(result.user.id.as_str()) {
                 return Err(EngineError::Other("That was another account: sign in as the one using Zeron here".into()));
             }
+            let fresh = result.step_up.is_some();
             self.keep_step_up(result.step_up);
+            if fresh {
+                self.run_fresh_ticket(result.user.id).await;
+            }
             return Ok(());
         }
-        self.finish_sign_in(result, generation)
+        let (user, org_id) = self.commit_sign_in(result, generation)?;
+        // While the ticket is in this process: the app restarts the engine
+        // as soon as the sign-in is announced.
+        self.run_fresh_ticket(user.id.clone()).await;
+        self.announce_sign_in(user, org_id, generation)
     }
 
     fn keep_step_up(&self, step_up: Option<(String, Duration)>) {
@@ -1045,7 +1086,8 @@ impl Auth {
         })
     }
 
-    fn finish_sign_in(&self, result: SignInResult, generation: u64) -> Result<(), EngineError> {
+    /// Keep a sign-in's credentials (not yet announced): its user and org.
+    fn commit_sign_in(&self, result: SignInResult, generation: u64) -> Result<(AuthUser, Option<String>), EngineError> {
         // Serialize the final commit with sign-out. A callback can consume its
         // OAuth state and spend time exchanging the code; if cancellation wins
         // during that await, its old generation must never restore credentials.
@@ -1066,11 +1108,22 @@ impl Auth {
         self.persist(Some(&session));
         *lock(&self.inner.stored) = Some(session);
         self.retry_refresh();
-        tracing::info!(email = %result.user.email, org = org_id.as_deref().unwrap_or("<none>"),
+        Ok((result.user, org_id))
+    }
+
+    /// Say a committed sign-in is in, unless a sign-out came first.
+    fn announce_sign_in(&self, user: AuthUser, org_id: Option<String>, generation: u64) -> Result<(), EngineError> {
+        let sign_in = lock(&self.inner.sign_in);
+        if sign_in.generation != generation {
+            return Err(EngineError::Other(
+                "sign-in was canceled — start again from Zeron".into(),
+            ));
+        }
+        tracing::info!(email = %user.email, org = org_id.as_deref().unwrap_or("<none>"),
             "auth: signed in");
         self.inner
             .state_tx
-            .send_replace(state_for(result.user, org_id));
+            .send_replace(state_for(user, org_id));
         self.inner
             .token_tx
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
@@ -1554,6 +1607,27 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
     }
 }
 
+/// The session's bearer, whether or not the sign-in is announced yet
+/// ([`Auth::session_bearer`]).
+struct SessionBearer(Auth);
+
+#[async_trait::async_trait]
+impl zeron_rpc::TokenSource for SessionBearer {
+    async fn token(&self) -> Result<String, TokenError> {
+        self.0.access_token().await
+    }
+}
+
+impl Auth {
+    /// A token source for what runs while a sign-in's ticket is fresh
+    /// ([`Auth::on_fresh_ticket`]): the session's bearer, already there
+    /// though the sign-in isn't announced yet (the plain source says signed
+    /// out until it is).
+    pub fn session_bearer(&self) -> Arc<dyn zeron_rpc::TokenSource> {
+        Arc::new(SessionBearer(self.clone()))
+    }
+}
+
 /// The relay/room token seam: `Auth` IS a [`zeron_rpc::TokenSource`], so the host relay
 /// and link cache always dial with a fresh bearer after refreshes.
 #[async_trait::async_trait]
@@ -1631,7 +1705,7 @@ async fn handle_loopback_conn(
         match (code, state) {
             (Some(code), Some(state)) => match auth.take_pending(state) {
                 Some(generation) => match auth.exchange_code(code).await {
-                    Ok(result) => match auth.finish_exchange(state, result, generation) {
+                    Ok(result) => match auth.finish_exchange(state, result, generation).await {
                         Ok(()) => (
                             "200 OK",
                             page("Signed in. You can close this tab and return to Zeron."),

@@ -734,7 +734,7 @@ fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bo
         looks_up.set(Value::from(found.as_ref().is_some_and(|p| p.0.looks_up())));
         *platform.borrow_mut() = found;
         match chrome {
-            Some(chrome) => zgx::compose::column().child(chrome).child(zgx::style::Styled::grow(view)),
+            Some(chrome) => plugins::host_bar::compose(chrome, view),
             None => view,
         }
     }));

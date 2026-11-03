@@ -3761,3 +3761,42 @@ fn every_list_row_hovers_by_the_design_system_s_one_recipe() {
         assert!(src.contains("Surface {") && src.contains("depth = \"flat\""), "{file}'s rows aren't the flat Surface");
     }
 }
+
+/// Settings, sealed from plugins (`#shell-settings`, `hook = false`), lays
+/// its pages out at their full width with plugins loaded, its rows
+/// clickable, whether plugins load before Settings opens or while it's
+/// open (the window reloads with them, as the bridge's do).
+#[test]
+fn settings_pages_lay_out_at_full_width_with_plugins_loaded() {
+    let items = vec![builtin("parallax-scenes"), builtin("git"), builtin("github")];
+    for late in [false, true] {
+        let mut app = shell(if late { vec![] } else { items.clone() });
+        assert_eq!(app.error(), None);
+        app.host.run_command("shell.settings");
+        app.frames(30);
+        if late {
+            // (One of them, its own actions answered: the others' services
+            // aren't played here.)
+            let items = &items[..1];
+            for item in items {
+                expose_own(&app.host, item.id());
+                for name in ["result", "ack", "menus", "toast", "problem", "open_tab", "add_page", "github_watch", "open_url", "setting_status", "cost"] {
+                    app.host.action(format!("plugin.{}.{name}", item.id()), |_| {});
+                }
+            }
+            app.host.set_plugins(items.iter().filter_map(Item::plugin).collect());
+            app.host.reload().unwrap();
+            app.frames(30);
+        }
+        let page = app.bounds("settings-page");
+        assert!(page.width > 400., "late={late}: the page's width: {page:?}\n{}", app.tree());
+        assert!(app.bounds("settings-nav").width > 100., "late={late}: {:?}", app.bounds("settings-nav"));
+        app.click("#settings-nav >> role:tab \"Appearance\"");
+        app.frames(20);
+        let row = app.bounds("setting-scheme");
+        assert!(row.width > 400., "late={late}: a page's row: {row:?}\n{}", app.tree());
+        app.click("#setting-scheme >> role:radio \"Dark\"");
+        app.frames(10);
+        assert_eq!(app.error(), None);
+    }
+}

@@ -3179,7 +3179,9 @@
       "remove_body_device": "It stops everywhere in Zeron on {device} at once. Its folder goes to the removed items in that computer's plugins folder, in case you want it back.",
       "install_dialog_title_device": "Install a plugin on {device}",
       "install_dialog_body_device": "Paste a link to a .zeron-plugin file, a GitHub release or a repository. Zeron checks who signed it, and you allow what it asks before it runs there.",
-      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins."
+      "file_here_only": "A plugin file installs only on the computer it's on. To install one from a file, show this Mac's plugins.",
+      "setup_title": "Finish setting up your account",
+      "setup_body": "Your plugins load as soon as you've chosen where you work."
     },
     "consent": {
       "made_by_you": "Made by you",
