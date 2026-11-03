@@ -987,6 +987,7 @@ fn hang_run(
                             is_error: true,
                             output: Some("Exit code 137\n\n[killed]".into()),
                             diff: None,
+                            exit_code: Some(137),
                         });
                         let _ = tx.send(AgentEvent::TextDelta {
                             text: "The server was stopped; I'll go on without it.\n\n".into(),
@@ -1006,6 +1007,7 @@ fn hang_run(
                             is_error: true,
                             output: Some("[Request interrupted by user for tool use]".into()),
                             diff: None,
+                            exit_code: None,
                         });
                         let _ = tx.send(AgentEvent::TextDelta {
                             text: "The scout was stopped; I'll read the logs myself.\n\n".into(),
