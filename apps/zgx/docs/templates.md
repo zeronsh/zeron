@@ -2,13 +2,22 @@
 
 A template is a whole interface for Zeron, like a WordPress theme. It's a folder holding any part of Zeron's own Luau app: `app.luau`, `screens/`, `ds/`, `assets/`. Zeron runs its window from its own app with your template laid over it, so any file you leave out is Zeron's own. One template is in use at a time. Colours are separate: the person picks a theme, and it's worn over whichever template runs (see Colours and themes). Agents make and change templates through Zeron's MCP tools; this guide is the whole reference.
 
+## Zeron's templates
+
+Two come with Zeron, listed first on the Templates page, by Zeron:
+
+- **Zeron v3** (id `zeron`), the default. The chat and its panel are rounded cards set into the window under the title bar, and chats can sit side by side: drag one from the sidebar (or a pane's head) to a chat's edge, up to 6 (`screens/shell/split.luau`).
+- **Zeron v2** (id `zeron-v2`), the single-page layout from before Zeron v3: one chat at a time, no cards. It's a template like yours, laying 8 files over the default (`ui/templates/zeron-v2/` in Zeron's source). Zeron installs it and updates it with each version, and it can't be deleted.
+
+To make one from either, `create_template` with `from` set to its id.
+
 ## How it runs
 
 - The window runs from `<data>/templates/.live/`: Zeron's own files (`.zeron/`) with the template in use on top.
 - Saving a file rewrites only what changed, and the window reloads **in place**. State is kept wherever both versions have the module.
 - **Fallback, per file:** a file that fails (to load, to build, or later) is replaced by Zeron's own copy of that file alone. You get one notice, and `template_status` names it with its error. Save it again to retry.
 - **Fallback, whole:** if your `app.luau` fails, the whole window goes back to Zeron's own and the template shows as broken.
-- **The way back from any template:** View → Use Zeron's Template (in the menu bar, or the bar Zeron draws at the window's top on Linux and Windows), Revert on a preview's bar, holding ⌥ as Zeron opens, or launching it with `--zeron-template`. Each starts **safe mode**: Zeron's own interface runs whatever `.active` says, the terminals templates opened are closed, and it stays so across launches until the person picks a template on Zeron's Templates page. A template that crashes Zeron at launch twice in a row starts it too.
+- **The way back from any template:** View → Use Zeron v3 (in the menu bar, or the bar Zeron draws at the window's top on Linux and Windows), Revert on a preview's bar, holding ⌥ as Zeron opens, or launching it with `--zeron-template`. Each starts **safe mode**: Zeron's own interface runs whatever `.active` says, the terminals templates opened are closed, and it stays so across launches until the person picks a template on Zeron's Templates page. A template that crashes Zeron at launch twice in a row starts it too.
 
 ## Preview until the person keeps it
 
@@ -30,8 +39,9 @@ zeron-template.json    id, name, description, author, version, zeron_version
 theme.luau             your template's own theme, as data (see Colours and themes)
 app.luau               the root: the window, built from the rest
 screens/shell/         the window: init.luau (its frame), sidebar.luau, title_bar.luau,
-                       page.luau (the routed page), settings.luau (Settings' list),
-                       route.luau (where it is), appearance.luau
+                       page.luau (the routed page, its cards and split chats),
+                       split.luau (which chats sit side by side), settings.luau
+                       (Settings' list), route.luau (where it is), appearance.luau
 screens/chat/          a chat: home.luau (a new chat), session.luau, composer.luau, store.luau
 screens/files/         the files pane
 screens/panel/         the side panel (terminals, tabs)

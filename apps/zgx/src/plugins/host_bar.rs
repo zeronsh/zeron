@@ -7,7 +7,7 @@
 //! - a notice when the template changed without you choosing it here (an
 //!   agent's `use_template`, an update, a file written by hand);
 //! - on Linux and Windows, which have no system menu bar, the app's menu
-//!   bar (zgx's `app_menu_bar`): View → Use Zeron's Template is always in
+//!   bar (zgx's `app_menu_bar`): View → Use Zeron v3 is always in
 //!   it, the host's own item.
 //!
 //! It sits above the scripts' view in the window's own layout. (A script's
@@ -89,7 +89,7 @@ fn strip(runtime: &zgx::reactive::Runtime) -> View {
                         .gap(10.)
                         .bg(Color(0x1f, 0x2a, 0x44, 0xff))
                         .child(text(words).text_color(Color(0xe8, 0xee, 0xff, 0xff)).grow())
-                        .child(button().child("Use Zeron's Template").on_click(|| super::host_command(super::USE_ZERON_TEMPLATE))),
+                        .child(button().child("Use Zeron v3").on_click(|| super::host_command(super::USE_ZERON_TEMPLATE))),
                 );
             }
             out

@@ -45,11 +45,12 @@ pub const ZERON_VERSION: &str = env!("ZERON_VERSION");
 pub const NEVER_TEMPLATED: &[&str] = &["screens/plugins/", "screens/templates/", "account/", ".luaurc"];
 
 /// What of `ui/` isn't the main window's interface: the gallery and its
-/// demos, tests and their fixtures, the intro, and the consent windows (each
-/// its own host, always Zeron's own).
+/// demos, tests and their fixtures, the intro, the consent windows (each
+/// its own host, always Zeron's own), and the official templates' files
+/// (`official`: each installed as a template of its own).
 fn not_the_app(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or(rel);
-    matches!(first, "demos" | "tests" | ".zgx")
+    matches!(first, "demos" | "tests" | ".zgx") || super::official::source_file(rel)
         || matches!(rel, "gallery.luau" | "intro.luau" | "consent.luau" | "template_consent.luau")
         || (!rel.contains('/') && rel.ends_with("_fixture.luau"))
 }
@@ -153,8 +154,9 @@ pub fn mirror(to: &Path, want: &BTreeMap<String, PathBuf>, keep: impl Fn(&str) -
 }
 
 /// `.zeron`, as `ui/` has it now: the app's files, their hashes, the catalog
-/// of screens (what each draws, the hooks it declares) and Zeron's manifest.
-/// How many files changed.
+/// of screens (what each draws, the hooks it declares) and Zeron's manifest;
+/// and the official templates beside it, as this build ships them
+/// (`official::install`). How many of `.zeron`'s files changed.
 pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
     let dir = templates.join(ZERON);
     let want = files(ui, |rel| !not_the_app(rel));
@@ -170,13 +172,14 @@ pub fn sync_zeron(ui: &Path, templates: &Path) -> std::io::Result<usize> {
         &dir.join("zeron-template.json"),
         &json(serde_json::json!({
             "id": BUILTIN,
-            "name": "Zeron",
-            "description": "The default interface.",
+            "name": super::official::DEFAULT_NAME,
+            "description": super::official::DEFAULT_DESCRIPTION,
             "author": "Zeron",
             "version": ZERON_VERSION,
             "zeron_version": ZERON_VERSION,
         })),
     )?;
+    super::official::install(ui, templates);
     Ok(changed)
 }
 
@@ -313,10 +316,15 @@ pub fn template_stamp(dir: &Path) -> String {
     stamp(dir, |_| true)
 }
 
-/// `ui/`'s app files as they stand: unchanged, `.zeron` needn't be copied
-/// again.
+/// `ui/`'s app files (and the official templates') as they stand:
+/// unchanged, `.zeron` needn't be copied again.
 pub fn ui_stamp(ui: &Path) -> String {
-    stamp(ui, |rel| !not_the_app(rel))
+    stamp(ui, synced)
+}
+
+/// What of `ui/` a sync copies: the app's files, and the official templates'.
+fn synced(rel: &str) -> bool {
+    !not_the_app(rel) || super::official::source_file(rel)
 }
 
 /// What a look found, off the UI thread: `.zeron` brought up to date (only
@@ -336,7 +344,9 @@ pub struct Survey {
 
 pub fn survey(ui: &Path, templates: &Path, last_ui_stamp: Option<&str>) -> Survey {
     let ui_stamp = ui_stamp(ui);
-    let current = last_ui_stamp == Some(ui_stamp.as_str()) && templates.join(ZERON).join(".hashes.json").is_file();
+    // (An official template gone, deleted by hand: put back, as `.zeron` is.)
+    let current =
+        last_ui_stamp == Some(ui_stamp.as_str()) && templates.join(ZERON).join(".hashes.json").is_file() && !super::official::missing(ui, templates);
     let synced = if current { Ok(0) } else { sync_zeron(ui, templates).map_err(|e| e.to_string()) };
     let id = active(templates);
     let (template_stamp, files_) = if id == BUILTIN {
@@ -374,8 +384,8 @@ pub fn watched(templates: &Path, ui: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut dirs = vec![templates.to_path_buf()];
     let id = active(templates);
     let edited_in_place = |rel: &str| rel.ends_with(".luau") || rel.ends_with(".json") || rel == ".luaurc";
-    files_.extend(files(ui, |rel| !not_the_app(rel) && edited_in_place(rel)).into_values());
-    folders(ui, &mut dirs, |rel| !not_the_app(rel));
+    files_.extend(files(ui, |rel| synced(rel) && edited_in_place(rel)).into_values());
+    folders(ui, &mut dirs, synced);
     if id != BUILTIN {
         let dir = templates.join(&id);
         files_.extend(files(&dir, |_| true).into_values());
@@ -423,6 +433,9 @@ pub struct Installed {
     /// Installed from someone's signed package: `.imported.json`'s
     /// `{key, author}` (the engine's `template_packages`).
     pub imported: Option<serde_json::Value>,
+    /// One of Zeron's official templates, exactly as this build wrote it
+    /// (`official::verified`): built in, as the default is.
+    pub official: Option<super::official::Official>,
 }
 
 /// Whether a template made for Zeron `made_for` is out of date in Zeron
@@ -439,7 +452,8 @@ fn read_json(path: &Path) -> serde_json::Value {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-/// Zeron's own first, then every template, by name.
+/// The default first, then the official templates in Zeron's order, then
+/// every other template, by name.
 pub fn installed(templates: &Path) -> Vec<Installed> {
     let zeron = read_json(&templates.join(ZERON).join("zeron-template.json"));
     let now = zeron["zeron_version"].as_str().unwrap_or("").to_string();
@@ -461,6 +475,7 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             imported: (id != BUILTIN)
                 .then(|| read_json(&dir.join(".imported.json")))
                 .filter(|v| v["key"].is_string()),
+            official: (id != BUILTIN).then(|| super::official::verified(dir)).flatten(),
         })
     };
     let mut out: Vec<Installed> = manifest(&templates.join(ZERON), BUILTIN).into_iter().collect();
@@ -474,7 +489,7 @@ pub fn installed(templates: &Path) -> Vec<Installed> {
             (!id.starts_with('.') && id != BUILTIN && plain(&id)).then(|| manifest(&e.path(), &id)).flatten()
         })
         .collect();
-    rest.sort_by_key(|t| t.name.to_lowercase());
+    rest.sort_by_key(|t| (super::official::order(&t.id, t.official), t.name.to_lowercase()));
     out.extend(rest);
     out
 }
