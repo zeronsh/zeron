@@ -156,6 +156,11 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
             ("waiting", Value::from(self.waiting)),
+            // (This device's own copy: its pictures are the files it was
+            // sent from, here, which the chat's device never had. The
+            // chat's copy, once it comes, is marked `waiting` too until
+            // its reply begins, so that can't tell them apart.)
+            ("here", Value::Bool(true)),
             ("at", self.at.as_deref().map_or(Value::Nil, Value::from)),
             ("copy", copy_value(&words)),
         ])
