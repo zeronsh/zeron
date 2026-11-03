@@ -50,7 +50,7 @@ pub mod diff_sync;
 pub mod doc_host;
 mod fs_watch;
 pub mod harness_updates;
-pub(crate) mod home_index;
+pub(crate) mod names_index;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
