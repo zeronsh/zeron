@@ -18,8 +18,11 @@
 --
 -- What a lane is, and how one opens:
 --   lanes.side(id)        a session's side chats (sessions.children), newest first
---   lanes.subagents()     the open chat's subagents, from its transcript's
---                         spawn chips ({ ref, title, status?, at? }), in order
+--   lanes.subagents()     the open chat's subagents: its transcript's spawns
+--                         ({ ref, call, title, status?, at? }), in order, then
+--                         the chats its agent made as subagents through
+--                         Zeron ({ ref, chat = true, title, status, at,
+--                         agent? }: src/sessions.rs `subagent_chats`)
 --   lanes.view(slot)      a lane's chat as the host watches it beside the open
 --                         one (src/chat.rs `chat.open_lane`): { session,
 --                         messages, draft } states; `lanes.watch(slot, id)`
@@ -85,10 +88,19 @@ function M.side(id: string?): { sessions.Child }
 	return sessions.children(id)
 end
 
--- A transcript's subagents: each spawn chip that names its doc, once, in
--- the order they were spawned, with when their turn began.
+-- A transcript's subagents: each spawn that names its doc, once, in the
+-- order they were spawned, with when their turn began. (A reply carries
+-- its spawns as `subagents`; a tool row naming one is an older host's.)
 function M.subagents_of(messages: { any }): { any }
 	local out, seen = {}, {}
+	local function spawns(list: { any }?, at: number?)
+		for _, sub in list or {} do
+			if sub.ref and not seen[sub.ref] then
+				seen[sub.ref] = true
+				table.insert(out, { ref = sub.ref, call = sub.id, title = sub.title or locale.s("chat.lanes.subagent"), status = sub.status, at = at })
+			end
+		end
+	end
 	local function walk(tools: { any }?, at: number?)
 		for _, t in tools or {} do
 			local sub = t.subagent
@@ -106,14 +118,37 @@ function M.subagents_of(messages: { any }): { any }
 		end
 	end
 	for _, m in messages do
+		spawns(m.subagents, m.started)
 		walk(m.tools, m.started)
 		blocks(m.blocks, m.started)
 	end
 	return out
 end
 
+-- The chats `id`'s agent made as its subagents, as its lanes list them: a
+-- chat's state as a subagent's (working, waiting on you: running).
+function M.chat_subagents(id: string?): { any }
+	local out = {}
+	for _, c in sessions.subagent_chats(id) do
+		local st = c.status
+		local status = if st == "working" or st == "input" or st == "approval" then "running" elseif st == "failed" then "failed" else "done"
+		table.insert(out, { ref = c.id, chat = true, title = c.title, status = status, at = c.created, agent = c.agent })
+	end
+	return out
+end
+
 local subagents = ui.computed(function(): { any }
-	return M.subagents_of(store.messages:get())
+	local list = M.subagents_of(store.messages:get())
+	local s = store.session:get()
+	local chats = M.chat_subagents(if s then s.id else nil)
+	if #chats == 0 then
+		return list
+	end
+	local out = table.clone(list)
+	for _, c in chats do
+		table.insert(out, c)
+	end
+	return out
 end)
 
 function M.subagents(): { any }
@@ -168,9 +203,19 @@ function M.open(session: string, lane: { kind: string, id: string, title: string
 	end
 end
 
+-- A chat its agent made as a subagent, in a lane: its transcript, watched
+-- live (a chat of its own has no upload to read first).
+function M.open_chat_subagent(session: string, id: string, title: string?)
+	M.open(session, { kind = "subagent", id = id, title = title or locale.s("chat.lanes.subagent"), data = { frozen = false, parent = session } })
+end
+
 -- A subagent's tab: a finished one (done or failed) is read from its
 -- upload first.
 function M.open_subagent(session: string, sub: any)
+	if sub.chat then
+		M.open_chat_subagent(session, sub.ref, sub.title)
+		return
+	end
 	local frozen = sub.status == "done" or sub.status == "failed"
 	M.open(session, { kind = "subagent", id = sub.ref, title = sub.title or locale.s("chat.lanes.subagent"), data = { frozen = frozen, parent = session } })
 end

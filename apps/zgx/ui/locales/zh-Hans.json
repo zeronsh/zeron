@@ -1052,6 +1052,19 @@
       "cut": "剪切",
       "paste": "粘贴",
       "label": "文本"
+    },
+    "subagents": {
+      "count": "{n, plural, other {# 个子代理}}",
+      "working_n": "{n} 个运行中",
+      "done": "已完成",
+      "working": "运行中",
+      "finished": "已完成",
+      "failed": "失败",
+      "stop": "停止",
+      "stop_named": "停止 {title}",
+      "stopping": "正在停止",
+      "open": "打开",
+      "open_named": "打开 {title}"
     }
   },
   "settings": {

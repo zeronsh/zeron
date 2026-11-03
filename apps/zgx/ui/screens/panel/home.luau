@@ -1153,7 +1153,10 @@ local function lanes(props: Props, sid: string): Node
 			-- session's turn goes on (screens/chat/store `stop_call`).
 			stoppable = M.subagent_stoppable,
 			on_stop = function(l: any)
-				if sid and l.sub and l.sub.call then
+				if sid and l.sub and l.sub.chat then
+					-- (A chat its agent made: its own turn interrupted.)
+					store.interrupt(l.sub.ref)
+				elseif sid and l.sub and l.sub.call then
 					store.stop_call(sid, l.sub.call, l.title)
 				end
 			end,
@@ -1188,7 +1191,7 @@ end
 -- known.
 function M.subagent_stoppable(l: any): boolean
 	local sub = l.sub
-	return sub ~= nil and sub.call ~= nil and sub.status == "running"
+	return sub ~= nil and (sub.call ~= nil or sub.chat == true) and sub.status == "running"
 end
 
 -- A subagent row's menu, on a secondary click: open it.

@@ -47,6 +47,7 @@ local ReplyPicture = require("@self/reply_picture")
 local Visual = require("@self/visual")
 local Wide = require("@self/wide")
 local Activity = require("@self/activity")
+local Subagents = require("@self/subagents")
 local status = require("@self/status")
 local Working = require("@self/working")
 local Mark = require("@self/mark")
@@ -75,6 +76,10 @@ export type Message = {
 	-- A reply's model, for naming who said a selection.
 	model: string?,
 	tools: { Tool }?,
+	-- The subagents it set to work (its spawns, as the host gives them:
+	-- { id, ref?, status, title, model?, type?, result? }): its block at
+	-- the top (ds/subagents), never among its tools.
+	subagents: { any }?,
 	-- Its parts in order, as Zeron lays a reply out: its text, and between
 	-- the text each run of tools as a group of its own (keyed by its first
 	-- part), open while it is the tail of a reply being written. Given,
@@ -163,6 +168,17 @@ export type Props = {
 	-- Stop one running tool of a reply being written (ds/activity's
 	-- `stop_tool`): a hung command, a subagent. Without it, none has a stop.
 	on_stop_tool: ((tool: any, settle: (stopping: boolean) -> ()) -> ())?,
+	-- A reply's subagents as its block lists them (ds/subagents' items),
+	-- read as they change: its spawns and the chats its agent made as
+	-- subagents, joined with what's known of each (screens/chat/subagents).
+	-- An item with `chat` is such a chat: the reply's rows for the Zeron
+	-- calls that made it (`zeron_spawn`) leave its tool groups. Without it,
+	-- the message's own `subagents`.
+	subagents: ((m: Message) -> { Subagents.Sub })?,
+	-- A subagent's row's Stop and Open. Without them, its spawn's call is
+	-- stopped (`on_stop_tool`) and its lane opened (`on_open_subagent`).
+	on_stop_subagent: ((sub: any, settle: (stopping: boolean) -> ()) -> ())?,
+	on_open_subagent_row: ((sub: any) -> ())?,
 }
 export type Anchor = { id: string, dy: number }
 export type TranscriptFind = {
@@ -463,6 +479,9 @@ type View = {
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
 	open_subagent: ((sub: any) -> ())?,
 	stop_tool: ((tool: any, settle: (stopping: boolean) -> ()) -> ())?,
+	subagents: ((m: Message) -> { Subagents.Sub })?,
+	stop_subagent: ((sub: any, settle: (stopping: boolean) -> ()) -> ())?,
+	open_subagent_row: ((sub: any) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
 	-- The page's room around the reading column (ds/wide), for a reply's
@@ -470,8 +489,42 @@ type View = {
 	wide: State<Wide.Room>?,
 }
 
-local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
-	local shown = ui.computed(list)
+-- A reply's blocks without the Zeron calls that made the chats its
+-- subagent block shows (`hide`): their rows leave their groups, each group
+-- taking its line without them (`summary_bare`), and a group of only them
+-- goes. (Blocks with none are the host's own, untouched.)
+local function without_spawns(list: { Block }): { Block }
+	local out: { Block } = {}
+	for _, b in list do
+		if b.kind == "tools" and (b :: any).summary_bare ~= nil then
+			local kept: { Tool } = {}
+			for _, t in b.tools or {} do
+				if not (t :: any).zeron_spawn then
+					table.insert(kept, t)
+				end
+			end
+			if #kept > 0 then
+				local copy = table.clone(b)
+				copy.tools = kept
+				copy.summary = (b :: any).summary_bare
+				table.insert(out, copy)
+			end
+		elseif b.kind == "work" and b.blocks then
+			local copy = table.clone(b)
+			copy.blocks = without_spawns(b.blocks)
+			table.insert(out, copy)
+		else
+			table.insert(out, b)
+		end
+	end
+	return out
+end
+
+local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?, hide: (() -> boolean)?): Node
+	local shown = ui.computed(function(): { Block }
+		local given = list()
+		return if hide and hide() then without_spawns(given) else given
+	end)
 	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
 		if b.kind == "tools" or b.kind == "work" then
 			return Activity {
@@ -494,7 +547,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 							pt = "$space.2",
 							blocks_of(function(): { Block }
 								return brow:get().blocks or {}
-							end, m, now, draft, view),
+							end, m, now, draft, view, hide),
 						}
 					end
 					else nil,
@@ -584,6 +637,64 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 	})
 end
 
+-- A reply's own subagents (its spawns, as the host gives them) as its
+-- block lists them: a spawn whose doc is known opens it; any stops by its
+-- call.
+local function own_subagents(m: Message): { Subagents.Sub }
+	local out: { Subagents.Sub } = {}
+	for _, s in m.subagents or {} do
+		table.insert(out, {
+			id = s.id,
+			title = s.title or locale.s("ds.activity.subagent"),
+			status = s.status or "done",
+			model = s.model,
+			step = s.type,
+			result = s.result,
+			stoppable = true,
+			openable = s.ref ~= nil,
+			ref = s.ref,
+		} :: any)
+	end
+	return out
+end
+
+-- The block at a reply's top, its subagents (`subs`), each row's Stop and
+-- Open as the view has them.
+local function subagent_block(m: Message, now: () -> Message, subs: () -> { Subagents.Sub }, view: View?): Node
+	local stop = nil :: ((sub: any, settle: (boolean) -> ()) -> ())?
+	if view and view.stop_subagent then
+		stop = view.stop_subagent
+	elseif view and view.stop_tool then
+		local stop_tool = view.stop_tool :: (any, (boolean) -> ()) -> ()
+		stop = function(sub: any, settle: (boolean) -> ())
+			stop_tool({ id = sub.id, verb = sub.title }, settle)
+		end
+	end
+	local open = nil :: ((sub: any) -> ())?
+	if view and view.open_subagent_row then
+		open = view.open_subagent_row
+	elseif view and view.open_subagent then
+		local open_lane = view.open_subagent :: (any) -> ()
+		open = function(sub: any)
+			if sub.ref then
+				open_lane({ ref = sub.ref, title = sub.title, status = sub.status })
+			end
+		end
+	end
+	return Subagents {
+		key = m.id,
+		items = subs,
+		on_stop = stop,
+		on_open = open,
+		started = function(): number?
+			return now().started
+		end,
+		worked = function(): number?
+			return now().worked
+		end,
+	}
+end
+
 local function reply(
 	m: Message,
 	row: State<Message>,
@@ -594,6 +705,22 @@ local function reply(
 ): Node
 	local function now(): Message
 		return row:get()
+	end
+	-- Its subagents, and whether any is a chat its agent made through Zeron
+	-- (whose calls then leave its tool groups).
+	local subs = ui.computed(function(): { Subagents.Sub }
+		if view and view.subagents then
+			return view.subagents(now())
+		end
+		return own_subagents(now())
+	end)
+	local function hide(): boolean
+		for _, sub in subs:get() do
+			if (sub :: any).chat then
+				return true
+			end
+		end
+		return false
 	end
 	-- Its text: the draft's while it's being written, then its own.
 	local function text(): string
@@ -614,6 +741,12 @@ local function reply(
 		provide = { message = m.id, [Wide.KEY] = if view then view.wide else nil },
 		w_full = true,
 		gap = "$space.3",
+		-- Its subagents first, where its tools' group would sit.
+		ui.show(function(): boolean
+			return #subs:get() > 0
+		end, subagent_block(m, now, function(): { Subagents.Sub }
+			return subs:get()
+		end, view)),
 		if m.blocks ~= nil
 			then blocks_of(function(): { Block }
 				local n = now()
@@ -621,7 +754,7 @@ local function reply(
 					return n.compact
 				end
 				return n.blocks or {}
-			end, m, now, draft, view)
+			end, m, now, draft, view, hide)
 			else ui.show(
 			function()
 				local tools = now().tools
@@ -1547,7 +1680,7 @@ local function Transcript(props: Props): Node
 						strip(m, state, hovered),
 						waiting_line(state, props.on_retry),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, wide = wide, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, stop_tool = props.on_stop_tool, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { view = list, offset = offset, at_end = at_end, wide = wide, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, open_subagent = props.on_open_subagent, stop_tool = props.on_stop_tool, subagents = props.subagents, stop_subagent = props.on_stop_subagent, open_subagent_row = props.on_open_subagent_row, find = find_for }),
 			},
 		}
 	end

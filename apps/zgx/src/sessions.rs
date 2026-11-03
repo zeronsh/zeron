@@ -15,8 +15,11 @@
 //!                 updated, created, harness?, agent?, model?,
 //!                 running_subagents, side_chats, working_side_chats } },
 //!     children = { [parent id] = { { id, parent, title, device, status?,
-//!                 updated, created, harness?, agent? } } } (its side chats,
-//!                 newest first),
+//!                 updated, created, harness?, agent?, kind, model?,
+//!                 preview? } } } (its side chats, newest first),
+//!     subagent_chats = { [parent id] = { … as children } } (the chats its
+//!                 agent made as subagents, `childKind: "subagent"`, in the
+//!                 order made: never among its side chats),
 //!     places = { pinned = { id }, sections = { { id, name, sessions = { id },
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
@@ -419,13 +422,22 @@ impl Sessions {
         // Side chats, under their parents (as the shipping app's lanes list
         // them): each as a row of its own, and how many there are and how
         // many work now, on the parent's row.
+        // A child an agent made as its subagent (the Zeron MCP server's
+        // `kind: "subagent"`, the row's `childKind`) is the parent's
+        // subagent instead: listed apart (`subagent_chats`), counted among
+        // its running subagents, never a side chat. A row without the kind
+        // (a person's side chat, a fork, one from before it) stays a side chat.
         let mut children: Vec<(String, Vec<Value>)> = Vec::new();
+        let mut sub_chats: Vec<(String, Vec<Value>)> = Vec::new();
         let mut working_children: HashMap<String, u32> = HashMap::new();
+        let mut working_subs: HashMap<String, u32> = HashMap::new();
         for c in all.iter().filter(|c| !archived(c)) {
             let (Some(id), Some(parent)) = (c["id"].as_str(), c["parentChatId"].as_str()) else { continue };
+            let subagent = c["childKind"].as_str() == Some("subagent");
             let status = status(c, live.get(id));
             if status.as_deref() == Some("working") {
-                *working_children.entry(parent.to_owned()).or_default() += 1;
+                let counts = if subagent { &mut working_subs } else { &mut working_children };
+                *counts.entry(parent.to_owned()).or_default() += 1;
             }
             let created = c["createdAt"].as_str().and_then(unix_seconds).unwrap_or(0);
             let updated = c["lastMessageAt"].as_str().and_then(unix_seconds).unwrap_or(created);
@@ -436,7 +448,7 @@ impl Sessions {
                 .as_str()
                 .filter(|t| !t.trim().is_empty())
                 .or(c["lastMessagePreview"].as_str().filter(|t| !t.trim().is_empty()))
-                .unwrap_or("New side chat");
+                .unwrap_or(if subagent { "Subagent" } else { "New side chat" });
             let row = Value::record([
                 ("id", Value::from(id)),
                 ("parent", Value::from(parent)),
@@ -452,16 +464,26 @@ impl Sessions {
                         "agent_icon",
                         harness.and_then(crate::agents::registry_icon).map_or(Value::Nil, |i| Value::from(i.as_str())),
                     ),
+                    ("kind", Value::from(if subagent { "subagent" } else { "side" })),
+                    ("model", opt(c["config"]["model"].as_str())),
+                    // What it said last (a subagent's row's second line).
+                    ("preview", opt(c["lastMessagePreview"].as_str().map(str::trim))),
             ]);
-            match children.iter_mut().find(|(p, _)| p == parent) {
+            let lists = if subagent { &mut sub_chats } else { &mut children };
+            match lists.iter_mut().find(|(p, _)| p == parent) {
                 Some((_, list)) => list.push(row),
-                None => children.push((parent.to_owned(), vec![row])),
+                None => lists.push((parent.to_owned(), vec![row])),
             }
         }
-        // (Newest first, as the lanes card orders them.)
+        // (Side chats newest first, as the lanes card orders them; subagents
+        // in the order they were made, as a reply's block lists them.)
         let newest = |v: &Value| v.field("updated").and_then(Value::as_f64).unwrap_or(0.);
         for (_, list) in &mut children {
             list.sort_by(|a, b| newest(b).total_cmp(&newest(a)));
+        }
+        let made = |v: &Value| v.field("created").and_then(Value::as_f64).unwrap_or(0.);
+        for (_, list) in &mut sub_chats {
+            list.sort_by(|a, b| made(a).total_cmp(&made(b)));
         }
         let side_chats = |id: &str| children.iter().find(|(p, _)| p == id).map_or(0, |(_, l)| l.len());
         // A top-level chat as scripts see it (side chats and a voice call's
@@ -504,7 +526,10 @@ impl Sessions {
                     ("harness_session", opt(c["harnessSessionId"].as_str())),
                     // Its subagents streaming now (the sidebar's pill), and
                     // its side chats: how many, how many working.
-                    ("running_subagents", Value::from(live.get(id).map_or(0, |l| l.subagents) as f64)),
+                    (
+                        "running_subagents",
+                        Value::from((live.get(id).map_or(0, |l| l.subagents) + working_subs.get(id).copied().unwrap_or(0)) as f64),
+                    ),
                     ("side_chats", Value::from(side_chats(id) as f64)),
                     ("working_side_chats", Value::from(working_children.get(id).copied().unwrap_or(0) as f64)),
                 ]))
@@ -540,6 +565,10 @@ impl Sessions {
             (
                 "children",
                 Value::record(children.iter().map(|(parent, list)| (parent.as_str(), Value::List(list.clone().into())))),
+            ),
+            (
+                "subagent_chats",
+                Value::record(sub_chats.iter().map(|(parent, list)| (parent.as_str(), Value::List(list.clone().into())))),
             ),
             ("archived", Value::List(archived.into())),
             (
@@ -1374,6 +1403,40 @@ mod tests {
         assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(2.));
         assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
         assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(2.));
+    }
+
+    #[test]
+    fn a_child_made_as_a_subagent_is_its_parent_s_subagent_not_a_side_chat() {
+        let s = with_children("2099-01-01T00:00:00Z");
+        s.chats.borrow_mut().as_array_mut().unwrap().extend([
+            serde_json::json!({ "id": "s1", "parentChatId": "p", "childKind": "subagent", "deviceId": "d",
+              "createdAt": "2026-11-01T10:09:00Z", "lastMessagePreview": "Reading the parser", "config": { "harness": "codex", "model": "gpt-5.5" } }),
+            serde_json::json!({ "id": "s0", "parentChatId": "p", "childKind": "subagent", "deviceId": "d",
+              "createdAt": "2026-11-01T10:08:30Z", "config": { "harness": "claude-code" } }),
+            // An explicit side chat, and a kind from a newer engine: side chats.
+            serde_json::json!({ "id": "x", "parentChatId": "p", "childKind": "side", "deviceId": "d", "createdAt": "2026-11-01T10:01:00Z" }),
+            serde_json::json!({ "id": "y", "parentChatId": "p", "childKind": "later", "deviceId": "d", "createdAt": "2026-11-01T10:02:00Z" }),
+        ]);
+        s.live.borrow_mut().as_array_mut().unwrap().push(
+            serde_json::json!({ "chatId": "s1", "status": "working", "updatedAt": "2099-01-01T00:00:00Z" }),
+        );
+        let v = s.value();
+        let ids = |list: &[zgx_script::Value]| -> Vec<String> { list.iter().filter_map(|c| c.field("id").map(crate::auth::text)).collect() };
+        let side = v.field("children").unwrap().field("p").unwrap().list();
+        assert_eq!(ids(side), vec!["b", "a", "y", "x"]);
+        // In the order made, with their model and what they said last.
+        let subs = v.field("subagent_chats").unwrap().field("p").unwrap().list();
+        assert_eq!(ids(subs), vec!["s0", "s1"]);
+        assert_eq!(subs[1].field("kind").map(crate::auth::text).as_deref(), Some("subagent"));
+        assert_eq!(subs[1].field("model").map(crate::auth::text).as_deref(), Some("gpt-5.5"));
+        assert_eq!(subs[1].field("preview").map(crate::auth::text).as_deref(), Some("Reading the parser"));
+        assert_eq!(subs[0].field("title").map(crate::auth::text).as_deref(), Some("Subagent"));
+        assert_eq!(side[0].field("kind").map(crate::auth::text).as_deref(), Some("side"));
+        // Counted with the harness's running subagents, not the side chats.
+        let p = chat(&v, "p");
+        assert_eq!(p.field("side_chats").and_then(|n| n.as_f64()), Some(4.));
+        assert_eq!(p.field("working_side_chats").and_then(|n| n.as_f64()), Some(1.));
+        assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(3.));
     }
 
     #[test]
