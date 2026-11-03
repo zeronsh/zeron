@@ -241,6 +241,24 @@ fn shown_command(args: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Interpreters' switches that take no value (`python -u app.py`, `node
+/// --inspect server.js`): any other flag without `=` is read as taking the
+/// argument after it.
+const SWITCHES: &[&str] = &[
+    "-u", "-B", "-O", "-OO", "-E", "-s", "-S", "-I", "-q", "-b", "-bb", "-d", "-i", "-v",
+    "--inspect", "--inspect-brk", "--watch", "--trace-warnings", "--no-warnings",
+    "--enable-source-maps", "--hot", "--smol",
+];
+
+/// A flag whose name looks like a credential's (`--token`, `--api-key`,
+/// `--password`).
+fn secret_flag(flag: &str) -> bool {
+    let name = flag.trim_start_matches('-').to_ascii_lowercase();
+    ["token", "secret", "passw", "auth", "credential", "cookie", "key"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
 /// What a listener is, in a few words (zeron_preview::discovery::
 /// process_label, its copy, for a process read here): its
 /// program, and what a runner runs (`node server.js`, `python3 -m
@@ -281,11 +299,33 @@ fn process_label(args: &[String]) -> String {
     let inline = rest
         .iter()
         .any(|a| matches!(a.as_str(), "-c" | "-e" | "--eval" | "-p" | "--print"));
-    let words = || rest.iter().filter(|a| !a.starts_with('-'));
+    // Its arguments that are no flag nor a flag's value: a flag without
+    // `=` takes the next argument (`--token abc`, `-p 3000`), unless it's
+    // an interpreter's switch known to stand alone; one whose name looks
+    // like a credential's always does.
+    let words = || {
+        let mut out: Vec<&String> = Vec::new();
+        let mut value = false;
+        for arg in rest {
+            if std::mem::take(&mut value) {
+                continue;
+            }
+            if arg == "--" {
+                continue;
+            }
+            if arg.starts_with('-') {
+                value = !arg.contains('=') && (secret_flag(arg) || !SWITCHES.contains(&arg.as_str()));
+                continue;
+            }
+            out.push(arg);
+        }
+        out.into_iter()
+    };
     let lower = program.to_ascii_lowercase();
     if lower.starts_with("python") {
         if let Some(i) = rest.iter().position(|a| a == "-m")
             && let Some(module) = rest.get(i + 1)
+            && !module.starts_with('-')
             && plain(module, "")
         {
             return format!("{program} -m {module}");
@@ -460,6 +500,8 @@ mod tests {
         assert_eq!(label(&["python", "app.py"]), "python app.py");
         assert_eq!(label(&["npm", "run", "dev"]), "npm run dev");
         assert_eq!(label(&["cargo", "test", "-p", "x"]), "cargo test");
+        assert_eq!(label(&["npx", "--token", "abc", "server"]), "npx server");
+        assert_eq!(label(&["node", "--api-key", "s3cr3t", "app.js"]), "node app.js");
         assert_eq!(label(&[]), "");
     }
 
