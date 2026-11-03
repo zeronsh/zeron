@@ -189,11 +189,63 @@ local function encoded(path: string): string
 	end))
 end
 
+-- The GitHub repository (`owner/name`) a remote's address names, or nil:
+-- `https://github.com/o/n.git`, `git@github.com:o/n`, `ssh://git@github.com/
+-- o/n`, or one through a proxy that keeps GitHub's path (`http://127.0.0.1:
+-- 7457/github.com/o/n.git`). Any other host is no GitHub repository.
+local function github_remote(url: string?): string?
+	if type(url) ~= "string" then
+		return nil
+	end
+	-- (GitHub's own host, not one ending in it: after a start, `/` or `@`.)
+	local owner, name = string.match(`/{url}`, "[/@]github%.com[:/]+([%w%-_%.]+)/([%w%-_%.]+)/?$")
+	if not owner then
+		return nil
+	end
+	name = string.gsub(name :: string, "%.git$", "")
+	if name == "" or owner == "." or owner == ".." or name == "." or name == ".." then
+		return nil
+	end
+	return `{owner}/{name}`
+end
+
+-- The repository of a folder from `git remote -v`, the remote chosen as gh
+-- chooses (upstream, github, origin), else the only GitHub repository its
+-- remotes name; nil if none, or several and none of those.
+local function remote_repository(listing: string?): string?
+	local by_remote: { [string]: string } = {}
+	local distinct: { [string]: boolean } = {}
+	local count = 0
+	for line in string.gmatch(listing or "", "[^\n]+") do
+		local remote, url = string.match(line, "^(%S+)%s+(%S+)")
+		local repo = github_remote(url)
+		if remote and repo then
+			by_remote[remote] = by_remote[remote] or repo
+			if not distinct[repo] then
+				distinct[repo] = true
+				count += 1
+			end
+		end
+	end
+	for _, remote in { "upstream", "github", "origin" } do
+		if by_remote[remote] then
+			return by_remote[remote]
+		end
+	end
+	if count == 1 then
+		local only = next(distinct)
+		return only
+	end
+	return nil
+end
+
 return function(zeron: any)
 	local gh = Gh(zeron)
 	local M = {}
 	M.task = gh.task
 	M.parse = parse
+	M.github_remote = github_remote
+	M.remote_repository = remote_repository
 
 	local function failed(why: string): Gh.Task
 		return gh.task(function(_resolve, reject)
@@ -479,16 +531,34 @@ return function(zeron: any)
 					resolve(value)
 					return
 				end
+				local function found(name: string)
+					gh.keep(key, name)
+					resolve(name)
+				end
+				-- (gh can't place a remote whose host it doesn't know, such as
+				-- one through a local proxy: then the folder's remotes, read
+				-- as gh would choose among them.)
+				local function from_remotes()
+					zeron.run("git", { "remote", "-v" }, { cwd = path, timeout = 30 }):after(function(r: any)
+						local name = if type(r) == "table" and r.status == 0 then remote_repository(r.stdout) else nil
+						if name then
+							found(name)
+						else
+							reject(zeron.s("pulls.no_repo"))
+						end
+					end, function(err: any)
+						reject(tostring(if type(err) == "table" and err.message then err.message else err))
+					end)
+				end
 				zeron.run("gh", { "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner" }, { cwd = path, timeout = 30 }):after(function(r: any)
 					local name = if type(r) == "table" and r.status == 0 then string.match(r.stdout or "", "^%s*(%S+)") else nil
-					if name then
-						gh.keep(key, name)
-						resolve(name)
+					if name and string.match(name, "^[^/]+/[^/]+$") then
+						found(name)
 					else
-						reject(zeron.s("pulls.no_repo"))
+						from_remotes()
 					end
-				end, function(err: any)
-					reject(tostring(if type(err) == "table" and err.message then err.message else err))
+				end, function()
+					from_remotes()
 				end)
 			end)
 		end)

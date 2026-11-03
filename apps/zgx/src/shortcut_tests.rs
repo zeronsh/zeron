@@ -544,18 +544,26 @@ fn command_slash_opens_the_model_picker() {
     }
 }
 
-/// Holds `meta` (and `shift`) as the window reports a modifier alone
-/// (zgx's `ui.modifiers`, which `app.keys` never sets: it presses and lets
-/// go at once).
-fn hold(w: &mut Window, meta: bool, shift: bool) {
-    let held = zgx::input::Modifiers { meta, shift, ..Default::default() };
+/// Holds ⌘ (and `shift`) as the window reports a modifier alone (zgx's
+/// `ui.modifiers`, which `app.keys` never sets: it presses and lets go at
+/// once). ⌘ is what `cmd` shortcuts are pressed with: Command on macOS,
+/// Control elsewhere.
+fn hold(w: &mut Window, command: bool, shift: bool) {
+    let mut held = zgx::input::Modifiers { shift, ..Default::default() };
+    if cfg!(target_os = "macos") {
+        held.meta = command;
+    } else {
+        held.control = command;
+    }
     zgx::input::set_held_modifiers(&w.app.ui.runtime, held);
     w.app.frames(2);
 }
 
-/// Whether the first row wears its jump (`find` names one node; nine show).
+/// Whether the first row wears its jump (`find` names one node; nine show),
+/// as the platform writes it: ⌘1, or Ctrl+1.
 fn hints(w: &mut Window) -> bool {
-    w.app.tree().lines().any(|line| line.contains("text \"⌘1\""))
+    let keys = if cfg!(target_os = "macos") { "⌘1" } else { "Ctrl+1" };
+    w.app.tree().lines().any(|line| line.contains(&format!("text \"{keys}\"")))
 }
 
 /// ⌘ held alone shows the sidebar's ⌘1–9 hints at once, kept through the
@@ -596,6 +604,26 @@ fn jump_hints_follow_command_held_alone() {
     w.app.frames(5);
     hold(&mut w, true, false);
     assert!(!hints(&mut w), "none over the palette");
+    hold(&mut w, false, false);
+}
+
+/// The other of Command and Control (Control on macOS; Super, `meta`,
+/// elsewhere) is no ⌘: held alone it shows no hints, and held with ⌘ it
+/// hides them, as ⇧ does.
+#[test]
+fn jump_hints_want_the_platforms_command_not_the_other() {
+    let mut w = mount();
+    let mac = cfg!(target_os = "macos");
+    let other = zgx::input::Modifiers { control: mac, meta: !mac, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, other);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "the other alone: none");
+    let both = zgx::input::Modifiers { control: true, meta: true, ..Default::default() };
+    zgx::input::set_held_modifiers(&w.app.ui.runtime, both);
+    w.app.frames(2);
+    assert!(!hints(&mut w), "with the other: not alone");
+    hold(&mut w, true, false);
+    assert!(hints(&mut w), "⌘ alone: shown");
     hold(&mut w, false, false);
 }
 

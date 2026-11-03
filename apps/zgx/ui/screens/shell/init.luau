@@ -402,10 +402,11 @@ return function(): Node
 		-- bubble here from whatever has focus, too.
 		on_key = function(e): boolean
 			-- Any key down while ⌘ is held: the sidebar's hints go (⌘C), but
-			-- for the ⌘1–9 they offer.
+			-- for the ⌘1–9 they offer. (`cmd` is Ctrl or Command, as the
+			-- platform has it: both down, the other is held too.)
 			local sidebar: any = boundary.load("@app/screens/shell/sidebar")
 			if sidebar and sidebar.key_pressed then
-				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or e.ctrl))
+				sidebar.key_pressed(string.match(e.key, "^[1-9]$") ~= nil and not (e.shift or e.alt or (e.ctrl and e.meta)))
 			end
 			if e.key == "Escape" and not (e.shift or e.cmd or e.alt or e.ctrl) then
 				local store: any = boundary.load("@app/screens/chat/store")
