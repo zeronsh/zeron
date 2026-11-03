@@ -102,6 +102,13 @@ pub fn after_quit() {
 /// to wait for.
 pub fn command(launch: &Launch, exe: &Path, pid: u32) -> Command {
     let mut command = Command::new(exe);
+    // (Its first word as this launch's was, so it reads the same in `ps`;
+    // the program run is still `exe`.)
+    #[cfg(unix)]
+    if let Some(first) = launch.args.first() {
+        use std::os::unix::process::CommandExt;
+        command.arg0(first);
+    }
     command.args(launch.args.iter().skip(1));
     command.env_clear();
     command.envs(
