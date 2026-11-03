@@ -995,6 +995,8 @@ fn hang_run(
                         tokio::time::sleep(pause).await;
                         command_open = false;
                         let _ = tx.send(AgentEvent::ToolResult {
+                            image_payloads: Vec::new(),
+                            preview_paths: Vec::new(),
                             id,
                             is_error: true,
                             output: Some("Exit code 137\n\n[killed]".into()),
@@ -1015,6 +1017,8 @@ fn hang_run(
                             session_id: None,
                         }));
                         let _ = tx.send(AgentEvent::ToolResult {
+                            image_payloads: Vec::new(),
+                            preview_paths: Vec::new(),
                             id,
                             is_error: true,
                             output: Some("[Request interrupted by user for tool use]".into()),
