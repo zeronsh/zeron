@@ -2869,6 +2869,7 @@
       "port_open_external": "Open in Default Browser",
       "port_copy": "Copy URL",
       "port_copied": "URL copied",
+      "port_closed": "Closed",
       "previews_unavailable": "Local previews aren't available right now"
     }
   },

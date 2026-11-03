@@ -656,7 +656,9 @@ local function ports(app: any, n: number, extra: { [string]: any }?)
 	local services = {}
 	for i = 1, n do
 		local name = if i == 1 then "web" else `port-{i}`
-		table.insert(services, { id = `svc-{i}`, name = name, port = 2999 + i, url = `http://{name}.proj.localhost:7400`, project = "comet-native", device = "work-laptop", cwd = "/proj", remote = false })
+		-- (Their processes long started: open before the home looked, they
+		-- show at once.)
+		table.insert(services, { id = `svc-{i}`, name = name, port = 2999 + i, url = `http://{name}.proj.localhost:7400`, project = "comet-native", device = "work-laptop", cwd = "/proj", remote = false, started = 1 })
 	end
 	local p: { [string]: any } = { chat = "chat-1", ready = true, services = services }
 	for k, v in extra or {} do
@@ -712,6 +714,78 @@ test("a port's menu opens it, opens it in the default browser, or copies its add
 	app:set_state("test_menu_pick", "Open")
 	app:command("port_menu_pick")
 	expect(calls(app)).to_contain("port_open")
+end)
+
+-- chat-1's previews as the host has them now: `services`, each started
+-- just now unless it says.
+local function serving(app: any, services: { any })
+	app:set_state("previews", { chat = "chat-1", ready = true, services = services })
+end
+
+local function test_server(id: string, port: number): any
+	return {
+		id = id,
+		name = "HTTP server",
+		port = port,
+		url = `http://{id}.proj.localhost:7400`,
+		process = "python3 -m http.server",
+		command = `python3 -m http.server {port}`,
+	}
+end
+
+-- (A frame is 1/60 s of the test's clock.)
+local function seconds(app: any, s: number)
+	app:frames(math.ceil(s * 60))
+end
+
+test("a port open under five seconds never shows; one open longer shows, then stays a while once closed", function()
+	local app = home()
+	serving(app, {})
+	seconds(app, 0.5)
+	-- A test's server: open a second, gone.
+	serving(app, { test_server("blip", 41001) })
+	seconds(app, 1)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	serving(app, {})
+	seconds(app, 6)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	-- A dev server: shows once it's stayed open five seconds.
+	serving(app, { test_server("dev", 8000) })
+	seconds(app, 4)
+	expect(app:has("#panel-home-ports")).to_be(false)
+	seconds(app, 1.5)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	-- Closed (restarting): still listed, ten seconds.
+	serving(app, {})
+	seconds(app, 8)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	-- Back in time: listed on, as if it never went.
+	serving(app, { test_server("dev", 8000) })
+	seconds(app, 0.5)
+	serving(app, {})
+	seconds(app, 9)
+	expect(app:has('role:button "Open python3 -m http.server preview"')).to_be(true)
+	seconds(app, 1.5)
+	expect(app:has("#panel-home-ports")).to_be(false)
+end)
+
+test("a port's row names the process serving it, its command line in its tooltip", function()
+	local app = home()
+	local sv = test_server("dev", 8000)
+	sv.started = 1
+	serving(app, { sv })
+	app:frames(20)
+	expect(app:has('role:button "Open python3 -m http.server preview" >> ":8000"')).to_be(true)
+	expect(app:has('"HTTP server"')).to_be(false)
+	app:hover('role:button "Open python3 -m http.server preview"')
+	expect(app:wait('"python3 -m http.server 8000"', { timeout_ms = 5000 })).to_be(true)
+	-- Without one (an engine that names none, a remote device's): what the
+	-- engine calls it.
+	serving(app, { { id = "web", name = "Vite", port = 5173, url = "http://web.proj.localhost:7400", started = 1 } })
+	seconds(app, 0.5)
+	-- (Not the first answer: it settles first.)
+	seconds(app, 5.5)
+	expect(app:has('role:button "Open Vite preview"')).to_be(true)
 end)
 
 test("local previews that can't open say so in one plain line, never the system's words", function()

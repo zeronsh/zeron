@@ -2869,6 +2869,7 @@
       "port_open_external": "在默认浏览器中打开",
       "port_copy": "复制网址",
       "port_copied": "网址已复制",
+      "port_closed": "已关闭",
       "previews_unavailable": "本地预览暂时不可用"
     }
   },
