@@ -540,6 +540,37 @@ pub struct BackgroundTaskOutput {
     pub truncated: bool,
 }
 
+/// Bytes of a command's whole output its host serves (`ReadToolOutput`): the
+/// END of it, redacted. A run journal holds at most
+/// [`crate::COMMAND_OUTPUT_CAP`] per command today; this bounds a journal
+/// that holds more (an older build's, a harness without the cap).
+pub const TOOL_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
+/// Bytes of text one `ReadToolOutput` reply carries (an attachment chunk's
+/// size, so a relayed reply stays as small as theirs).
+pub const TOOL_OUTPUT_CHUNK_BYTES: usize = 48 * 1024;
+
+/// One chunk of a command's whole output, read from its host's run journal
+/// (`ReadToolOutput {chatId, toolId, offset}`), redacted as the chat's tail
+/// is. Ask again from `next_offset` until `done`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputChunk {
+    /// The text from the asked-for byte offset, ending on a character.
+    pub text: String,
+    pub next_offset: u64,
+    pub done: bool,
+    /// Bytes in the whole (redacted, trimmed) text served.
+    pub bytes: u64,
+    /// Lines in it.
+    pub lines: u64,
+    /// Earlier output was trimmed to [`TOOL_OUTPUT_MAX_BYTES`].
+    #[serde(default)]
+    pub trimmed: bool,
+    /// The command's exit status, as its harness reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
 impl Session {
     /// Attention across native and terminal work. Native execution control must
     /// keep using `status`: a terminal report cannot complete/steer a native run.

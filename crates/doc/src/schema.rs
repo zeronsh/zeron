@@ -149,6 +149,10 @@ struct DocPartJson {
     /// only when true): the UI says earlier output was trimmed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_truncated: Option<bool>,
+    /// Lines in the whole command output (additive; only with
+    /// `outputTruncated`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_lines: Option<u64>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -203,6 +207,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_tail,
             exit_code,
             output_truncated,
+            output_lines,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -228,6 +233,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_tail: subagent_tail.clone(),
             exit_code: *exit_code,
             output_truncated: output_truncated.then_some(true),
+            output_lines: *output_lines,
             ..Default::default()
         },
         MessagePart::Input {
@@ -316,6 +322,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 subagent_tail: p.subagent_tail,
                 exit_code: p.exit_code,
                 output_truncated: p.output_truncated.unwrap_or(false),
+                output_lines: p.output_lines,
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -1094,6 +1101,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(truncated) = doc_part.output_truncated {
         map.insert("outputTruncated", truncated)?;
     }
+    if let Some(lines) = doc_part.output_lines {
+        map.insert("outputLines", lines as i64)?;
+    }
     Ok(())
 }
 
@@ -1266,6 +1276,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
                 .get("outputTruncated")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
+            output_lines: obj.get("outputLines").and_then(|x| x.as_u64()),
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1576,6 +1587,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(truncated) = doc_part.output_truncated {
         map.insert("outputTruncated", truncated)?;
     }
+    if let Some(lines) = doc_part.output_lines {
+        map.insert("outputLines", lines as i64)?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1878,6 +1892,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         };
         let doc = SessionDoc::init("c1").unwrap();
         let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
@@ -1944,6 +1959,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1998,6 +2014,7 @@ mod tests {
             subagent_tail: None,
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         };
         let parts = vec![
             tool(
@@ -2400,6 +2417,7 @@ mod tests {
                 output_bytes,
                 exit_code,
                 output_truncated,
+                output_lines,
                 is_error,
                 ..
             } => {
@@ -2408,6 +2426,7 @@ mod tests {
                 assert!(*output_truncated);
                 assert_eq!(*output_bytes, Some(full.len() as u64));
                 assert_eq!(tail.lines().count(), crate::parts::COMMAND_TAIL_MAX_LINES);
+                assert_eq!(*output_lines, Some(80));
                 assert!(tail.ends_with("line 80"));
             }
             other => panic!("unexpected {other:?}"),
@@ -2422,6 +2441,7 @@ mod tests {
             MessagePart::Tool {
                 exit_code: Some(101),
                 output_truncated: true,
+                output_lines: Some(80),
                 ..
             }
         ));
@@ -2457,6 +2477,7 @@ mod tests {
                 subagent_tail: None,
                 exit_code: None,
                 output_truncated: false,
+                output_lines: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

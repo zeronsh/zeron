@@ -287,6 +287,7 @@ mod tests {
             subagent_tail: Some("Reading veil.rs".into()),
             exit_code: None,
             output_truncated: false,
+            output_lines: None,
         }
     }
 

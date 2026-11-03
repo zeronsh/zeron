@@ -41,6 +41,12 @@
 //!   `ReadChatImageChunk {chatId, path, offset}` → the same reply, for an image
 //!   a reply names in Markdown (jailed to that one chat's working folder, no
 //!   link followed).
+//! - Tool outputs: `ReadToolOutput {chatId, toolId, offset}` → `ToolOutputChunk`
+//!   (`{text, nextOffset, done, bytes, lines, trimmed, exitCode?}`): one command's
+//!   whole output from this host's run journal, redacted as the doc's tail is
+//!   ([`crate::tool_output`]). Answered only by the chat's host; a command it
+//!   has no record of fails `tool_output.unavailable`, one still running
+//!   `tool_output.not_finished` (capability error codes).
 //!
 //! ## Device-addressed routing (`targetDeviceId`, feature-inventory §2.1)
 //!
@@ -565,6 +571,16 @@ struct UploadCommitParams {
 #[serde(rename_all = "camelCase")]
 struct ReadAttachmentChunkParams {
     path: String,
+    #[serde(default)]
+    offset: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadToolOutputParams {
+    /// The doc the tool part is in: a chat, or a subagent's doc in it.
+    chat_id: String,
+    tool_id: String,
     #[serde(default)]
     offset: u64,
 }
@@ -2330,6 +2346,8 @@ fn forwardable(method: &str) -> bool {
             | methods::UPLOAD_COMMIT
             | methods::READ_ATTACHMENT_CHUNK
             | methods::READ_CHAT_IMAGE_CHUNK
+            // A command's whole output lives in its host's run journal.
+            | methods::READ_TOOL_OUTPUT
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
             | methods::APPLY_UPDATE
@@ -5013,6 +5031,38 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?
                 .map_err(|e| RpcError::BadParams(e.to_string()))?;
+                RpcReply::value(&chunk)
+            }
+            methods::READ_TOOL_OUTPUT => {
+                let p: ReadToolOutputParams = parse_params(params)?;
+                // Only the host has the journal; the same chat check as a
+                // reply's pictures (`chat_image_root`). A subagent's doc is
+                // its root chat's.
+                let chat_id = crate::tool_output::journal_chat(&p.chat_id);
+                let chat = self
+                    .workspace
+                    .chat(chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                use crate::tool_output::ToolOutputError as E;
+                let chunk = self
+                    .sessions
+                    .read_tool_output(&p.chat_id, &p.tool_id, p.offset)
+                    .await
+                    .map_err(|e| match e {
+                        E::NotACommand | E::BadOffset => RpcError::BadParams(e.to_string()),
+                        // Stable codes: a client words these for its reader.
+                        E::NotAvailable => RpcError::Capability(
+                            capability_errors::TOOL_OUTPUT_UNAVAILABLE.into(),
+                        ),
+                        E::NotFinished => RpcError::Capability(
+                            capability_errors::TOOL_OUTPUT_NOT_FINISHED.into(),
+                        ),
+                        E::Journal(err) => RpcError::Failed(err.to_string()),
+                    })?;
                 RpcReply::value(&chunk)
             }
             methods::PUBLISH_VISUAL => {
