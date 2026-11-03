@@ -2259,7 +2259,7 @@ impl AcpHarness {
 
     /// A registry agent started and initialized as a sign-in client
     /// (terminal sign-ins offered), its output discarded.
-    async fn start_registry(&self) -> Result<(tokio::process::Child, RpcClient, mpsc::Receiver<Incoming>, Value), HarnessError> {
+    async fn start_registry(&self) -> Result<(crate::process::Child, RpcClient, mpsc::Receiver<Incoming>, Value), HarnessError> {
         let display_name = self.spec.display_name;
         let (exe, args) = self.resolve_program(false).await?;
         let mut cmd = Command::new(&exe);
