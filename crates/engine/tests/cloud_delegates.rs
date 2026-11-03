@@ -130,6 +130,7 @@ async fn a_cloud_machine_starts_delegates_of_its_own_chat() {
                 None,
                 Some("/home/user/app".into()),
                 Some("main".into()),
+                None,
             )
             .unwrap();
     });

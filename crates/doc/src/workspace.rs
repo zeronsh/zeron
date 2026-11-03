@@ -297,6 +297,7 @@ impl WorkspaceDoc {
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
         set_opt_ms(&row, "lastSeenAt", chat.last_seen_at)?;
         set_opt_str(&row, "parentChatId", chat.parent_chat_id.as_deref())?;
+        set_opt_str(&row, "childKind", chat.child_kind.map(zeron_proto::ChildKind::as_str))?;
         self.doc.commit();
         Ok(())
     }
@@ -759,6 +760,9 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    /// LENIENT, as `config`: a kind from a newer peer reads as none.
+    #[serde(default, deserialize_with = "zeron_proto::lenient_child_kind")]
+    child_kind: Option<zeron_proto::ChildKind>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -801,6 +805,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            child_kind: raw.child_kind,
         }
     }
 }
@@ -922,6 +927,7 @@ mod tests {
             harness_session_cwd: None,
             harness_session_harness: None,
             parent_chat_id: Some("parent-chat".into()),
+            child_kind: None,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
@@ -1032,6 +1038,19 @@ mod tests {
             .delete("lastCompletedTurn")
             .unwrap();
         assert_eq!(ws.read_sessions().unwrap()[0].last_completed_turn, None);
+    }
+
+    #[test]
+    fn a_child_kind_round_trips() {
+        let ws = WorkspaceDoc::new();
+        let mut sub = chat("chat-1", "dev-a");
+        sub.child_kind = Some(zeron_proto::ChildKind::Subagent);
+        ws.upsert_chat(&sub).unwrap();
+        assert_eq!(ws.chat("chat-1").unwrap(), Some(sub.clone()));
+        // Cleared by a full-row upsert without one.
+        sub.child_kind = None;
+        ws.upsert_chat(&sub).unwrap();
+        assert_eq!(ws.chat("chat-1").unwrap().unwrap().child_kind, None);
     }
 
     #[test]
