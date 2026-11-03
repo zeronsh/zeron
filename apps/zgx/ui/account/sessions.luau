@@ -15,6 +15,9 @@
 --                          `source` (Fork chat): a promise of its id, or the
 --                          engine's words for why not
 --   sessions.children(id)  a chat's side chats, newest first (tracked)
+--   sessions.subagent_chats(id)  the chats its agent made as its subagents
+--                          (Zeron's `kind: "subagent"`), in the order made
+--                          (tracked): never among its side chats
 --   sessions.archive(id), sessions.unarchive(id)
 --   sessions.rename(id, title)
 --   sessions.rename_project(id, name)
@@ -69,6 +72,11 @@ export type Child = {
 	created: number,
 	harness: string?,
 	agent: string?,
+	-- "side", or "subagent" (an agent made it as its subagent: listed in
+	-- `subagent_chats`, never `children`); its model, and what it said last.
+	kind: string?,
+	model: string?,
+	preview: string?,
 }
 -- `github`: its GitHub repository (`owner/name`), the one a Cloud chat of it
 -- clones.
@@ -93,6 +101,9 @@ export type Now = {
 	archived: { Chat },
 	-- Each chat's side chats, by its id, newest first.
 	children: { [string]: { Child } }?,
+	-- The chats each chat's agent made as its subagents, by its id, in the
+	-- order made.
+	subagent_chats: { [string]: { Child } }?,
 	places: Places,
 	places_ready: boolean,
 	-- The engine's connection, when it's not healthy (the sidebar's line):
@@ -128,6 +139,13 @@ function M.children(id: string?): { Child }
 		return {}
 	end
 	return (M.now:get().children or {})[id] or {}
+end
+
+function M.subagent_chats(id: string?): { Child }
+	if id == nil then
+		return {}
+	end
+	return (M.now:get().subagent_chats or {})[id] or {}
 end
 
 function M.archive(id: string)

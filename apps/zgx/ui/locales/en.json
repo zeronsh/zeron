@@ -1024,6 +1024,19 @@
       "cut": "Cut",
       "paste": "Paste",
       "label": "Text"
+    },
+    "subagents": {
+      "count": "{n, plural, one {# subagent} other {# subagents}}",
+      "working_n": "{n} working",
+      "done": "done",
+      "working": "Working",
+      "finished": "Finished",
+      "failed": "Failed",
+      "stop": "Stop",
+      "stop_named": "Stop {title}",
+      "stopping": "Stopping",
+      "open": "Open",
+      "open_named": "Open {title}"
     }
   },
   "settings": {
