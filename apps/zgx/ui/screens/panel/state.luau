@@ -17,7 +17,7 @@
 
 local M = {}
 
-export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent"
+export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "notes"
 export type Tab = {
 	id: string,
 	kind: Kind,
@@ -46,7 +46,8 @@ export type Tab = {
 	icon: string?,
 	data: any?,
 	-- A lane's (a side chat, a subagent: screens/chat/lane_tab): the chat
-	-- it shows (a side chat's id, a subagent's doc).
+	-- it shows (a side chat's id, a subagent's doc); a Notes tab's, its
+	-- main chat (screens/panel/notes).
 	chat: string?,
 }
 export type Session = { tabs: { Tab }, active: string?, visited: { string } }
@@ -175,6 +176,9 @@ function M.open(key: string, kind: Kind, extra: { [string]: any }?): string
 	end
 	if (kind == "side_chat" or kind == "subagent") and extra then
 		tab.chat, tab.title, tab.data = extra.chat, extra.title, extra.data
+	end
+	if kind == "notes" and extra then
+		tab.chat = extra.chat
 	end
 	if kind == "terminal" and extra then
 		-- (A run action's: its name, and what runs it.)
