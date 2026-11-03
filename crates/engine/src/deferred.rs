@@ -6,11 +6,11 @@
 //! attach to the assembled service without reconnecting.
 //!
 //! While the account still has setup to finish (signed in, no organization
-//! chosen: [`DeferredState::Onboarding`]), nothing that needs the workspace
-//! waits for it: calls answer at once with `setup_incomplete`
-//! (`RpcError::Capability`), the app's cue to say "Finish setting up your
-//! account". Only watch streams other than plugins' and templates' keep
-//! waiting, to attach once it opens.
+//! chosen: [`DeferredState::Onboarding`]), plugin and template calls answer
+//! at once with `setup_incomplete` (`RpcError::Capability`), the app's cue
+//! to say "Finish setting up your account", instead of hanging until setup
+//! ends. Every other call waits exactly as before (the GPUI app's onboarding
+//! relies on it).
 //!
 //! Both owners of a desktop engine use it: the app's background engine
 //! ([`crate::Engine::run_managed`]) and the app's in-process fallback.
@@ -68,7 +68,7 @@ impl RpcService for DeferredEngineRpc {
         loop {
             let current = { state.borrow().clone() };
             match current {
-                DeferredState::Onboarding if !waits_through_setup(method) => {
+                DeferredState::Onboarding if crate::plugins::handles(method) => {
                     return Err(RpcError::Capability(SETUP_INCOMPLETE.into()));
                 }
                 DeferredState::Onboarding | DeferredState::Waiting => {}
@@ -88,14 +88,6 @@ impl RpcService for DeferredEngineRpc {
 /// What a call that needs the workspace answers while the account's setup
 /// isn't finished: the app says "Finish setting up your account".
 pub const SETUP_INCOMPLETE: &str = "setup_incomplete";
-
-/// Whether `method` may keep waiting through setup: a watch stream, which
-/// attaches once the workspace opens (the app's chats, devices…), but not
-/// plugins' or templates', which answer `setup_incomplete` like every call.
-fn waits_through_setup(method: &str) -> bool {
-    (method.starts_with("Watch") || method.starts_with("Subscribe"))
-        && !crate::plugins::handles(method)
-}
 
 /// Wait for assembly's outcome.
 pub async fn wait(state: &mut watch::Receiver<DeferredState>) -> Result<(), String> {
@@ -283,8 +275,8 @@ mod tests {
     }
 
     /// The staging pass: signed in with no organization chosen, plugin and
-    /// template calls (and every other call needing the workspace) answer at
-    /// once with `setup_incomplete` instead of hanging until setup finishes.
+    /// template calls answer at once with `setup_incomplete` instead of
+    /// hanging until setup finishes; every other call waits as it always did.
     #[tokio::test]
     async fn calls_answer_setup_incomplete_while_the_account_is_being_set_up() {
         let (state_tx, state) = watch::channel(DeferredState::Onboarding);
@@ -296,8 +288,7 @@ mod tests {
             methods::LIST_TEMPLATES,
             methods::USE_TEMPLATE,
             methods::DESCRIBE_APP,
-            methods::LIST_HARNESSES,
-            methods::MUTATE,
+            methods::CHECK_PLUGIN_UPDATES,
         ] {
             let answered = tokio::time::timeout(Duration::from_secs(1), rpc.handle(method, serde_json::json!({})))
                 .await
@@ -308,10 +299,12 @@ mod tests {
                 answered.err()
             );
         }
-        // Identity still answers; the app's own watch streams wait to attach.
+        // Identity still answers; everything else waits, unanswered, as before.
         assert!(rpc.handle(methods::ENGINE_INFO, serde_json::json!({})).await.is_ok());
-        let watching = tokio::time::timeout(Duration::from_millis(100), rpc.handle(methods::WATCH_CHATS, serde_json::json!({}))).await;
-        assert!(watching.is_err(), "WatchChats waits for the workspace");
+        for method in [methods::WATCH_CHATS, methods::LIST_HARNESSES, methods::MUTATE, methods::QUEUE_MESSAGE] {
+            let waiting = tokio::time::timeout(Duration::from_millis(100), rpc.handle(method, serde_json::json!({}))).await;
+            assert!(waiting.is_err(), "{method} waits for the workspace");
+        }
 
         // Set up and assembling: calls wait (briefly) for it, as before.
         state_tx.send_replace(DeferredState::Waiting);
