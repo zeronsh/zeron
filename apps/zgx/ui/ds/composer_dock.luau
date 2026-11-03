@@ -404,7 +404,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 	end
 	local function hint(): string
 		local what = locale.s(`ds.composer_dock.{action()}_hint`)
-		return if last() then locale.s("ds.composer_dock.hint_last", { what = what }) else what
+		return if last() then locale.s("ds.composer_dock.hint_last", { what = what, key = ui.shortcut_text("cmd+enter") }) else what
 	end
 	local function locked(): boolean
 		return now().locked ~= nil
