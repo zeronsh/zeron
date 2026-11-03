@@ -285,6 +285,8 @@ mod tests {
             subagent_ref: status.map(|_| format!("chat--sub--{id}")),
             subagent_status: status,
             subagent_tail: Some("Reading veil.rs".into()),
+            exit_code: None,
+            output_truncated: false,
         }
     }
 

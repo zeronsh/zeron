@@ -4,8 +4,10 @@
 //! stderr in debug logs). That text can carry authorization urls (with
 //! `state`, PKCE challenges, codes), device/user codes, and — from a buggy or
 //! verbose CLI — tokens. [`redact_output`] keeps the human part ("Device code
-//! request failed: 503") and replaces the rest. (Crash diagnostics use the
-//! narrower credential-marker redaction in the crate root.)
+//! request failed: 503") and replaces the rest. The doc fold runs a
+//! command's output tail through it before the tail enters a chat's doc
+//! (zeron-doc `command_output_tail`). (Harness crash diagnostics use the
+//! narrower credential-marker redaction in zeron-harness's crate root.)
 
 /// `text` with terminal escapes stripped and every secret-shaped token
 /// replaced:

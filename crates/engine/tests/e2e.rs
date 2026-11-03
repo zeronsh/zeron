@@ -79,6 +79,7 @@ fn mock_script() -> Vec<AgentEvent> {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         done(DoneStatus::Completed),
     ]
@@ -1335,6 +1336,8 @@ fn spawn_chip(id: &str, status: SubagentStatus) -> MessagePart {
         subagent_ref: Some(format!("{CHAT}--sub--{id}")),
         subagent_status: Some(status),
         subagent_tail: None,
+        exit_code: None,
+        output_truncated: false,
     }
 }
 
@@ -2875,6 +2878,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         AgentEvent::TextDelta { text: "two".into() },
         done(DoneStatus::Completed),
@@ -3278,6 +3282,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             is_error: false,
             output: None,
             diff: None,
+            exit_code: None,
         },
         image.clone(),
         image.clone(),

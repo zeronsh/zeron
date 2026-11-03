@@ -1980,6 +1980,7 @@ impl Inner {
                             is_error: true,
                             output: None,
                             diff: None,
+                            exit_code: None,
                         },
                         AgentEvent::Error {
                             message: "Generated image unavailable".into(),
@@ -3335,6 +3336,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                exit_code,
+                output_truncated,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -3353,6 +3356,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref: subagent_ref.clone(),
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
+                exit_code: *exit_code,
+                output_truncated: *output_truncated,
             },
             other => other.clone(),
         })
