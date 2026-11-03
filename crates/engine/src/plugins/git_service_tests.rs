@@ -17,6 +17,8 @@ struct Fixture {
 }
 
 async fn call(plugins: &Plugins, method: &str, params: Value) -> Value {
+    // Allowing and signing as Zeron's consent window does: with a review.
+    let params = super::authority_tests::as_consent_window(plugins, method, params).await;
     match plugins.dispatch(method, params).await {
         Ok(RpcReply::Value(value)) => value,
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -44,7 +46,11 @@ async fn fixture() -> Fixture {
     assert!(signed.get("rpc_error").is_none(), "{signed}");
     let decided = call(&plugins, methods::DECIDE_PLUGIN, json!({ "id": "git", "allow": true, "hash": signed["hash"] })).await;
     assert_eq!(decided["status"], "on", "{decided}");
-    Fixture { _dir: dir, plugins, scratch: tempfile::tempdir().unwrap() }
+    // The scratch folder is this device's projects: the service works there alone.
+    let scratch = tempfile::tempdir().unwrap();
+    let known = scratch.path().display().to_string();
+    plugins.set_folders(move || vec![known.clone()]);
+    Fixture { _dir: dir, plugins, scratch }
 }
 
 impl Fixture {
@@ -579,4 +585,95 @@ async fn a_linked_worktree_is_told_of_its_own_branch_and_index() {
     git(&linked, &["commit", "-q", "-m", "Side"]);
     let said = changed_within(&mut channel, Duration::from_millis(1500)).await;
     assert_eq!(said.len(), 1, "{said:?}");
+}
+
+/// R20: a caller's values never reach git as options (`a` was put before
+/// `--` as it came: `--output=` wrote any file), and git works only in this
+/// device's chats' and projects' folders (a planted repository's config is
+/// git's to run).
+#[tokio::test]
+async fn callers_values_never_become_git_options_or_folders() {
+    let f = fixture().await;
+    let repo = f.repo("work");
+    write(&repo, "a.txt", "one\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "First"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("authorized_keys");
+    for (a, b) in [
+        (format!("--output={}", target.display()), head.clone()),
+        (head.clone(), format!("--output={}", target.display())),
+        ("-p".to_string(), head.clone()),
+        ("HEAD~1".to_string(), head.clone()),
+    ] {
+        let refused = f.ask("diff", json!({ "cwd": cwd(&repo), "a": a, "b": b, "path": "a.txt" })).await;
+        assert_ne!(refused["ok"], true, "diff {a} {b}: {refused}");
+    }
+    assert!(!target.exists(), "git wrote outside the repository");
+    for base in ["--output=/tmp/x", "-x", "a..b", "a b"] {
+        let refused = f.ask("changes", json!({ "cwd": cwd(&repo), "scope": "branch", "base": base })).await;
+        assert_ne!(refused["ok"], true, "base {base}: {refused}");
+    }
+    let refused = f.ask("commit_info", json!({ "cwd": cwd(&repo), "sha": "--output=/tmp/x" })).await;
+    assert_ne!(refused["ok"], true, "{refused}");
+    // The same file's diff, asked plainly, still answers.
+    write(&repo, "a.txt", "two\n");
+    let changes = f.ok("changes", json!({ "cwd": cwd(&repo), "scope": "working" })).await;
+    let diff = f.ok("diff", json!({ "cwd": cwd(&repo), "a": changes["a"], "b": changes["b"], "path": "a.txt" })).await;
+    assert!(diff["text"].as_str().unwrap().contains("+two"), "{diff}");
+
+    // A repository outside every chat and project: refused before git runs
+    // (its fsmonitor would have).
+    let planted = outside.path().join("planted");
+    std::fs::create_dir_all(&planted).unwrap();
+    git(&planted, &["init", "-q"]);
+    let ran = outside.path().join("ran");
+    let config = planted.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("[core]\n\tfsmonitor = \"touch {}; false\"\n", ran.display()));
+    std::fs::write(&config, text).unwrap();
+    for asked in [cwd(&planted), format!("{}/../{}", cwd(&repo), "../planted"), "/".to_string()] {
+        let refused = f.ask("status", json!({ "cwd": asked })).await;
+        assert_ne!(refused["ok"], true, "{asked}: {refused}");
+    }
+    assert!(!ran.exists(), "the planted repository's fsmonitor ran");
+}
+
+/// A commit made through Git, in a chat's or project's checkout, runs that
+/// checkout's hooks as git does for you (a pre-commit that fails stops it);
+/// reading (status, changes, diff) runs none, nor the filesystem monitor.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_commit_in_your_checkout_runs_its_hooks_and_reading_runs_none() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture().await;
+    let repo = f.repo("hooked");
+    write(&repo, "a.txt", "one\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "First"]);
+    let marks = tempfile::tempdir().unwrap();
+    let (hook, fsmonitor) = (marks.path().join("pre-commit-ran"), marks.path().join("fsmonitor-ran"));
+    let pre_commit = repo.join(".git/hooks/pre-commit");
+    std::fs::write(&pre_commit, format!("#!/bin/sh\ntouch {}\n", hook.display())).unwrap();
+    std::fs::set_permissions(&pre_commit, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo, &["config", "core.fsmonitor", &format!("touch {}; false", fsmonitor.display())]);
+
+    write(&repo, "a.txt", "two\n");
+    f.ok("status", json!({ "cwd": cwd(&repo) })).await;
+    let changes = f.ok("changes", json!({ "cwd": cwd(&repo), "scope": "working" })).await;
+    f.ok("diff", json!({ "cwd": cwd(&repo), "a": changes["a"], "b": changes["b"], "path": "a.txt" })).await;
+    assert!(!hook.exists(), "reading ran a hook");
+    f.ok("stage", json!({ "cwd": cwd(&repo), "all": true })).await;
+    f.ok("commit", json!({ "cwd": cwd(&repo), "message": "Second" })).await;
+    assert!(hook.exists(), "the checkout's pre-commit didn't run");
+    assert!(!fsmonitor.exists(), "the filesystem monitor ran");
+
+    // A pre-commit that says no stops the commit, as it would for you.
+    std::fs::write(&pre_commit, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+    write(&repo, "a.txt", "three\n");
+    f.ok("stage", json!({ "cwd": cwd(&repo), "all": true })).await;
+    let refused = f.ask("commit", json!({ "cwd": cwd(&repo), "message": "Third" })).await;
+    assert_ne!(refused["ok"], true, "{refused}");
+    assert_eq!(git(&repo, &["log", "-1", "--format=%s"]).trim(), "Second");
 }

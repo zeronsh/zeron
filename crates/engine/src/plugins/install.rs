@@ -169,7 +169,8 @@ pub fn pack_folder(dir: &Path) -> Result<Vec<u8>, String> {
     }
     let mut files = BTreeMap::new();
     for rel in inspected.files.keys() {
-        let bytes = std::fs::read(dir.join(rel)).map_err(|_| format!("Couldn't read {rel}"))?;
+        let path = zeron_plugin_guard::path::join(dir, rel)?;
+        let bytes = std::fs::read(path).map_err(|_| format!("Couldn't read {rel}"))?;
         files.insert(rel.clone(), bytes);
     }
     package::pack(FORMAT, &manifest.raw, &files)
@@ -189,6 +190,29 @@ pub fn grant_change(before: &[String], after: &[String]) -> GrantChange {
         added: after.difference(&before).map(|s| (*s).clone()).collect(),
         removed: before.difference(&after).map(|s| (*s).clone()).collect(),
     }
+}
+
+/// Whether `candidate` is a later version than `installed`: semver when
+/// both are, else dot-separated numbers (`2` > `1.9`, a missing part is 0).
+/// Anything it can't order is not newer: an update must say it's later.
+pub fn newer(candidate: &str, installed: &str) -> bool {
+    let clean = |v: &str| v.trim().trim_start_matches(['v', 'V']).to_owned();
+    let (a, b) = (clean(candidate), clean(installed));
+    if let (Ok(a), Ok(b)) = (semver::Version::parse(&a), semver::Version::parse(&b)) {
+        return a > b;
+    }
+    let numbers = |v: &str| v.split('.').map(|p| p.parse::<u64>().ok()).collect::<Option<Vec<u64>>>();
+    let (Some(mut a), Some(mut b)) = (numbers(&a), numbers(&b)) else {
+        return false;
+    };
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    a > b
+}
+
+pub fn not_newer(candidate: &str, installed: &str) -> String {
+    format!("Version {candidate} isn't later than the {installed} installed, so it won't replace it")
 }
 
 /// What was installed over, when it was an update.
@@ -233,6 +257,11 @@ pub fn install(plugins_dir: &Path, package: &Package, source: &Source) -> Result
                 "A plugin called {id} is installed already, signed by someone else. Remove it first to install this one."
             ));
         }
+        // Signed downgrades (or a different build under the same version)
+        // are refused: an old version's holes stay closed.
+        if replaced.hash != package.hash && !newer(&package.manifest.version, &replaced.version) {
+            return Err(not_newer(&package.manifest.version, &replaced.version));
+        }
         Some(replaced)
     } else {
         None
@@ -269,7 +298,9 @@ fn stage(staged: &Path, package: &Package, source: &Source) -> Result<(), String
     let write_error = |_| "Couldn't write its files".to_string();
     std::fs::create_dir_all(staged).map_err(write_error)?;
     for (rel, bytes) in &package.files {
-        let path = staged.join(rel);
+        // (Every path through the one join that keeps it inside, on every
+        // system: `D:x.cmd` never leaves the staging folder.)
+        let path = zeron_plugin_guard::path::join(staged, rel)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(write_error)?;
         }
@@ -610,6 +641,10 @@ pub struct Found {
     /// Where it came from this time (a git commit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
+    /// What it grows past what you allowed (`capability::Diff`), when it
+    /// grows anything: installing it waits for you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest_diff: Option<Value>,
 }
 
 impl Found {
@@ -618,6 +653,9 @@ impl Found {
         let mut value = json!({ "version": self.version, "added": self.added, "removed": self.removed });
         if let Some(refused) = &self.refused {
             value["refused"] = json!(refused);
+        }
+        if let Some(diff) = &self.digest_diff {
+            value["digest_diff"] = diff.clone();
         }
         value
     }
@@ -665,9 +703,21 @@ pub fn keep_found(plugins_dir: &Path, id: &str, found: &Found, package: Option<&
     std::fs::write(found_path(plugins_dir, id), bytes).map_err(|_| "Couldn't keep the update".to_string())
 }
 
-/// What a check of `id` (installed: `key`, `permissions`, `hash`) found in
-/// `fetched`: nothing new, or an update (refused when someone else signed it).
-pub fn compare(id: &str, key: &str, permissions: &[String], hash: &str, fetched: &Package, source: Source) -> Option<Found> {
+/// The plugin installed, as a check compares a new version with it.
+pub struct Installed<'a> {
+    pub id: &'a str,
+    pub key: &'a str,
+    pub version: &'a str,
+    pub permissions: &'a [String],
+    pub hash: &'a str,
+    /// The capability record you allowed it (its own, when you haven't).
+    pub allowed: &'a Value,
+}
+
+/// What a check of `installed` found in `fetched`: nothing new, or an
+/// update (refused when someone else signed it, or it isn't later).
+pub fn compare(installed: &Installed<'_>, fetched: &Package, source: Source) -> Option<Found> {
+    let Installed { id, key, version, permissions, hash, allowed } = *installed;
     if fetched.hash == hash {
         return None;
     }
@@ -676,9 +726,12 @@ pub fn compare(id: &str, key: &str, permissions: &[String], hash: &str, fetched:
         Some(format!("The new version is a different plugin ({})", fetched.id()))
     } else if fetched.key != key {
         Some("The new version is signed by someone else, so it won't be installed".to_string())
+    } else if !newer(&fetched.manifest.version, version) {
+        Some(not_newer(&fetched.manifest.version, version))
     } else {
         None
     };
+    let diff = super::capability::diff(allowed, &super::capability::record(&fetched.manifest));
     Some(Found {
         from: hash.to_owned(),
         version: fetched.manifest.version.clone(),
@@ -687,6 +740,7 @@ pub fn compare(id: &str, key: &str, permissions: &[String], hash: &str, fetched:
         removed: change.removed,
         refused,
         source: Some(source),
+        digest_diff: diff.grew().then(|| diff.to_value()),
     })
 }
 
@@ -783,11 +837,41 @@ pub(crate) mod tests {
         let installed = parse(signed_package(&key, "focus", "1.0.0", &["ui.add"], "return 1")).unwrap();
         let source = Source { kind: "link".into(), url: Some("https://e/x.zeron-plugin".into()), path: None, git_ref: None, commit: None, version: "1.0.0".into(), installed_at: 0 };
         let perms = installed.manifest.permissions.clone();
-        assert_eq!(compare("focus", &key.public(), &perms, &installed.hash, &installed, source.clone()), None);
-        let newer = parse(signed_package(&key, "focus", "1.1.0", &["github"], "return 2")).unwrap();
-        let found = compare("focus", &key.public(), &perms, &installed.hash, &newer, source.clone()).unwrap();
+        let record = crate::plugins::capability::record(&installed.manifest);
+        let key_public = key.public();
+        let was = Installed { id: "focus", key: &key_public, version: "1.0.0", permissions: &perms, hash: &installed.hash, allowed: &record };
+        assert_eq!(compare(&was, &installed, source.clone()), None);
+        let later = parse(signed_package(&key, "focus", "1.1.0", &["github"], "return 2")).unwrap();
+        let found = compare(&was, &later, source.clone()).unwrap();
         assert_eq!((found.version.as_str(), found.added.clone(), found.removed.clone(), found.refused.clone()), ("1.1.0", vec!["github".to_string()], vec!["ui.add".to_string()], None));
+        assert_eq!(found.digest_diff.unwrap()["permissions_added"], json!(["github"]));
         let theirs = parse(signed_package(&eve, "focus", "2.0.0", &[], "return 3")).unwrap();
-        assert!(compare("focus", &key.public(), &perms, &installed.hash, &theirs, source).unwrap().refused.is_some());
+        assert!(compare(&was, &theirs, source).unwrap().refused.is_some());
+    }
+
+    /// R23: an update was any package with another hash under the same key,
+    /// so the author's key (or whoever holds it) could roll a plugin back to
+    /// an older, vulnerable version.
+    #[test]
+    fn a_signed_downgrade_is_refused() {
+        assert!(newer("1.1.0", "1.0.0") && newer("2", "1.9") && newer("v1.10", "1.9") && newer("1.0.0", "1.0.0-beta"));
+        assert!(!newer("1.0.0", "1.0.0") && !newer("0.9", "1.0") && !newer("1", "1.0.0") && !newer("tomorrow", "1"));
+        let dir = tempfile::tempdir().unwrap();
+        let (key, _) = SigningKey::generate().unwrap();
+        let source = Source { kind: "file".into(), url: None, path: None, git_ref: None, commit: None, version: String::new(), installed_at: 0 };
+        let v2 = parse(signed_package(&key, "focus", "2.0.0", &[], "return 2")).unwrap();
+        install(dir.path(), &v2, &source).unwrap();
+        let v1 = parse(signed_package(&key, "focus", "1.0.0", &[], "return 1")).unwrap();
+        assert!(install(dir.path(), &v1, &source).unwrap_err().contains("isn't later"));
+        let same_version = parse(signed_package(&key, "focus", "2.0.0", &[], "return 666")).unwrap();
+        assert!(install(dir.path(), &same_version, &source).unwrap_err().contains("isn't later"));
+        // The same package again is no change.
+        assert!(install(dir.path(), &v2, &source).is_ok());
+        let perms = Vec::new();
+        let record = crate::plugins::capability::record(&v2.manifest);
+        let key_public = key.public();
+        let was = Installed { id: "focus", key: &key_public, version: "2.0.0", permissions: &perms, hash: &v2.hash, allowed: &record };
+        assert!(compare(&was, &v1, source).unwrap().refused.unwrap().contains("isn't later"));
+        assert_eq!(scan::inspect(&dir.path().join("focus"), true).hash, v2.hash);
     }
 }

@@ -37,6 +37,17 @@ local PACKAGES: { [string]: any } = {
 		hash = "mystery-hash-1",
 		author = { kind = "unknown", reason = "Checking who made it…" },
 	},
+	-- A template in preview, to keep (an agent made it on this device).
+	sleek = {
+		keep = "sleek",
+		id = "sleek",
+		name = "Sleek",
+		description = "",
+		version = "",
+		files = 7,
+		hash = "sleek-digest-1",
+		author = { kind = "unknown", reason = "Made on this device, by you or an agent." },
+	},
 }
 
 local said: { string } = {}
@@ -52,13 +63,18 @@ end
 
 ui.actions {
 	["templates.decide"] = function(arg: any)
-		note(`decide:{arg.pending}:{tostring(arg.allow)}:{arg.hash}`)
+		if arg.keep then
+			note(`keep:{arg.keep}:{tostring(arg.allow)}:{arg.hash}`)
+		else
+			note(`decide:{arg.pending}:{tostring(arg.allow)}:{arg.hash}`)
+		end
 		show(nil)
 	end,
 }
 
 ui.command { id = "ledger", title = "Show Ledger", run = function() show("ledger") end }
 ui.command { id = "mystery", title = "Show Mystery", run = function() show("mystery") end }
+ui.command { id = "sleek", title = "Keep Sleek", run = function() show("sleek") end }
 ui.command {
 	id = "found",
 	title = "Mystery's signer is looked up",

@@ -54,9 +54,9 @@ use crate::engine::{self, rpc};
 
 pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
     engine::install(cx);
-    host.async_action("terminal.start", |arg| async move { start(arg).await });
+    host.async_action("terminal.start", |arg| async move { crate::plugins::preview::refuse("terminal.start")?; start(arg).await });
     host.async_action("terminal.claimed", |arg| async move { claimed(arg).await });
-    host.async_action("terminal.command", |arg| async move {
+    host.async_action("terminal.command", |arg| async move { crate::plugins::preview::refuse("terminal.command")?;
         let device = crate::files::route_to(opt_text(arg.field("device"))).await;
         command(arg, device)
     });
@@ -71,7 +71,7 @@ pub fn install(cx: &mut WindowContext, host: &ScriptHost) {
         call_for("CloseTerminal", &arg, Map::new()).await?;
         Ok(Value::Nil)
     });
-    host.async_action("terminal.write", |arg| async move {
+    host.async_action("terminal.write", |arg| async move { crate::plugins::preview::refuse("terminal.write")?;
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(text(arg.field("text")));
         let mut params = Map::new();
@@ -179,6 +179,8 @@ async fn claimed(arg: Value) -> Result<Value, String> {
         tx.send(await_claim(&claim, CLAIM_WAIT));
     });
     let id = rx.recv().await.unwrap_or_else(|| Err("The terminal didn't open.".into()))?;
+    // Opened while a template ran: closed if safe mode starts (preview.rs).
+    crate::plugins::preview::terminal_opened(&id, None);
     Ok(Value::from(id.as_str()))
 }
 

@@ -44,7 +44,7 @@ zgx-script = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090
 zgx-gpu = { git = "https://github.com/zeronsh/zgx", rev = "f81d5e99e0fc16d090d52055b847969edd9573fc", default-features = false }
 # Each plugin's own database (`zeron.db`, src/plugins/db.rs): SQLite,
 # built in; `limits` to keep one from attaching any other file.
-rusqlite = { version = "0.32", features = ["bundled", "limits"] }
+rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks"] }
 # `fetch`: zgx's own transport for `ui.fetch` and remote images (HTTP and
 # HTTPS, rustls), given to every window (src/main.rs): the app's scripts,
 # and plugins granted "network". Nothing else of the runner.
@@ -99,6 +99,8 @@ json5 = "0.4"
 # `show_visual` scripts, and its offscreen GPU renderer for their scenes and
 # shaders (the same wgpu zgx draws with).
 zeron-visual = { path = "../../crates/visual" }
+# The rules plugins are held to (paths, programs, network), the engine's own.
+zeron-plugin-guard = { path = "../../crates/plugin-guard" }
 zeron-visual-gpu = { path = "../../crates/visual-gpu" }
 # Their frames' pixel loops, optimized in debug builds too (below).
 zeron-zgx-pixels = { path = "pixels" }

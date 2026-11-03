@@ -326,7 +326,7 @@ fn publish_records(app: &TestApp, items: &[Item]) {
         ..Default::default()
     };
     for item in items {
-        let value = records::records(&item.permissions(), &sources);
+        let value = records::records_with(&item.permissions(), &item.change(), &sources);
         app.host.shared(&format!("plugin.{}.records", item.id()), zgx_script::Value::Nil).set(json_value(&value));
     }
     app.frames(10);
@@ -1643,7 +1643,7 @@ fn board() -> (TestApp, Heard) {
         expose_own(&host, "github");
         super::locales::publish(&host, "github", &super::builtin_dir().join("github"));
         // (Its projects' folders: "files.read".)
-        host.shared("plugin.github.records", json_value(&json!({ "profile": {}, "projects": { "p1": { "name": "Atlas", "path": "/work/atlas" }, "p2": { "name": "Borealis", "path": "/work/borealis" } } })));
+        host.shared("plugin.github.records", zgx_script::Value::Nil).set(json_value(&json!({ "profile": {}, "projects": { "p1": { "name": "Atlas", "path": "/work/atlas" }, "p2": { "name": "Borealis", "path": "/work/borealis" } } })));
         for name in ["result", "ack", "menus", "toast", "add_page", "github_watch", "open_url", "cost"] {
             host.action(format!("plugin.github.{name}"), |_| {});
         }
@@ -2621,7 +2621,7 @@ fn git_in(fixture: &str, records: serde_json::Value, service: serde_json::Value,
                 let (calls, key) = (calls.clone(), format!("plugin.{id}.{name}"));
                 host.action(key.clone(), move |v: zgx_script::Value| calls.borrow_mut().push((key.clone(), v.to_json())));
             }
-            host.shared(&format!("plugin.{id}.records"), json_value(&records));
+            host.shared(&format!("plugin.{id}.records"), zgx_script::Value::Nil).set(json_value(&records));
             fake_github(&host, &id, gh.clone(), calls.clone());
             plugins.extend(item.plugin());
         }

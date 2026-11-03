@@ -165,7 +165,8 @@ impl DeferredEngine {
         let workspace_scope = self.workspace_scope;
         let runtime_slot = self.runtime.clone();
         let assembled = self.assembled.clone();
-        let ipc_token_file = zeron_rpc::ipc_auth::token_path(&config.data_dir);
+        // Agents' MCP servers get the scoped token, never the app's.
+        let ipc_token_file = zeron_rpc::ipc_auth::agent_token_path(&config.data_dir);
         // The instance lock rides into the boot task and is consumed by
         // assembly — held through sign-in onboarding too, because this
         // process owns the data dir from the moment it decided to host it.

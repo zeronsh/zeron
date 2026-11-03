@@ -32,6 +32,7 @@ mod appshots;
 mod auth;
 mod chat;
 mod cloud;
+mod dev;
 mod completion;
 mod engine;
 mod engine_update;
@@ -193,7 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    inspect |= zgx_script::inspect::asked();
+    // (`ZGX_INSPECT_SOCKET=1`: debug builds alone, src/dev.rs.)
+    inspect |= dev::inspect_asked();
     if inspect {
         // Devtools label every node with the script line that made it, and
         // turn the layout warnings on as they start. Asked for from the
@@ -422,7 +424,10 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
-    let view = serve(cx, host, "app.luau", inspect);
+    // The host's own bar above it (a template in preview, a switch you
+    // didn't make, and the menu bar where the system has none).
+    let chrome = plugins::host_bar::view(cx);
+    let view = serve_with(cx, host, "app.luau", inspect, Some(chrome));
     // What zgx reports of the window's elements, for plugins' places.
     plugins::set_view(view);
     // Launch's allocator peak handed back once it has settled (src/heap.rs).
@@ -695,6 +700,13 @@ fn selection_platform(cx: &mut WindowContext, host: &ScriptHost) -> Rc<RefCell<O
 /// Loads `host`'s scripts into the window, reloading them as they change,
 /// with devtools when asked.
 fn serve(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -> zgx::compose::ViewHandle {
+    serve_with(cx, host, entry, inspect, None)
+}
+
+/// `serve`, with what the host draws above the scripts' view (`chrome`: the
+/// main window's own bar, src/plugins/host_bar.rs), outside anything the
+/// scripts build.
+fn serve_with(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool, chrome: Option<zgx::compose::View>) -> zgx::compose::ViewHandle {
     let _ = host.reload();
     // (The scripts' garbage is collected as the window goes idle, by zgx
     // itself: `zgx::idle`. The app once looked for quiet twice a second.)
@@ -721,7 +733,10 @@ fn serve(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -
         let found = cx.try_service::<PlatformService>().map(|p| (*p).clone());
         looks_up.set(Value::from(found.as_ref().is_some_and(|p| p.0.looks_up())));
         *platform.borrow_mut() = found;
-        view
+        match chrome {
+            Some(chrome) => zgx::compose::column().child(chrome).child(zgx::style::Styled::grow(view)),
+            None => view,
+        }
     }));
     let devtools = if inspect {
         let session = zgx_script::inspect::Session::new(
@@ -766,7 +781,14 @@ fn serve(cx: &mut WindowContext, host: ScriptHost, entry: &str, inspect: bool) -
 fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::Effect {
     let (commands, reserved) = (host.commands(), host.reserved_keys());
     let windows = cx.windows.clone();
+    // The host's own items follow a template going in and out of preview.
+    let preview = cx.ui.runtime.signal(plugins::preview::current());
+    let heard = preview.clone();
+    plugins::preview::on_change(move |now| {
+        heard.set(now.cloned());
+    });
     let follow = cx.ui.runtime.effect(move || {
+        preview.with(|_| ());
         let all = commands.get();
         let (bar, taken) = menus_noting(&all);
         // A plugin's whose shortcut was taken says so on its Plugins row.
@@ -778,7 +800,12 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::E
             eprintln!("zeron-zgx: menus: {error}; the app's own, without plugins'");
             let own: Vec<zgx_script::Command> = all.iter().filter(|c| !is_plugins(c)).cloned().collect();
             if let Err(error) = windows.set_menus(menus(&own)) {
-                eprintln!("zeron-zgx: menus: {error}");
+                // The scripts' are the template's too: the host's own bar,
+                // which always has the way back to Zeron's template.
+                eprintln!("zeron-zgx: menus: {error}; the host's own alone");
+                if let Err(error) = windows.set_menus(menus(&[])) {
+                    eprintln!("zeron-zgx: menus: {error}");
+                }
             }
         }
         let keys = reserved.get().iter().filter_map(|key| accelerator(key)).collect();
@@ -788,9 +815,11 @@ fn serve_commands(cx: &mut WindowContext, host: &ScriptHost) -> zgx::reactive::E
     });
     let run = host.clone();
     cx.on_menu_action(move |action| {
-        // The host's own item (no script's): a way back from any template.
-        if action.0 == plugins::USE_ZERON_TEMPLATE {
-            plugins::use_zeron_template();
+        // The host's own items (no script's: `zeron.` is the host's, and
+        // `menus` leaves the scripts' out): a way back from any template,
+        // and keeping the one in preview.
+        if action.0.starts_with(HOST_COMMANDS) {
+            plugins::host_command(&action.0);
             return;
         }
         run.run_command(&action.0);
@@ -840,6 +869,13 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
     let mut ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut menus: Vec<AppMenu> = Vec::new();
     for (i, command) in commands.iter().enumerate() {
+        // `zeron.` is the host's: a script's (a template's) command by such
+        // an id would be a second item with the host's action, and the
+        // platform refuses the whole bar for it.
+        if !command.separator && command.id.starts_with(HOST_COMMANDS) {
+            eprintln!("zeron-zgx: menus: {} is the host's; the script's is left out", command.id);
+            continue;
+        }
         if !command.separator && (command.id.is_empty() || command.title.is_empty() || !ids.insert(command.id.as_str())) {
             continue;
         }
@@ -873,9 +909,16 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
     if !menus[view].entries.is_empty() {
         menus[view].entries.push(AppMenuEntry::Separator);
     }
+    // A template in preview: keeping it, from here too (the bar's Keep).
+    if let Some(preview) = plugins::preview::current() {
+        menus[view].entries.push(AppMenuEntry::item(format!("Keep {}…", preview.name), plugins::KEEP_TEMPLATE));
+    }
     menus[view].entries.push(AppMenuEntry::item("Use Zeron's Template", plugins::USE_ZERON_TEMPLATE));
     (menus, lost)
 }
+
+/// The host's own command ids: no script's command may have one.
+const HOST_COMMANDS: &str = "zeron.";
 
 /// `cmd+shift+d`, `cmd+alt+arrowleft`, `cmd+[`, `cmd+,` as a menu's
 /// accelerator: `cmd` is Command on macOS, Control elsewhere.
@@ -998,7 +1041,7 @@ fn gallery_window() -> WindowOptions {
 /// an app bundle (the Zeron app: the beta), the copy in its `Contents/Resources/ui`
 /// (with `plugins-builtin` beside it).
 fn ui_dir() -> PathBuf {
-    match std::env::var_os("ZERON_ZGX_UI") {
+    match dev::smoke_switch("ZERON_ZGX_UI") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => bundled_ui().unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")),
     }

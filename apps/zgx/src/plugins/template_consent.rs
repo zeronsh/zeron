@@ -65,6 +65,13 @@ fn checking(item: &Json) -> bool {
 /// is still being checked).
 fn fetch(shared: Shared, last: Last, pending: String, generation: Rc<Cell<u64>>, error: Option<String>) {
     let at = generation.get();
+    // Keeping a template in preview: what it is now, read here.
+    if let Some(id) = pending.strip_prefix(KEEP) {
+        let item = keep_item(id);
+        shared.set(record(item.as_ref(), false, error.as_deref()));
+        *last.borrow_mut() = item;
+        return;
+    }
     engine::get().spawn(async move {
         for attempt in 0..=RECHECKS {
             let list = engine::get().call("ListTemplates", json!({})).await;
@@ -85,6 +92,48 @@ fn fetch(shared: Shared, last: Last, pending: String, generation: Rc<Cell<u64>>,
             }
         }
     });
+}
+
+/// What's shown names a template to keep, not a package waiting: `keep:<id>`
+/// (a package's waiting name is never so: `valid_pending` has no `:`).
+const KEEP: &str = "keep:";
+
+/// Template `id` as the keep sheet shows it: its name and description, its
+/// own files' count, the digest you keep (`preview::digest`), and who signed
+/// it if it came from a package. None when it isn't installed (or is
+/// Zeron's own, which needs no keeping).
+fn keep_item(id: &str) -> Option<Json> {
+    let root = super::templates_root()?;
+    if id == super::live::BUILTIN || !super::live::plain(id) {
+        return None;
+    }
+    let t = super::live::installed(&root).into_iter().find(|t| t.id == id)?;
+    let dir = root.join(id);
+    let files = super::live::files(&dir, |rel| !super::live::template_meta(rel) && !super::live::never_templated(rel)).len();
+    let author = match &t.imported {
+        Some(imported) => imported["author"].clone(),
+        None => json!({ "kind": "unknown", "reason": "Made on this device, by you or an agent." }),
+    };
+    Some(json!({
+        "keep": id,
+        "id": id,
+        "name": t.name,
+        "description": t.description,
+        "version": t.version,
+        "files": files,
+        "hash": super::preview::digest(&dir),
+        "author": author,
+    }))
+}
+
+/// The keep sheet for template `id` (one in preview): in the window if it's
+/// open, else in a new one. Only its Keep (`templates.decide { keep }`)
+/// gives the template Zeron's powers.
+pub fn keep(bridge: &Rc<Bridge>, id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    review(bridge, &format!("{KEEP}{id}"));
 }
 
 /// Shows waiting package `pending`'s sheet: in the window if it's open,
@@ -120,7 +169,7 @@ pub fn review(bridge: &Rc<Bridge>, pending: &str) {
         let Some(bridge) = weak.upgrade() else { return };
         let host = host(cx, &bridge, names.clone(), slot.clone(), gen_.clone(), last_.clone());
         // (`ZERON_ZGX_TEMPLATE_REVIEW`, development: devtools are this window's.)
-        crate::serve(cx, host, "template_consent.luau", std::env::var_os("ZERON_ZGX_TEMPLATE_REVIEW").is_some());
+        crate::serve(cx, host, "template_consent.luau", crate::dev::switch("ZERON_ZGX_TEMPLATE_REVIEW").is_some());
         cx.on_closed(move || {
             OPEN.with(|open| open.borrow_mut().take());
         });
@@ -164,18 +213,70 @@ fn host(
     // window closes once the engine has it, and the main window looks again.
     let (weak, window, out) = (Rc::downgrade(bridge), cx.window.clone(), shared);
     host.action("templates.decide", move |arg| {
-        let name = arg.field("pending").map(text).unwrap_or_default();
         let allow = arg.field("allow").is_some_and(Value::truthy);
         let hash = arg.field("hash").map(text).unwrap_or_default();
+        // Keeping a template in preview: recorded here, by the app alone
+        // (never the engine), bound to its files as you were shown them.
+        if let Some(id) = arg.field("keep").map(text).filter(|id| !id.is_empty()) {
+            let shown = pending.borrow().strip_prefix(KEEP) == Some(id.as_str());
+            let kept = if !allow {
+                Ok(())
+            } else if !shown {
+                Err("This isn't the template you were shown. Open its Keep again.".to_string())
+            } else {
+                super::templates_root()
+                    .ok_or_else(|| "Templates aren't available right now".to_string())
+                    .and_then(|root| {
+                        if super::preview::digest(&root.join(&id)) != hash {
+                            return Err("This template changed while you looked at it. Look at it again.".into());
+                        }
+                        super::preview::approve(&id, &hash)
+                    })
+            };
+            eprintln!("zeron-zgx: templates: {id} {}", if allow { "kept" } else { "not kept (Not now)" });
+            match kept {
+                Ok(()) => {
+                    if let Some(b) = weak.upgrade() {
+                        b.look();
+                    }
+                    window.close();
+                }
+                Err(error) => {
+                    generation.set(generation.get() + 1);
+                    let item = keep_item(&id);
+                    out.set(record(item.as_ref(), false, Some(&error)));
+                    *last.borrow_mut() = item;
+                }
+            }
+            return;
+        }
+        let name = arg.field("pending").map(text).unwrap_or_default();
         eprintln!("zeron-zgx: templates: {name} {}", if allow { "allowed" } else { "not allowed (Not now)" });
         generation.set(generation.get() + 1);
         out.set(record(last.borrow().as_ref(), true, None));
         let (weak, window, out, pending, generation, last) =
             (weak.clone(), window.clone(), out.clone(), pending.clone(), generation.clone(), last.clone());
         engine::get().spawn(async move {
-            let result = engine::get()
-                .call("DecideTemplate", json!({ "pending": name, "allow": allow, "hash": hash }))
-                .await;
+            // Allowing it: the engine's single-use review for this package,
+            // minted here (never by a script) just before the answer
+            // (`ReviewTemplate`, the engine authority's).
+            let mut params = json!({ "pending": name, "allow": allow, "hash": hash });
+            if allow {
+                match engine::get().call("ReviewTemplate", json!({ "pending": name, "hash": hash })).await {
+                    Ok(reply) => params["review"] = reply["review"].clone(),
+                    Err(error) => eprintln!("zeron-zgx: templates: no review for {name}: {error}"),
+                }
+            }
+            let result = engine::get().call("DecideTemplate", params).await;
+            // Allowed in this window: installed as you were shown it, so it
+            // runs with Zeron's powers (its files as installed).
+            if let Ok(reply) = &result
+                && let Some(id) = reply["installed"].as_str()
+                && let Some(root) = super::templates_root()
+                && let Err(error) = super::preview::approve(id, &super::preview::digest(&root.join(id)))
+            {
+                eprintln!("zeron-zgx: templates: {id} installed, not kept: {error}");
+            }
             if let Some(b) = weak.upgrade() {
                 b.look();
             }
