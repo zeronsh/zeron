@@ -1943,7 +1943,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "plus", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.new_chat")
-			end, nil, "$font.weight.medium"), hint("⌘N")),
+			end, nil, "$font.weight.medium"), hint(ui.shortcut_text("cmd+n"))),
 			on_click = function()
 				if props.on_new then
 					props.on_new(nil)
@@ -1957,7 +1957,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			lead = Icon { name = "search", size = 16 },
 			words = line(label(function(): string
 				return locale.s("ds.sidebar.search")
-			end), hint("⌘K")),
+			end), hint(ui.shortcut_text("cmd+k"))),
 			on_click = props.on_search,
 		},
 		if props.pages

@@ -268,7 +268,7 @@ function M.Corner(props: CornerProps): Node
 				items = "center",
 				pointer_events = "none",
 				M.hint(function(): string
-					return `⌘{jump() or ""}`
+					return ui.shortcut_text(`cmd+{jump() or ""}`)
 				end),
 			}
 		),
