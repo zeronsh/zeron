@@ -16,7 +16,9 @@
 --   Dock { queue = queued, todos = plan, tasks = running, open = tray, … }
 --
 -- The queue's rows are Zeron's (crates/ui/src/queue.rs): a grip, its
--- thumbnails, its first line, and at its end Edit, Remove and one primary
+-- first line, and at its end Edit, Remove, what it carries (a glyph and
+-- how many: the files and pictures it opens to, kept compact so the row
+-- never grows), and one primary
 -- action: "Send now" for a message with cargo (it interrupts), "Steer" where
 -- the agent takes a word mid-turn, else "Send next". Rows drag into a new
 -- order (or Alt+↑/↓). A row being edited says so. The plan's rows are the
@@ -36,6 +38,9 @@ local material = require("@self/material")
 local control = require("@self/control")
 local cargo = require("@self/composer_cargo")
 local locale = require("@self/locale")
+local Menu = require("@self/menu")
+local Lightbox = require("@self/lightbox")
+local ReplyPicture = require("@self/reply_picture")
 
 local M = {}
 
@@ -91,8 +96,12 @@ export type Props = {
 	on_stop_all: (() -> ())?,
 	-- Which tray is open; the dock keeps its own when not given.
 	open: State<Tray?>?,
-	-- Short of room: rows lose their thumbnails, actions become glyphs.
+	-- Short of room: actions become glyphs.
 	narrow: (() -> boolean)?,
+	-- Where a queued row's pictures show from (a chat on another device
+	-- reads them from there: screens/chat/reply_images' `for_attachments`);
+	-- without it, each path as it is.
+	pictures: ReplyPicture.Pictures?,
 }
 
 -- The trays' geometry, in points, read as the dock is built (the theme's).
@@ -327,65 +336,150 @@ local function tray(level: () -> number, head_node: Node, body: Node, open: () -
 	}
 end
 
--- A queued message's thumbnails: its first picture or two (one, narrow),
--- and how many more.
-local function thumbs(items: { cargo.Item }, narrow: () -> boolean): Node?
-	if #items == 0 then
-		return nil
+-- What a queued message carries, at its row's end: a glyph (a picture's,
+-- if all it carries are pictures) and how many, a line high. Pressed, its
+-- pictures and files over it, a picture opening into the lightbox.
+local function carried(now: () -> Queued, key: string, props: Props): Node
+	local open = ui.use_state(false)
+	local function items(): { cargo.Item }
+		return now().cargo or {}
 	end
-	local shown: { Node } = {}
-	local most = if narrow() then 1 else 2
-	for i, it in items do
-		if i > most then
-			break
+	local function pictures(): { cargo.Item }
+		local out = {}
+		for _, it in items() do
+			if it.kind == "image" and it.src then
+				table.insert(out, it)
+			end
 		end
-		table.insert(
-			shown,
-			ui.overlay {
-				w = 40,
-				h = 28,
-				shrink = 0,
-				-- Concentric with its row, a step in from the row's edge.
-				rounded = "$zeron.composer.tray.thumb_radius",
-				overflow = "hidden",
-				border = 1,
-				border_color = "$zeron.composer.chip.edge",
-				border_over = true,
-				bg = "$hover",
-				items = "center",
-				justify = "center",
-				label = it.name,
-				tooltip = it.name,
-				if it.kind == "image" and it.src
-					then ui.image {
-						src = it.src,
-						fit = "cover",
-						w_full = true,
-						h_full = true,
-						-- (Its file gone since: the glyph a file has.)
-						fallback = ui.div { color = "$text.secondary", Icon { name = "paperclip", size = 14 } },
-					}
-					else ui.div { color = "$text.secondary", Icon { name = if it.kind == "annotation" then "cursor" else "paperclip", size = 14 } },
-			}
-		)
+		return out
 	end
-	local rest = #items - most
-	if rest > 0 then
-		local names: { string } = {}
-		for i = most + 1, #items do
-			table.insert(names, items[i].name)
+	-- (Read from the chat's device first, where it's on another.)
+	local function shown(src: string): string
+		if not props.pictures then
+			return src
 		end
-		table.insert(shown, ui.text {
-			`+{rest}`,
-			shrink = 0,
+		local p = props.pictures.resolve(src)
+		return if p and p.state == "ready" and p.src then p.src else ""
+	end
+	local group = `queued-{key}`
+	local function lightbox(): { Lightbox.Item }
+		local out: { Lightbox.Item } = {}
+		for _, it in pictures() do
+			local src = shown(it.src :: string)
+			if src ~= "" then
+				table.insert(out, { src = src, name = it.name, path = if string.sub(src, 1, 1) == "/" then src else nil })
+			end
+		end
+		return out
+	end
+	local function names(): string
+		local out = {}
+		for _, it in items() do
+			table.insert(out, it.name)
+		end
+		return table.concat(out, " · ")
+	end
+	local trigger = Button {
+		size = "sm",
+		tone = "ghost",
+		h = 24,
+		px = "$space.1",
+		gap = "$zeron.space.hair",
+		shrink = 0,
+		label = function()
+			return locale.s("ds.composer_dock.carries", { n = #items(), names = names() })
+		end,
+		tooltip = names(),
+		expanded = function()
+			return open:get()
+		end,
+		on_click = function()
+			open:set(not open:peek())
+		end,
+		Icon {
+			name = function(): Icon.Name
+				return if #pictures() == #items() then "gallery" else "paperclip"
+			end,
+			size = 14,
+		},
+		ui.text {
+			function()
+				return tostring(#items())
+			end,
 			tabular = true,
 			text_size = "$font.size.xs",
 			weight = "$font.weight.medium",
-			color = "$text.tertiary",
-			tooltip = locale.s("ds.composer_dock.rest", { n = rest, names = table.concat(names, " · ") }),
-		})
-	end
-	return ui.row { gap = "$space.1", items = "center", shrink = 0, table.unpack(shown) }
+		},
+	}
+	return ui.popover(Menu.panel {
+		open = open,
+		anchor = trigger,
+		placement = { side = "top", align = "end", offset = 6 },
+		w = "$zeron.menu.width",
+		build = function()
+			local tiles: { Node } = {}
+			for i, it in pictures() do
+				if props.pictures then
+					props.pictures.fetch(it.src :: string)
+				end
+				table.insert(
+					tiles,
+					Lightbox.Thumb {
+						group = group,
+						index = i,
+						items = lightbox,
+						radius = ui.theme.get("zeron.composer.tray.thumb_radius") :: number,
+						label = locale.t("ds.composer_dock.open_named", { name = it.name }),
+						tooltip = it.name,
+						w = 64,
+						h = 48,
+						shrink = 0,
+						rounded = "$zeron.composer.tray.thumb_radius",
+						ui.overlay {
+							w_full = true,
+							h_full = true,
+							rounded = "$zeron.composer.tray.thumb_radius",
+							overflow = "hidden",
+							border = 1,
+							border_color = "$zeron.composer.chip.edge",
+							border_over = true,
+							bg = "$hover",
+							items = "center",
+							justify = "center",
+							ui.image {
+								src = function(): string
+									return shown(it.src :: string)
+								end,
+								fit = "cover",
+								w_full = true,
+								h_full = true,
+								fallback = ui.div { color = "$text.tertiary", Icon { name = "gallery", size = 16 } },
+							},
+						},
+					}
+				)
+			end
+			local files: { Node } = {}
+			for _, it in items() do
+				if not (it.kind == "image" and it.src) then
+					table.insert(files, Menu.Row {
+						icon = if it.kind == "annotation" then "cursor" else "paperclip",
+						label = it.name,
+					})
+				end
+			end
+			return ui.column {
+				w_full = true,
+				py = "$space.1",
+				role = "list",
+				label = locale.t("ds.composer_dock.carried"),
+				if #tiles > 0
+					then ui.row { px = "$space.2", py = "$space.1", gap = "$space.1", wrap = true, table.unpack(tiles) }
+					else nil,
+				if #files > 0 then Menu.Group { table.unpack(files) } else nil,
+			}
+		end,
+	})
 end
 
 -- A queued row.
@@ -521,6 +615,10 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 					end,
 				},
 			},
+			ui.show(function()
+				local c = now().cargo
+				return c ~= nil and #c > 0
+			end, carried(now, q.key or q.id, props)),
 			primary,
 		}
 	end
@@ -568,9 +666,6 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			text_size = "$font.size.xs",
 			color = "$text.tertiary",
 		},
-		ui.show(function()
-			return not narrow() or (q.cargo ~= nil and #(q.cargo :: { cargo.Item }) > 0)
-		end, thumbs(q.cargo or {}, narrow) or ui.div {}),
 		FadeText {
 			function()
 				if editing() then

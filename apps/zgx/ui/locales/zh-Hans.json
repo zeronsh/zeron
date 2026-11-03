@@ -809,6 +809,9 @@
       "stop_all": "全部停止",
       "steer_all": "全部引导",
       "steer_all_hint": "将所有排队消息编号合并为一条进行引导",
+      "carries": "{n} 个附件：{names}",
+      "carried": "附件",
+      "open_named": "打开 {name}",
       "running": "运行中",
       "queued_messages": "队列中的消息",
       "queued": "已加入队列"

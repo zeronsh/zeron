@@ -37,6 +37,7 @@ local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
 local queued = require("@app/screens/chat/queued")
+local ReplyImages = require("@app/screens/chat/reply_images")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -360,6 +361,15 @@ local function Composer(): Node
 			asked:set(r)
 			chosen:set({})
 		end
+	end)
+	-- A queued row's pictures, each a path on the chat's device: read from
+	-- there, on another (as its sent messages' are, screens/chat/session).
+	local queue_pictures = ReplyImages.for_attachments(function(): any
+		local s = open()
+		if not s or s.state == "missing" then
+			return nil
+		end
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
 	end)
 	-- The engine's queue, and the queue shown: with what was just asked of
 	-- it (screens/chat/queued), from the frame it's asked.
@@ -1177,6 +1187,7 @@ local function Composer(): Node
 					}
 				end)
 			end,
+			queue_pictures = queue_pictures,
 			on_queue_save = function()
 				end_edit("commit")
 			end,

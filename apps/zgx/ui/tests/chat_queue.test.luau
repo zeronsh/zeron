@@ -168,3 +168,34 @@ test("Steer all shows with two queued rows or more, while the agent can be steer
 	settle(app)
 	expect(app:has('role:button "Steer all"')).to_be(false)
 end)
+
+-- What a queued message carries: a glyph and how many at its row's end,
+-- the row no taller; pressed, its picture and file, the picture opening
+-- into the lightbox.
+
+local function height(app: any, target: string): number
+	local line = app:tree(target):match("[^\n]*") or ""
+	return tonumber(line:match("%d+,%d+ %d+x(%d+)")) or -1
+end
+
+test("a queued message's files show as a count at its row's end, the row no taller", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	running(app, "s2")
+	app:command("queue_with_files")
+	settle(app)
+	local with = 'role:listitem "2. Look at these"'
+	expect(app:has(`{with} >> role:button "2 attachments: flint.png · notes.txt"`)).to_be(true)
+	expect(app:has('role:listitem "1. Plain words" >> role:button "1 attachment"')).to_be(false)
+	expect(height(app, with)).to_be(height(app, 'role:listitem "1. Plain words"'))
+	-- (Carrying files, it's sent now: the engine won't steer files mid-turn.)
+	expect(app:has(`{with} >> role:button "Send now"`)).to_be(true)
+	app:click(`{with} >> role:button "2 attachments: flint.png · notes.txt"`)
+	settle(app)
+	expect(app:has('role:list "Attachments" >> ~"notes.txt"')).to_be(true)
+	app:click('role:button "Open flint.png"')
+	settle(app)
+	local open = app:state("ds/lightbox.luau::open")
+	expect(open ~= nil).to_be(true)
+	expect(open.items[1].name).to_be("flint.png")
+end)

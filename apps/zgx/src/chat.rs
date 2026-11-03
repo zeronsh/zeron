@@ -9,7 +9,8 @@
 //!                    "missing" | "offline", title, project, device, harness,
 //!                    model, effort, fast, access, plan, running, steers
 //!                    (Steer takes a queued row into the turn), context,
-//!                    context_tokens?, context_window?, ask?, queue, todos,
+//!                    context_tokens?, context_window?, ask?, queue (rows:
+//!                    { id, text, cargo?, editing?, locked? }), todos,
 //!                    tasks }, nil for none
 //!   `chat.messages`  its transcript as ds/transcript's messages, keyed by id
 //!   `chat.draft`     the reply being written: { id, text }
@@ -3545,6 +3546,12 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         .iter()
         .map(|q| {
             let mut fields = vec![("id", s(&q["id"])), ("text", s(&q["text"]))];
+            // Its files (their paths on the chat's host), as a sent
+            // message's: the tray says how many, and shows them.
+            let paths = row_paths(q);
+            if !paths.is_empty() {
+                fields.push(("cargo", attachments_value(&paths)));
+            }
             let mine = open.editing.as_ref().is_some_and(|e| q["id"].as_str() == Some(&e.item));
             if mine {
                 fields.push(("editing", Value::Bool(true)));

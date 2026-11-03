@@ -425,6 +425,27 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "queue_with_files",
+	title = "A message with a picture and a file waits in the queue, after one without",
+	run = function()
+		if opened then
+			publish(opened, {
+				queue = {
+					{ id = "q1", text = "Plain words" },
+					{
+						id = "q2",
+						text = "Look at these",
+						cargo = {
+							{ kind = "image", name = "flint.png", src = "assets/favicons/flint.png" },
+							{ kind = "file", name = "notes.txt" },
+						},
+					},
+				},
+			})
+		end
+	end,
+}
+ui.command {
 	id = "queue_two",
 	title = "Two messages wait in the queue",
 	run = function()
