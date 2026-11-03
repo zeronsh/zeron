@@ -46,11 +46,15 @@ fn a_sessions_composer_sits_on_the_page_foot_and_its_menu_opens_at_the_click() {
         settle(&app);
 
         // The dock rests its gap (screens/chat/dock's GAP, 16) above the
-        // page's foot, which is the window's bottom.
+        // page's foot: its card's bottom, inside the card's 1-point edge,
+        // the window's gap (4) under it.
         let dock = app.find("#chat-composer-dock").expect("the session's composer");
         let d = app.ui.scene.borrow().transformed_bounds(dock);
-        let gap = h - (d.y + d.height);
-        assert!((gap - 16.).abs() < 1., "at {zoom}: the dock ends {gap} above the window's bottom ({h})");
+        let page = app.find("#shell-page").expect("the page");
+        let p = app.ui.scene.borrow().transformed_bounds(page);
+        assert!((h - (p.y + p.height) - 4.).abs() < 1., "at {zoom}: the page's card stands the window's gap above its bottom");
+        let gap = (p.y + p.height - 1.) - (d.y + d.height);
+        assert!((gap - 16.).abs() < 1., "at {zoom}: the dock ends {gap} above the page's foot ({p:?})");
 
         // Words in the draft, selected; a secondary click on them.
         app.type_text("#chat-composer >> role:textbox", "asdasd");

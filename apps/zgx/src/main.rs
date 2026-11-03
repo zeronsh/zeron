@@ -64,6 +64,8 @@ mod menu_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
+mod split_tests;
+#[cfg(test)]
 mod route_motion_tests;
 #[cfg(test)]
 mod hit_sweep_tests;
@@ -938,7 +940,7 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
         };
         menus[index].entries.push(entry);
     }
-    // "Use Zeron's Template", the host's own, after the scripts' View items:
+    // "Use Zeron v3", the host's own, after the scripts' View items:
     // no template can take it away (src/plugins).
     let view = match menus.iter().position(|m| m.label == "View") {
         Some(index) => index,
@@ -954,7 +956,7 @@ fn menus_noting(commands: &[zgx_script::Command]) -> (Vec<AppMenu>, Vec<(String,
     if let Some(preview) = plugins::preview::current() {
         menus[view].entries.push(AppMenuEntry::item(format!("Keep {}…", preview.name), plugins::KEEP_TEMPLATE));
     }
-    menus[view].entries.push(AppMenuEntry::item("Use Zeron's Template", plugins::USE_ZERON_TEMPLATE));
+    menus[view].entries.push(AppMenuEntry::item("Use Zeron v3", plugins::USE_ZERON_TEMPLATE));
     (menus, lost)
 }
 
