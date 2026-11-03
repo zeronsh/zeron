@@ -96,6 +96,70 @@ fn ready_peer_must_match_exact_provider_device_and_synced_scope() {
     }
 }
 
+// Failure modes: only a staging controller can wake, so Crew and Crew Canary
+// controllers are refused; or a controller in a deployment the devbox skill
+// does not configure starts another deployment's engine on the machine.
+#[test]
+fn controller_deployment_selects_the_host_channel() {
+    let scope = |project: &str, deployment: Option<&str>| -> zeron_proto::CollaborationScope {
+        serde_json::from_value(serde_json::json!({"projectId": project, "deploymentId": deployment})).unwrap()
+    };
+    for (project, deployment, channel) in [
+        ("ashler-production", None, HostChannel::Production),
+        // Production leaves its deployment to device bootstrap.
+        ("ashler-production", Some("ashler-production"), HostChannel::Production),
+        ("ashler-staging", Some("ashler-staging"), HostChannel::Staging),
+        ("crew-upstream-canary", Some("crew-upstream-canary"), HostChannel::Canary),
+    ] {
+        assert_eq!(HostChannel::for_controller(&scope(project, deployment)), Ok(channel), "{project} {deployment:?}");
+    }
+    for (project, deployment) in [
+        ("ashler-staging", None),
+        ("ashler-staging", Some("preview-deployment")),
+        ("crew-upstream-canary", None),
+        ("local-development", None),
+    ] {
+        assert!(HostChannel::for_controller(&scope(project, deployment)).is_err(), "{project} {deployment:?}");
+    }
+}
+
+// Failure mode: wake starts one fixed channel's helper, which a machine set up
+// for another channel refuses, so it never comes online. The names are the
+// devbox skill's `crew-devbox-autostart` channels.
+#[cfg(unix)]
+#[tokio::test]
+async fn host_start_runs_the_controller_channel_helper() {
+    use std::os::unix::fs::PermissionsExt;
+    for (channel, name) in [
+        (HostChannel::Production, "production"),
+        (HostChannel::Staging, "staging"),
+        (HostChannel::Canary, "canary"),
+    ] {
+        for (provider, id) in [(DeviceEnvironment::Boat, BOX), (DeviceEnvironment::Namespace, "abcdefgh23456")] {
+            let temp = tempfile::tempdir().unwrap();
+            let helper = temp.path().join(".local/bin/crew-devbox-autostart");
+            std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+            let seen = temp.path().join("seen");
+            std::fs::write(&helper, format!("#!/bin/sh\nprintf '%s' \"$*\" > '{}'\n", seen.display())).unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let home = temp.path().display();
+            // Boat: `--no-update --json info ID`, then `--no-update --json exec ID --timeout 180 COMMAND`.
+            // Namespace: `exec ID -- sh -c COMMAND`.
+            let script = if provider == DeviceEnvironment::Boat {
+                format!("#!/bin/sh\nif [ \"$3\" = info ]; then\n  printf '%s' '{{\"sandbox\":{{\"id\":\"{BOX}\",\"state\":\"ready\"}}}}'\nelse\n  shift 6\n  exec env HOME='{home}' /bin/sh -c \"$1\"\nfi\n")
+            } else {
+                format!("#!/bin/sh\nshift 3\nexec env HOME='{home}' \"$@\"\n")
+            };
+            let executable = temp.path().join("provider");
+            std::fs::write(&executable, script).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let stop = CancellationToken::new();
+            prepare_host(&executable, provider, id, channel, &stop, &|| Ok(())).await.unwrap();
+            assert_eq!(std::fs::read_to_string(&seen).unwrap(), name, "{provider:?}");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn bounded_cli_capture_surfaces_excess_output_without_retaining_it() {
@@ -219,7 +283,7 @@ async fn wake_deadline_includes_waiting_for_another_wake() {
     core.workspace.upsert_device_row(&device);
     let _gate = GATE.lock().await;
     let authorize = || Ok(());
-    let operation = wake(&core.workspace, &links, &device.id, &authorize);
+    let operation = wake(&core.workspace, &links, &device.id, HostChannel::Staging, &authorize);
     tokio::pin!(operation);
     tokio::select! {
         result = &mut operation => panic!("wake escaped its occupied gate: {result:?}"),
@@ -248,7 +312,7 @@ async fn queued_wake_rejects_a_changed_binding_before_provider_operations() {
     core.workspace.upsert_device_row(&device);
     let gate = GATE.lock().await;
     let authorize = || Ok(());
-    let operation = wake(&core.workspace, &links, &device.id, &authorize);
+    let operation = wake(&core.workspace, &links, &device.id, HostChannel::Staging, &authorize);
     tokio::pin!(operation);
     assert!(futures::poll!(operation.as_mut()).is_pending());
     // Removing the binding also keeps the unfixed path provider-free.
@@ -267,7 +331,11 @@ async fn queued_wake_rpc_rejects_sign_out_revocation_and_scope_change() {
     use zeron_sync::scaffold_auth::{save_session, ScaffoldConfig, ScaffoldIdentity, ScaffoldSession, DEFAULT_OAUTH_SCOPES};
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    for outcome in ["signed-out", "revoked", "scope-changed"] {
+    // A Canary controller must reach the wake gate like a staging one; only
+    // staging controllers could wake before.
+    for (project, outcome) in ["ashler-staging", "crew-upstream-canary"].into_iter()
+        .flat_map(|project| ["signed-out", "revoked", "scope-changed"].map(|outcome| (project, outcome)))
+    {
         let temp = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -283,7 +351,7 @@ async fn queued_wake_rpc_rejects_sign_out_revocation_and_scope_change() {
                     let request = String::from_utf8_lossy(&bytes[..size]);
                     let body = if request.starts_with("GET /auth/session ") {
                         serde_json::json!({"userId":"owner", "email":"owner@example.com",
-                            "projectScope":"ashler-staging", "deploymentId": if moved.load(Ordering::SeqCst) { "other-deployment" } else { "ashler-staging" },
+                            "projectScope":project, "deploymentId": if moved.load(Ordering::SeqCst) { "other-deployment" } else { project },
                             "credential":"scaffold", "capabilities":["session.read"]})
                     } else {
                         assert!(request.starts_with("GET /api/code-sandboxes/auth/session "), "unexpected request: {request}");
@@ -299,17 +367,17 @@ async fn queued_wake_rpc_rejects_sign_out_revocation_and_scope_change() {
         save_session(&auth_dir.join("scaffold-session.json"), &ScaffoldSession {
             access_token: "sc_rc_test".into(), resource: origin.clone(), edge_origin: origin.clone(), device: None,
             identity: ScaffoldIdentity { user_id: "owner".into(), email: "owner@example.com".into(), name: None,
-                project_scope: "ashler-staging".into(), deployment_id: Some("ashler-staging".into()), capabilities: vec!["session.read".into()] },
+                project_scope: project.into(), deployment_id: Some(project.into()), capabilities: vec!["session.read".into()] },
         }).unwrap();
         let mut config = crate::AuthConfig::new(&origin, &auth_dir);
-        config.scaffold = Some(ScaffoldConfig::new(&origin, &origin, "ashler-staging"));
+        config.scaffold = Some(ScaffoldConfig::new(&origin, &origin, project));
         let auth = crate::Auth::detect(config).await;
         assert!(auth.state().is_signed_in());
         let token = TokenSource::token(&auth).await.unwrap();
         let runtime = crate::scaffold::ScaffoldRuntime::new(
-            crate::scaffold::ScaffoldClient::new(&origin, "ashler-staging", auth.for_profile_tokens()).unwrap(),
+            crate::scaffold::ScaffoldClient::new(&origin, project, auth.for_profile_tokens()).unwrap(),
             &origin, Arc::new(crate::scaffold::UnavailableDeviceJoinGrantProvider),
-        ).with_deployment_id("ashler-staging".into());
+        ).with_deployment_id(project.into());
         let crew = crate::crew::CrewServices::new(auth.clone(), runtime,
             Arc::new(zeron_sync::DocsStore::open(&temp.path().join("ledger")).unwrap())).unwrap();
         let core = crate::EngineCore::assemble_with_profile(
@@ -328,7 +396,7 @@ async fn queued_wake_rpc_rejects_sign_out_revocation_and_scope_change() {
         let gate = GATE.lock().await;
         let operation = rpc.handle(methods::WAKE_DEVICE, serde_json::json!({"deviceId": device.id}));
         tokio::pin!(operation);
-        assert!(futures::poll!(operation.as_mut()).is_pending());
+        assert!(futures::poll!(operation.as_mut()).is_pending(), "{project} wake did not reach the gate");
         match outcome {
             "signed-out" => auth.sign_out(),
             "revoked" => auth.invalidate(token.generation),
@@ -345,9 +413,9 @@ async fn queued_wake_rpc_rejects_sign_out_revocation_and_scope_change() {
         drop(gate);
         let error = match operation.await {
             Err(error) => error,
-            Ok(_) => panic!("queued {outcome} wake must be rejected"),
+            Ok(_) => panic!("queued {project} {outcome} wake must be rejected"),
         };
-        assert!(error.to_string().contains("Crew"), "{outcome}: {error}");
+        assert!(error.to_string().contains("Crew"), "{project} {outcome}: {error}");
         core.sessions.shutdown().await;
         server.abort();
     }
@@ -378,7 +446,7 @@ async fn boat_start_supplies_only_a_missing_native_identity() {
         )).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let stop = CancellationToken::new();
-        prepare_host(&executable, DeviceEnvironment::Boat, BOX, &stop, &|| Ok(())).await.unwrap();
+        prepare_host(&executable, DeviceEnvironment::Boat, BOX, HostChannel::Staging, &stop, &|| Ok(())).await.unwrap();
         assert_eq!(std::fs::read_to_string(&seen).unwrap(), format!("{expected} staging"));
     }
     let temp = tempfile::tempdir().unwrap();
@@ -388,7 +456,7 @@ async fn boat_start_supplies_only_a_missing_native_identity() {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let stop = CancellationToken::new();
     let forged = format!("{BOX}\"; touch pwned; \"");
-    assert!(prepare_host(&executable, DeviceEnvironment::Boat, &forged, &stop, &|| Ok(())).await.is_err());
+    assert!(prepare_host(&executable, DeviceEnvironment::Boat, &forged, HostChannel::Staging, &stop, &|| Ok(())).await.is_err());
     assert!(!invoked.exists(), "an invalid Boat ID must not reach the provider CLI");
 }
 
@@ -409,7 +477,7 @@ async fn provider_preparation_rechecks_authority_between_commands() {
         if inspected.exists() { Err("Controller scope changed".to_owned()) } else { Ok(()) }
     };
     let stop = CancellationToken::new();
-    let result = prepare_host(&executable, DeviceEnvironment::Boat, BOX, &stop, &authorize).await;
+    let result = prepare_host(&executable, DeviceEnvironment::Boat, BOX, HostChannel::Staging, &stop, &authorize).await;
     assert!(matches!(result, Err(error) if error == "Controller scope changed"));
     assert!(inspected.exists());
     assert!(!mutated.exists(), "revoked authority must not resume or exec the machine");

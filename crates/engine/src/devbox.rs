@@ -14,9 +14,38 @@ const OUTPUT_LIMIT: usize = 64 * 1024;
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 const WAKE_TIMEOUT: Duration = Duration::from_secs(180);
-const START_HELPER: &str = "exec \"$HOME/.local/bin/crew-devbox-autostart\" staging";
 // ponytail: one explicit wake at a time; use per-device gates if parallel wakes are needed.
 static GATE: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// The `crew-devbox-autostart` channel wake starts on the machine. A controller
+/// lists only devices in its own deployment, so the machine runs the channel
+/// that the devbox skill (ashler-platform `skills/devbox`) configures for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostChannel {
+    Production,
+    Staging,
+    Canary,
+}
+
+impl HostChannel {
+    pub(crate) fn for_controller(scope: &zeron_proto::CollaborationScope) -> Result<Self, String> {
+        match (scope.project_id.as_str(), scope.deployment_id.as_deref()) {
+            // Production leaves deployment selection to device bootstrap.
+            ("ashler-production", _) => Ok(Self::Production),
+            ("ashler-staging", Some("ashler-staging")) => Ok(Self::Staging),
+            ("crew-upstream-canary", Some("crew-upstream-canary")) => Ok(Self::Canary),
+            _ => Err("This Crew deployment has no devbox setup. Wake devboxes from Crew, Crew Staging or Crew Canary".into()),
+        }
+    }
+
+    fn start_helper(self) -> &'static str {
+        match self {
+            Self::Production => "exec \"$HOME/.local/bin/crew-devbox-autostart\" production",
+            Self::Staging => "exec \"$HOME/.local/bin/crew-devbox-autostart\" staging",
+            Self::Canary => "exec \"$HOME/.local/bin/crew-devbox-autostart\" canary",
+        }
+    }
+}
 
 pub fn namespace_host() -> bool {
     cfg!(target_os = "linux") && Path::new("/.namespace/tasks").is_dir()
@@ -157,7 +186,7 @@ fn provider_failure(stdout: &[u8], stderr: &[u8]) -> String {
         "Devbox refused the operation because of billing, usage or permissions. No account change or replacement was attempted".into()
     } else {
         // Provider errors may contain auth URLs, environment values or remote logs.
-        "Devbox command failed. Inspect this machine and its existing crew-devbox-autostart staging helper; no recovery or replacement was attempted".into()
+        "Devbox command failed. Inspect this machine and its existing crew-devbox-autostart helper; no recovery or replacement was attempted".into()
     }
 }
 
@@ -316,6 +345,7 @@ async fn prepare_host(
     executable: &Path,
     provider: DeviceEnvironment,
     id: &str,
+    channel: HostChannel,
     cancel: &CancellationToken,
     authorize: &(impl Fn() -> Result<(), String> + Sync),
 ) -> Result<(), String> {
@@ -323,7 +353,7 @@ async fn prepare_host(
     if provider == DeviceEnvironment::Namespace {
         let (status, out, err) = run_cli(
             executable,
-            &["exec", id, "--", "sh", "-c", START_HELPER],
+            &["exec", id, "--", "sh", "-c", channel.start_helper()],
             START_TIMEOUT,
             cancel,
         )
@@ -363,7 +393,7 @@ async fn prepare_host(
     authorize()?;
     // A restarted Boat agent can drop BOAT_ID from exec sessions. Boat routed
     // this exec to `id`, so supply only that missing value; Boat's own wins.
-    let start = format!("export BOAT_ID=\"${{BOAT_ID:-{id}}}\"; {START_HELPER}");
+    let start = format!("export BOAT_ID=\"${{BOAT_ID:-{id}}}\"; {}", channel.start_helper());
     let (status, out, err) = run_cli(
         executable,
         &["--no-update", "--json", "exec", id, "--timeout", "180", &start],
@@ -474,11 +504,12 @@ pub(crate) async fn wake(
     workspace: &crate::WorkspaceHost,
     links: &Arc<LinkCache>,
     device_id: &str,
+    channel: HostChannel,
     authorize: &(impl Fn() -> Result<(), String> + Sync),
 ) -> Result<Device, String> {
     // This deadline includes gate contention, provider operations and exact-peer
     // readiness. Dropping an in-flight provider future kills only its owned group.
-    tokio::time::timeout(WAKE_TIMEOUT, wake_inner(workspace, links, device_id, authorize)).await
+    tokio::time::timeout(WAKE_TIMEOUT, wake_inner(workspace, links, device_id, channel, authorize)).await
         .map_err(|_| "Devbox wake timed out; inspect its existing state before retrying. The original draft was not submitted".to_owned())?
 }
 
@@ -486,6 +517,7 @@ async fn wake_inner(
     workspace: &crate::WorkspaceHost,
     links: &Arc<LinkCache>,
     device_id: &str,
+    channel: HostChannel,
     authorize: &(impl Fn() -> Result<(), String> + Sync),
 ) -> Result<Device, String> {
     if !cfg!(unix) {
@@ -514,7 +546,7 @@ async fn wake_inner(
     };
     authorize_host()?;
     let stop = CancellationToken::new();
-    prepare_host(&executable(provider)?, provider, id, &stop, &authorize_host).await?;
+    prepare_host(&executable(provider)?, provider, id, channel, &stop, &authorize_host).await?;
     links.invalidate(device_id);
     await_peer(workspace, links, device_id, provider, id).await
 }

@@ -2879,10 +2879,7 @@ impl RpcService for EngineRpc {
                 let authority_epoch = zeron_rpc::TokenSource::subscribe(auth)
                     .ok_or_else(|| RpcError::Failed("Crew authority notifications unavailable".into()))?;
                 let (principal, scope) = self.crew_services()?.controller()?;
-                if scope.project_id != "ashler-staging"
-                    || scope.deployment_id.as_deref() != Some("ashler-staging") {
-                    return Err(RpcError::Failed("Devbox wake requires the staging Crew controller".into()));
-                }
+                let channel = crate::devbox::HostChannel::for_controller(&scope).map_err(RpcError::Failed)?;
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase", deny_unknown_fields)]
                 struct Input { device_id: String }
@@ -2907,7 +2904,7 @@ impl RpcService for EngineRpc {
                 let device = tokio::select! {
                     biased;
                     _ = authority_changes.changed() => return Err(RpcError::Failed("Crew controller authority changed during wake".into())),
-                    result = crate::devbox::wake(&self.workspace, links, &input.device_id, &authorize) => result.map_err(RpcError::Failed)?,
+                    result = crate::devbox::wake(&self.workspace, links, &input.device_id, channel, &authorize) => result.map_err(RpcError::Failed)?,
                 };
                 authorize().map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({
