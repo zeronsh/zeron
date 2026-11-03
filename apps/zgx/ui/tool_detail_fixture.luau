@@ -2,9 +2,13 @@
 -- (ds/tool_detail), for tests/tool_detail.test.luau: an edit (its files'
 -- counts, its whole diff in the sidecar), a command (a 30-line summary, its
 -- whole output in the sidecar), a read, and an older doc's edit carrying
--- its diff. Fetches are stubbed (`test_tool_fetches`, one line each; the
--- output's first fetch fails while `test_tool_fail` is set). The work is
--- made again, as a reload makes it, when `test_tool_generation` moves.
+-- its diff; then commands with a short output, a failed one (Claude Code's
+-- "Exit code 2" leading it, colours and a progress line's carriage
+-- returns in it), a huge one, and one still running whose output is
+-- `test_tool_stream`. Fetches are stubbed (`test_tool_fetches`, one line
+-- each; the output's first fetch fails while `test_tool_fail` is set). The
+-- work is made again, as a reload makes it, when `test_tool_generation`
+-- moves.
 -- Here, beside app.luau, as a mounted script loads modules from its own
 -- directory down.
 
@@ -17,6 +21,7 @@ local ToolDetail = require("@ds/tool_detail")
 local fetches = ui.state("test_tool_fetches", "")
 local fail = ui.state("test_tool_fail", false)
 local generation = ui.state("test_tool_generation", 1)
+local stream = ui.state("test_tool_stream", "Compiling zeron\n")
 
 local function settled(value: any, err: any?): any
 	return {
@@ -59,6 +64,11 @@ ToolDetail.fetch = function(blob_ref: string): any
 	return settled({ kind = "output", lines = THIRTY, more = 0 })
 end
 
+local HUGE = {}
+for i = 1, 5000 do
+	table.insert(HUGE, `row {i}`)
+end
+
 local TOOLS = {
 	{ id = "p1", kind = "edit", verb = "Edited", target = "app.rs", added = 1, removed = 1, stats = { { path = "src/app.rs", added = 1, removed = 1 } }, diff_ref = "c/p1.diff" },
 	{ id = "p2", kind = "exec", verb = "Ran", target = "cargo test", output = table.concat(THIRTY, "\n"), output_ref = "c/p2", output_bytes = 12345 },
@@ -70,7 +80,23 @@ local TOOLS = {
 		target = "old.txt",
 		diff = { kind = "diff", path = "old.txt", lines = { { kind = "hunk", text = "@@ -1 +1 @@" }, { kind = "-", old = 1, text = "before" }, { kind = "+", new = 1, text = "after" } } },
 	},
+	{ id = "p5", kind = "exec", verb = "Ran", target = "echo ok", output = "ok\n" },
+	{
+		id = "p6",
+		kind = "exec",
+		verb = "Ran",
+		target = "make",
+		failed = true,
+		output = "Exit code 2\n\27[1;31merror\27[0m: \27]0;title\7missing \27[4mtarget\27[24m\nfetch 10%\rfetch 100%\n",
+	},
+	{ id = "p7", kind = "exec", verb = "Ran", target = "seq 5000", output = table.concat(HUGE, "\n") },
 }
+
+local function tools(): { any }
+	local all = table.clone(TOOLS)
+	table.insert(all, { id = "p8", kind = "exec", verb = "Ran", target = "cargo build", output = stream:get() })
+	return all
+end
 
 return ui.column {
 	w_full = true,
@@ -84,9 +110,7 @@ return ui.column {
 			h_full = true,
 			Activity {
 				key = "work-1",
-				tools = function()
-					return TOOLS
-				end,
+				tools = tools,
 			},
 		}
 	end),
