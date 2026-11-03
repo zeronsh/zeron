@@ -1344,3 +1344,31 @@ async fn plugins_export_packs_a_plugin_that_installs_elsewhere() {
     let here = call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await.unwrap_err();
     assert!(here.contains("making a plugin called hello"), "{here}");
 }
+
+/// The theme tools' methods over this device's files, and the window told
+/// of each change (`WatchThemes`) so it reads them again.
+#[tokio::test]
+async fn theme_methods_write_this_device_s_files_and_tell_the_window() {
+    let f = fixture();
+    let mut told = match f.plugins.dispatch(methods::WATCH_THEMES, serde_json::json!({})).await {
+        Ok(RpcReply::Stream(stream)) => stream,
+        _ => panic!("stream"),
+    };
+    let nord = zeron_theme::builtin_registry().families.iter().flat_map(|fam| &fam.variants).find(|v| v.id == "nord").unwrap();
+    let dark = zeron_theme::catalog::Palette::of(nord).to_json(None);
+    let made = call(&f.plugins, methods::CREATE_THEME, serde_json::json!({ "name": "Ink", "dark": dark })).await.unwrap();
+    assert_eq!(made["id"], "custom-ink");
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::CustomThemeLibrary::load(&f.data).unwrap().entry("custom-ink").is_some(), "in the data dir");
+    call(&f.plugins, methods::USE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert_eq!(zeron_theme::catalog::chosen(&f.data).dark.as_deref(), Some("custom-ink-dark"));
+    // Reading tells nothing; a refusal says why and changes nothing.
+    let listed = call(&f.plugins, methods::LIST_THEMES, serde_json::json!({})).await.unwrap();
+    assert_eq!(listed["wearing"]["dark"]["theme"], "custom-ink");
+    let refused = call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "gruvbox" })).await.unwrap_err();
+    assert!(refused.contains("built in"), "{refused}");
+    call(&f.plugins, methods::DELETE_THEME, serde_json::json!({ "id": "custom-ink" })).await.unwrap();
+    assert_eq!(told.next().await.unwrap(), serde_json::json!({ "changed": true }));
+    assert!(zeron_theme::catalog::chosen(&f.data).is_empty());
+}

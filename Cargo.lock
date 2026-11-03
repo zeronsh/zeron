@@ -13737,6 +13737,7 @@ dependencies = [
  "zeron-rpc",
  "zeron-sync",
  "zeron-term-link",
+ "zeron-theme",
  "zeron-update",
  "zeron-visual",
  "zip",
@@ -13809,6 +13810,7 @@ dependencies = [
  "zeron-doc",
  "zeron-proto",
  "zeron-rpc",
+ "zeron-theme",
  "zeron-visual",
 ]
 
