@@ -23,6 +23,8 @@ local paths = require("@app/screens/files/paths")
 local files_api = require("@app/screens/files/api")
 local templates = require("@app/screens/templates/state")
 local themes = require("@app/screens/themes/state")
+local keys = require("@app/screens/shell/keys")
+local host = require("@app/screens/settings/host")
 
 -- What was used lately, by id, the latest first (kept across launches).
 local recent = ui.persist("shell_palette_recent", {} :: { string })
@@ -435,6 +437,36 @@ local function root(): { Item }
 			end
 		end
 	end
+	-- The app itself, for when something has left it in a bad state:
+	-- relaunched whole (the engine keeps running, the chat open comes back),
+	-- or its interface's scripts evaluated again in place. (Their keys, if
+	-- Settings → Shortcuts gave them any.)
+	local function key_of(id: string): string?
+		local combo = keys.combo(id)
+		return if combo ~= "" then combo else nil
+	end
+	table.insert(out, {
+		id = "a-reload",
+		label = locale.s("shell.palette.reload_zeron"),
+		section = locale.s("shell.palette.app"),
+		icon = "restart",
+		shortcut = key_of("shell.reload"),
+		keywords = "reload restart relaunch refresh quit app",
+		run = function()
+			host.invoke("app.relaunch")
+		end,
+	})
+	table.insert(out, {
+		id = "a-reload-interface",
+		label = locale.s("shell.palette.reload_interface"),
+		section = locale.s("shell.palette.app"),
+		icon = "refresh",
+		shortcut = key_of("shell.reload_interface"),
+		keywords = "reload refresh scripts ui window",
+		run = function()
+			host.invoke("app.reload_interface")
+		end,
+	})
 	-- Where settings go: each of its pages.
 	for _, id in settings.pages:get() do
 		local page = settings.page(id)

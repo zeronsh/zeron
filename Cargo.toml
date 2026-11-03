@@ -12,6 +12,7 @@ members = [
     "crates/audio",
     "crates/proto",
     "crates/preview",
+    "crates/preview-label",
     "crates/doc",
     "crates/sync",
     "crates/harness",
@@ -52,6 +53,7 @@ zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
+zeron-preview-label = { path = "crates/preview-label" }
 zeron-doc = { path = "crates/doc" }
 zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }

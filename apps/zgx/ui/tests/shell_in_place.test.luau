@@ -890,14 +890,16 @@ test("the palette finds the session's files once typing pauses, under Files, and
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 300 })).to_be(false)
 	app:type('role:textbox "Search"', "e")
 	expect(app:wait('#palette-list >> role:option "README.md"', { timeout_ms = 3000 })).to_be(true)
-	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- (A folder isn't something it opens.)
 	expect(node(app, "#palette-list", "option", "docs")).to_be_nil()
-	-- Its Files scope (⌘4, as Zeron's): the files alone.
+	-- Its Files scope (⌘4, as Zeron's): the files alone. (All of them
+	-- here: unscoped, commands matching "re", Reload Zeron among them,
+	-- come first and can push a file below the list's fold.)
 	app:key("cmd+4")
 	app:frames(20)
 	expect(node(app, "#palette-list", "option", "Ship the release")).to_be_nil()
 	expect(node(app, "#palette-list", "option", "README.md")).never.to_be_nil()
+	expect(node(app, "#palette-list", "option", "GUIDE.md")).never.to_be_nil()
 	-- Enter: the file, in the session's panel.
 	app:key("Enter")
 	app:frames(40)
