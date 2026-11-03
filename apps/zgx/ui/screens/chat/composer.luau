@@ -107,6 +107,12 @@ local function Composer(): Node
 	-- Moved as it switches between them (ds.Composer's `snap`): its form and
 	-- size there at once, not eased.
 	local snap = ui.state("chat_composer_snap", 0)
+	-- Whether its model picker is open: the composer is held where it is
+	-- while it is (the picker hangs from its chip; a new chat's composer,
+	-- re-centring as its draft grows or shrinks, moved the chip and the
+	-- picker with it on every frame of its glide), and goes to its place
+	-- as the picker closes.
+	local model_open = ui.state("chat_model_open", false)
 	local function shown_new(): boolean
 		return form_new:get()
 	end
@@ -1058,6 +1064,7 @@ local function Composer(): Node
 			keep = "chat",
 			toolbar_id = "composer-toolbar",
 			open_model = shared.open_model,
+			model_open = model_open,
 			tray = TRAY,
 			value = shared.text,
 			placeholder = ui.t("chat.composer.placeholder"),
@@ -1389,6 +1396,7 @@ local function Composer(): Node
 	-- (Kept state, as this file's others: the composer is made in a plain
 	-- function, not a component.)
 	local place = ui.state("chat_composer_place", 0)
+	-- (Held where it is while its model picker is open: `model_open`.)
 	local was_new: boolean? = nil
 	local gliding: any = nil
 	local snap_until = 0
@@ -1423,6 +1431,9 @@ local function Composer(): Node
 			snap:set(snap:peek() + 1)
 		end
 		form_new:set(nc)
+		if model_open:get() and not switched then
+			return
+		end
 		glide_to(y)
 	end)
 	-- Over the whole pane, the pointer passing through it to the page
