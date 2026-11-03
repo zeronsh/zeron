@@ -23,9 +23,10 @@ local remote = ui.state("test_sent_remote", true)
 local reads = ui.state("test_sent_reads", "")
 local generation = ui.state("test_sent_generation", 1)
 -- A prompt sent from here to the chat on the other device
--- (`test_sent_pending`): "sending", this Mac's copy, its picture the file
--- it was sent from (here); "landed", the chat's copy of it (the same id),
--- its picture the upload kept there.
+-- (`test_sent_pending`): "sending", this Mac's copy (`here`), its picture
+-- the file it was sent from; "working", the chat's copy of it (the same
+-- id), its picture the upload kept there, still waiting for its reply;
+-- "landed", the chat's copy once the reply has begun.
 local pending = ui.state("test_sent_pending", "")
 
 local sent = ReplyImages.for_attachments(function(): any
@@ -66,13 +67,15 @@ local function conversation(on_other: boolean): { any }
 		{ id = if on_other then "a-other" else "a-here", role = "assistant", text = "Seen." },
 	}
 end
-local function sent_from_here(sending: boolean): { any }
+local function sent_from_here(stage: string): { any }
+	local sending = stage == "sending"
 	return {
 		{
 			id = "u-sent",
 			role = "user",
 			text = "Sent from here",
-			waiting = if sending then "sending" else nil,
+			here = if sending then true else nil,
+			waiting = if sending then "sending" elseif stage == "working" then "working" else nil,
 			attachments = {
 				if sending
 					then { kind = "image", name = "paste.png", src = "assets/composer/shell.png" }
@@ -84,7 +87,7 @@ end
 local messages = ui.computed(function(): { any }
 	local p = pending:get()
 	if p ~= "" then
-		return sent_from_here(p == "sending")
+		return sent_from_here(p)
 	end
 	return conversation(remote:get())
 end)

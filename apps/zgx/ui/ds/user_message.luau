@@ -35,11 +35,12 @@ export type Attachment = { kind: "image" | "file", name: string, src: string?, m
 -- `for_attachments`; without it, each path as it is.)
 -- (`find`: a find's marks in its text, ds/markdown's.)
 -- (`now`: the message as it is now, when it changes after it's drawn. A
--- prompt sent from here is first this Mac's copy (`waiting`), its pictures
--- the files it was sent from, here; then the chat's, its pictures the
--- uploads its device keeps, read from there as `pictures` says. Each
--- picture follows the `n`th of them.)
-export type Now = { attachments: { Attachment }?, waiting: string? }
+-- prompt sent from here is first this Mac's copy (`here`, src/chat.rs
+-- `Pending`), its pictures the files it was sent from, here; then the
+-- chat's, its pictures the uploads its device keeps, read from there as
+-- `pictures` says, even while it still waits for its reply. Each picture
+-- follows the `n`th of them.)
+export type Now = { attachments: { Attachment }?, here: boolean? }
 export type Props = {
 	text: string,
 	attachments: { Attachment }?,
@@ -223,7 +224,7 @@ return ui.component(function(props: Props): Node
 		if not m then
 			return a.src or "", false
 		end
-		local own = m.waiting ~= nil
+		local own = m.here == true
 		local k = 0
 		for _, b in m.attachments or {} do
 			if b.kind == "image" and b.src and b.src ~= "" then
