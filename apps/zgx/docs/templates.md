@@ -12,7 +12,7 @@ A template is a whole interface for Zeron, like a WordPress theme. It's a folder
 
 ## Preview until the person keeps it
 
-A template is Zeron's own code, so it can do anything Zeron can, but only once the person has **kept** it in Zeron's own window. Until then it runs as a **preview**: it draws as it likes, under a bar Zeron draws ("Agent template · Keep… / Revert"), and Zeron refuses what it asks of the host's powers. That means terminals, the account, plugins, switching or changing templates, writing files, and sending to agents or answering for them.
+A template is Zeron's own code, so it can do anything Zeron can, but only once the person has **kept** it in Zeron's own window. Until then it runs as a **preview**: it draws as it likes, under a toast Zeron draws ("Previewing <name>", with Keep and Revert), and Zeron refuses what it asks of the host's powers. That means terminals, the account, plugins, switching or changing templates, writing files, and sending to agents or answering for them.
 
 - Every template you make or switch to with these tools starts as a preview. So does one installed signed by this device, and one changed since it was kept: what the person keeps is the template's files as they were, so an edit after that is a preview again until they keep it again.
 - Keep opens Zeron's own sheet in a window of its own. Only that window records the decision, in Zeron's app data, never the engine's. No tool, IPC call or plugin can keep a template for the person.

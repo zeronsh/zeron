@@ -430,7 +430,10 @@ fn open(cx: &mut WindowContext, entry: &str, inspect: bool) {
     // (Development: `ZERON_ZGX_DEV_PLUGINS` loads plugin folders into a
     // fixture's window, no engine. src/plugins `dev_plugins`.)
     plugins::dev_plugins(&host);
-    serve(cx, host, entry, inspect);
+    // (Development: `ZERON_ZGX_HOST_TOASTS=1` lays the host's toasts over a
+    // fixture, a template in preview and a notice of each kind.)
+    let chrome = plugins::host_bar::dev_toasts(cx);
+    serve_with(cx, host, entry, inspect, chrome);
 }
 
 /// The main window: app.luau as the shell (`window` = "main"), where setup
@@ -443,8 +446,9 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
-    // The host's own bar above it (a template in preview, a switch you
-    // didn't make, and the menu bar where the system has none).
+    // The host's own toasts over it (a template in preview, a switch you
+    // didn't make, signing keys, safe mode at launch) and the menu bar
+    // where the system has none.
     let chrome = plugins::host_bar::view(cx);
     let view = serve_with(cx, host, "app.luau", inspect, Some(chrome));
     // What zgx reports of the window's elements, for plugins' places.
