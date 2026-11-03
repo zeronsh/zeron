@@ -52,6 +52,7 @@ local locale = require("@self/locale")
 -- A session's row, its corner, its group's header and pager: shared with
 -- every other list of sessions (the panel home's).
 local SessionRow = require("@self/session_row")
+local People = require("@self/people")
 local EditorMenu = require("@self/editor_menu")
 
 export type Session = {
@@ -77,7 +78,12 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- of its initial and hue; `emoji`: a chosen emoji, on a wash of its hue.)
 -- (`icon`: a group that is no folder, the chats in none, drawn as that
 -- glyph on a quiet wash in place of an initial on a hue.)
-export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, sessions: { Session } }
+-- (`empty`: the caller's word that it has no sessions but archived ones.
+-- Grouped by project first, those are listed after the rest, folded into
+-- one row of their own ("21 empty projects"), closed until it's opened;
+-- `details.empty_projects` off, not listed at all. A project with none at
+-- all, just added, isn't: a new chat starts in it.)
+export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, sessions: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -101,6 +107,10 @@ export type Details = {
 	archived: State<boolean>?,
 	-- A project filter over the list (Zeron's), where the caller has one.
 	project_filter: State<boolean>?,
+	-- The empty projects' fold at the end of the projects (those it says
+	-- are `empty`): listed there, or (off) not at all. On unless the caller
+	-- says.
+	empty_projects: State<boolean>?,
 	-- A folded group (or Pinned, or a section of yours) still lists its
 	-- sessions in a state (working, asking, done unseen: those whose corner
 	-- shows a glyph), each leaving as it settles. On unless the caller says.
@@ -641,6 +651,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (Closing waits out the fade, so nothing is cut while it can be seen.)
 	local CLOSE, CLOSE_AFTER = 240, GO
 	local OPEN = 260
+	-- (The empty projects' fold: its tiles fly as it opens and closes, so it
+	-- moves in one stroke, quicker, its height and ink together.)
+	local FLY = 200
 	-- What fades with `shown`: away at once, back in once there is room.
 	-- (Its props, `props`, changed in place and returned.)
 	local function fades(props: ContainerProps, shown: () -> boolean): ContainerProps
@@ -1632,6 +1645,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- Its second level's groups, with both levels on (its sessions all
 		-- of theirs).
 		children: { Group }?,
+		-- A project's with none but archived sessions (its `empty`), at the
+		-- top level: listed in the empty projects' fold.
+		empty: boolean?,
 	}
 	-- How long ago a session moved, in seconds (its `time`: a time, or as
 	-- it reads: "now", "5m", "3h", "1d", "2w"), for the most recent first.
@@ -1733,6 +1749,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						new_in = true,
 						project = p.id,
 						device = outer_device,
+						-- (Only at the top, and only while it holds none.)
+						empty = if subset == nil and p.empty == true and #p.sessions == 0 then true else nil,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -2031,6 +2049,27 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local SHELF_FIRST, SHELF_MORE = 10, 25
 	local shelf_shown = ui.use_state(SHELF_FIRST)
 	local groups_open = opened["::groups"]
+	-- The empty projects' fold: closed until it's opened (kept with the
+	-- folds, `folded`, as open: the one fold that starts closed).
+	local EMPTIES = "::empty_projects"
+	local empties_open: State<boolean> = {
+		get = function(_): boolean
+			return folded:get()[EMPTIES] == true
+		end,
+		peek = function(_): boolean
+			return folded:peek()[EMPTIES] == true
+		end,
+		set = function(_, on: boolean)
+			local f = table.clone(folded:peek())
+			f[EMPTIES] = if on then true else nil
+			folded:set(f)
+		end,
+	} :: any
+	-- Whether the empty projects are listed (in their fold) at all.
+	local function empties_shown(): boolean
+		local st = (details :: any).empty_projects :: State<boolean>?
+		return st == nil or st:get()
+	end
 	-- The sessions put in a place, in its order (any no longer known left
 	-- out).
 	local function sessions_of(ids: { string }): { Session }
@@ -2138,14 +2177,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- fades in; `together`, both at once, for the last place, with nothing
 	-- after it to slide up), and whether its rows are in the list at all
 	-- (still there while it closes).
-	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean }
+	-- (`dur`: one duration both ways, for a fold played together; else
+	-- OPEN and CLOSE.)
+	type Fold = { key: string, is_open: () -> boolean, write: (boolean) -> (), h: Anim, o: Anim, present: boolean, together: boolean, dur: number? }
 	local shape = ui.use_state(0)
 	local folds_by: { [string]: Fold } = {}
-	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?): Fold
+	local function fold_of(key: string, is_open: () -> boolean, write: (boolean) -> (), together: boolean?, dur: number?): Fold
 		local f = folds_by[key]
 		if not f then
 			local on = is_open()
-			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true }
+			f = { key = key, is_open = is_open, write = write, h = still(if on then 1 else 0), o = still(if on then 1 else 0), present = on, together = together == true, dur = dur }
 			folds_by[key] = f
 		end
 		return f
@@ -2156,18 +2197,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- while it moves, those past what shows stand in as one; see
 		-- `build_shape`.)
 		shape:set(shape:peek() + 1)
+		local open, close = f.dur or OPEN, f.dur or CLOSE
 		if on then
 			f.present = true
-			f.h = anim(f.h, 1, OPEN, 0, function()
+			f.h = anim(f.h, 1, open, 0, function()
 				shape:set(shape:peek() + 1)
 			end)
-			f.o = anim(f.o, 1, if f.together then OPEN else COME, if f.together then 0 else COME_AFTER)
+			f.o = anim(f.o, 1, if f.together then open else COME, if f.together then 0 else COME_AFTER)
 			-- (Its height on the column motion's CSS ease, ds/motion: into
 			-- place with no overshoot, as it opens so it closes.)
 			f.h.css = true
 		else
-			f.o = anim(f.o, 0, if f.together then CLOSE else GO)
-			f.h = anim(f.h, 0, CLOSE, if f.together then 0 else CLOSE_AFTER, function()
+			f.o = anim(f.o, 0, if f.together then close else GO)
+			f.h = anim(f.h, 0, close, if f.together then 0 else CLOSE_AFTER, function()
 				if not f.is_open() and f.present then
 					f.present = false
 				end
@@ -2198,6 +2240,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			groups_open:set(on)
 		end, true)
 	end
+	local function empties_fold(): Fold
+		return fold_of("empties", function(): boolean
+			return empties_open:peek()
+		end, function(on: boolean)
+			empties_open:set(on)
+		end, true, FLY)
+	end
 	local function group_fold(key: string): Fold
 		local st = opened[key]
 		return fold_of(key, function(): boolean
@@ -2226,13 +2275,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end)
 	end
 	-- A section folded or opened from outside (the caller's `folded`: on
-	-- another device, say): its fold plays as a click's would.
+	-- another device, say), or the empty projects': its fold plays as a
+	-- click's would.
 	ui.effect(function()
 		local f = folded:get()
 		for key, fold in folds_by do
 			local id = string.match(key, "^sec:(.*)$")
 			if id and (fold.h.to == 1) == (f[id] == true) then
 				fold_set(fold, not f[id])
+			elseif key == "empties" and (fold.h.to == 1) ~= (f[EMPTIES] == true) then
+				fold_set(fold, f[EMPTIES] == true)
 			end
 		end
 	end)
@@ -2390,6 +2442,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- A pager's own key, where it isn't its group's sessions' (an outer
 		-- group's inner groups: `{key}/groups`).
 		pkey: string?,
+		-- The empty projects' row: the projects (their tiles stack on it).
+		gs: { Group }?,
 	}
 	type Shape = { items: { Item }, at: { [string]: number }, counts: { [string]: number } }
 	local function build_shape(by: Organize): Shape
@@ -2550,9 +2604,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end
 		end
 		-- The groups.
-		local gs, title = groups_of(by, placed)
+		local all_groups, title = groups_of(by, placed)
+		-- (Projects with none but archived sessions: after the rest, in a
+		-- fold of their own; or, not shown, nowhere.)
+		local gs: { Group } = {}
+		local empties: { Group } = {}
+		local show_empties = empties_shown()
+		for _, g in all_groups do
+			if not g.empty then
+				table.insert(gs, g)
+			elseif show_empties then
+				table.insert(empties, g)
+			end
+		end
 		local gf = groups_fold()
-		local count = if by == "none" then #listed(gs[1].sessions) else #gs
+		local count = if by == "none" then #listed(gs[1].sessions) else #gs + #empties
 		add({ kind = "title", key = "title:groups", place = "regular", chain = {}, title = title, n = count, fold = groups_fold, open = groups_open, base = title_h })
 		if gf.present then
 			-- A group's header, then what's under it: its sessions (its first
@@ -2698,6 +2764,21 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					sessions_rows(g.key, listed(g.sessions), by, base, "regular")
 				else
 					emit_group(g, base, false, nil)
+				end
+			end
+			-- The empty projects: one row saying how many, its chevron
+			-- opening them under it, each a project's header as any other
+			-- (its new chat, its menu); closed, none of them in the list.
+			if #empties > 0 then
+				local ef = empties_fold()
+				add({ kind = "empties", key = "empties", place = "regular", chain = base, n = #empties, gs = empties, base = function(): number
+					return TITLE + gap_after
+				end })
+				if ef.present then
+					local inner = { gf, ef }
+					for _, g in empties do
+						emit_group(g, inner, false, nil)
+					end
 				end
 			end
 		end
@@ -3257,7 +3338,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local grows: { [string]: Anim } = {}
 		local going: { [string]: { it: Item, after: string? } } = {}
 		local pending: { [string]: number }? = nil
-		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true }
+		local GLIDES: { [string]: boolean } = { session = true, group = true, pager = true, empties = true }
 		local function quiet(): boolean
 			return drag:peek() == nil and starting == nil
 		end
@@ -3486,6 +3567,220 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			local i = s.at[key]
 			return if i then s.items[i] else nil
 		end
+		-- The empty projects' row (the Archived title's own frame, no
+		-- caret: the whole row folds): "Empty", a stack of their tiles
+		-- overlapping (as many as fit, at most EMPTY_TILES: whole tiles
+		-- dropped, never the word or the count cut), and how many at the
+		-- end. Its full phrase, "21 empty projects", names it and is its
+		-- tooltip. Opened, each tile of the stack flies down to be its
+		-- project's icon in the row under it (and back up as it closes),
+		-- on the fold's own motion; the stack's tiles are made once and
+		-- follow the projects in place.
+		local EMPTY_TILES = 5
+		local EMPTY_TILE, EMPTY_OVERLAP, EMPTY_GAP = 18, 6, 1.5
+		-- What the row keeps before the stack, points: its insets, the word
+		-- (an estimate, the longer of its locales'), the space, and the
+		-- count's digits.
+		local EMPTY_FIXED = 8 * 2 + 40 + 8 + 8
+		local EMPTY_DIGIT = 7
+		-- A tile's cut: a rounded square the next one's size, and a gap round it
+		-- (params[0]: its centre and half-side as fractions of the width,
+		-- params[1]: its corner), so the tile behind is notched to the shape of
+		-- the one over it, with no shadow, whatever shows through.
+		local NOTCH = ui.layer_shader([[
+fn layer(input:LayerInput)->vec4<f32> {
+ let w=input.size.x;
+ let c=vec2(input.params[0].x*w,.5*input.size.y);
+ let h=input.params[0].y*w;
+ let r=input.params[0].z*w;
+ let q=abs(input.p-c)-vec2(h-r);
+ let d=length(max(q,vec2(0.0)))+min(max(q.x,q.y),0.0)-r;
+ return vec4(input.color.rgb,input.color.a*smoothstep(-.5,.5,d));
+}
+]])
+		local function empties_row(now: () -> Item): Node
+			local function says(): string
+				return locale.s("ds.sidebar.empty_projects", { n = now().n or 0 })
+			end
+			local function group_at(i: number): Group?
+				return (now().gs or {})[i]
+			end
+			local function project_at(i: number): Project?
+				local g = group_at(i)
+				return if g then index:get().by_project[g.project :: string] else nil
+			end
+			-- How many tiles the width keeps.
+			local function fit(): number
+				local free = room() - PAD * 2 - EMPTY_FIXED - EMPTY_DIGIT * #tostring(now().n or 0)
+				if free < EMPTY_TILE then
+					return 0
+				end
+				return math.min(EMPTY_TILES, 1 + math.floor((free - EMPTY_TILE) / (EMPTY_TILE - EMPTY_OVERLAP)))
+			end
+			local function shows(i: number): boolean
+				return i <= fit() and group_at(i) ~= nil
+			end
+			-- The fold's own motion (its height's progress, its ink): 0 closed,
+			-- 1 open.
+			local function flown(): number
+				return value(empties_fold().h, clock:get())
+			end
+			local stack_ref = ui.ref()
+			local STEP = EMPTY_TILE - EMPTY_OVERLAP
+			-- Where tile `i` lands, from where it stands: its project's row
+			-- icon (the rows' own tile slot, centred on its slot).
+			local function lands(i: number): (number, number)
+				local g = group_at(i)
+				local sh0 = sh:peek()
+				local from, to = sh0.at["empties"], if g then sh0.at[`group:{g.key}`] else nil
+				local box, list = stack_ref:peek(), list_view:peek()
+				if not (from and to and box and list) then
+					return 0, 0
+				end
+				local dy = (SLOT - TITLE) / 2
+				for k = from, to - 1 do
+					dy += sh0.items[k].base()
+				end
+				local dx = list.x + PAD + (SLOT - EMPTY_TILE) / 2 - (box.x + (i - 1) * STEP)
+				return dx, dy
+			end
+			local function tile(i: number, cut: boolean): Node
+				local held: { [any]: any } = {
+					shrink = 0,
+					w = EMPTY_TILE,
+					h = EMPTY_TILE,
+					Tile {
+						size = EMPTY_TILE,
+						label = function(): string
+							local p = project_at(i)
+							return if p then p.name else ""
+						end,
+						hue = function(): string?
+							local p = project_at(i)
+							return (p and p.hue) or "gray"
+						end,
+						src = function(): string?
+							local p = project_at(i)
+							return if p then p.src else nil
+						end,
+						emoji = function(): string?
+							local p = project_at(i)
+							return if p then p.emoji else nil
+						end,
+					},
+				}
+				if cut then
+					held.layer_shader = NOTCH
+					local half = EMPTY_TILE / 2 + EMPTY_GAP
+					local radius = ((ui.theme.get("radius.sm") :: number?) or 4) + EMPTY_GAP
+					held.layer_params = {
+						{ (STEP + EMPTY_TILE / 2) / EMPTY_TILE, half / EMPTY_TILE, radius / EMPTY_TILE, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+						{ 0, 0, 0, 0 },
+					}
+				end
+				return ui.div(held)
+			end
+			local function slot(i: number): Node
+				return ui.show(function(): boolean
+					return shows(i)
+				end, ui.div {
+					shrink = 0,
+					ml = if i == 1 then 0 else ui.raw(-EMPTY_OVERLAP, "tiles overlap by a third"),
+					-- (Flying: down to its row's icon as the fold opens, back as
+					-- it closes; whole while it flies, it hands over to the
+					-- row's own icon, fading in under it, over the last stretch.)
+					x = function(): number
+						local p = flown()
+						return if p > 0 then p * (lands(i)) else 0
+					end,
+					y = function(): number
+						local p = flown()
+						if p <= 0 then
+							return 0
+						end
+						local _, dy = lands(i)
+						return p * dy
+					end,
+					opacity = function(): number
+						return 1 - math.clamp((flown() - 0.75) / 0.25, 0, 1)
+					end,
+					-- (The notch only while it sits in the stack.)
+					ui.show(function(): boolean
+						return not (i < EMPTY_TILES and shows(i + 1)) or flown() > 0
+					end, tile(i, false)),
+					if i < EMPTY_TILES
+						then ui.show(function(): boolean
+							return shows(i + 1) and flown() <= 0
+						end, tile(i, true))
+						else nil,
+				})
+			end
+			local slots: { Node } = {}
+			for i = 1, EMPTY_TILES do
+				table.insert(slots, slot(i))
+			end
+			local frame: { [any]: any } = {
+				class = "empty-projects",
+				role = "button",
+				label = says,
+				w = function(): number
+					return room() - PAD * 2
+				end,
+				h = TITLE,
+				shrink = 0,
+				pl = "$space.2",
+				pr = "$space.2",
+				items = "center",
+				color = "$text.tertiary",
+				cursor = "pointer",
+				hover = { color = "$text.secondary" },
+				on_click = function()
+					fold_set(empties_fold(), not empties_open:peek())
+				end,
+				ui.text {
+					locale.t("ds.sidebar.empty_projects_word"),
+					shrink = 0,
+					text_size = "$font.size.xs",
+					weight = "$font.weight.medium",
+				},
+				-- (Gone from the header once they've landed in the rows.)
+				ui.show(function(): boolean
+					return flown() < 1 or not empties_open:get()
+				end, ui.row {
+					class = "empty-projects-stack",
+					ref = stack_ref,
+					ml = "$space.2",
+					shrink = 1,
+					min_w = 0,
+					items = "center",
+					table.unpack(slots),
+				}),
+				ui.div { grow = 1 },
+				ui.text {
+					function(): string
+						return tostring(now().n or 0)
+					end,
+					shrink = 0,
+					text_size = "$font.size.xs",
+					tabular = true,
+				},
+				ui.presence(says, function(name: string): Node
+					return ui.div { absolute = true, left = 0, top = 0, w_full = true, h_full = true, tooltip = name, tooltip_delay = 150, pointer_events = "none" }
+				end),
+			}
+			frame.relative = true
+			-- (No folding frame round it, which would clip: its tiles fly out.)
+			return ui.div {
+				w_full = true,
+				h = TITLE,
+				ui.row(fades(frame :: any, function(): boolean
+					return not railed()
+				end)),
+			}
+		end
+
 		local function build(key: string): Node
 			local it = item_of(key)
 			if not it then
@@ -3588,6 +3883,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					},
 					tree_now
 				)
+			elseif it.kind == "empties" then
+				-- The Archived row's own (a section's title: its height, its
+				-- words, its ink) with a chevron before: "Empty", the first
+				-- projects' tiles stacked, the count at its end.
+				node = empties_row(now)
 			elseif it.kind == "more" then
 				-- "Show N more": the shelf's next few.
 				node = row {
@@ -3619,7 +3919,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					local a = slides[key]
 					return if a then value(a, clock:get()) else 0
 				end,
-				overflow = "hidden",
+				-- (The empty projects' row lets its tiles fly out of it.)
+				overflow = if it.kind == "empties" then "visible" else "hidden",
 				opacity = function(): number
 					local now = item_of(key)
 					local t = clock:get()
@@ -3904,7 +4205,11 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					table.insert(out, { key = `section:{sec.id}`, name = sec.name, sessions = own })
 				end
 				for _, g in (groups_of(by, placed_in(p))) do
-					table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					-- (The empty projects aren't on the rail: their fold is
+					-- the list's.)
+					if not g.empty then
+						table.insert(out, { key = g.key, name = g.name :: string, sessions = listed(g.sessions) })
+					end
 				end
 				return out
 			end)
@@ -4102,6 +4407,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	end
 	if (details :: any).archived then
 		table.insert(SHOW, { key = "archived", label = "ds.sidebar.view.archived", icon = "archive-minimalistic" })
+	end
+	if (details :: any).empty_projects then
+		table.insert(SHOW, { key = "empty_projects", label = "ds.sidebar.view.empty_projects", icon = "inbox" })
 	end
 	-- Opens it. (A press anywhere outside it closes it, this one too, as
 	-- zgx closes any popover: toggling here would open it again.)

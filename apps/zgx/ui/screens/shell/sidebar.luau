@@ -68,6 +68,10 @@ local shared = {
 		archived = ui.persist("shell_sidebar_show_archived", false),
 		-- (Zeron's project filter over the list: off until asked for.)
 		project_filter = ui.persist("shell_sidebar_show_project_filter", false),
+		-- The projects with none but archived sessions, folded into one row
+		-- at the projects' end: listed there (closed until it's opened), or
+		-- not at all.
+		empty_projects = ui.persist("shell_sidebar_show_empty_projects", true),
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
@@ -282,6 +286,16 @@ end
 -- The sessions as the sidebar groups them: under each project (in the
 -- engine's order, empty ones too: a new chat starts in one), those in none
 -- under Chats.
+--
+-- A project is empty when every session it has had is archived: none
+-- listed, one or more on the Archived shelf. The sidebar folds those into
+-- one row at the projects' end. One with no sessions at all (just added)
+-- isn't: it's where a new chat is about to start. Counted on all of them,
+-- not what a filter shows, so narrowing never moves a project in or out
+-- (the status filter hides every group with none anyway); the project the
+-- project filter is narrowed to is never folded away. Archived sessions
+-- stay on the Archived shelf, as everyone's do, so Show → Archived changes
+-- nothing here.
 local NO_PROJECT = "none"
 -- What an agent asks of you, by chat (the chat page's, `chat.asks`): it
 -- says which of "input" a session waiting on you is, an approval or a
@@ -412,6 +426,19 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		table.insert(out, group)
 	end
 	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "chat-round-line", sessions = {} }
+	-- (Which have sessions listed, and which archived ones.)
+	local listed: { [string]: boolean } = {}
+	for _, c in now.chats do
+		if c.project then
+			listed[c.project] = true
+		end
+	end
+	for _, c in now.archived or {} do
+		local group = if c.project then by[c.project] else nil
+		if group and not listed[c.project :: string] and c.project ~= just then
+			group.empty = true
+		end
+	end
 	for _, c in now.chats do
 		if just and c.project ~= just then
 			continue
