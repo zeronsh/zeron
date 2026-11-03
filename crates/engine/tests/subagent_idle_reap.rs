@@ -225,6 +225,7 @@ async fn park_after_spawn() -> Parked {
         is_error: false,
         output: None,
         diff: None,
+        exit_code: None,
     })
     .unwrap();
     feed.send(done(DoneStatus::Completed)).unwrap();

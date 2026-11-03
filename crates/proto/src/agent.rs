@@ -656,6 +656,25 @@ pub struct WorktreeSpec {
 /// life of a run.
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 
+/// Bytes of a command's output a harness adapter puts on its
+/// [`AgentEvent::ToolResult`]: the END of it, where a build's error or a
+/// test run's summary is. The doc keeps far less (a 50-line / 4 KB tail);
+/// this bounds what the run journal holds per command.
+pub const COMMAND_OUTPUT_CAP: usize = 32 * 1024;
+
+/// The last [`COMMAND_OUTPUT_CAP`] bytes of a command's output, started on a
+/// char boundary; `None` when it printed nothing.
+pub fn command_output_cap(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(COMMAND_OUTPUT_CAP);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(text[start..].to_owned())
+}
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -996,13 +1015,20 @@ pub enum AgentEvent {
         id: String,
         is_error: bool,
         /// Tool output text, capped by the emitting harness (ACP tool-call
-        /// content; claude/codex adapters never populate it). The doc-side
-        /// fold applies its own byte cap before anything persists.
+        /// content; the claude/codex adapters send a command's output only,
+        /// its last [`COMMAND_OUTPUT_CAP`] bytes). The doc-side fold keeps a
+        /// short redacted tail of a command's output and drops every other
+        /// tool's before anything persists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+        /// A command's exit status, when the harness reported one (Claude
+        /// Code's Bash, Codex's command execution). Absent for other tools,
+        /// a command still running in the background, or one that never ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
