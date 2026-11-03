@@ -1,5 +1,5 @@
 //! Persisted names are independent of ephemeral process/listener observations.
-use crate::discovery::{Listener, command_identity, framework};
+use crate::discovery::{Listener, command_identity, framework, shown_command};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -428,6 +428,7 @@ impl Catalog {
                 started_at: listener.started_at,
                 zeron_owned: listener.zeron_owned,
                 chat_id: listener.chat_id.clone(),
+                command: shown_command(&listener.args),
             };
             next.insert(id, LocalRoute { service, listener });
         }
@@ -508,6 +509,13 @@ mod tests {
                 .services
                 .iter()
                 .any(|s| s.hostname == "macbook.my-app-api.localhost" && s.port == 3000)
+        );
+        // (Each names the command that listens, for clients to show.)
+        assert!(
+            before
+                .services
+                .iter()
+                .any(|s| s.port == 3000 && s.command == ["node", "api.js", "--port", "3000"])
         );
         catalog.replace_local(Vec::new()).unwrap();
         assert!(catalog.snapshot().services.is_empty());
