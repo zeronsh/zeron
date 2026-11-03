@@ -87,7 +87,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             }
             _ => None,
         };
-        async move { open_link("BillingCheckout", params.ok_or("invalid")?).await }
+        async move { crate::plugins::preview::refuse("billing.checkout")?; open_link("BillingCheckout", params.ok_or("invalid")?).await }
     });
     host.async_action("billing.portal", |_| async { open_link("BillingPortal", json!({})).await });
 }

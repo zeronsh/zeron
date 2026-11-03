@@ -24,8 +24,14 @@ local zeron = require("./zeron")("git")
 -- password (a push waits for none), and `status` taking no lock an agent's
 -- git could trip over.
 local ENV = { LC_ALL = "C", GIT_TERMINAL_PROMPT = "0", GIT_OPTIONAL_LOCKS = "0" }
--- What git prints and the plugin reads: never its colours or a pager.
-local BASE = { "-c", "core.quotepath=off", "-c", "color.ui=false", "-c", "core.pager=cat" }
+-- What git prints and the plugin reads: never its colours or a pager, and
+-- no filesystem monitor a repository's config names. (Hooks are Zeron's
+-- runner's to decide: a commit, merge or push in a chat's or project's
+-- checkout runs its hooks, as git does for you; nothing else does.)
+local BASE = {
+	"-c", "core.quotepath=off", "-c", "color.ui=false", "-c", "core.pager=cat",
+	"-c", "core.fsmonitor=false",
+}
 -- A file's diff is sent whole up to this; past it, cut (and said).
 local MAX_DIFF = 600 * 1024
 -- The most files a list sends (a thousand reads; a vendored tree doesn't).
@@ -117,11 +123,58 @@ local function trim(s: string): string
 	return (string.gsub(string.gsub(s, "^%s+", ""), "%s+$", ""))
 end
 
+-- The folders git may work in: this device's chats' and projects'
+-- (`zeron.folders`), asked again when one isn't among those last heard.
+local folders: { string } = {}
+local function among(cwd: string): boolean
+	for _, f in folders do
+		local root = if string.sub(f, -1) == "/" then string.sub(f, 1, -2) else f
+		if cwd == root or string.sub(cwd, 1, #root + 1) == root .. "/" then
+			return true
+		end
+	end
+	return false
+end
+
+-- A checkout of this device's: a whole path, plainly written, in a chat's
+-- folder or a project's. Never anywhere a caller names (a planted
+-- repository's config would be git's to run).
 local function check_cwd(cwd: any): string
 	if type(cwd) ~= "string" or cwd == "" or string.sub(cwd, 1, 1) ~= "/" then
 		error("no_checkout: This chat has no folder to look in", 0)
 	end
+	for part in string.gmatch(cwd, "[^/]+") do
+		if part == "." or part == ".." then
+			error("no_checkout: This chat has no folder to look in", 0)
+		end
+	end
+	cwd = if #cwd > 1 and string.sub(cwd, -1) == "/" then string.sub(cwd, 1, -2) else cwd
+	if not among(cwd) then
+		folders = zeron.folders():await() or {}
+	end
+	if not among(cwd) then
+		error("not_a_checkout: That folder isn't one of this device's chats or projects", 0)
+	end
 	return cwd
+end
+
+-- An object id (a commit's or a tree's, as git printed it).
+local function check_oid(oid: any, what: string): string
+	if type(oid) ~= "string" or not string.match(oid, "^%x+$") or #oid < 4 or #oid > 64 then
+		error(`bad_ref: {what} isn't an object id`, 0)
+	end
+	return oid
+end
+
+-- A revision a caller names (a branch to compare with): a ref's name or an
+-- id, never an option.
+local function check_rev(rev: any, what: string): string
+	if type(rev) ~= "string" or rev == "" or #rev > 255 or string.sub(rev, 1, 1) == "-"
+		or string.find(rev, "[%c%s~^:?*%[\\]") or string.find(rev, "..", 1, true)
+	then
+		error(`bad_ref: {what} isn't a branch's name`, 0)
+	end
+	return rev
 end
 
 -- One piece of work at a time per checkout: the plugin's index is one file,
@@ -215,7 +268,7 @@ local function base_of(cwd: string): string?
 	end
 	r.base, r.base_at = base, os.time()
 	-- (Who commits here, and where each remote is, asked with it.)
-	r.who = trim(run(cwd, { "config", "user.name" }).stdout)
+	r.who = trim(run(cwd, { "config", "--get", "user.name" }).stdout)
 	local urls: { [string]: string } = {}
 	for line in string.gmatch(run(cwd, { "remote", "-v" }).stdout, "[^\n]+") do
 		local name, url = string.match(line, "^(%S+)%s+(%S+)%s+%(fetch%)")
@@ -457,7 +510,7 @@ local function changes(args: any): any
 			out.a = from
 			out.files = files
 		elseif scope == "branch" then
-			local base = args.base or base_of(cwd)
+			local base = if args.base ~= nil then check_rev(args.base, "The base") else base_of(cwd)
 			if not base then
 				error("no_base: There's no branch to compare with", 0)
 			end
@@ -465,7 +518,7 @@ local function changes(args: any): any
 			if not exists(cwd, { base })[base] then
 				error(`no_ref: {base}`, 0)
 			end
-			local mb = run(cwd, { "merge-base", base, "HEAD" })
+			local mb = run(cwd, { "merge-base", "--end-of-options", base, "HEAD" })
 			if mb.status ~= 0 then
 				error(`no_base: {base} and this branch share no history`, 0)
 			end
@@ -481,9 +534,8 @@ local function changes(args: any): any
 			out.at = turn.at
 			out.files = diff_files(cwd, turn.tree, tree)
 		elseif scope == "commit" then
-			local sha = args.sha
-			assert(type(sha) == "string" and string.match(sha, "^%x+$"), "commit needs its sha")
-			local parents = string.split(trim(git(cwd, { "rev-list", "--parents", "-n", "1", sha })), " ")
+			local sha = check_oid(args.sha, "The commit")
+			local parents = string.split(trim(git(cwd, { "rev-list", "--parents", "-n", "1", "--end-of-options", sha })), " ")
 			out.a = if parents[2] then parents[2] else r.empty
 			out.b = parents[1]
 			out.files = diff_files(cwd, out.a, out.b)
@@ -505,14 +557,17 @@ end
 -- One file's patch between two trees (what `changes` said they were).
 local function diff(args: any): any
 	local cwd = check_cwd(args.cwd)
-	assert(type(args.a) == "string" and type(args.b) == "string" and type(args.path) == "string", "diff needs a, b and path")
+	-- (`a` and `b` are ids `changes` gave; paths are the repository's own,
+	-- taken literally.)
+	local a, b = check_oid(args.a, "a"), check_oid(args.b, "b")
+	assert(type(args.path) == "string" and args.path ~= "", "diff needs a, b and path")
 	local paths = { args.path }
-	if type(args.old) == "string" and args.old ~= args.path then
+	if type(args.old) == "string" and args.old ~= "" and args.old ~= args.path then
 		table.insert(paths, 1, args.old)
 	end
-	local cmd = { "diff", "--no-ext-diff", "-M", args.a, args.b, "--" }
+	local cmd = { "diff", "--no-ext-diff", "-M", "--end-of-options", a, b, "--" }
 	for _, p in paths do
-		table.insert(cmd, p)
+		table.insert(cmd, ":(top,literal)" .. p)
 	end
 	local text = git(cwd, cmd, { timeout = 60 })
 	local cut = #text > MAX_DIFF
@@ -682,11 +737,10 @@ end
 
 local function commit_of(args: any): any
 	local cwd = check_cwd(args.cwd)
-	local sha = args.sha
-	assert(type(sha) == "string" and string.match(sha, "^%x+$"), "commit needs its sha")
-	local out = git(cwd, { "show", "-s", `--format=%H{SEP}%P{SEP}%an{SEP}%ae{SEP}%at{SEP}%cn{SEP}%ce{SEP}%ct{SEP}%D{SEP}%s{SEP}%b`, sha })
+	local sha = check_oid(args.sha, "The commit")
+	local out = git(cwd, { "show", "-s", `--format=%H{SEP}%P{SEP}%an{SEP}%ae{SEP}%at{SEP}%cn{SEP}%ce{SEP}%ct{SEP}%D{SEP}%s{SEP}%b`, "--end-of-options", sha })
 	local f = string.split(out, SEP)
-	local stat = run(cwd, { "diff-tree", "--root", "--no-commit-id", "-r", "--numstat", "-M", sha })
+	local stat = run(cwd, { "diff-tree", "--root", "--no-commit-id", "-r", "--numstat", "-M", "--end-of-options", sha })
 	local adds, dels, files = 0, 0, 0
 	for a, d in string.gmatch(stat.stdout, "([%d%-]+)\t([%d%-]+)\t[^\n]*") do
 		files += 1
@@ -911,7 +965,7 @@ local function switch(args: any): any
 		error("bad_name: Name the branch", 0)
 	end
 	name = trim(name)
-	local ok = run(cwd, { "check-ref-format", "--branch", name })
+	local ok = if string.sub(name, 1, 1) == "-" then { status = 1 } else run(cwd, { "check-ref-format", "--branch", name })
 	if ok.status ~= 0 then
 		error(`bad_name: "{name}" can't be a branch's name`, 0)
 	end

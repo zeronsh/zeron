@@ -30,7 +30,7 @@ pub fn install(host: &ScriptHost) {
         let snapshot = call("ListProjectActions", json!({ "spaceId": space }), &arg).await?;
         Ok(value(&snapshot_for_script(&snapshot)))
     });
-    host.async_action("home.save_action", |arg| async move {
+    host.async_action("home.save_action", |arg| async move { crate::plugins::preview::refuse("home.save_action")?;
         let space = field(&arg, "space").ok_or("no project")?;
         let draft = json!({
             "name": field(&arg, "name").unwrap_or_default(),
@@ -52,7 +52,7 @@ pub fn install(host: &ScriptHost) {
         let snapshot = call("DeleteProjectAction", json!({ "spaceId": space, "actionId": id }), &arg).await?;
         Ok(value(&snapshot_for_script(&snapshot)))
     });
-    host.async_action("home.run_action", |arg| async move {
+    host.async_action("home.run_action", |arg| async move { crate::plugins::preview::refuse("home.run_action")?;
         let space = field(&arg, "space").ok_or("no project")?;
         let chat = field(&arg, "chat").ok_or("no session")?;
         let id = field(&arg, "id").ok_or("no action")?;

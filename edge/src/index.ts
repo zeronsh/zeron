@@ -71,6 +71,7 @@
  */
 import { authenticate } from "./auth";
 import { chatRoute } from "./chat-route";
+import { dialDeviceRoom } from "./device-link";
 import { deviceParam, forward } from "./forward";
 import { handleAuthRoute } from "./auth-routes";
 import { handlePublicCardRoute, handleUsernameRoute } from "./card-routes";
@@ -374,20 +375,10 @@ export default {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "expected websocket" }, 426);
         }
-        const role = url.searchParams.get("role") === "host" ? "host" : "client";
-        const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
         // Dials never wake a sleeping Cloud session (viewing a chat must not
         // start a billed machine): the dial sees host_offline. Sends do —
         // through the nudge below.
-        // `d2/` — same staging→prod identity break as `s2/` above.
-        return forward(
-          env.DEVICE_ROOMS,
-          `d2/${deviceId}`,
-          request,
-          auth,
-          "/ws",
-          `?role=${role}&connId=${encodeURIComponent(connId)}`
-        );
+        return dialDeviceRoom(env, auth, request, url, deviceId);
       }
       if (parts[2] === "sidecar" && parts[3] && /^[a-z0-9-]{1,64}$/.test(parts[3])) {
         return forward(env.DEVICE_ROOMS, `d2/${deviceId}`, request, auth, `/sidecar/${parts[3]}`, "");

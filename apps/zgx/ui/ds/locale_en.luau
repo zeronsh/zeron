@@ -601,6 +601,7 @@ return {
 	["ds.composer_ask.multi"] = "Select one or more options.",
 	["ds.composer_cargo.remove"] = "Remove {name}",
 	["ds.composer_cargo.uploading"] = "Uploading {n}%",
+	["ds.composer_cargo.comment_from"] = "From {plugin}",
 	["ds.composer_cargo.retry_named"] = "Retry {name}",
 	["ds.composer_cargo.retry"] = "Retry",
 	["ds.composer_cargo.annotation"] = "Annotation {n}: {note}",

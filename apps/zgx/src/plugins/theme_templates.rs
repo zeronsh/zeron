@@ -165,12 +165,56 @@ fn read_json(path: &Path) -> Json {
 }
 
 /// Whose folder `dir` is: none (free), the built-in theme `key`'s, or
-/// someone else's.
+/// someone else's. A built-in's holds what Zeron writes and nothing else
+/// (`theme_shaped`): a folder that only says `builtin_theme` (an imported
+/// package's, or one an agent wrote) is someone else's, never written over.
 fn holds(dir: &Path, key: &str) -> Option<bool> {
     if std::fs::symlink_metadata(dir).is_err() {
         return None;
     }
-    Some(read_json(&dir.join("zeron-template.json"))[MARK].as_str() == Some(key))
+    Some(theme_shaped(dir).as_deref() == Some(key))
+}
+
+/// The built-in theme key a folder is shaped as Zeron writes one: a real
+/// folder holding exactly its manifest (marked) and `theme.luau`, both
+/// regular files, nothing else (no screens, no `.imported.json`). Whether
+/// their bytes are this build's is `verified`'s.
+fn theme_shaped(dir: &Path) -> Option<String> {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // (`live::put`'s temporary files, mid-write.)
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|k| k.is_file()) {
+            return None;
+        }
+        names.push(name);
+    }
+    names.sort();
+    if names != [FILE, "zeron-template.json"] {
+        return None;
+    }
+    read_json(&dir.join("zeron-template.json"))[MARK].as_str().map(str::to_string).filter(|k| !k.is_empty())
+}
+
+/// The built-in theme `dir` is, if this build wrote it as it stands: shaped
+/// as one (`theme_shaped`), at its own id, its manifest and palette byte for
+/// byte what `install` writes. Only such a folder shows as Zeron's (and
+/// can't be deleted); any other that says `builtin_theme` is an ordinary
+/// template.
+pub fn verified(dir: &Path) -> Option<String> {
+    let key = theme_shaped(dir)?;
+    let choice = find(&key)?;
+    let id = dir.file_name()?.to_str()?;
+    let ours = id == choice.id() || id.strip_prefix(&format!("{}-", choice.id())).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let manifest = serde_json::to_vec_pretty(&manifest(&choice, id)).unwrap_or_default();
+    let same = |rel: &str, want: &[u8]| std::fs::read(dir.join(rel)).is_ok_and(|b| b == want);
+    (ours && same(FILE, theme_file(&choice).as_bytes()) && same("zeron-template.json", &manifest)).then_some(key)
 }
 
 /// Where the built-in theme `key` is (or would be) installed: its own id
@@ -231,7 +275,8 @@ fn remove_unshipped(templates: &Path) {
         if !entry.file_type().is_ok_and(|k| k.is_dir()) {
             continue;
         }
-        let Some(key) = read_json(&entry.path().join("zeron-template.json"))[MARK].as_str().map(str::to_string) else { continue };
+        // Only a folder shaped as Zeron wrote it: anything more is someone's.
+        let Some(key) = theme_shaped(&entry.path()) else { continue };
         let ours = rest == key || rest.strip_prefix(&format!("{key}-")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
         if ours && !shipped.contains(&key) {
             let _ = std::fs::remove_dir_all(entry.path());
@@ -336,6 +381,42 @@ mod tests {
         assert_eq!(entry.theme.as_deref(), Some("gruvbox"));
         assert!(installed.iter().find(|i| i.id == "theme-gruvbox").unwrap().theme.is_none());
         assert_eq!(order("vscode-default"), 0);
+    }
+
+    /// R18: an imported template's manifest that says `builtin_theme` never
+    /// shows as Zeron's (author Zeron, no Delete), nor is one rewritten
+    /// into Zeron's name.
+    #[test]
+    fn an_imported_builtin_theme_never_shows_as_zeron_s() {
+        let t = dir("posing");
+        // A package from someone, installed by the engine as signed: its
+        // manifest kept as it came, marked, with screens of its own.
+        let posing = t.join("theme-catppuccin");
+        std::fs::create_dir_all(posing.join("screens/shell")).unwrap();
+        std::fs::write(posing.join("zeron-template.json"), r#"{"id":"theme-catppuccin","name":"Catppuccin","author":"Zeron","builtin_theme":"catppuccin"}"#).unwrap();
+        std::fs::write(posing.join(FILE), "return nil").unwrap();
+        std::fs::write(posing.join("screens/shell/sidebar.luau"), "-- takes over").unwrap();
+        std::fs::write(posing.join(".imported.json"), r#"{"key":"k","author":{"kind":"unknown"}}"#).unwrap();
+        // Shaped as a theme (just a manifest and a palette), but not this
+        // build's palette: a palette is code too.
+        let shaped = t.join("theme-ayu");
+        std::fs::create_dir_all(&shaped).unwrap();
+        std::fs::write(shaped.join("zeron-template.json"), serde_json::to_vec_pretty(&manifest(&find("ayu").unwrap(), "theme-ayu")).unwrap()).unwrap();
+        std::fs::write(shaped.join(FILE), "ui.call('terminal.start', {}) return nil").unwrap();
+        let listed = live::installed(&t);
+        let theme_of = |id: &str| listed.iter().find(|i| i.id == id).map(|i| i.theme.clone());
+        assert_eq!(theme_of("theme-catppuccin"), Some(None), "an ordinary template: its author's, deletable");
+        assert_eq!(theme_of("theme-ayu"), Some(None), "not this build's bytes: not Zeron's");
+        assert!(verified(&posing).is_none() && verified(&shaped).is_none());
+        // Zeron's own built-in goes beside the posing one, never over it.
+        let id = install(&t, "catppuccin").unwrap();
+        assert_eq!(id, "theme-catppuccin-2");
+        assert_eq!(std::fs::read_to_string(posing.join("screens/shell/sidebar.luau")).unwrap(), "-- takes over");
+        assert_eq!(verified(&t.join(&id)).as_deref(), Some("catppuccin"));
+        // The theme-shaped one is rewritten with Zeron's own palette, and
+        // only then is it Zeron's.
+        assert_eq!(install(&t, "ayu").unwrap(), "theme-ayu");
+        assert_eq!(verified(&shaped).as_deref(), Some("ayu"));
     }
 
     #[test]

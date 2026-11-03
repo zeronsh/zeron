@@ -530,6 +530,69 @@ impl Rpc {
     }
 }
 
+/// How a watch waiting for the account's setup is watched again: handed to
+/// `Rpc::watch_set_up`'s `wait`, called once setup is finished.
+pub type Again = Box<dyn FnOnce()>;
+
+/// A watch the engine may answer `setup_incomplete` (signed in, no
+/// organization chosen yet: its deferred.rs), watched again, on the same
+/// connection, once setup is finished (`Rpc::watch_set_up`). Cancels it
+/// when dropped, and is never watched again after.
+pub struct SetUpWatch(Rc<RefCell<Option<Watch>>>);
+
+impl Rpc {
+    /// [`Rpc::watch`], for a watch the engine answers `setup_incomplete`
+    /// until the account's setup is finished: ended so, `wait` is handed
+    /// how to watch again (once it's finished: `auth::set_up`), and
+    /// `on_item` hears what the new watch sends. Any other end is its own.
+    pub fn watch_set_up(
+        &self,
+        method: &str,
+        params: Value,
+        on_item: impl FnMut(Value) + 'static,
+        wait: impl Fn(Again) + 'static,
+    ) -> SetUpWatch {
+        let slot: Rc<RefCell<Option<Watch>>> = Rc::default();
+        let on_item: Rc<RefCell<dyn FnMut(Value)>> = Rc::new(RefCell::new(on_item));
+        let wait: Rc<dyn Fn(Again)> = Rc::new(wait);
+        let watch = set_up_watch(self.clone(), method.to_string(), params, on_item, wait, Rc::downgrade(&slot));
+        *slot.borrow_mut() = Some(watch);
+        SetUpWatch(slot)
+    }
+}
+
+fn set_up_watch(
+    rpc: Rpc,
+    method: String,
+    params: Value,
+    on_item: Rc<RefCell<dyn FnMut(Value)>>,
+    wait: Rc<dyn Fn(Again)>,
+    slot: std::rc::Weak<RefCell<Option<Watch>>>,
+) -> Watch {
+    let heard = on_item.clone();
+    let (again_rpc, again_method, again_params) = (rpc.clone(), method.clone(), params.clone());
+    rpc.watch_ending(
+        &method,
+        params,
+        move |item| (heard.borrow_mut())(item),
+        move |why| {
+            if !why.contains("setup_incomplete") {
+                return;
+            }
+            let w = wait.clone();
+            wait(Box::new(move || {
+                // (Dropped meanwhile, or the connection gone: never again.)
+                let Some(held) = slot.upgrade() else { return };
+                if again_rpc.is_closed() {
+                    return;
+                }
+                let watch = set_up_watch(again_rpc, again_method, again_params, on_item, w, Rc::downgrade(&held));
+                *held.borrow_mut() = Some(watch);
+            }));
+        },
+    )
+}
+
 /// Cancels its watch when dropped.
 pub struct Watch {
     rpc: Rpc,
@@ -598,5 +661,43 @@ mod tests {
         let waker = std::task::Waker::noop();
         assert!(pump.as_mut().poll(&mut std::task::Context::from_waker(waker)).is_ready());
         assert_eq!(*ended.borrow(), vec!["no checkout".to_string(), "closed".to_string()]);
+    }
+
+    /// The engine answers plugin watches `setup_incomplete` until an
+    /// organization is chosen: the watch is asked again once it is (`wait`'s
+    /// `again`), and what the new one sends (the plugins) is heard, with no
+    /// relaunch. Another end isn't retried; one dropped is never asked again.
+    #[test]
+    fn a_watch_answered_setup_incomplete_is_watched_again_once_set_up() {
+        let (rpc, _frames, _heard) = loopback();
+        let heard: Rc<RefCell<Vec<Value>>> = Rc::default();
+        let waiting: Rc<RefCell<Vec<Again>>> = Rc::default();
+        let (h, w) = (heard.clone(), waiting.clone());
+        let watch = rpc.watch_set_up("WatchPlugins", json!({}), move |v| h.borrow_mut().push(v), move |again| w.borrow_mut().push(again));
+        let first = watch.0.borrow().as_ref().unwrap().id;
+        rpc.route(json!({ "id": first, "err": "capability error: setup_incomplete" }));
+        assert!(heard.borrow().is_empty());
+        assert_eq!(waiting.borrow().len(), 1, "waits for setup");
+        // An organization chosen: watched again, and the plugins arrive.
+        let again = waiting.borrow_mut().pop().unwrap();
+        again();
+        let second = watch.0.borrow().as_ref().unwrap().id;
+        assert_ne!(first, second, "a new watch");
+        rpc.route(json!({ "id": second, "item": { "plugins": [{ "id": "git", "status": "on" }] } }));
+        assert_eq!(heard.borrow().len(), 1);
+        assert_eq!(heard.borrow()[0]["plugins"][0]["id"], "git");
+        // Another end: its own, no wait.
+        rpc.route(json!({ "id": second, "err": "offline" }));
+        assert!(waiting.borrow().is_empty());
+        // Dropped while waiting: never watched again.
+        let (h, w) = (heard.clone(), waiting.clone());
+        let dropped = rpc.watch_set_up("WatchPlugins", json!({}), move |v| h.borrow_mut().push(v), move |again| w.borrow_mut().push(again));
+        let id = dropped.0.borrow().as_ref().unwrap().id;
+        rpc.route(json!({ "id": id, "err": "setup_incomplete" }));
+        drop(dropped);
+        let again = waiting.borrow_mut().pop().unwrap();
+        let before = rpc.0.next_id.get();
+        again();
+        assert_eq!(rpc.0.next_id.get(), before, "nothing asked");
     }
 }

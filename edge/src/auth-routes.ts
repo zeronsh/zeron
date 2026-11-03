@@ -22,7 +22,11 @@
 import { bearerFromRequest, verifyToken } from "./auth";
 import { forgetCard } from "./card-cache";
 import type { Env } from "./env";
+import { cleanImage } from "./image-check";
+import { nameProblem, orgNameProblem } from "./names";
+import { MAX_LIVE_STEP_UPS, STEP_UP_TTL_MS, newStepUpToken, stepUpHash, stepUpRequired } from "./step-up";
 import { userDirectoryStub, type MemberProfile } from "./user-directory";
+import { deleteUserBlobs } from "./user-images";
 import {
   WorkOsAuthFailed,
   createOrg,
@@ -72,6 +76,21 @@ const bodyJson = async <T>(request: Request): Promise<T | undefined> => {
   }
 };
 
+/** A new step-up ticket for `userId`, or undefined when the directory can't
+ * take one (logged without the user). */
+const mintStepUp = async (env: Env, userId: string): Promise<{ token: string; expiresAt: number } | undefined> => {
+  const directory = userDirectoryStub(env);
+  if (!directory) return undefined;
+  const token = newStepUpToken();
+  try {
+    const expiresAt = await directory.issueStepUp(userId, (await stepUpHash(token))!, STEP_UP_TTL_MS, MAX_LIVE_STEP_UPS);
+    return { token, expiresAt };
+  } catch (e) {
+    console.warn("auth/exchange: minting a step-up failed", e instanceof Error ? e.name : "error");
+    return undefined;
+  }
+};
+
 /** Handle an /auth/* route; undefined means "not an auth route". */
 export const handleAuthRoute = async (
   request: Request,
@@ -86,11 +105,16 @@ export const handleAuthRoute = async (
     if (!apiKey) return notConfigured();
     const body = await bodyJson<{ code?: string }>(request);
     if (typeof body?.code !== "string") return json({ error: "missing code" }, 400);
+    let exchanged: Awaited<ReturnType<typeof exchange>>;
     try {
-      return json(await exchange(env, apiKey, body.code));
+      exchanged = await exchange(env, apiKey, body.code);
     } catch (e) {
       return authFailed(e);
     }
+    // A code comes only from an interactive sign-in: the one moment that
+    // earns a step-up ticket (step-up.ts). Sign-in itself never fails on it.
+    const stepUp = await mintStepUp(env, exchanged.user.id);
+    return json(stepUp ? { ...exchanged, stepUp } : exchanged);
   }
 
   if (parts[1] === "refresh" && parts.length === 2 && request.method === "POST") {
@@ -139,6 +163,8 @@ export const handleAuthRoute = async (
       if (trimmed.length === 0 || trimmed.length > 80) {
         return json({ error: "name must be 1-80 characters" }, 400);
       }
+      const problem = orgNameProblem(trimmed);
+      if (problem) return invalidName(problem);
       // Each user creates one org; invitations to others are unaffected. The
       // claim is taken before WorkOS is called, so concurrent requests (a
       // double-submit, a retry) can't both create.
@@ -233,13 +259,17 @@ export const handleAuthRoute = async (
 //
 //  GET    /auth/me                                   → Me
 //  PATCH  /auth/me {name?, title?}                   → Me   (title "" or null clears it)
-//  DELETE /auth/me {confirm: <email>}                → {ok} (409 last_admin: the only
-//                                                     admin of an org with others)
-//  PUT    /auth/me/photo  <image/png|jpeg, ≤1 MB>    → Me
+//  DELETE /auth/me {confirm: <email>, stepUp}        → {ok} (403 step_up_required without a
+//                                                     fresh sign-in's ticket, step-up.ts;
+//                                                     409 last_admin: the only admin of an
+//                                                     org with others; 409 busy)
+//  PUT    /auth/me/photo  <image/png|jpeg, ≤1 MB>    → Me   (checked and stripped, image-check.ts)
 //  DELETE /auth/me/photo                             → Me
 //  GET    /auth/avatars/{key}                        → the photo (public, immutable)
 //  PUT    /auth/me/images <image/png|jpeg, ≤1 MB>    → {url}  (an image of yours, e.g. a
-//                                                     project's icon, served as a photo is)
+//                                                     project's icon, served as a photo is;
+//                                                     checked and stripped; 409 too_many_images,
+//                                                     413 image_quota, 429 rate_limited)
 //  DELETE /auth/me/images/{key}                      → {ok}   (yours only; 404 otherwise)
 //  PATCH  /auth/orgs/{org} {name}                    → {organizationId, name}  (admin)
 //  GET    /auth/orgs/{org}/members                   → {members}               (member)
@@ -284,6 +314,10 @@ const upstream = (e: unknown, route: string): Response => {
 const forbidden = (): Response => json({ error: "forbidden" }, 403);
 const notFound = (): Response => json({ error: "not_found" }, 404);
 const invalid = (): Response => json({ error: "invalid" }, 400);
+/** A name names.ts refuses: it would go out in WorkOS's emails. */
+const invalidName = (reason: string): Response => json({ error: "invalid_name", reason }, 400);
+/** Someone else is changing this org's roles right now: try again. */
+const busy = (): Response => json({ error: "busy" }, 409);
 
 /** A trimmed name of 1-80 characters from `{ name }`, or undefined. */
 const nameFrom = (body: unknown): string | undefined => {
@@ -377,12 +411,6 @@ const withRecorded = async <T>(
 
 const unavailable = (): Response => json({ error: "unavailable" }, 503);
 
-/** Bytes that start as a PNG or a JPEG says it does. */
-const isImage = (type: string, bytes: Uint8Array): boolean =>
-  type === "image/png"
-    ? bytes.length > 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((b, i) => bytes[i] === b)
-    : bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-
 /** The caller's own photo: stored under a new random key (so the URL is never
  * reused and caches forever), the one it replaces deleted. */
 const putPhoto = async (request: Request, env: Env, url: URL, apiKey: string, userId: string): Promise<Response> => {
@@ -397,16 +425,18 @@ const putPhoto = async (request: Request, env: Env, url: URL, apiKey: string, us
   return answer;
 };
 
-/** The bytes of a PNG or JPEG of at most `MAX_PHOTO_BYTES` sent with
- * `request`, as `[type, bytes]`, or the answer refusing them. */
+/** The PNG or JPEG of at most `MAX_PHOTO_BYTES` sent with `request`, checked
+ * and rebuilt without its metadata (image-check.ts), as `[type, bytes]`, or
+ * the answer refusing it. */
 const imageBody = async (request: Request): Promise<[string, Uint8Array] | Response> => {
   const type = request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
   if (type !== "image/png" && type !== "image/jpeg") return invalid();
   if (Number(request.headers.get("content-length") ?? "0") > MAX_PHOTO_BYTES) return json({ error: "too_large" }, 413);
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.length > MAX_PHOTO_BYTES) return json({ error: "too_large" }, 413);
-  if (!isImage(type, bytes)) return invalid();
-  return [type, bytes];
+  const clean = cleanImage(type, bytes);
+  if (!clean) return invalid();
+  return [type, clean];
 };
 
 const newPhotoKey = (): string => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -419,10 +449,31 @@ const putImage = async (request: Request, env: Env, url: URL, userId: string): P
   if (body instanceof Response) return body;
   const [type, bytes] = body;
   const key = newPhotoKey();
-  await env.BLOBS.put(photoObject(key), bytes, {
-    httpMetadata: { contentType: type, cacheControl: PHOTO_CACHE },
-    customMetadata: { owner: userId, kind: "image" }
-  });
+  // Counted against the owner's quota first (user-directory.ts `reserveImage`),
+  // so it's theirs to account for, and goes with their account.
+  const directory = userDirectoryStub(env);
+  if (!directory) return unavailable();
+  switch (await directory.reserveImage(userId, key, bytes.length)) {
+    case "ok":
+      break;
+    case "too_many":
+      return json({ error: "too_many_images" }, 409);
+    case "too_large":
+      return json({ error: "image_quota" }, 413);
+    case "rate_limited":
+      return json({ error: "rate_limited" }, 429);
+    case "deleted_user":
+      return forbidden();
+  }
+  try {
+    await env.BLOBS.put(photoObject(key), bytes, {
+      httpMetadata: { contentType: type, cacheControl: PHOTO_CACHE },
+      customMetadata: { owner: userId, kind: "image" }
+    });
+  } catch (e) {
+    await directory.dropImage(userId, key);
+    throw e;
+  }
   return json({ key, url: photoUrl(url, key) });
 };
 
@@ -433,6 +484,7 @@ const deleteImage = async (env: Env, userId: string, key: string): Promise<Respo
   const object = await env.BLOBS.head(photoObject(key));
   if (!object || object.customMetadata?.owner !== userId || object.customMetadata?.kind !== "image") return notFound();
   await env.BLOBS.delete(photoObject(key));
+  await userDirectoryStub(env)?.dropImage(userId, key);
   return json({ ok: true });
 };
 
@@ -460,7 +512,9 @@ const avatar = async (env: Env, key: string): Promise<Response> => {
     headers: {
       "content-type": object.httpMetadata?.contentType ?? "image/png",
       "cache-control": PHOTO_CACHE,
-      "x-content-type-options": "nosniff"
+      "x-content-type-options": "nosniff",
+      // Only ever a picture: nothing it holds runs, opened directly or not.
+      "content-security-policy": "default-src 'none'; sandbox"
     }
   });
 };
@@ -481,7 +535,8 @@ const confirms = (confirm: string, email: string | null | undefined): boolean =>
  * retry after WorkOS has deleted them (an answer lost on the way back)
  * finishes the edge's part. */
 const deleteMe = async (request: Request, env: Env, apiKey: string, userId: string): Promise<Response> => {
-  const confirm = (await bodyJson<{ confirm?: unknown }>(request))?.confirm;
+  const body = await bodyJson<{ confirm?: unknown; stepUp?: unknown }>(request);
+  const confirm = body?.confirm;
   // Nothing is asked of WorkOS without the address typed.
   if (typeof confirm !== "string" || confirm.trim() === "") return invalid();
   let user: WireProfile;
@@ -492,51 +547,93 @@ const deleteMe = async (request: Request, env: Env, apiKey: string, userId: stri
     return upstream(e, "me");
   }
   if (!confirms(confirm, user.email)) return invalid();
-  const alone: string[] = [];
-  try {
-    for (const org of await listOrgs(apiKey, userId)) {
-      const others = (await listOrgMembers(apiKey, org.organizationId)).filter((m) => m.userId !== userId);
-      if (others.length === 0) {
-        alone.push(org.organizationId);
-      } else if (org.role === "admin" && !others.some((m) => m.role === "admin")) {
-        return json({ error: "last_admin", organization: org.name }, 409);
-      }
-    }
-  } catch (e) {
-    return upstream(e, "me");
-  }
+  // A bearer alone never deletes an account: a fresh sign-in's ticket
+  // (step-up.ts) does. Checked here, used up by the tombstone.
   const directory = userDirectoryStub(env);
-  let photoKey: string | null = null;
+  if (!directory) return unavailable();
+  if (!(await directory.hasStepUp(userId, await stepUpHash(body?.stepUp)))) return stepUpRequired();
+  let orgs: Awaited<ReturnType<typeof listOrgs>>;
   try {
-    photoKey = directory ? await directory.photoKey(userId) : null;
-  } catch {
-    // (Its object stays behind: unreachable, its key unknown.)
-  }
-  try {
-    // Their own orgs first: once the user is gone, which they were is too.
-    for (const organizationId of alone) await deleteOrg(apiKey, organizationId);
-    await deleteUser(apiKey, userId);
+    orgs = await listOrgs(apiKey, userId);
   } catch (e) {
     return upstream(e, "me");
   }
-  await tombstone(env, user, photoKey);
-  return json({ ok: true });
+  // Where they're an admin, their deletion takes the org's role lock: two
+  // admins deleting themselves at once can't both see the other stay.
+  const locked = await lockOrgs(env, orgs.filter((o) => o.role === "admin").map((o) => o.organizationId));
+  if (!locked) return busy();
+  try {
+    const alone: string[] = [];
+    try {
+      for (const org of orgs) {
+        const others = (await listOrgMembers(apiKey, org.organizationId)).filter((m) => m.userId !== userId);
+        if (others.length === 0) {
+          alone.push(org.organizationId);
+        } else if (org.role === "admin" && !others.some((m) => m.role === "admin")) {
+          return json({ error: "last_admin", organization: org.name }, 409);
+        }
+      }
+    } catch (e) {
+      return upstream(e, "me");
+    }
+    let photoKey: string | null = null;
+    try {
+      photoKey = await directory.photoKey(userId);
+    } catch {
+      // (Its object stays behind: unreachable, its key unknown.)
+    }
+    try {
+      // Their own orgs first: once the user is gone, which they were is too.
+      for (const organizationId of alone) await deleteOrg(apiKey, organizationId);
+      await deleteUser(apiKey, userId);
+    } catch (e) {
+      return upstream(e, "me");
+    }
+    await tombstone(env, user, photoKey);
+    return json({ ok: true });
+  } finally {
+    await locked.release();
+  }
+};
+
+/** Take the role locks of `orgIds` (sorted, so two callers can't each hold
+ * half), or none: undefined when one is held by someone else. */
+const lockOrgs = async (env: Env, orgIds: readonly string[]): Promise<{ release: () => Promise<void> } | undefined> => {
+  const directory = userDirectoryStub(env);
+  const noop = { release: async () => {} };
+  if (!directory || orgIds.length === 0) return noop;
+  const holder = crypto.randomUUID();
+  const taken: string[] = [];
+  const release = async () => {
+    for (const orgId of taken) await directory.unlockOrg(orgId, holder).catch(() => undefined);
+  };
+  for (const orgId of [...new Set(orgIds)].sort()) {
+    if (!(await directory.lockOrg(orgId, holder))) {
+      await release();
+      return undefined;
+    }
+    taken.push(orgId);
+  }
+  return { release };
 };
 
 /** The directory's part of a deletion: tombstoned (username retired, card
- * forgotten) and the photo's object gone. Failures are logged and left: the
- * `user.deleted` webhook lands the tombstone too, and a retry finishes it. */
+ * forgotten, step-up tickets gone) and the photo's and images' objects gone.
+ * Failures are logged and left: the `user.deleted` webhook lands the
+ * tombstone too, and a retry finishes it. */
 const tombstone = async (env: Env, user: WireProfile, photoKey: string | null): Promise<void> => {
   const directory = userDirectoryStub(env);
+  let images: string[] = [];
   if (directory) {
     try {
+      images = await directory.takeImages(user.id);
       const username = await directory.remove(user, new Date().toISOString());
       if (username) await forgetCard(username);
     } catch (e) {
       console.warn("auth/me: directory tombstone failed", e instanceof Error ? e.name : "error");
     }
   }
-  if (photoKey) await env.BLOBS.delete(photoObject(photoKey));
+  await deleteUserBlobs(env, user.id, photoKey, images);
 };
 
 /** A delete asked again after WorkOS already deleted the caller: the
@@ -562,8 +659,14 @@ const finishDeleted = async (env: Env, userId: string, confirm: string): Promise
       { id: userId, email: "", first_name: null, last_name: null, profile_picture_url: null, created_at: now, updated_at: now },
       photoKey
     );
-  } else if (photoKey) {
-    await env.BLOBS.delete(photoObject(photoKey));
+  } else {
+    let images: string[] = [];
+    try {
+      images = await directory.takeImages(userId);
+    } catch {
+      // (The scan below still finds them.)
+    }
+    await deleteUserBlobs(env, userId, photoKey, images);
   }
   return json({ ok: true });
 };
@@ -579,6 +682,8 @@ const patchMe = async (request: Request, env: Env, url: URL, apiKey: string, use
   if (!hasName && !hasTitle) return invalid();
   const name = hasName ? nameFrom(body) : undefined;
   if (hasName && !name) return invalid();
+  const problem = name ? nameProblem(name) : undefined;
+  if (problem) return invalidName(problem);
   const title = hasTitle ? titleFrom(body!.title) : undefined;
   if (hasTitle && title === undefined) return invalid();
   let user: WireProfile;
@@ -658,6 +763,8 @@ const gate = async (ctx: OrgContext, admin: boolean): Promise<Response | undefin
 const patchOrg: OrgHandler = async (ctx) => {
   const name = nameFrom(await bodyJson<unknown>(ctx.request));
   if (!name) return invalid();
+  const problem = orgNameProblem(name);
+  if (problem) return invalidName(problem);
   const refused = await gate(ctx, true);
   if (refused) return refused;
   try {
@@ -738,31 +845,51 @@ const otherMembership = async (ctx: OrgContext): Promise<Response | undefined> =
   return undefined;
 };
 
-const removeMember: OrgHandler = async (ctx) => {
-  const refused = (await gate(ctx, true)) ?? (await otherMembership(ctx));
-  if (refused) return refused;
+/**
+ * Run a role change or removal under the org's role lock, re-checking that
+ * the caller is still an admin inside it. Two admins demoting (or removing)
+ * each other at once would each pass a check made before the other's change
+ * and leave the org with no admin. Under the lock, the second one finds it's
+ * no longer an admin (403). The answer is 409 `busy` while another change
+ * holds the lock. `last_admin` (409) also guards the change itself: it never
+ * leaves the org without an active admin.
+ */
+const adminChange = async (ctx: OrgContext, demotes: boolean, change: () => Promise<void>): Promise<Response> => {
+  const locked = await lockOrgs(ctx.env, [ctx.orgId]);
+  if (!locked) return busy();
   try {
-    await removeMembership(ctx.apiKey, ctx.itemId!);
-  } catch (e) {
-    return upstream(e, "members");
+    const refused = (await gate(ctx, true)) ?? (await otherMembership(ctx));
+    if (refused) return refused;
+    if (demotes) {
+      let members: OrgMember[];
+      try {
+        members = await listOrgMembers(ctx.apiKey, ctx.orgId);
+      } catch (e) {
+        return upstream(e, "members");
+      }
+      const left = members.filter((m) => m.role === "admin" && m.membershipId !== ctx.itemId);
+      if (left.length === 0) return json({ error: "last_admin" }, 409);
+    }
+    try {
+      await change();
+    } catch (e) {
+      if (e instanceof WorkOsAuthFailed && e.code === "invalid_role") return json({ error: "invalid_role" }, 400);
+      return upstream(e, "members");
+    }
+    return json({ ok: true });
+  } finally {
+    await locked.release();
   }
-  return json({ ok: true });
 };
+
+const removeMember: OrgHandler = (ctx) => adminChange(ctx, true, () => removeMembership(ctx.apiKey, ctx.itemId!));
 
 const ROLES = new Set(["admin", "member"]);
 
 const patchMember: OrgHandler = async (ctx) => {
   const role = (await bodyJson<{ role?: unknown }>(ctx.request))?.role;
   if (typeof role !== "string" || !ROLES.has(role)) return invalid();
-  const refused = (await gate(ctx, true)) ?? (await otherMembership(ctx));
-  if (refused) return refused;
-  try {
-    await setMembershipRole(ctx.apiKey, ctx.itemId!, role);
-  } catch (e) {
-    if (e instanceof WorkOsAuthFailed && e.code === "invalid_role") return json({ error: "invalid_role" }, 400);
-    return upstream(e, "members");
-  }
-  return json({ ok: true });
+  return adminChange(ctx, role !== "admin", () => setMembershipRole(ctx.apiKey, ctx.itemId!, role));
 };
 
 /** Pending invitations, and those expired in the last 30 days, newest first.
@@ -847,12 +974,13 @@ const resendOrgInvitation: OrgHandler = async (ctx) => {
 // ---------------------------------------------------------------------------
 
 /** Addresses one request may invite, after dedupe. */
-export const MAX_INVITES_PER_REQUEST = 20;
+export const MAX_INVITES_PER_REQUEST = 10;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** The body's addresses, trimmed and deduped case-insensitively (first
- * spelling kept); undefined unless it's `{ emails: string[] }` with 1-20. */
+ * spelling kept); undefined unless it's `{ emails: string[] }` with 1 to
+ * `MAX_INVITES_PER_REQUEST`. */
 const inviteEmails = (body: unknown): string[] | undefined => {
   const emails = (body as { emails?: unknown } | undefined)?.emails;
   if (!Array.isArray(emails) || emails.length > 100 || !emails.every((e) => typeof e === "string")) return undefined;
@@ -880,6 +1008,8 @@ const invite = async (
     if (!memberships.some((m) => m.organizationId === organizationId && m.role === "admin")) {
       return json({ error: "forbidden" }, 403);
     }
+    // (The org's name goes out in WorkOS's email. names.ts checked it when it
+    // was set; names from before that are grandfathered.)
   } catch (e) {
     return authFailed(e);
   }

@@ -37,6 +37,14 @@ pub type WsStream = crate::socket::Connection<MaybeTlsStream<crate::socket::Prog
 /// [`crate::wake::notify_online`] so sibling sockets waiting out a reconnect
 /// backoff redial immediately instead of sleeping through the recovery.
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
+    connect_ws_with_headers(url).await.map(|(ws, _)| ws)
+}
+
+/// [`connect_ws`], with the upgrade response's headers (what the server
+/// said about the connection, e.g. the device room's verified caller).
+pub async fn connect_ws_with_headers(
+    url: &str,
+) -> Result<(WsStream, tokio_tungstenite::tungstenite::http::HeaderMap), WsError> {
     // Bound DNS, all TCP attempts, TLS and HTTP upgrade together. Some
     // callers (notably the host relay) have no outer connection deadline.
     tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(url))
@@ -49,7 +57,9 @@ pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
         })?
 }
 
-async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
+async fn connect_ws_inner(
+    url: &str,
+) -> Result<(WsStream, tokio_tungstenite::tungstenite::http::HeaderMap), WsError> {
     let request = url.into_client_request()?;
     let uri = request.uri();
     let host = uri
@@ -71,13 +81,16 @@ async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
     // Best-effort: a socket that works without NODELAY beats no socket.
     let _ = stream.set_nodelay(true);
     let (stream, progress) = crate::socket::ProgressIo::new(stream);
-    let (ws, _response) =
+    let (ws, response) =
         tokio_tungstenite::client_async_tls_with_config(request, stream, None, None).await?;
     crate::wake::notify_online();
-    Ok(crate::socket::Connection {
-        socket: ws,
-        progress,
-    })
+    Ok((
+        crate::socket::Connection {
+            socket: ws,
+            progress,
+        },
+        response.headers().clone(),
+    ))
 }
 
 /// Race TCP connects over an already-ordered address list: one new attempt per
