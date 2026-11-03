@@ -13256,6 +13256,8 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
         };
         let entry = assistant(
             "a1",
@@ -14450,6 +14452,8 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
         }
     }
 
@@ -14572,6 +14576,8 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            exit_code: None,
+            output_truncated: false,
         }
     }
 
