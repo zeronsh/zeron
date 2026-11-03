@@ -52,10 +52,14 @@ const FOIL_STOPS = [[0xc9, 0xd6, 0xff, 0xcc], [0xef, 0xd0, 0xf2, 0xcc], [0xff, 0
 
 // How the public read's badges map onto the card's pills. The read gives an
 // id, a name and a free-form icon; the card wants a style (ink, outline or
-// foil) and, if any, one of the intro's characters. Cloud Tester is an
-// outline pill with no glyph, as the native sign-in wall shows it; a badge
-// this table doesn't know is an ink pill, the native card's default.
-export const BADGE_STYLES = { "cloud-tester": "outline" };
+// foil) and, if any, one of the intro's characters. Every badge the server
+// gives is an outline pill with no glyph, as the native app draws a served
+// card (zgx account/api.luau); this table names them, and an id it doesn't
+// know is an outline pill too. (Ink is only ds.MemberCard's default for a
+// badge given without a style, as the gallery's fixtures are.) The read's
+// order is the card's (the order the badges were defined), so two cards with
+// the same badges show them alike.
+export const BADGE_STYLES = { "cloud-tester": "outline", "v3-beta": "outline" };
 export const BADGE_GLYPHS = { hash: "#", at: "@", sparkle: "+", star: "x", plus: "+", dot: ".", dash: "-" };
 
 // `since` as the card prints it: "Oct 4, 2023" from "2023-10-04" (UTC).
@@ -619,7 +623,7 @@ export function layoutCard(card) {
   return { runs, boxes, name, since, number };
 }
 function badgeOf(b) {
-  const style = b.style || BADGE_STYLES[b.id] || "ink";
+  const style = b.style || BADGE_STYLES[b.id] || "outline";
   const glyph = b.glyph || (b.icon ? BADGE_GLYPHS[b.icon] || null : null);
   return { label: String(b.name || b.label || b.id || "").toUpperCase(), style, glyph: glyph ? [...glyph][0] : null };
 }
