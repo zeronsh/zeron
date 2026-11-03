@@ -18,6 +18,7 @@ export type Name =
 	| "pi"
 	| "hermes"
 	| "muse"
+	| "droid"
 
 local FILES: { [Name]: string } = {
 	claude = "claude-mark",
@@ -30,11 +31,12 @@ local FILES: { [Name]: string } = {
 	pi = "pi-mark",
 	hermes = "hermes-mark",
 	muse = "muse-mark",
+	droid = "droid-mark",
 }
 
 -- Marks drawn in one ink (black, for the white tile): bare, they take the
 -- colour of the text around them instead, or they vanish on dark.
-local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true }
+local MONO: { [Name]: boolean } = { openai = true, grok = true, cursor = true, devin = true, hermes = true, droid = true }
 
 local RegistryMark = require("@self/registry_mark")
 
