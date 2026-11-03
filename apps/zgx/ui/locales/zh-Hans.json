@@ -778,7 +778,8 @@
       "show_fewer": "显示更少附件",
       "show_more": "再显示 {n} 个附件",
       "show_less": "显示更少",
-      "more": "另有 {n} 个"
+      "more": "另有 {n} 个",
+      "comment_from": "来自 {plugin}"
     },
     "composer_dock": {
       "fold": "折叠{title}",
@@ -1780,7 +1781,10 @@
         "not_found": "该项目已不存在。",
         "invalid": "内容似乎有误。",
         "too_large": "图片太大。请尝试较小的图片。",
-        "last_admin": "你是组织中唯一的管理员。请先将其他人设为管理员。"
+        "last_admin": "你是组织中唯一的管理员。请先将其他人设为管理员。",
+        "busy": "你的组织中有人正在更改角色。请稍后再试。",
+        "try_again": "暂时无法删除你的账户，所有内容均未删除。请稍后再试。",
+        "timed_out": "重新登录超时，所有内容均未删除。请重试。"
       },
       "couldnt_save_name": "无法保存你的名称",
       "couldnt_rename_org": "无法重命名组织",
@@ -1990,8 +1994,12 @@
         "description": "永久删除你的账户、会员卡和组织成员身份。",
         "failed": "无法删除你的账户",
         "confirm_title": "删除你的账户？",
-        "confirm_body_org": "你将离开 {org}，并在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。",
-        "confirm_body": "你将在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。"
+        "confirm_body_org": "你将离开 {org}，并在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "confirm_body": "你将在所有设备上退出登录。你的会员卡地址将停用。此操作无法撤销。你需要重新登录以确认是你本人。",
+        "step_up": {
+          "title": "要删除你的账户，请重新登录",
+          "body": "请在浏览器中完成登录。登录后，你的账户将立即被删除。"
+        }
       },
       "claim": {
         "open": "领取用户名",
@@ -2012,6 +2020,24 @@
         "sessions": "随处可用的会话",
         "sessions_description": "在手机或另一台电脑上接着聊。",
         "sign_in": "登录"
+      },
+      "keys": {
+        "label": "签名密钥",
+        "terms": "密钥 签名 插件 模板 安全 撤销 指纹 设备 keys signing plugins templates revoke fingerprint",
+        "description": "你的设备使用这些密钥为你制作的插件和模板签名。如果有你不认识的密钥，请撤销它。",
+        "this_mac": "这台 Mac",
+        "another_device": "其他设备",
+        "new": "新",
+        "added": "添加于 {date}",
+        "revoked": "撤销于 {date}",
+        "revoke": "撤销",
+        "revoke_title": "撤销此密钥？",
+        "revoke_body": "由它签名的插件和模板将不再算作你的。",
+        "revoke_failed": "无法撤销该密钥",
+        "none": "还没有签名密钥。",
+        "none_how": "签名插件时会自动创建一个。",
+        "failed": "无法加载你的签名密钥",
+        "retry": "重试"
       }
     },
     "browser": {
@@ -2964,11 +2990,11 @@
         },
         "ui_change": {
           "title": "更改{places}的显示方式",
-          "detail": "它可以隐藏、重新排序或重命名其中的内容。"
+          "detail": "它可以隐藏、重新排序、重命名或重新绘制其中的内容。"
         },
         "ui_replace": {
           "title": "用自己的界面替换{places}",
-          "detail": "它作为 Zeron 的一部分运行，可以执行 Zeron 能做的任何操作。"
+          "detail": "它的代码作为 Zeron 的一部分运行：可以做你能做的任何事。"
         },
         "profile_read": {
           "title": "查看你的姓名、用户名和照片"
@@ -3014,7 +3040,9 @@
           "detail": "仍由你来发送。"
         },
         "network": {
-          "title": "连接互联网"
+          "title": "连接互联网",
+          "title_any": "连接到互联网上的任何网站",
+          "title_hosts": "连接到这些地方"
         },
         "clipboard": {
           "title": "读取和更改你的剪贴板"
@@ -3037,7 +3065,8 @@
         "commands": {
           "title": "以你的身份在此 Mac 上运行 {list}",
           "title_on": "以你的身份在 {device} 上运行 {list}",
-          "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。"
+          "detail": "它可以使用你的登录身份执行 {list} 能做的任何操作。",
+          "detail_anything": "这些程序可以使用你的登录做你能做的任何事。"
         },
         "native": {
           "title": "在此 Mac 上为你的智能体运行它自己的程序",
@@ -3075,7 +3104,28 @@
       },
       "unverified": "未验证",
       "from": "来自 {where}",
-      "from_file": "来自文件"
+      "from_file": "来自文件",
+      "more": "另有 {n} 项",
+      "diff": {
+        "commands": "以你的身份运行更多程序",
+        "mcp": "在你的智能体旁运行另一个程序",
+        "mcp_gone": "停止在你的智能体旁运行它的程序",
+        "tools_added": "为你的智能体提供新工具",
+        "tools_changed": "对你的智能体说法已改变的工具",
+        "service": "运行另一个后台服务",
+        "entry": "从另一个文件启动",
+        "network": "连接到更多地方",
+        "settings": "它的设置已更改",
+        "ui_replace": "用自己的界面替换{places}"
+      },
+      "can_anything": "{name}：可以做你能做的任何事",
+      "any_site": "互联网上的任何网站",
+      "near_host": "{host}：这台 Mac 或你的网络",
+      "details": {
+        "changes": "它更改的 Zeron 部分",
+        "replaces": "它替换的界面",
+        "changes_since": "自你允许以来还更改"
+      }
     },
     "page": {
       "title": "插件",
@@ -3129,7 +3179,9 @@
       "remove_body_device": "它会立即在 {device} 上的 Zeron 各处停止。它的文件夹会移到那台电脑插件文件夹的已移除项目中，以便你想找回。",
       "install_dialog_title_device": "在 {device} 上安装插件",
       "install_dialog_body_device": "粘贴 .zeron-plugin 文件、GitHub 发布版或代码仓库的链接。Zeron 会检查是谁签名的，在它在那里运行前，由你允许它请求的权限。",
-      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台 Mac 的插件。"
+      "file_here_only": "插件文件只能安装在它所在的电脑上。要从文件安装，请先显示这台 Mac 的插件。",
+      "setup_title": "完成账户设置",
+      "setup_body": "选择工作空间后，你的插件会立即加载。"
     },
     "consent": {
       "made_by_you": "由你制作",
@@ -3143,12 +3195,20 @@
       "tampered": "自你允许后已发生更改",
       "asks_again": "它现在还请求：",
       "asks": "它请求：",
-      "mine": "这是我的",
+      "mine": "这是我的…",
       "not_now": "暂不",
       "allow": "允许",
       "on_device": "在 {device} 上",
       "unverified_why": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许。",
-      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。"
+      "unverified_why_from": "Zeron 无法确认它的作者。只有在你信任它的来源时才允许：{where}。",
+      "made_on_your_device": "由你的另一台设备制作",
+      "grew": "自你允许以来新增：",
+      "allow_there": "请在{device}上允许：它会在那台电脑的 Zeron 中询问。",
+      "mine_confirm": "将{name}签名为你自己的插件？仅当它是你亲自编写的：从现在起，Zeron 会在这台 Mac 上把它当作你的插件。",
+      "mine_cancel": "取消",
+      "mine_sign": "签名为我的",
+      "details": "详细信息",
+      "details_hide": "隐藏详细信息"
     },
     "permissions": {
       "screen_recording": {
@@ -3279,6 +3339,12 @@
       "nothing": "没有待处理的请求",
       "nothing_body": "此模板已处理。",
       "install_title": "安装 {name}？",
+      "keep_title": "保留 {name}？",
+      "keep_trust": "仅在信任其来源时保留",
+      "keep_body": "这个模板由代理创建、修改或切换而来，或在你上次保留后又有改动。保留之前它只是预览：Zeron 不允许它运行程序、使用你的账户、更改插件、模板或文件，也不允许它向代理发送内容。保留后，它将拥有 Zeron 的全部能力。",
+      "keep_files": "{n, plural, other {# 个文件}}，以当前内容为准",
+      "keep_files_detail": "如果它们再次改动，Zeron 会再次询问。",
+      "keep": "保留",
       "trust": "仅在信任{whom}时安装",
       "trust_body": "模板是 Zeron 自身的代码：它会替换 Zeron 的界面，并拥有 Zeron 的全部能力，可访问你的对话、文件、账户和智能体。",
       "unknown_body": "Zeron 无法确定签名所用密钥的所有者。仅在信任来源时安装。",

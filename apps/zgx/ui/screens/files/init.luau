@@ -20,6 +20,7 @@
 
 local ds = require("@ds")
 local control = require("@ds/control")
+local token = require("@ds/token")
 local FilesPane = require("@ds/files_pane")
 local Workspace = require("@app/screens/files/workspace")
 local comments = require("@app/screens/files/comments")
@@ -368,11 +369,11 @@ local function folder(w: Workspace, v: View, props: Props, here: () -> Where?): 
 		},
 		viewer = {
 			id = "file-viewer",
-			-- (What's under it, for plugins: the open file's path.)
+			-- (What's under it, for plugins: the open file, as a token.)
 			provide = {
 				file = ui.computed(function(): string?
 					local d = v.doc:get()
-					return if d then d.path else nil
+					return if d then token.file(d.path) else nil
 				end),
 			},
 			doc = v.doc,

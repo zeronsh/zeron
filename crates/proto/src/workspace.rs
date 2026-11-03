@@ -147,6 +147,7 @@ mod tests {
                     "sidebar-section-order-v1",
                     "provider-switch-v1",
                     "background-tasks-v1",
+                    "zgx-interface-v1",
                     "voice-client-media-v1"
                 ],
             })

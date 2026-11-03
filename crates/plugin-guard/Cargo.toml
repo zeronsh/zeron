@@ -1,0 +1,13 @@
+[package]
+name = "zeron-plugin-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The rules a plugin's package paths, programs and network requests are held to, shared by Zeron's engine and its zgx app"
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

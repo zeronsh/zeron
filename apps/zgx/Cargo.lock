@@ -6124,6 +6124,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-plugin-guard"
+version = "0.2.136"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "zeron-theme"
 version = "0.2.136"
 dependencies = [
@@ -6204,6 +6211,7 @@ dependencies = [
  "zeron-cli",
  "zeron-launch",
  "zeron-notify",
+ "zeron-plugin-guard",
  "zeron-theme",
  "zeron-update",
  "zeron-visual",

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use mlua::chunk::ChunkMode;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use serde_json::Value as Json;
 use tokio::sync::oneshot;
@@ -409,7 +410,7 @@ fn run(
         }
     };
     let chunk_name = format!("@{}", spec.entry);
-    if let Err(error) = enter(&|| lua.load(source.as_str()).set_name(chunk_name.as_str()).exec()) {
+    if let Err(error) = enter(&|| lua.load(source.as_str()).set_name(chunk_name.as_str()).set_mode(ChunkMode::Text).exec()) {
         let _ = loaded.send(Err(lua_message(&error)));
         return;
     }
@@ -600,7 +601,7 @@ fn setup(
 
     let host = natives(&lua, spec, ops, tx, state).map_err(fail)?;
     let (service, dispatch, describe, done, stopping, heard): (Function, Function, Function, Function, Function, Function) =
-        lua.load(PRELUDE).set_name("=zeron").call(host).map_err(fail)?;
+        lua.load(PRELUDE).set_name("=zeron").set_mode(ChunkMode::Text).call(host).map_err(fail)?;
     globals.raw_set("zeron_service", service).map_err(fail)?;
     lua.sandbox(true).map_err(fail)?;
     Ok((
@@ -817,7 +818,9 @@ fn install_require(lua: &Lua, root: &Path) -> mlua::Result<()> {
             return Ok(value.clone());
         }
         let source = read_source(&root, &rel).map_err(mlua::Error::runtime)?;
-        let value: Value = lua.load(source.as_str()).set_name(format!("@{rel}")).call(())?;
+        // Text only: Luau doesn't validate bytecode, so a planted binary chunk
+        // could corrupt the engine (R5).
+        let value: Value = lua.load(source.as_str()).set_name(format!("@{rel}")).set_mode(ChunkMode::Text).call(())?;
         let value = if value.is_nil() { Value::Boolean(true) } else { value };
         loaded.borrow_mut().insert(rel, value.clone());
         Ok(value)

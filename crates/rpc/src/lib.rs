@@ -18,19 +18,22 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+mod caller;
 mod client;
 pub mod device_room;
 pub mod ipc_auth;
 mod server;
 mod ws;
 
-pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ws};
+pub use caller::{Caller, caller, with_caller};
+pub use client::{RpcClient, RpcSubscription, connect_ipc, connect_ipc_as_agent, connect_ws};
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
+    CallerProof, CallerProofFn, DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig,
+    LinkCache, LinkCacheConfig, caller_proof_message,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame, is_liveness_probe,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::{serve_connection, serve_ws_listener, serve_ws_listener_scoped};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -185,6 +188,16 @@ pub mod methods {
     /// calls refresh; the refresh token never leaves the engine. Local IPC
     /// only ([`crate::local_only`]): the device-room relay refuses it.
     pub const ACCESS_TOKEN: &str = "AccessToken";
+    /// `{}` → `{url}`: a fresh interactive sign-in (as `SignIn`) whose
+    /// exchange leaves the engine a one-time step-up ticket, kept in memory
+    /// and never handed out. Needed before `DeleteAccount`.
+    pub const STEP_UP: &str = "StepUp";
+    /// `{confirm}` (the account's email) → `{ok: true}`, or `{ok: false,
+    /// error, message, organization?}`: the engine deletes the account at
+    /// the edge with its step-up ticket. `error` is `step_up_required` (run
+    /// `StepUp`, then retry), `signed_out`, `offline`, `invalid`,
+    /// `last_admin` (with `organization`), `busy` or `upstream`.
+    pub const DELETE_ACCOUNT: &str = "DeleteAccount";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
@@ -419,8 +432,17 @@ pub mod methods {
     /// `{}` → stream of `ListPlugins`' reply: the current list at once, then
     /// each change.
     pub const WATCH_PLUGINS: &str = "WatchPlugins";
-    /// `{id, allow, hash}` → `PluginItem`.
+    /// `{id, allow, hash, review?}` → `PluginItem`. Allowing needs `review`,
+    /// minted by [`REVIEW_PLUGIN`] for the same `id` and `hash`: only Zeron's
+    /// consent window holds one. Declining (`allow: false`) needs none.
+    /// Allowing is this device's alone: never over the relay.
     pub const DECIDE_PLUGIN: &str = "DecidePlugin";
+    /// `{id, hash}` → `{review}`: a one-time capability for one decision
+    /// about plugin `id` as shown (`hash`) — `DecidePlugin {allow: true}` or
+    /// `SignPlugin {id}` — good for a few minutes. Minted for the consent
+    /// window's own host only: full-token local IPC, never an agent, never
+    /// another device.
+    pub const REVIEW_PLUGIN: &str = "ReviewPlugin";
     /// `{id, off}` → `PluginItem` (an allowed plugin only).
     pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
     /// `{id}` → `{}`: the folder moves to `plugins/.removed/`.
@@ -464,6 +486,10 @@ pub mod methods {
     pub const WATCH_PLUGIN_CHANNEL: &str = "WatchPluginChannel";
     /// `{}` → `{key, registered}`.
     pub const PLUGIN_SIGNING_KEY: &str = "PluginSigningKey";
+    /// Another of your devices says it revoked a signing key: this device
+    /// looks up its own key at once (nothing in the call is trusted; it only
+    /// hastens the regular check). Answered to peers; not to agents.
+    pub const CHECK_PLUGIN_KEY: &str = "CheckPluginKey";
     /// Templates (whole replacements of Zeron's interface): `{}` → `{dir,
     /// active, templates: [{id, name, description, author, version,
     /// zeron_version, builtin, active, status: "ok" | "errors" | "out_of_date"
@@ -498,6 +524,9 @@ pub mod methods {
     /// (checked again; `hash` is the package as shown). Only Zeron's consent
     /// window calls it.
     pub const DECIDE_TEMPLATE: &str = "DecideTemplate";
+    /// `{pending, hash}` → `{review}`: as [`REVIEW_PLUGIN`], for
+    /// `DecideTemplate {allow: true}` on that waiting package.
+    pub const REVIEW_TEMPLATE: &str = "ReviewTemplate";
     /// Each template installed from a link checked there for a newer
     /// version (`{id?}`): `{updates, errors}`.
     pub const CHECK_TEMPLATE_UPDATES: &str = "CheckTemplateUpdates";
@@ -554,6 +583,10 @@ pub fn local_only(method: &str) -> bool {
     matches!(
         method,
         methods::ACCESS_TOKEN
+            | methods::STEP_UP
+            | methods::DELETE_ACCOUNT
+            | methods::REVIEW_PLUGIN
+            | methods::REVIEW_TEMPLATE
             // Plugins: authoring, tools and the window's channel stay this
             // device's. Your other devices may list, review, allow, turn
             // off, install and remove plugins here (the account's own
@@ -586,6 +619,77 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+    )
+}
+
+/// Methods a peer device may not have answered here even though they're
+/// relay-forwardable: allowing a plugin is this device's person's decision,
+/// made in this device's consent window; and a file path names a file on
+/// the caller's device, never this one. Declining, turning off, removing,
+/// and installing from a link (which lands waiting here) stay open to your
+/// other devices (Settings → Plugins' device switcher).
+pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
+    if local_only(method) {
+        return true;
+    }
+    match method {
+        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
+        methods::INSTALL_PLUGIN => params.get("path").is_some_and(|path| !path.is_null()),
+        _ => false,
+    }
+}
+
+/// The methods an agent's `zeron mcp` server may call with the
+/// agent-scoped IPC token: what its tools need and nothing that grants
+/// power. An allow-list, so a method added later stays the app's until
+/// it's listed here. Never here: deciding or reviewing (`Decide*`,
+/// `Review*`), signing (`SignPlugin`, `PluginSigningKey`), updating
+/// (`UpdatePlugin`, `UpdateTemplate`, the engine's and harnesses'),
+/// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
+/// terminals, files, vault and agent logins.
+pub fn agent_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        // Discovery.
+        methods::ENGINE_INFO
+            | methods::LOCAL_DEVICE
+            | methods::WATCH_DEVICES
+            | methods::WATCH_SPACES
+            | methods::WATCH_CHATS
+            | methods::WATCH_SESSIONS
+            | methods::WATCH_DOC_MESSAGES
+            | methods::LIST_HARNESSES
+            | methods::LIST_MODELS
+            | methods::LIST_AGENT_ACCOUNTS
+            // Chats: create, message, steer, archive (`Mutate`).
+            | methods::MUTATE
+            | methods::QUEUE_MESSAGE
+            | methods::QUEUE_COMMAND
+            // Showing the person something in the calling chat.
+            | methods::PUBLISH_VISUAL
+            | methods::PUBLISH_IMAGE
+            // Plugins: authoring, installing (lands waiting for the person),
+            // checking for updates, and their tools.
+            | methods::LIST_PLUGINS
+            | methods::PLUGIN_STATUS
+            | methods::NEW_PLUGIN
+            | methods::INSTALL_PLUGIN
+            | methods::CHECK_PLUGIN_UPDATES
+            | methods::LIST_PLUGIN_TOOLS
+            | methods::WATCH_PLUGIN_TOOLS
+            | methods::CALL_PLUGIN_TOOL
+            | methods::DESCRIBE_ELEMENTS
+            // Templates: authoring and switching (the app shows an
+            // unapproved one as a preview until the person keeps it), and
+            // importing (lands waiting for the person).
+            | methods::LIST_TEMPLATES
+            | methods::DESCRIBE_APP
+            | methods::CREATE_TEMPLATE
+            | methods::USE_TEMPLATE
+            | methods::TEMPLATE_STATUS
+            | methods::DELETE_TEMPLATE
+            | methods::EXPORT_TEMPLATE
+            | methods::IMPORT_TEMPLATE
     )
 }
 
@@ -1120,6 +1224,80 @@ mod tests {
             .unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    /// Answers every method with the caller it ran as.
+    struct WhoAsked;
+    #[async_trait]
+    impl RpcService for WhoAsked {
+        async fn handle(&self, _method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            Ok(RpcReply::Value(serde_json::json!(format!("{:?}", crate::caller()))))
+        }
+    }
+
+    /// R6/R16: the agent-scoped token (what `zeron mcp` holds) reaches its
+    /// tools' methods as an agent, and nothing that decides, signs, updates
+    /// or hands out credentials; the full token still reaches everything.
+    #[tokio::test]
+    async fn the_agent_token_refuses_everything_that_grants_power() {
+        let tokens = ipc_auth::IpcTokens::generate().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_ws_listener_scoped(listener, Arc::new(WhoAsked), tokens.clone()));
+        let url = format!("ws://127.0.0.1:{port}");
+
+        let agent = connect_ws(&url, Some(&tokens.agent)).await.unwrap();
+        for method in [
+            methods::DECIDE_PLUGIN,
+            methods::REVIEW_PLUGIN,
+            methods::SIGN_PLUGIN,
+            methods::PLUGIN_SIGNING_KEY,
+            methods::DECIDE_TEMPLATE,
+            methods::REVIEW_TEMPLATE,
+            methods::UPDATE_PLUGIN,
+            methods::UPDATE_TEMPLATE,
+            methods::APPLY_UPDATE,
+            methods::ACCESS_TOKEN,
+            methods::STEP_UP,
+            methods::DELETE_ACCOUNT,
+            methods::SIGN_IN,
+            methods::COMPLETE_SIGN_IN,
+            methods::SIGN_OUT,
+            methods::SET_PLUGIN_OFF,
+            methods::REMOVE_PLUGIN,
+            methods::SET_BUILTIN_PLUGINS,
+            methods::OPEN_TERMINAL,
+            methods::WRITE_TERMINAL,
+            methods::WRITE_WORKSPACE_FILE,
+            methods::EXPORT_PLUGIN,
+        ] {
+            assert!(!agent_allowed(method), "{method}");
+            match agent.call(method, serde_json::json!({})).await {
+                Err(RpcError::Failed(message)) => assert!(message.contains("isn't open to agents"), "{method}: {message}"),
+                other => panic!("an agent reached {method}: {other:?}"),
+            }
+        }
+        let asked = agent.call(methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
+        assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+
+        let app = connect_ws(&url, Some(&tokens.full)).await.unwrap();
+        for method in [methods::DECIDE_PLUGIN, methods::ACCESS_TOKEN] {
+            let asked = app.call(method, serde_json::json!({})).await.unwrap();
+            assert_eq!(asked, serde_json::json!("Local"), "{method}");
+        }
+    }
+
+    #[test]
+    fn peers_may_decline_but_never_allow() {
+        let hash = "ab".repeat(32);
+        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash})));
+        assert!(peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": "yes"})));
+        assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": false})));
+        assert!(peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"path": "/x"})));
+        assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x", "path": null})));
+        assert!(peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({})));
+        assert!(peer_refused(methods::SIGN_PLUGIN, &serde_json::json!({})));
+        assert!(peer_refused(methods::DELETE_ACCOUNT, &serde_json::json!({})));
     }
 
     #[tokio::test]
