@@ -99,7 +99,19 @@ fn gh_answer(world: &serde_json::Value, asked: &serde_json::Value) -> Option<ser
     if let Some(why) = world["fail"].as_str() {
         return fail(why);
     }
+    // A folder's remotes (`remotes`, by folder): none, no repository.
+    if asked["program"] == "git" && args == ["remote", "-v"] {
+        let cwd = asked["cwd"].as_str().unwrap_or_default();
+        return match world["remotes"][cwd].as_str() {
+            Some(listing) => text(listing.to_string()),
+            None => fail("fatal: not a git repository (or any of the parent directories): .git"),
+        };
+    }
     if args.first().map(String::as_str) == Some("repo") {
+        // (gh not knowing the remotes' host: a proxy's, say.)
+        if world["gh_unknown_host"] == true {
+            return fail("none of the git remotes configured for this repository point to a known GitHub host");
+        }
         // (At scale, each folder its own: /work/r7 is o/r7.)
         if world["repos_by_cwd"] == true {
             let cwd = asked["cwd"].as_str().unwrap_or_default();
@@ -157,7 +169,15 @@ fn gh_answer(world: &serde_json::Value, asked: &serde_json::Value) -> Option<ser
             for (k, branch) in &vars {
                 let Some((repo, _)) = k.strip_prefix('b').and_then(|rest| rest.split_once('_')) else { continue };
                 let alias = format!("r{repo}");
-                let pr = &world["branches"][branch.as_str().unwrap_or_default()];
+                let branch = branch.as_str().unwrap_or_default();
+                // (`by_repo`: each repository's own branches, `owner/name`
+                // to branch to pull request; else `branches`, any's.)
+                let pr = if world["by_repo"].is_object() {
+                    let name = format!("{}/{}", vars[&format!("o{repo}")].as_str().unwrap_or_default(), vars[&format!("n{repo}")].as_str().unwrap_or_default());
+                    &world["by_repo"][name.as_str()][branch]
+                } else {
+                    &world["branches"][branch]
+                };
                 let entry = data.entry(alias).or_insert_with(|| json!({}));
                 entry[k.as_str()] = json!({ "nodes": if pr.is_null() { json!([]) } else { json!([pr]) } });
             }
@@ -895,17 +915,61 @@ fn github_leaves_what_the_engine_watches_to_the_engine() {
     assert_eq!(app.error(), None);
 }
 
+/// The fixture's sessions made `chats` (each `[id, folder, branch]`), as
+/// the engine would say them, and the plugin's records made again.
+fn sessions_in(app: &mut TestApp, items: &[Item], chats: &[(&str, &str, &str)]) {
+    let shared = app.host.shared("sessions", zgx_script::Value::Nil);
+    let mut sessions = value_json(&shared.signal().with_untracked(zgx_script::Value::clone));
+    for chat in sessions["chats"].as_array_mut().into_iter().flatten() {
+        if let Some((_, cwd, branch)) = chats.iter().find(|(id, _, _)| chat["id"] == *id) {
+            chat["cwd"] = json!(cwd);
+            chat["branch"] = json!(branch);
+        }
+    }
+    shared.set(json_value(&sessions));
+    publish_records(app, items);
+}
+
 #[test]
-fn github_finds_a_session_s_pull_request_on_github_when_its_folder_isn_t_here() {
+fn github_shows_a_session_only_its_own_repository_s_pull_request() {
     let items = vec![builtin("github")];
-    // (gh finds no repository in the folder: it isn't on this Mac.)
-    let github = world(json!({ "viewer": "ada", "repository": "zeronsh/zgx", "branches": { "fix/build": branch_pr(31, "OPEN", json!({})) } }));
+    // Your one open pull request from a `main`, in a repository none of the
+    // sessions is in (a class's: head `main`, base `feedback`).
+    let unrelated = branch_pr(4711, "OPEN", json!({ "headRefName": "main", "baseRefName": "feedback", "url": "https://github.com/class/lab-3/pull/4711" }));
+    let github = world(json!({
+        "viewer": "ada",
+        // (gh can't place the remotes, which go through a local proxy:
+        // the folders' own remotes say which repositories they are.)
+        "gh_unknown_host": true,
+        "remotes": {
+            "/work/atlas": "origin\thttp://127.0.0.1:7457/github.com/zeronsh/zgx.git (fetch)\norigin\thttp://127.0.0.1:7457/github.com/zeronsh/zgx.git (push)\n",
+            "/work/notes": "origin\tgit@github.com:ada/notes.git (fetch)\norigin\tgit@github.com:ada/notes.git (push)\n",
+        },
+        "by_repo": {
+            "zeronsh/zgx": { "fix/build": branch_pr(1300, "OPEN", json!({ "isCrossRepository": false })) },
+            "class/lab-3": { "main": unrelated },
+        },
+        // (What a search of your pull requests by branch alone would find.)
+        "branches": { "main": unrelated },
+    }));
     let (mut app, heard) = shell_with(items.clone(), github.clone());
-    publish_records(&app, &items);
-    // Searched on GitHub by its branch, among pull requests that involve you.
-    let _ = &heard;
-    assert!(app.wait_until(|app| app.target("#shell-sidebar >> .session-row >> .github-pr-badge").is_ok()), "{}", app.tree());
-    assert!(app.tree().contains("\"31\""), "{}", app.tree());
+    // Two sessions on `main` in different repositories, one on `main` in a
+    // folder that isn't here (no repository to tell), and one on a branch
+    // with its own pull request in its own repository.
+    sessions_in(&mut app, &items, &[("a1", "/work/atlas", "fix/build"), ("a2", "/work/atlas", "main"), ("a3", "/work/notes", "main"), ("b1", "/srv/borealis", "main")]);
+    // (Each found, asked, and asked again.)
+    app.frames(5 * 60);
+    assert!(app.host.run_command("github/refresh"));
+    app.frames(5 * 60);
+    // The sessions on `main`: none, never the unrelated repository's.
+    assert!(!app.tree().contains("4711"), "another repository's pull request shown: {}", app.tree());
+    // a1's, from its own repository: shown.
+    assert!(app.wait_until(|app| app.tree().contains("\"1300\"")), "{}\n{:?}", app.tree(), runs(&heard));
+    assert!(runs(&heard).iter().any(|r| r["program"] == "git" && r["cwd"] == "/work/notes"), "{:?}", runs(&heard));
+    // (Each badge a link named by its pull request.)
+    assert_eq!(app.tree().matches("link \"Open pull request ").count(), 1, "{}", app.tree());
+    assert!(!runs(&heard).iter().any(|r| ran(r, &["search(", "head:"])), "searched by branch alone: {:?}", runs(&heard));
+    assert_eq!(app.error(), None);
 }
 
 #[test]
