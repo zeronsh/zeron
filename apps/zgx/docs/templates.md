@@ -1,6 +1,6 @@
 # Writing a Zeron template
 
-A template is a whole interface for Zeron, like a WordPress theme. It's a folder holding any part of Zeron's own Luau app: `app.luau`, `screens/`, `ds/`, `assets/`. Zeron runs its window from its own app with your template laid over it, so any file you leave out is Zeron's own. One template is in use at a time. Agents make and change templates through Zeron's MCP tools; this guide is the whole reference.
+A template is a whole interface for Zeron, like a WordPress theme. It's a folder holding any part of Zeron's own Luau app: `app.luau`, `screens/`, `ds/`, `assets/`. Zeron runs its window from its own app with your template laid over it, so any file you leave out is Zeron's own. One template is in use at a time. Colours are separate: the person picks a theme, and it's worn over whichever template runs (see Colours and themes). Agents make and change templates through Zeron's MCP tools; this guide is the whole reference.
 
 ## How it runs
 
@@ -27,6 +27,7 @@ The line this holds is agents that reach Zeron only through its MCP tools, and a
 
 ```
 zeron-template.json    id, name, description, author, version, zeron_version
+theme.luau             your template's own theme, as data (see Colours and themes)
 app.luau               the root: the window, built from the rest
 screens/shell/         the window: init.luau (its frame), sidebar.luau, title_bar.luau,
                        page.luau (the routed page), settings.luau (Settings' list),
@@ -48,12 +49,23 @@ assets/                icons and art
 
 Zeron's interface is written in zgx. A template that follows these stays fast, keeps people's place and survives updates.
 
-1. **Values live in the theme.** Colours, type, spacing, radii and shadows are tokens: `$text.primary`, `$space.3`, `$radius.lg`, and Zeron's own under `$zeron.…` (declared in `ds/tokens.luau`). Change the look in `ds/themes/*.json` and `ds/tokens.luau` first; every component follows. A deliberate raw value is `ui.raw(value, "why")`. `zgx lint` flags any other.
+1. **Values live in the theme.** Colours, type, spacing, radii and shadows are tokens (a raw colour doesn't follow the person's theme): `$text.primary`, `$space.3`, `$radius.lg`, and Zeron's own under `$zeron.…` (declared in `ds/tokens.luau`). Change the look in `ds/themes/*.json` and `ds/tokens.luau` first; every component follows. A deliberate raw value is `ui.raw(value, "why")`. `zgx lint` flags any other.
 2. **Corners are concentric.** Anything inside a rounded box takes its radius less the inset between them, hover washes and selections included. `control.nest(outer, inset…)` in `ds/control.luau` works it out.
 3. **Data changes in place.** A list is a keyed `ui.each` with its row as state (`function(item, i, row)`), so rows stay theirs as others come and go. A value that changes is read through a function or a state bound to its prop. `ui.presence`/`ui.switch` are for real swaps (loading, empty, one page to another), keyed by which kind shows, **never by data**: a key made from data rebuilds the part on every change, losing focus and scroll.
 4. **Reloads are cheap and quiet.** A reload rebuilds nodes but keeps keyed state. Nothing should animate or call the engine just because a reload happened. An effect owns what it makes: a timer started in an effect stops when the effect runs again.
 5. **Keep Zeron's element names.** Plugins place by `#id` and `.class` (`describe_elements`). The stable ones are `#sidebar`, `.session-row`, `#session-header`, `.message`, `#chat-composer`, `#new-chat-background`, `.file-row`, `.file-tab`, `.panel-tab` and the `.md-*` blocks. Keep them, with what they `provide`, wherever you redraw those parts, and plugins keep working on your template. A plugin aimed at one you dropped says "Not shown in this template".
 6. **Every save must parse.** A file with a syntax error falls back to Zeron's. A broken `ds/` file can take whole screens with it. Write a file whole, then save.
+
+## Colours and themes
+
+The theme is the person's choice, not the template's. They pick one for light and one for dark on Zeron's Themes page (Settings → Themes: Zeron's built-in themes, VS Code themes they import, and each template's own), and it's worn over whichever template runs. So your template works with every theme, and no theme needs a template.
+
+- **Draw with tokens** (rule 1). A theme sets every colour token (`$text.primary`, `$accent`, `$border`, `$zeron.window`, `$zeron.syntax.*` and the rest) through `ds/palettes`. A raw colour, `ui.raw` included, stays as written under every theme.
+- **A theme of your own** goes in `theme.luau` at the template's root: `return { name = "Ink", dark = { … }, light = { … } }`, a palette for each scheme you have, in `ds/palettes`' shape: `background`, `raised`, `text`, `muted`, `faint`, `accent`, `danger`, `warning`, `success`, `syntax` (12 colours: comment, keyword, string, number, type, function, property, variable, punctuation, tag, attribute, invalid) and, if you like, `shell`, `card`, `terminal` and `ansi` (16). It must be data: a table of strings, numbers and tables, no code. Zeron reads it as data to list it on the Themes page as your template's theme.
+- **It's a suggestion.** Your theme is worn for a scheme only while the person hasn't chosen one for that scheme. A theme with only `dark` fills only dark. Anyone can pick it on the Themes page and wear it with any template.
+- Your `ds/themes/zeron-{light,dark}.json` still sets the rest of the look (type, spacing, radii, glass), and its colours show wherever no theme is worn.
+
+Zeron's built-in themes used to be templates (`theme-<key>`, colour-only). They aren't any more: a launch moves anyone on one to the default template with that theme chosen, and removes the folders Zeron wrote for them. A folder of yours under such an id is never touched.
 
 ## The loop
 
