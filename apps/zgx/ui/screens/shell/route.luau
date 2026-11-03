@@ -18,8 +18,14 @@
 --   route.projects:get()    the projects a new chat can work in, as
 --                           ds.Composer takes them ({ value, label, hue? })
 --   route.open_session(id)  to that session
---   route.new_chat(project?) to a new chat (in that project, a space id;
---                           "none" for none; nil, the one chosen last)
+--   route.new_chat(project?, device?) to a new chat (in that project, a
+--                           space id; "none" for none; nil, the one chosen
+--                           last), on that device if given (a device id):
+--                           the composer's device picked for it (a project
+--                           not there: its namesake there, else the
+--                           composer's pick there; `placed`)
+--   route.device_pick:get() that device, until the new chat's composer takes
+--                           it ({ device }; `take_device()` reads and clears)
 --   route.settings(page?)   to settings (a page's id; "general" first)
 --   route.leave_settings()  back where the chats were
 --   route.plugin_page(plugin, page)  to a plugin's page (`plugin`, `page`:
@@ -401,13 +407,74 @@ ui.effect(function()
 	end
 end)
 
-function M.new_chat(project: string?)
-	if project then
-		chosen:set(project)
+-- A device asked of the next new chat (a device's "+" in the sidebar):
+-- held until its composer takes it (`take_device`), so it lands whether
+-- the composer is there already or arrives with the move home. (A named
+-- state: a reload in between keeps it.)
+M.device_pick = ui.state("shell_device_pick", nil :: { device: string }?)
+function M.take_device(): string?
+	local pick = M.device_pick:peek()
+	if pick then
+		M.device_pick:set(nil)
+		return pick.device
 	end
-	if at().name ~= "home" then
-		go("home")
+	return nil
+end
+
+-- Where a new chat in `project` on `device` can start, as the composer's
+-- picker allows (a project is a folder on one device): one of Cloud's
+-- machines is Cloud (screens/chat/where's CLOUD, which keeps a project
+-- Cloud can open); a computer the project isn't on, the same project there
+-- (its repository, its name or its path), else none: the composer picks
+-- one there (as the panel home's side chats' "+" does).
+local function placed(project: string?, device: string): (string?, string)
+	local now = sessions.now:peek()
+	for _, d in now.devices do
+		if d.id == device and d.cloud then
+			return project, "cloud"
+		end
 	end
+	local p = project_of(project)
+	if p == nil or p.device == device then
+		return project, device
+	end
+	local named: sessions.Project? = nil
+	for _, q in now.projects do
+		if q.device == device then
+			if p.github and q.github == p.github then
+				return q.id, device
+			elseif q.name == p.name or q.path == p.path then
+				named = named or q
+			end
+		end
+	end
+	return if named then named.id else nil, device
+end
+
+function M.new_chat(project: string?, device: string?)
+	local on: string? = nil
+	-- (None of the project's there: none chosen, so the composer picks.)
+	local unchosen = false
+	if device then
+		local asked = project
+		project, on = placed(project, device)
+		unchosen = asked ~= nil and project == nil
+	end
+	ui.batch(function()
+		if project then
+			chosen:set(project)
+		elseif unchosen then
+			chosen:set(nil)
+		end
+		if on then
+			-- (A fresh table each time, so the same device asked again is
+			-- heard.)
+			M.device_pick:set({ device = on })
+		end
+		if at().name ~= "home" then
+			go("home")
+		end
+	end)
 end
 
 function M.choose_project(id: string?)

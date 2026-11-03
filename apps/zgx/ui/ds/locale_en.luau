@@ -343,6 +343,7 @@ return {
 	["ds.sidebar.devices"] = "Devices",
 	["ds.sidebar.sessions"] = "Sessions",
 	["ds.sidebar.new_chat_in"] = "New chat in {name}",
+	["ds.sidebar.new_chat_in_on"] = "New chat in {name} on {device}",
 	["ds.sidebar.new_chat"] = "New chat",
 	["ds.sidebar.search"] = "Search",
 	["ds.sidebar.pinned"] = "Pinned",

@@ -157,8 +157,10 @@ export type Props = {
 	-- Room left at its top for a title bar laid over it (the window's
 	-- buttons): it runs to the window's top edge, its hairline with it.
 	top: number?,
-	-- A new chat: from the top (no project), or a project's header (its id).
-	on_new: ((project: string?) -> ())?,
+	-- A new chat: from the top (no project), or a project's header (its id);
+	-- from a device's header inside a project's (or a project's inside a
+	-- device's), on that device too (its name, as the sessions have it).
+	on_new: ((project: string?, device: string?) -> ())?,
 	on_search: (() -> ())?,
 	-- Plugins' pages ("pages.add"), each a row under Search: `{ plugin, id,
 	-- title, icon? }` as a state of a list, and what choosing one does.
@@ -1618,10 +1620,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		tile: (hidden: () -> boolean, sessions: Sessions?) -> Node,
 		sessions: Sessions,
 		new_in: boolean?,
-		-- A project's group: the project (a new chat in it).
+		-- A project's group: the project (a new chat in it); a device's
+		-- inside a project's, its project's too.
 		project: string?,
-		-- A device's group: the device's name.
+		-- A device's group: the device's name; a project's inside a
+		-- device's, that device's too (a new chat in it starts there).
 		device: string?,
+		-- The project's name, for a device's group inside it (its new chat's
+		-- tooltip).
+		project_name: string?,
 		shows_tile: (() -> boolean)?,
 		-- Its second level's groups, with both levels on (its sessions all
 		-- of theirs).
@@ -1698,8 +1705,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		local everything, devices = ix.everything, ix.devices
 		local levels = SessionRow.levels(by)
 		-- One level's groups of `subset` (nil: all; at the top, projects with
-		-- none show too, where a new chat starts), their keys under `prefix`.
-		local function level_groups(level: string, subset: { [string]: boolean }?, prefix: string): { Group }
+		-- none show too, where a new chat starts), their keys under `prefix`;
+		-- inside `outer`, its project or device carried (a new chat in an
+		-- inner group starts in both).
+		local function level_groups(level: string, subset: { [string]: boolean }?, prefix: string, outer: Group?): { Group }
+			-- (A device the sessions don't name is nowhere a chat can start.)
+			local outer_device = if outer and outer.device and outer.device ~= UNKNOWN then outer.device else nil
 			local groups: { Group } = {}
 			if level == "project" then
 				for _, p in ix.projects do
@@ -1722,6 +1733,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						sessions = own,
 						new_in = true,
 						project = p.id,
+						device = outer_device,
 						shows_tile = function(): boolean
 							return details.project_icon:get()
 						end,
@@ -1761,10 +1773,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					if subset ~= nil and #on == 0 then
 						continue
 					end
+					-- (Inside a project's: a new chat in it, on this device.)
+					local in_project = outer ~= nil and outer.project ~= nil and d ~= UNKNOWN
 					table.insert(groups, {
 						key = `{prefix}device:{d}`,
 						name = d,
 						device = d,
+						new_in = if in_project then true else nil,
+						project = if in_project then (outer :: Group).project else nil,
+						project_name = if in_project then (outer :: Group).name :: string else nil,
 						sessions = on,
 						tile = function(hidden: () -> boolean, live: Sessions?): Node
 							return group_tile(QUIET, Icon { name = if d == ix.here then "laptop" else "remote-server", size = 12 }, live or on, hidden)
@@ -1782,7 +1799,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					for _, s in listed(g.sessions) do
 						subset[s.id] = true
 					end
-					g.children = level_groups(levels[2], subset, `{g.key}/`)
+					g.children = level_groups(levels[2], subset, `{g.key}/`, g)
 				end
 			end
 			return groups, if levels[1] == "project" then "ds.sidebar.projects" else "ds.sidebar.devices"
@@ -1837,6 +1854,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		return name
 	end
 
+	-- A group's new chat, under the pointer in its header's corner: in its
+	-- project, and (a group with both levels' say) on its device. (`now`:
+	-- the group as it stands, its project's id followed.)
+	local function new_corner(g: Group, now: () -> Group): Node
+		local project_name = g.project_name or g.name :: string
+		local key, args = "ds.sidebar.new_chat_in", { name = project_name } :: { [string]: any }
+		if g.device then
+			key, args = "ds.sidebar.new_chat_in_on", { name = project_name, device = g.device }
+		end
+		return corner(key, "plus", function()
+			if props.on_new then
+				local cur = now()
+				props.on_new(cur.project, cur.device)
+			end
+		end, args)
+	end
+
 	-- A group's tile on the rail, its flyout of its sessions hung off it.
 	local function group(g: Group, by: Organize): (Node, () -> number)
 		local given = g.name
@@ -1879,11 +1913,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						then ui.show(
 							hovered,
 							-- (A project's: its name is its own.)
-							corner("ds.sidebar.new_chat_in", "plus", function()
-								if props.on_new then
-									props.on_new(g.project)
-								end
-							end, { name = g.name :: string })
+							new_corner(g, function(): Group
+								return g
+							end)
 						)
 						else nil,
 				}
@@ -3154,13 +3186,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					return tostring(#sessions())
 				end,
 				hidden,
-				if g.new_in
-					then corner("ds.sidebar.new_chat_in", "plus", function()
-						if props.on_new then
-							props.on_new(now().project)
-						end
-					end, { name = g.name :: string })
-					else nil,
+				if g.new_in then new_corner(g, now) else nil,
 				if g.new_in
 					then function(): boolean
 						return hovered:get()
@@ -3962,6 +3988,10 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					sessions = sessions(key),
 					tile = g.tile,
 					new_in = g.new_in,
+					-- (Its project and device: where its new chat starts.)
+					project = g.project,
+					device = g.device,
+					project_name = g.project_name,
 					shows_tile = g.shows_tile,
 				}, by))
 			end

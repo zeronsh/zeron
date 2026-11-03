@@ -456,6 +456,7 @@
       "devices": "设备",
       "sessions": "会话",
       "new_chat_in": "在 {name} 中新建对话",
+      "new_chat_in_on": "在 {device} 上的 {name} 中新建对话",
       "new_chat": "新建对话",
       "search": "搜索",
       "pinned": "已置顶",
