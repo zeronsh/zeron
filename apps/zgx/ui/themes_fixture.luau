@@ -146,6 +146,7 @@ publish()
 return ui.scroll {
 	w_full = true,
 	h_full = true,
+	bg = "$zeron.window",
 	ui.column {
 		w_full = true,
 		p = "$space.6",
