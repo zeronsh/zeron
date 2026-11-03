@@ -14,7 +14,7 @@ local function work(): any
 	app:frames(10)
 	expect(app:error()).to_be_nil()
 	-- (Settled work folds to its line: open it.)
-	app:click('role:button "Read 1 file · ran 5 commands · edited 2 files · 1 failed"')
+	app:click('role:button "Read 1 file · ran 6 commands · edited 2 files · 2 failed"')
 	app:frames(30)
 	return app
 end
@@ -112,6 +112,14 @@ test("a huge output keeps its end, saying earlier output was trimmed", function(
 	app:click('role:button "Show all 400 lines"')
 	app:frames(20)
 	expect(app:has('.tool-output-text >> ~"row 5000"')).to_be(true)
+end)
+
+test("an output the engine kept the end of says so, with its exit code", function()
+	local app = work()
+	open_row(app, "Ran cargo nextest")
+	expect(app:has('.tool-output >> ~"… earlier output trimmed"')).to_be(true)
+	expect(app:has('.tool-output-text >> ~"error: 1 test failed"')).to_be(true)
+	expect(app:has('.tool-exit-code >> ~"Exit code 101"')).to_be(true)
 end)
 
 test("a running command's output grows in place", function()

@@ -169,6 +169,14 @@ pub fn tool_fields(part: &Json) -> Vec<(&'static str, Value)> {
     if let Some(n) = part["outputBytes"].as_u64() {
         fields.push(("output_bytes", Value::Num(n as f64)));
     }
+    // A command's: the engine keeps its output's end (50 lines / 4 KB) and
+    // its exit code.
+    if part["outputTruncated"].as_bool() == Some(true) {
+        fields.push(("output_trimmed", Value::Bool(true)));
+    }
+    if let Some(code) = part["exitCode"].as_i64() {
+        fields.push(("exit_code", Value::Num(code as f64)));
+    }
     if let Some(r) = text("diffRef") {
         fields.push(("diff_ref", Value::from(r)));
     }
@@ -230,11 +238,16 @@ mod tests {
             "output": "ok",
             "outputRef": "c/p1",
             "outputBytes": 12345,
+            "outputTruncated": true,
+            "exitCode": 101,
             "diffRef": "c/p1.diff",
             "diffStats": [{ "path": "src/a.rs", "additions": 3, "deletions": 1 }],
         });
         let names: Vec<_> = tool_fields(&part).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(names, vec!["output", "output_ref", "output_bytes", "diff_ref", "stats"]);
+        assert_eq!(
+            names,
+            vec!["output", "output_ref", "output_bytes", "output_trimmed", "exit_code", "diff_ref", "stats"]
+        );
         let old = json!({ "diff": { "path": "a.txt", "oldText": "a\n", "newText": "b\n" } });
         assert_eq!(tool_fields(&old).into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["diff"]);
     }

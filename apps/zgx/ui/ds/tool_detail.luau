@@ -48,6 +48,9 @@ export type Tool = {
 	failed: boolean?,
 	output_ref: string?,
 	output_bytes: number?,
+	-- The engine kept only its output's end (a command's last 50 lines or
+	-- 4 KB): "… earlier output trimmed" shows over it.
+	output_trimmed: boolean?,
 	diff_ref: string?,
 	stats: { Stat }?,
 	diff: Diff?,
@@ -259,7 +262,8 @@ end
 
 -- What an output view shows: the output's text, and how many lines past it
 -- weren't sent (a fetched output's cut).
-type Source = { text: string, more: number }
+-- `earlier`: the text is already an end (the engine's tail of a command).
+type Source = { text: string, more: number, earlier: boolean? }
 
 local function mono_note(text: () -> string, color: string): Node
 	return ui.text {
@@ -327,7 +331,7 @@ local function output_view(id: string, source: () -> Source, tool: () -> Tool): 
 			end,
 			overflow = "hidden",
 			ui.show(function(): boolean
-				return cleaned:get().earlier
+				return cleaned:get().earlier or source().earlier == true
 			end, mono_note(function(): string
 				return locale.s("ds.tool_detail.earlier_trimmed")
 			end, "$text.tertiary")),
@@ -593,7 +597,8 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 			elseif key == "output" then
 				-- (It follows its tool, in place: a running command's grows.)
 				return output_view(now().id, function(): Source
-					return { text = now().output or "", more = 0 }
+					local t = now()
+					return { text = t.output or "", more = 0, earlier = t.output_trimmed == true }
 				end, now)
 			end
 			local v = s.value
