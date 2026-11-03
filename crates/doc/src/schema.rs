@@ -2407,7 +2407,7 @@ mod tests {
                 assert_eq!(*exit_code, Some(101));
                 assert!(*output_truncated);
                 assert_eq!(*output_bytes, Some(full.len() as u64));
-                assert_eq!(tail.lines().count(), 50);
+                assert_eq!(tail.lines().count(), crate::parts::COMMAND_TAIL_MAX_LINES);
                 assert!(tail.ends_with("line 80"));
             }
             other => panic!("unexpected {other:?}"),

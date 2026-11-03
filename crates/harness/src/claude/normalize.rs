@@ -1486,7 +1486,7 @@ mod tests {
     }
 
     /// A failed Bash's long output: its `Exit code N` lead becomes the exit
-    /// code, and the doc keeps the last 50 lines / 4 KB, flagged, redacted.
+    /// code, and the doc keeps the last 10 lines / 1 KB, flagged, redacted.
     #[test]
     fn bash_output_folds_to_a_short_tail_with_its_exit_code() {
         let body: String = (1..=300)
@@ -1510,8 +1510,8 @@ mod tests {
         assert_eq!(*exit_code, Some(2));
         assert!(*output_truncated);
         assert_eq!(*output_bytes, Some(body.len() as u64));
-        assert!(tail.lines().count() <= 50, "{} lines", tail.lines().count());
-        assert!(tail.len() <= 4096, "{} bytes", tail.len());
+        assert!(tail.lines().count() <= 10, "{} lines", tail.lines().count());
+        assert!(tail.len() <= 1024, "{} bytes", tail.len());
         assert!(tail.contains("test case_300 ... FAILED"));
         assert!(!tail.contains("test case_250 "));
         assert!(!tail.starts_with("Exit code"));

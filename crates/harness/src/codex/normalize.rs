@@ -981,7 +981,7 @@ mod tests {
     }
 
     /// A command's aggregated output and exit code ride its result, and the
-    /// doc keeps only their tail: 50 lines / 4 KB, flagged, redacted.
+    /// doc keeps only their tail: 10 lines / 1 KB, flagged, redacted.
     #[test]
     fn command_execution_output_folds_to_a_short_tail() {
         let output: String = (1..=400)
@@ -1016,8 +1016,8 @@ mod tests {
         assert_eq!(*exit_code, Some(101));
         assert!(*output_truncated);
         assert_eq!(*output_bytes, Some(output.len() as u64));
-        assert!(tail.lines().count() <= 50, "{} lines", tail.lines().count());
-        assert!(tail.len() <= 4096, "{} bytes", tail.len());
+        assert!(tail.lines().count() <= 10, "{} lines", tail.lines().count());
+        assert!(tail.len() <= 1024, "{} bytes", tail.len());
         assert!(tail.contains("line 400: compiling crate-400"));
         assert!(!tail.contains("line 300:"));
         assert!(!tail.contains("ghp_abcdef"), "token survived: {tail}");

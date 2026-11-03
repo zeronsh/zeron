@@ -68,9 +68,9 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
 }
 
 /// Lines of a command's output the doc keeps ([`command_output_tail`]).
-pub const COMMAND_TAIL_MAX_LINES: usize = 50;
+pub const COMMAND_TAIL_MAX_LINES: usize = 10;
 /// Bytes of a command's output the doc keeps ([`command_output_tail`]).
-pub const COMMAND_TAIL_MAX_BYTES: usize = 4 * 1024;
+pub const COMMAND_TAIL_MAX_BYTES: usize = 1024;
 
 /// What the doc keeps of a command's output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -540,12 +540,13 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     //
                     // The one exception (2026-11-03, user decision): a
                     // COMMAND's output keeps a short, redacted tail — its
-                    // last 50 lines or 4 KB, whichever is less — with its
+                    // last 10 lines or 1 KB, whichever is less — with its
                     // exit code, so an opened Run row shows how it ended (a
                     // build's error, a test run's summary) the way a
                     // terminal would. Bounded per part, so a long session
-                    // grows by at most ~4 KB per command; file reads,
-                    // searches, fetches and MCP results stay out.
+                    // grows by at most ~1 KB per command; file reads,
+                    // searches, fetches and MCP results stay out. The whole
+                    // output stays in the host's run journal, never synced.
                     let tail = match (&*call, output.as_deref()) {
                         (ToolCall::Exec { command }, Some(output)) => {
                             command_output_tail(command, output)
@@ -1350,8 +1351,8 @@ mod tests {
     }
 
     #[test]
-    fn a_command_keeps_its_last_fifty_lines() {
-        let full: String = (1..=120).map(|i| format!("line {i}\n")).collect();
+    fn a_command_keeps_its_last_ten_lines() {
+        let full: String = (1..=40).map(|i| format!("line {i}\n")).collect();
         let MessagePart::Tool {
             output: Some(tail),
             output_bytes,
@@ -1362,18 +1363,18 @@ mod tests {
         else {
             panic!("no tail");
         };
-        assert_eq!(tail.lines().count(), 50);
-        assert!(tail.starts_with("line 71\n") && tail.ends_with("line 120"));
+        assert_eq!(tail.lines().count(), COMMAND_TAIL_MAX_LINES);
+        assert!(tail.starts_with("line 31\n") && tail.ends_with("line 40"));
         assert!(output_truncated);
         assert_eq!(output_bytes, Some(full.len() as u64));
         assert_eq!(exit_code, Some(1));
     }
 
     #[test]
-    fn a_command_keeps_at_most_four_kilobytes() {
-        // 30 lines of 299 bytes: under 50 lines, over 4 KB. (Words: a long
+    fn a_command_keeps_at_most_one_kilobyte() {
+        // 8 lines of 299 bytes: under 10 lines, over 1 KB. (Words: a long
         // letters-and-digits run would read as a token and be redacted.)
-        let full: String = (1..=30)
+        let full: String = (1..=8)
             .map(|i| format!("{i:03} {}\n", "ab ".repeat(98)))
             .collect();
         let MessagePart::Tool {
@@ -1385,8 +1386,8 @@ mod tests {
             panic!("no tail");
         };
         assert!(tail.len() <= COMMAND_TAIL_MAX_BYTES, "{}", tail.len());
-        assert!(tail.starts_with("018 ab"), "starts on a whole line");
-        assert!(tail.ends_with("030 ab") || tail.ends_with("ab ab"));
+        assert!(tail.starts_with("006 ab"), "starts on a whole line");
+        assert!(tail.ends_with("ab ab"));
         assert!(output_truncated);
         // One huge line keeps its end, on a char boundary.
         let line = "é".repeat(5000);

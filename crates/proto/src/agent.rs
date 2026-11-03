@@ -695,7 +695,7 @@ pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 
 /// Bytes of a command's output a harness adapter puts on its
 /// [`AgentEvent::ToolResult`]: the END of it, where a build's error or a
-/// test run's summary is. The doc keeps far less (a 50-line / 4 KB tail);
+/// test run's summary is. The doc keeps far less (a 10-line / 1 KB tail);
 /// this bounds what the run journal holds per command.
 pub const COMMAND_OUTPUT_CAP: usize = 32 * 1024;
 
