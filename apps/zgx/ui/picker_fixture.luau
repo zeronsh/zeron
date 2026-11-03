@@ -45,10 +45,45 @@ local MODELS: { ModelPicker.Model } = {
 	},
 }
 
+-- What the picker's panel, and what opens out with its list, have looked
+-- like since a test last set this, sampled each frame: the least opacity
+-- the panel had, and how many frames what opens out was part see-through
+-- (shown or not, never between) (tests/model_picker_motion.test.luau: never
+-- see-through as it opens, opens out, folds or follows its trigger).
+local alpha = ui.state("test_picker_alpha", { panel = 1, fold = 0 })
+ui.every(16, function()
+	local now = alpha:peek()
+	local panel = tonumber(anime.utils.get(".dropdown-panel", "opacity")) or 1
+	local fold = tonumber(anime.utils.get(".dropdown-fold", "opacity")) or 1
+	local between = fold > 0 and fold < 1
+	if panel < now.panel or between then
+		alpha:set({ panel = math.min(panel, now.panel), fold = now.fold + (if between then 1 else 0) })
+	end
+end)
+-- Where the reasoning thumb is drawn (its offset along the groove), each
+-- frame.
+local thumb = ui.state("test_picker_thumb", -1)
+ui.every(16, function()
+	local x = tonumber(anime.utils.get(".effort-thumb", "x"))
+	if x and x ~= thumb:peek() then
+		thumb:set(x)
+	end
+end)
+-- Room over the picker (its trigger moving, as a composer growing over a
+-- chip moves it).
+local above = ui.state("test_picker_above", 0)
+
 return ui.column {
 	w_full = true,
 	h_full = true,
 	p = "$space.4",
+	ui.div {
+		w_full = true,
+		shrink = 0,
+		h = function(): number
+			return above:get()
+		end,
+	},
 	ModelPicker {
 		model = ui.state("test_picker_model", "sonnet" :: string?),
 		effort = ui.state("test_picker_effort", "medium" :: string?),

@@ -66,6 +66,8 @@ export type Props = {
 	favorites: State<{ [string]: boolean }>?,
 	-- Bumped, it opens (a shortcut to it; Dropdown's `open_with`).
 	open_with: State<number>?,
+	-- Set to whether it is open (Dropdown's `showing`).
+	showing: State<boolean>?,
 }
 
 -- Devin Fusion's lead (what runs), listed first among its options.
@@ -564,15 +566,20 @@ return ui.component(function(props: Props): Node
 			tab:set(nil)
 		end,
 		on_escape = function(): boolean
-			-- Opened out, Escape folds it back; folded, it closes.
+			-- Opened out, Escape folds it back (onto the chosen model, its
+			-- agent's tab, as a pick folds it); folded, it closes.
 			if expanded:peek() then
-				expanded:set(false)
+				ui.batch(function()
+					expanded:set(false)
+					tab:set(nil)
+				end)
 				return true
 			end
 			return false
 		end,
 		width = 300,
 		open_with = props.open_with,
+		showing = props.showing,
 		-- The tabs scroll across when there are more than fit, each edge
 		-- fading only where more runs past it. (36 tall, 4 into the head's
 		-- inset by the list: the shown tab's bar meets the rule.)
