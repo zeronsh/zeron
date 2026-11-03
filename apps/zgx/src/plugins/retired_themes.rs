@@ -18,7 +18,7 @@ use std::path::Path;
 
 use serde_json::Value as Json;
 
-use super::{live, looks};
+use super::live;
 
 /// The manifest field that marked a folder as a built-in theme's (its key).
 const MARK: &str = "builtin_theme";
@@ -59,7 +59,7 @@ pub fn written_by_zeron(templates: &Path, id: &str) -> Option<String> {
     let key = manifest[MARK].as_str().filter(|k| !k.is_empty())?;
     let base = format!("theme-{key}");
     let at_its_id = id == base || id.strip_prefix(&format!("{base}-")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-    let palette = std::fs::read_to_string(dir.join(FILE)).ok().and_then(|t| looks::luau_literal(&t));
+    let palette = std::fs::read_to_string(dir.join(FILE)).ok().and_then(|t| zeron_theme::luau_data::parse(&t));
     (at_its_id && manifest["author"] == "Zeron" && palette.is_some()).then(|| key.to_string())
 }
 
