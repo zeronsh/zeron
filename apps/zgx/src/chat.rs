@@ -7,7 +7,8 @@
 //! What scripts see, per window:
 //!   `chat.session`   the open session: { id, state = "loading" | "ready" |
 //!                    "missing" | "offline", title, project, device, harness,
-//!                    model, effort, fast, access, plan, running, context,
+//!                    model, effort, fast, access, plan, running, steers
+//!                    (Steer takes a queued row into the turn), context,
 //!                    context_tokens?, context_window?, ask?, queue, todos,
 //!                    tasks }, nil for none
 //!   `chat.messages`  its transcript as ds/transcript's messages, keyed by id
@@ -26,11 +27,13 @@
 //!   chat.open(id?) (an action)    watch that chat, the last one let go
 //!   chat.catalog (an action)      the models, looked up again
 //!   chat.send(req)                run a message, or queue it while a turn runs
+//!                                 (then its queued row's id)
 //!   chat.interrupt(id)
 //!   chat.respond({ id, request, decision = "once" | "always" | "deny" |
 //!                  "answer", values?, text? })
 //!   chat.configure({ id, model?, effort?, fast?, access?, plan? })
 //!   chat.queue({ id, op = "remove" | "send" | "move", item, to? })
+//!                                 (a row sent shows in the transcript at once)
 //!
 //! The wire (crates/rpc, crates/doc): `WatchDocMessages` (a reset, then
 //! deltas: upserts after an anchor, text appended to a part, removals, the
@@ -296,7 +299,14 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        // (Queued while a turn runs: the queued row's id, which the composer's
+        // own row, shown at once, is reconciled with.)
+        async move {
+            v.send(req)
+                .await
+                .map(|queued| queued.map_or(Value::Nil, |id| Value::from(id.as_str())))
+                .map_err(String::from)
+        }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -324,7 +334,11 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let v = view.clone();
     host.async_action("chat.queue", move |args| {
         let v = v.clone();
-        async move { v.queue_op(args).await.map(|_| Value::Nil).map_err(String::from) }
+        // A row steered or sent joins the transcript now, as the call is
+        // made, not once the engine has answered (a chat on another device
+        // answers a round trip later).
+        let shown = v.queue_shown(&args);
+        async move { v.queue_op(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {
@@ -773,6 +787,20 @@ impl Chats {
             .iter()
             .find(|h| h["id"].as_str() == Some(harness))
             .is_some_and(|h| h["supportsSteering"].as_bool() == Some(true))
+    }
+
+    /// Whether the agent reads a word mid-turn (`step-boundary`): Steer
+    /// sends a row into the turn now. One that reads only between turns
+    /// takes a steered row next instead. (An agent not listed: most do.)
+    fn steers_mid_turn(&self, harness: &str) -> bool {
+        self.harnesses
+            .borrow()
+            .iter()
+            .find(|h| h["id"].as_str() == Some(harness))
+            .is_none_or(|h| {
+                h["supportsSteering"].as_bool() == Some(true)
+                    && h["steeringMode"].as_str().is_none_or(|m| m == "step-boundary")
+            })
     }
 
     /// The device to name for a call routed to the chat's host, when that
@@ -1243,7 +1271,7 @@ impl View {
         self.session.set(value);
     }
 
-    async fn send(self: &Rc<Self>, req: Value) -> Result<(), Outcome> {
+    async fn send(self: &Rc<Self>, req: Value) -> Result<Option<String>, Outcome> {
         let chats = CHATS.with(Rc::clone);
         let id = req.field("session").map(text).filter(|s| !s.is_empty()).ok_or("missing")?;
         let fresh = req.field("fresh").is_some_and(Value::truthy);
@@ -1344,7 +1372,7 @@ impl View {
             return engine::get()
                 .call("QueueMessage", params)
                 .await
-                .map(|_| ())
+                .map(|answer| answer["id"].as_str().map(str::to_owned))
                 .map_err(|e| engine::outcome(&e));
         }
         let config = merged_config(&chat["config"], &req);
@@ -1420,7 +1448,7 @@ impl View {
             }
         }
         self.publish_messages();
-        sent
+        sent.map(|()| None)
     }
 
     /// A pending prompt that didn't go: failed, with the command that sends
@@ -1680,11 +1708,79 @@ impl View {
         }
     }
 
-    async fn queue_op(self: &Rc<Self>, args: Value) -> Result<(), Outcome> {
+    /// A queued row the composer steers or sends: its words join the
+    /// transcript at once, sending, under the id of the message it becomes
+    /// (a row keeps its id through promotion), until the transcript has it.
+    /// Not a row that waits for the turn's end instead (an agent that reads
+    /// only between turns: Steer moves it to the front). The pending row's
+    /// id, if one was added.
+    fn queue_shown(&self, args: &Value) -> Option<String> {
+        if args.field("op").map(text).as_deref() != Some("send") {
+            return None;
+        }
+        let chats = CHATS.with(Rc::clone);
+        let id = args.field("id").map(text).unwrap_or_default();
+        let item = args.field("item").map(text).unwrap_or_default();
+        let harness = chats.chat(&id)?["config"]["harness"].as_str().unwrap_or_default().to_owned();
+        {
+            let mut slot = self.open.borrow_mut();
+            let open = slot.as_mut().filter(|o| o.id == id)?;
+            let row = open.queue.iter().find(|q| q["id"].as_str() == Some(item.as_str()))?.clone();
+            let paths = row_paths(&row);
+            if paths.is_empty() && chats.running(&id) && !chats.steers_mid_turn(&harness) {
+                return None;
+            }
+            let shown = |e: &Json| e["id"].as_str() == Some(item.as_str());
+            if open.pending.iter().any(|p| p.id == item) || open.entries.iter().any(shown) {
+                return None;
+            }
+            open.pending.push(Pending {
+                id: item.clone(),
+                words: row["text"].as_str().unwrap_or_default().to_owned(),
+                paths,
+                waiting: "sending",
+                retry: None,
+                at: stamp(now_seconds()),
+            });
+        }
+        self.publish_messages();
+        Some(item)
+    }
+
+    /// The pending row `queue_shown` added, gone: the row wasn't sent.
+    fn unshow(&self, shown: &Option<String>) {
+        let Some(item) = shown else { return };
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.pending.retain(|p| &p.id != item);
+        }
+        self.publish_messages();
+    }
+
+    async fn queue_op(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
+        let result = self.queue_call(&args).await;
+        // Not sent (refused, or the row had gone already): its words leave
+        // the transcript again.
+        if !matches!(result, Ok(true)) {
+            self.unshow(&shown);
+        }
+        result.map(|_| ())
+    }
+
+    /// The engine asked; whether it took the row (always, but for a send
+    /// that found the row gone).
+    async fn queue_call(self: &Rc<Self>, args: &Value) -> Result<bool, Outcome> {
         let chats = CHATS.with(Rc::clone);
         let id = args.field("id").map(text).unwrap_or_default();
         let item = args.field("item").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
+        // (A row with files the engine won't steer into a turn: it sends it
+        // now instead, interrupting, as the shipping app's
+        // `deliver_queued_now` does.)
+        let carries = self.open.borrow().as_ref().is_some_and(|o| {
+            o.queue
+                .iter()
+                .any(|q| q["id"].as_str() == Some(item.as_str()) && !row_paths(q).is_empty())
+        });
         let mut params = json!({ "chatId": id, "id": item });
         let target = chats.target(&chat);
         let routed = |mut p: Json| {
@@ -1697,7 +1793,7 @@ impl View {
             Some("remove") => ("RemoveQueuedMessage", routed(params)),
             Some("send") => {
                 let harness = chat["config"]["harness"].as_str().unwrap_or_default();
-                let method = if chats.running(&id) && chats.steers(harness) {
+                let method = if !carries && chats.running(&id) && chats.steers(harness) {
                     "SteerQueuedMessageNow"
                 } else {
                     "SendQueuedMessageNow"
@@ -1711,12 +1807,22 @@ impl View {
             }
             _ => return Err("failed"),
         };
-        engine::get()
+        let answer = engine::get()
             .call(method, params)
             .await
-            .map(|_| ())
-            .map_err(|e| engine::outcome(&e))
+            .map_err(|e| engine::outcome(&e))?;
+        Ok(answer["sent"].as_bool() != Some(false))
     }
+}
+
+/// A queued row's files: their paths on the chat's host.
+fn row_paths(row: &Json) -> Vec<String> {
+    row["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// A command for a chat (`QueueCommand`): a run, an interrupt, an answer.
@@ -3336,6 +3442,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("access", Value::from(access)),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
         ("running", Value::Bool(live)),
+        // Steer sends a queued row into the turn (else it goes next).
+        ("steers", Value::Bool(chats.steers_mid_turn(harness))),
         ("context", open.context.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_tokens", open.context_usage.0.map(Value::Num).unwrap_or(Value::Nil)),
         ("context_window", open.context_usage.1.map(Value::Num).unwrap_or(Value::Nil)),

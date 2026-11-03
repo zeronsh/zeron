@@ -2631,6 +2631,7 @@
       "edit_locked": "That message is being edited on another device",
       "edit_unavailable": "That message can't be edited now",
       "couldnt_stop_task": "Couldn't stop that process",
+      "remove_failed": "Couldn't remove that message",
       "commands_or_skills": "commands or skills",
       "drop_to_mention": "Drop to mention"
     }

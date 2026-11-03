@@ -2631,6 +2631,7 @@
       "edit_locked": "该消息正在其他设备上编辑",
       "edit_unavailable": "暂时无法编辑该消息",
       "couldnt_stop_task": "无法停止该进程",
+      "remove_failed": "无法移除该消息",
       "commands_or_skills": "命令或技能",
       "drop_to_mention": "松开以提及"
     }

@@ -47,6 +47,11 @@ export type Queued = {
 	editing: boolean?,
 	-- Held elsewhere: by whom ("Editing on devbox").
 	locked: string?,
+	-- On its way to the queue (shown as it was sent): no actions yet.
+	sending: boolean?,
+	-- What keeps its row as it changes id (a row on its way, then the
+	-- queue's copy of it); its id, without.
+	key: string?,
 }
 export type TodoState = "done" | "doing" | "pending"
 export type Todo = { id: string, text: string, state: TodoState }
@@ -409,12 +414,16 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 	local function locked(): boolean
 		return now().locked ~= nil
 	end
+	-- (Its actions wait while it's on its way.)
+	local function inert(): boolean
+		return locked() or now().sending == true
+	end
 	local function editing(): boolean
 		return now().editing == true
 	end
 	local function send()
 		if props.on_queue_send then
-			props.on_queue_send(q.id)
+			props.on_queue_send(now().id)
 		end
 	end
 	-- Edit and Remove stand in their room at all times, seen under the
@@ -434,7 +443,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			size = "sm",
 			on_click = function()
 				if props.on_queue_save then
-					props.on_queue_save(q.id)
+					props.on_queue_save(now().id)
 				end
 			end,
 		},
@@ -446,7 +455,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			tone = "quiet",
 			on_click = function()
 				if props.on_queue_cancel then
-					props.on_queue_cancel(q.id)
+					props.on_queue_cancel(now().id)
 				end
 			end,
 		},
@@ -461,7 +470,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			label = words,
 			tooltip = hint(),
 			size = "sm",
-			disabled = locked,
+			disabled = inert,
 			on_click = send,
 		}
 		local primary: Node = ui.show(narrow, IconButton(compact), Button {
@@ -470,7 +479,7 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 			h = 24,
 			label = words,
 			tooltip = hint(),
-			disabled = locked,
+			disabled = inert,
 			on_click = send,
 			ui.text { words, text_size = "$font.size.xs" },
 		})
@@ -488,10 +497,10 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 					tooltip = locale.s("ds.composer_dock.edit"),
 					size = "sm",
 					tone = "quiet",
-					disabled = locked,
+					disabled = inert,
 					on_click = function()
 						if props.on_queue_edit then
-							props.on_queue_edit(q.id)
+							props.on_queue_edit(now().id)
 						end
 					end,
 				},
@@ -501,10 +510,10 @@ local function queue_row(q: Queued, i: () -> number, last: () -> boolean, row: S
 					tooltip = locale.s("ds.composer_dock.remove"),
 					size = "sm",
 					tone = "quiet",
-					disabled = locked,
+					disabled = inert,
 					on_click = function()
 						if props.on_queue_remove then
-							props.on_queue_remove(q.id)
+							props.on_queue_remove(now().id)
 						end
 					end,
 				},
@@ -1064,9 +1073,13 @@ M.Dock = ui.component(function(props: Props): Node
 			role = "list",
 			label = locale.t("ds.composer_dock.queued_messages"),
 			ui.each(queue, function(q: Queued): Node
+				local key = q.key or q.id
+				local function same(x: Queued): boolean
+					return (x.key or x.id) == key
+				end
 				local row = ui.computed(function(): Queued
 					for _, x in queue:get() do
-						if x.id == q.id then
+						if same(x) then
 							return x
 						end
 					end
@@ -1074,7 +1087,7 @@ M.Dock = ui.component(function(props: Props): Node
 				end)
 				local function index(): number
 					for i, x in queue:get() do
-						if x.id == q.id then
+						if same(x) then
 							return i
 						end
 					end
@@ -1082,12 +1095,12 @@ M.Dock = ui.component(function(props: Props): Node
 				end
 				local function last(): boolean
 					local list = queue:get()
-					return list[#list] ~= nil and list[#list].id == q.id
+					return list[#list] ~= nil and same(list[#list])
 				end
 				return queue_row(q, index, last, row, props, narrow, geometry.row)
 			end, {
 				key = function(q: Queued): string
-					return q.id
+					return q.key or q.id
 				end,
 				gap = "$zeron.space.hair",
 				animate = { duration = 220, ease = "outCubic" },
