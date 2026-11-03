@@ -807,6 +807,8 @@
       "nothing_running": "Nothing running",
       "more_running": "{n} more",
       "stop_all": "Stop all",
+      "steer_all": "Steer all",
+      "steer_all_hint": "Steer every queued message as one, numbered",
       "running": "Running",
       "queued_messages": "Queued messages",
       "queued": "Queued"

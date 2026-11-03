@@ -24,6 +24,7 @@
 --   store.configure(id, patch)  { model?, effort?, fast?, options?, access?, plan? }
 --   store.queue(id, op)   { op = "remove" | "send" | "move", item, to? } (a
 --                         promise)
+--   store.steer_all(id, items, message_id)  queued rows steered as one
 --   store.queue_edit(id, item), store.queue_finish(id, item, action, text?)
 --                         a queued message edited in the composer
 --   store.load_catalog()  the models, looked up again
@@ -230,6 +231,12 @@ function M.queue(id: string, op: { [string]: any }): any
 	local args = table.clone(op)
 	args.id = id
 	return ui.call("chat.queue", args)
+end
+
+-- Queued rows (`items`, in the queue's order) steered as one message, each
+-- its own numbered block, shown meanwhile as `message_id`: a promise.
+function M.steer_all(id: string, items: { string }, message_id: string): any
+	return ui.call("chat.steer_all", { id = id, items = items, message_id = message_id })
 end
 
 -- Words put into the composer's draft (a plugin's `zeron.compose.insert`,

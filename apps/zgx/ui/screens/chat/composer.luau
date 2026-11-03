@@ -1124,6 +1124,42 @@ local function Composer(): Node
 			on_queue_send = function(item: string)
 				send_queued(item)
 			end,
+			-- Every row there is (not one on its way or being edited) as one
+			-- message, steered: gone from the queue and in the transcript at
+			-- once; back, and said, if the engine refuses.
+			on_queue_steer_all = function()
+				local id = session_id:peek()
+				if not id then
+					return
+				end
+				local ids, texts, files = {}, {}, {}
+				for _, r in queue:peek() do
+					if not (r.sending or r.locked or r.editing) then
+						table.insert(ids, r.id)
+						table.insert(texts, r.text)
+						for _, c in r.cargo or {} do
+							table.insert(files, c)
+						end
+					end
+				end
+				if #ids < 2 then
+					return
+				end
+				local mid = store.new_id()
+				queued.hide(id, ids)
+				store.messages:push { id = mid, role = "user", text = queued.numbered(texts), attachments = files, waiting = "sending" }
+				store.steer_all(id, ids, mid):after(function() end, function()
+					queued.unhide(id, ids)
+					local kept = {}
+					for _, m in store.messages:peek() do
+						if m.id ~= mid then
+							table.insert(kept, m)
+						end
+					end
+					store.messages:set(kept)
+					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+				end)
+			end,
 			on_queue_edit = function(item: string)
 				local id = session_id:peek()
 				if not id or editing:peek() then

@@ -34,6 +34,8 @@
 //!   chat.configure({ id, model?, effort?, fast?, access?, plan? })
 //!   chat.queue({ id, op = "remove" | "send" | "move", item, to? })
 //!                                 (a row sent shows in the transcript at once)
+//!   chat.steer_all({ id, items, message_id })  the rows steered as one
+//!                                 message, numbered, shown as `message_id`
 //!
 //! The wire (crates/rpc, crates/doc): `WatchDocMessages` (a reset, then
 //! deltas: upserts after an anchor, text appended to a part, removals, the
@@ -145,6 +147,9 @@ struct Pending {
     retry: Option<Json>,
     /// When it was sent, as its hover strip says.
     at: Option<String>,
+    /// The id the engine gave the message it became, when that isn't `id`
+    /// (queued rows steered as one): the transcript having it lets it go.
+    alias: Option<String>,
 }
 
 impl Pending {
@@ -339,6 +344,13 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         // answers a round trip later).
         let shown = v.queue_shown(&args);
         async move { v.queue_op(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
+    });
+    // Every queued row steered as one message (the queue tray's Steer all).
+    let v = view.clone();
+    host.async_action("chat.steer_all", move |args| {
+        let v = v.clone();
+        let shown = v.steer_all_shown(&args);
+        async move { v.steer_all(args, shown).await.map(|_| Value::Nil).map_err(String::from) }
     });
     let v = view.clone();
     host.async_action("chat.retry", move |args| {
@@ -1144,7 +1156,9 @@ impl View {
             if result.is_ok() {
                 open.heard = true;
                 let ids: Vec<&str> = open.entries.iter().filter_map(|e| e["id"].as_str()).collect();
-                open.pending.retain(|p| !ids.contains(&p.id.as_str()));
+                open.pending.retain(|p| {
+                    !ids.contains(&p.id.as_str()) && p.alias.as_deref().is_none_or(|a| !ids.contains(&a))
+                });
             }
             result
         };
@@ -1299,6 +1313,7 @@ impl View {
                 waiting: "sending",
                 retry: None,
                 at: stamp(now_seconds()),
+                alias: None,
             });
         }
         // What it carries, uploaded to the chat's host.
@@ -1741,6 +1756,7 @@ impl View {
                 waiting: "sending",
                 retry: None,
                 at: stamp(now_seconds()),
+                alias: None,
             });
         }
         self.publish_messages();
@@ -1754,6 +1770,112 @@ impl View {
             open.pending.retain(|p| &p.id != item);
         }
         self.publish_messages();
+    }
+
+    /// The rows `items` names (`{ id, items, message_id }`), in the queue's
+    /// order: their words as one message, and their files.
+    fn steer_all_rows(&self, args: &Value) -> Option<(String, Vec<String>, Vec<String>)> {
+        let id = args.field("id").map(text).unwrap_or_default();
+        let items: Vec<String> = args.field("items").map(Value::list).unwrap_or_default().iter().map(text).collect();
+        let slot = self.open.borrow();
+        let open = slot.as_ref().filter(|o| o.id == id)?;
+        let rows: Vec<&Json> = open
+            .queue
+            .iter()
+            .filter(|q| q["id"].as_str().is_some_and(|i| items.iter().any(|x| x == i)))
+            .collect();
+        if rows.len() < 2 {
+            return None;
+        }
+        let texts: Vec<String> = rows.iter().map(|q| q["text"].as_str().unwrap_or_default().to_owned()).collect();
+        let ids = rows.iter().filter_map(|q| q["id"].as_str().map(str::to_owned)).collect();
+        let paths = rows.iter().flat_map(|q| row_paths(q)).collect();
+        Some((numbered(&texts), paths, ids))
+    }
+
+    /// Steer all's message in the transcript at once, sending, under the
+    /// page's id for it (`message_id`).
+    fn steer_all_shown(&self, args: &Value) -> Option<String> {
+        let (words, paths, _) = self.steer_all_rows(args)?;
+        let message_id = args.field("message_id").map(text).filter(|s| !s.is_empty())?;
+        if let Some(open) = self.open.borrow_mut().as_mut() {
+            open.pending.push(Pending {
+                id: message_id.clone(),
+                words,
+                paths,
+                waiting: "sending",
+                retry: None,
+                at: stamp(now_seconds()),
+                alias: None,
+            });
+        }
+        self.publish_messages();
+        Some(message_id)
+    }
+
+    /// Every queued row named, steered as one message: queued whole (their
+    /// files with it), the rows it's made of removed, then steered into the
+    /// turn, or, carrying files (which the engine won't steer mid-turn),
+    /// sent now. A step refused undoes what came before it, but for the
+    /// steer itself: the message stays queued, whole.
+    async fn steer_all(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
+        let result = self.steer_all_call(&args, &shown).await;
+        if result.is_err() {
+            self.unshow(&shown);
+        }
+        result
+    }
+
+    async fn steer_all_call(self: &Rc<Self>, args: &Value, shown: &Option<String>) -> Result<(), Outcome> {
+        let chats = CHATS.with(Rc::clone);
+        let id = args.field("id").map(text).unwrap_or_default();
+        let chat = chats.chat(&id).ok_or("missing")?;
+        let (words, paths, items) = self.steer_all_rows(args).ok_or("missing")?;
+        let target = chats.target(&chat);
+        let routed = |mut p: Json| {
+            if let Some(t) = &target {
+                p["targetDeviceId"] = json!(t);
+            }
+            p
+        };
+        let mut params = json!({ "chatId": id, "text": words, "holdForTurnEnd": true });
+        if !paths.is_empty() {
+            params["attachments"] = json!(paths);
+        }
+        let answer = engine::get()
+            .call("QueueMessage", params)
+            .await
+            .map_err(|e| engine::outcome(&e))?;
+        let whole = answer["id"].as_str().ok_or("failed")?.to_owned();
+        // (The transcript's copy comes under the engine's id.)
+        if let Some(open) = self.open.borrow_mut().as_mut()
+            && let Some(p) = open.pending.iter_mut().find(|p| Some(&p.id) == shown.as_ref())
+        {
+            p.alias = Some(whole.clone());
+        }
+        for item in &items {
+            let removed = engine::get()
+                .call("RemoveQueuedMessage", routed(json!({ "chatId": id, "id": item })))
+                .await;
+            if let Err(e) = removed {
+                eprintln!("zeron-zgx: chat: steer all: a queued row wasn't removed: {e}");
+                let _ = engine::get()
+                    .call("RemoveQueuedMessage", routed(json!({ "chatId": id, "id": whole })))
+                    .await;
+                return Err(engine::outcome(&e));
+            }
+        }
+        let harness = chat["config"]["harness"].as_str().unwrap_or_default();
+        let method = if paths.is_empty() && chats.running(&id) && chats.steers(harness) {
+            "SteerQueuedMessageNow"
+        } else {
+            "SendQueuedMessageNow"
+        };
+        engine::get()
+            .call(method, routed(json!({ "chatId": id, "id": whole })))
+            .await
+            .map(|_| ())
+            .map_err(|e| engine::outcome(&e))
     }
 
     async fn queue_op(self: &Rc<Self>, args: Value, shown: Option<String>) -> Result<(), Outcome> {
@@ -1813,6 +1935,17 @@ impl View {
             .map_err(|e| engine::outcome(&e))?;
         Ok(answer["sent"].as_bool() != Some(false))
     }
+}
+
+/// Queued messages as one: each its own numbered block, in order, a blank
+/// line between.
+fn numbered(texts: &[String]) -> String {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{}. {}", i + 1, t.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A queued row's files: their paths on the chat's host.

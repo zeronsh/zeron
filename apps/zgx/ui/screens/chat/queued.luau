@@ -22,6 +22,16 @@
 
 local M = {}
 
+-- Queued messages as one, as the host steers them (src/chat.rs `numbered`):
+-- each its own numbered block, in order, a blank line between.
+function M.numbered(texts: { string }): string
+	local blocks: { string } = {}
+	for i, t in texts do
+		table.insert(blocks, `{i}. {string.match(t, "^%s*(.-)%s*$")}`)
+	end
+	return table.concat(blocks, "\n\n")
+end
+
 type Add = {
 	id: string,
 	text: string,

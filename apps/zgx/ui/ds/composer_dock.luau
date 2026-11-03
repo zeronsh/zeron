@@ -73,6 +73,9 @@ export type Props = {
 	-- Whether the agent takes a word mid-turn (a row's action is then Steer).
 	can_steer: (boolean | () -> boolean)?,
 	on_queue_send: ((id: string) -> ())?,
+	-- Every row steered as one message (the header's Steer all, shown with
+	-- two rows or more where a row would read Steer).
+	on_queue_steer_all: (() -> ())?,
 	on_queue_edit: ((id: string) -> ())?,
 	on_queue_remove: ((id: string) -> ())?,
 	on_queue_reorder: ((from: number, to: number) -> ())?,
@@ -1112,6 +1115,27 @@ M.Dock = ui.component(function(props: Props): Node
 				end,
 			}),
 		}
+		local trail: { Node } = {}
+		if props.on_queue_steer_all then
+			local function can_steer(): boolean
+				local s = props.can_steer
+				return if type(s) == "function" then s() else s == true
+			end
+			table.insert(trail, ui.show(function()
+				return #queue:get() >= 2 and can_steer()
+			end, Button {
+				locale.t("ds.composer_dock.steer_all"),
+				size = "sm",
+				tone = "ghost",
+				h = 24,
+				px = "$space.2",
+				text_size = "$font.size.xs",
+				tooltip = locale.s("ds.composer_dock.steer_all_hint"),
+				on_click = function()
+					(props.on_queue_steer_all :: () -> ())()
+				end,
+			}))
+		end
 		table.insert(
 			trays,
 			ui.show(
@@ -1124,6 +1148,7 @@ M.Dock = ui.component(function(props: Props): Node
 						return tostring(#queue:get())
 					end,
 					summary = summary,
+					trail = trail,
 				}, open, geometry.header), body, opened("queue"), geometry, "queue")
 			)
 		)

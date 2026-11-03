@@ -807,6 +807,8 @@
       "nothing_running": "没有运行中的项目",
       "more_running": "另外 {n} 项",
       "stop_all": "全部停止",
+      "steer_all": "全部引导",
+      "steer_all_hint": "将所有排队消息编号合并为一条进行引导",
       "running": "运行中",
       "queued_messages": "队列中的消息",
       "queued": "已加入队列"

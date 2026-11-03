@@ -375,6 +375,28 @@ stub.queue = function(id: string, op: any): any
 		return nil
 	end)
 end
+-- Queued rows steered as one: gone from the queue, one message in the
+-- transcript, its words the page's (the host numbers them the same way).
+stub.steer_all = function(id: string, items: { string }, message_id: string): any
+	note(`steer_all:{id}:{table.concat(items, ",")}`)
+	return answer(function()
+		local q = {}
+		for _, r in engine_queue(id) do
+			if not table.find(items, r.id) then
+				table.insert(q, r)
+			end
+		end
+		publish(id, { queue = q })
+		if opened == id then
+			for i, m in store.messages:peek() do
+				if m.id == message_id then
+					store.messages:set_key({ i, "waiting" }, ui.null)
+				end
+			end
+		end
+		return nil
+	end)
+end
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
