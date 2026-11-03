@@ -3768,22 +3768,14 @@ fn layer(input:LayerInput)->vec4<f32> {
 				end),
 			}
 			frame.relative = true
-			return ui.div(folds(
-				{
-					w_full = true,
-					ui.row(fades(frame :: any, function(): boolean
-						return not railed()
-					end)),
-				},
-				function(): boolean
+			-- (No folding frame round it, which would clip: its tiles fly out.)
+			return ui.div {
+				w_full = true,
+				h = TITLE,
+				ui.row(fades(frame :: any, function(): boolean
 					return not railed()
-				end,
-				function(): number
-					return TITLE
-				end,
-				8,
-				false
-			))
+				end)),
+			}
 		end
 
 		local function build(key: string): Node
