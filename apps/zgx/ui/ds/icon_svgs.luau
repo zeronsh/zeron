@@ -159,6 +159,17 @@ return {
 	["status-input"] = [==[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>]==],
 	["status-working"] = [==[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.1 2.182a10 10 0 0 1 3.8 0"/><path d="M13.9 21.818a10 10 0 0 1-3.8 0"/><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7"/><path d="M2.182 13.9a10 10 0 0 1 0-3.8"/><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69"/><path d="M21.818 10.1a10 10 0 0 1 0 3.8"/><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69"/><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7"/></svg>]==],
 	["stop"] = [==[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="2" fill="currentColor"/></svg>]==],
+	["sun"] = [==[<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<circle cx="12" cy="12" r="6" stroke="currentColor" stroke-width="1.5"/>
+<path d="M12 2V3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M12 21V22" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M22 12L21 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M3 12L2 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M19.0708 4.9292L18.678 5.32204" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M5.32178 18.6782L4.92894 19.0711" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M19.0708 19.0708L18.678 18.678" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M5.32178 5.32178L4.92894 4.92894" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>]==],
 	["tag"] = [==[<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
 <path d="M3.5 11.25V6.5a3 3 0 0 1 3-3h4.75a3 3 0 0 1 2.12.88l6.25 6.25a2 2 0 0 1 0 2.83l-6.16 6.16a2 2 0 0 1-2.83 0l-6.25-6.25a3 3 0 0 1-.88-2.12Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="8.25" cy="8.25" r="1.25" stroke="currentColor" stroke-width="1.5"/>

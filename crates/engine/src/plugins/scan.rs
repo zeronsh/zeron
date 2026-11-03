@@ -376,7 +376,7 @@ mod tests {
         assert!(mismatch.error.unwrap().contains("doesn't match"));
 
         let reserved = inspect(&write_plugin(root.path(), "zeron", manifest("zeron")), true);
-        assert_eq!(reserved.error.as_deref(), Some("That name is Zeron's own"));
+        assert_eq!(reserved.error.as_deref(), Some("Zeron already uses that name"));
 
         let mut no_entry = manifest("noentry");
         no_entry["entry"] = serde_json::json!("main.luau");

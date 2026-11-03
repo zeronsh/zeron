@@ -1666,7 +1666,7 @@ impl Plugins {
             methods::REMOVE_PLUGIN => {
                 let p: IdParams = parse_params(params)?;
                 if self.entry(&p.id).is_some_and(|e| e.item.builtin) {
-                    return Err(failed("Zeron's own plugins can be turned off, not removed"));
+                    return Err(failed("Built-in plugins can be turned off, but not removed"));
                 }
                 // (One plain name, joined so it stays in the plugins folder on
                 // every system: never `C:`, a device name or a trailing dot.)

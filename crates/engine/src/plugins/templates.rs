@@ -432,7 +432,7 @@ pub fn create(dir: &Path, id: &str, name: &str, from: Option<&str>, guide: &Path
         ));
     }
     if id == ZERON {
-        return Err("zeron is Zeron's own template. Pick another id.".into());
+        return Err("zeron is the default template's id. Pick another one.".into());
     }
     let target = dir.join(id);
     if std::fs::symlink_metadata(&target).is_ok() {
@@ -554,7 +554,7 @@ pub fn status(dir: &Path, id: &str) -> Result<Value, String> {
 /// `DeleteTemplate`: moves it to `.removed/<id>-<unix>`. `{deleted, active}`.
 pub fn delete(dir: &Path, id: &str) -> Result<Value, String> {
     if id == ZERON {
-        return Err("Zeron's own template can't be deleted.".into());
+        return Err("The default template can't be deleted.".into());
     }
     let folder = template_dir(dir, id)
         .ok_or_else(|| format!("There's no template {id}. list_templates names them."))?;
