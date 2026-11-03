@@ -496,12 +496,17 @@ return function(): Node
 		-- window beside the row, one surface of the menus' glass blurring
 		-- what's under it. (Not zgx's tooltip, whose popup frames it again
 		-- and blurs nothing.)
+		-- (An anchor at the window's corner, no box of its own: a layer the
+		-- window's size, even one passing the pointer through, stands in
+		-- front of everything for the pointer's cursor, and no resize edge
+		-- or button showed its own.)
 		ui.div {
 			absolute = true,
 			left = 0,
 			top = 0,
-			right = 0,
-			bottom = 0,
+			w = 0,
+			h = 0,
+			overflow = "visible",
 			pointer_events = "none",
 			hidden = in_settings,
 			ui.presence(function(): string
