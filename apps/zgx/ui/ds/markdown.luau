@@ -939,7 +939,8 @@ local function block(b: MarkdownBlock, ink: string?, ctx: Ctx?): Node
 			local source = if ctx then ctx.source else nil
 			local code = b.text
 			return ui.div {
-				provide = { code = { lang = b.lang or "", source = b.text } },
+				-- (As a token, read through what the plugin may read, ds/token.)
+				provide = { code = token.block({ lang = b.lang or "", source = b.text }) },
 				w_full = true,
 				min_w = 0,
 				Mermaid.Diagram {

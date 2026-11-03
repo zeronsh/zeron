@@ -2424,6 +2424,34 @@ fn agent_chat() -> Result<Option<String>, RpcError> {
     }
 }
 
+#[cfg(test)]
+mod question_caller_tests {
+    use super::acting_chat;
+    use zeron_rpc::{Caller, with_caller};
+
+    /// An agent asks, cancels and waits for its own chat alone; the app
+    /// names any.
+    #[tokio::test]
+    async fn an_agent_acts_for_its_own_chat_alone() {
+        let agent = || Caller::Agent { chat: Some("mine".into()) };
+        with_caller(agent(), async {
+            assert_eq!(acting_chat(None).unwrap(), "mine");
+            assert_eq!(acting_chat(Some("mine".into())).unwrap(), "mine");
+            assert!(acting_chat(Some("other".into())).is_err());
+        })
+        .await;
+        with_caller(Caller::Agent { chat: None }, async {
+            assert!(acting_chat(Some("any".into())).is_err());
+        })
+        .await;
+        with_caller(Caller::Local, async {
+            assert_eq!(acting_chat(Some("any".into())).unwrap(), "any");
+            assert!(acting_chat(None).is_err());
+        })
+        .await;
+    }
+}
+
 impl EngineRpc {
     /// AskQuestion, WatchQuestions, AnswerQuestion, DismissQuestion,
     /// CancelQuestion, ReleaseQuestion, NotifyTurnEnd.
