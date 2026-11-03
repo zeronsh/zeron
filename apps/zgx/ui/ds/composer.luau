@@ -1857,8 +1857,20 @@ return ui.component(function(props: Props): Node
 							return true
 						end
 					end
-					if e.key == "Escape" and not e.shift and not e.cmd and not e.alt and props.on_escape then
-						return props.on_escape()
+					-- A bare Escape: the caller's first (stopping the agent, where
+					-- settings say Escape does); else the keyboard goes back to
+					-- the window, whose bare letters (the panel's B, F, T…, I
+					-- to come back) work again, as vim's normal mode.
+					if e.key == "Escape" and not e.shift and not e.cmd and not e.alt then
+						if props.on_escape and props.on_escape() then
+							return true
+						end
+						local el = field:peek()
+						if el then
+							el:blur()
+							return true
+						end
+						return false
 					end
 					-- (⌘↩ under "mod_enter"; plain ↩ there breaks the line.)
 					local enter_breaks = props.send_with ~= nil and props.send_with() == "mod_enter" and not e.cmd
