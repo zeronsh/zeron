@@ -1,6 +1,6 @@
 //! Persisted names are independent of ephemeral process/listener observations.
 use crate::discovery::{Listener, command_identity, framework};
-use zeron_proto::preview::process_label;
+use zeron_preview_label::process_label;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

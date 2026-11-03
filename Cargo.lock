@@ -13884,8 +13884,13 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows-sys 0.61.2",
+ "zeron-preview-label",
  "zeron-proto",
 ]
+
+[[package]]
+name = "zeron-preview-label"
+version = "0.2.134"
 
 [[package]]
 name = "zeron-proto"

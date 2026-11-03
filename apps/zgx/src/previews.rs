@@ -26,7 +26,7 @@
 use serde_json::{Value as Json, json};
 use std::{cell::RefCell, rc::Rc};
 use zgx_script::{ScriptHost, Shared, Value};
-use zeron_proto::preview::{process_label, shown_command};
+use zeron_preview_label::{process_label, shown_command};
 
 use crate::engine::{
     self,
