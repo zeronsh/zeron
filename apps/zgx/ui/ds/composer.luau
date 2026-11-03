@@ -242,6 +242,8 @@ export type Props = {
 	drop_overlay: boolean?,
 	-- Bumped, the model picker opens (a shortcut to it).
 	open_model: State<number>?,
+	-- Set to whether the model picker is open.
+	model_open: State<boolean>?,
 	-- Which of `@`, `/`, `$` open their list (an agent's completion
 	-- settings), and what an empty list says, by trigger.
 	mention_enabled: ((trigger: string) -> boolean)?,
@@ -1236,6 +1238,7 @@ return ui.component(function(props: Props): Node
 			models = props.models :: any,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
+			showing = props.model_open,
 		}
 	end)
 	-- The footer folds a step at a time as it runs short of room, the
