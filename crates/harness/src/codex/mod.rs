@@ -58,6 +58,12 @@
 //! - Turn stop ([`crate::TurnControl::stop_turn`]): `turn/interrupt` ends the
 //!   turn `Interrupted`; the app-server and its threads (child agents
 //!   included) stay up for the next `turn/start`.
+//! - Stopping one call ([`crate::TurnControl::tool_stop_requested`]): a
+//!   command's exec session goes with `thread/backgroundTerminals/terminate`
+//!   (its item completes `failed`, exit -1, and the turn goes on), a
+//!   subagent with `turn/interrupt` on its own thread's turn (the parent's
+//!   `wait` returns). Live-verified 0.166.0. MCP and other tool calls have
+//!   no stop of their own.
 //! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
 //!   `turn/interrupt`, escalating to SIGTERM → SIGKILL if the child is
 //!   unresponsive; the stream always ends with `Done { status: Interrupted }`.
@@ -1816,6 +1822,10 @@ async fn run_session(session: Session) {
     // later (live, 0.159.3). The host's idle reaper must not retire the
     // app-server — and the process with it — while it runs.
     let mut open_commands: HashMap<String, OpenCommand> = HashMap::new();
+    // Each child (subagent) thread's turn in flight: what `turn/interrupt`
+    // names to stop that subagent alone (see the tool-stop arm below).
+    let mut child_turns: HashMap<String, String> = HashMap::new();
+    turn.accept_tool_stops();
     // An interrupted turn's foreground command is killed WITHOUT an
     // `item/completed`: once its process has had a moment to go, drop the
     // turn's commands whose process is gone (background ones live on).
@@ -1861,6 +1871,18 @@ async fn run_session(session: Session) {
                         }
                         ChildRoute::Consumed => continue,
                         ChildRoute::Subagent => {
+                            match method.as_str() {
+                                "turn/started" => {
+                                    let id = turn_id(&params);
+                                    if !id.is_empty() {
+                                        child_turns.insert(nthread.clone(), id);
+                                    }
+                                }
+                                "turn/completed" | "turn/failed" | "turn/aborted" | "thread/closed" => {
+                                    child_turns.remove(&nthread);
+                                }
+                                _ => {}
+                            }
                             for event in children.notification(&nthread, &method, &params) {
                                 if !send(&event_tx, event).await {
                                     break 'main;
@@ -2430,6 +2452,56 @@ async fn run_session(session: Session) {
                     {
                         prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, started_in));
                     }
+                }
+            },
+
+            // The person stopped one call of the turn, which goes on: a
+            // command's exec session is terminated (its item completes
+            // `failed` and the agent reads that), a subagent's turn is
+            // interrupted on its own thread (the parent's `wait` returns).
+            // Both live-verified against 0.166.0.
+            request = turn.tool_stop_requested(), if !interrupted => {
+                if let Some(open) = open_commands.get(&request.call_id) {
+                    match open.process.clone() {
+                        Some(process) => {
+                            let client = client.clone();
+                            let thread = thread_id.clone();
+                            tokio::spawn(async move {
+                                let params = json!({ "threadId": thread, "processId": process });
+                                if let Err(e) = client.request("thread/backgroundTerminals/terminate", params).await {
+                                    tracing::debug!(target: "zeron_harness::codex", "terminate failed: {e}");
+                                }
+                            });
+                            // Codex ends the call at once, but its process
+                            // was seen running on for a while (0.166.0): a
+                            // moment later, whatever still runs it goes.
+                            #[cfg(unix)]
+                            if let Some(root) = child.id() {
+                                let command = open.command.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    let doomed = crate::process::command_tree(root, &command).await;
+                                    crate::process::terminate_tree(&doomed, Duration::from_secs(2)).await;
+                                });
+                            }
+                            request.answer(crate::ToolStop::Stopping);
+                        }
+                        None => request.answer(crate::ToolStop::Unsupported(
+                            "Codex didn't say which process runs this command.".into(),
+                        )),
+                    }
+                } else if let Some(child_thread) = children.child_of(&request.call_id) {
+                    match child_turns.get(&child_thread).cloned() {
+                        Some(child_turn) => {
+                            send_turn_interrupt(&client, &child_thread, child_turn);
+                            request.answer(crate::ToolStop::Stopping);
+                        }
+                        None => request.answer(crate::ToolStop::NotRunning),
+                    }
+                } else {
+                    request.answer(crate::ToolStop::Unsupported(
+                        "Codex can stop a command or a subagent on its own, not this tool.".into(),
+                    ));
                 }
             },
 

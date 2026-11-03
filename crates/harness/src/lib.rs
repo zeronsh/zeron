@@ -82,6 +82,7 @@ pub struct TurnControl {
     stop: std::sync::Arc<tokio::sync::Notify>,
     background: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     processes: std::sync::Arc<background::BackgroundWork>,
+    tool_stops: std::sync::Arc<tool_stop::ToolStops>,
 }
 
 impl TurnControl {
@@ -151,6 +152,23 @@ impl TurnControl {
     /// listed. May read a file: call it off the async runtime.
     pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
         self.processes.output(id)
+    }
+
+    /// Driver: it can stop single calls of a live turn, and answers
+    /// [`Self::tool_stop_requested`] from now on (see [`tool_stop`]).
+    pub fn accept_tool_stops(&self) {
+        self.tool_stops.accept();
+    }
+
+    /// Driver: resolves with each call the host asked to stop. Answer it.
+    pub async fn tool_stop_requested(&self) -> ToolStopRequest {
+        self.tool_stops.requested().await
+    }
+
+    /// Host: stop one call of the live turn (a command, or the subagent a
+    /// call spawned) while the turn goes on, and hear what came of it.
+    pub async fn stop_tool_call(&self, call_id: &str) -> ToolStop {
+        self.tool_stops.stop(call_id).await
     }
 }
 
@@ -356,6 +374,8 @@ pub mod approval;
 pub mod archive_install;
 mod background;
 pub use background::OutputSource;
+pub mod tool_stop;
+pub use tool_stop::{ToolStop, ToolStopRequest};
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;

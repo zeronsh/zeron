@@ -47,6 +47,12 @@
 //!   `perTaskStopAffordance`, which makes that interrupt spare background
 //!   agents (the CLI otherwise stops them all); background shells survive
 //!   either way. `background_tasks_changed` reports the live set to the host.
+//! - Stopping one call ([`crate::TurnControl::tool_stop_requested`]): the
+//!   CLI registers every Bash command and subagent as a task
+//!   (`task_started` names its `tool_use_id`), foreground ones included, and
+//!   `stop_task` stops any of them. The call returns killed and the turn
+//!   goes on (live-verified 2.1.317). Other tools (MCP calls, reads) have
+//!   no task and can't be stopped alone.
 //! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
 //!   the interrupt control request, then SIGTERM and SIGKILL.
 
@@ -1332,6 +1338,14 @@ async fn run_session(session: Session) {
     // [`background`]), and the stops asked of them.
     let mut shells = background::BackgroundShells::default();
     let mut task_stops_sent = 0u64;
+    // Every running task by the tool call that started it — foreground
+    // commands and subagents too, not only the background ones listed
+    // above: `stop_task` stops any of them, and the call then returns as
+    // killed (a command's "Exit code 137", a subagent's "interrupted") while
+    // the turn goes on (live-verified 2.1.317).
+    let mut call_tasks: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    turn.accept_tool_stops();
 
     'main: loop {
         if std::mem::take(&mut relaunch) {
@@ -1345,6 +1359,7 @@ async fn run_session(session: Session) {
             stdin.close_for_teardown();
             child.shutdown(kill_grace).await;
             shells = background::BackgroundShells::default();
+            call_tasks.clear();
             turn.set_background_processes(Vec::new());
             let mut fresh = launched.clone();
             fresh.resume = None;
@@ -1464,6 +1479,19 @@ async fn run_session(session: Session) {
                         match system.subtype.as_str() {
                             "background_tasks_changed" => {
                                 turn.set_background(system.tasks.as_ref().map_or(0, Vec::len));
+                            }
+                            "task_started" => {
+                                if let (Some(task), Some(call)) = (
+                                    system.task_id.as_deref().filter(|t| !t.is_empty()),
+                                    system.tool_use_id.as_deref().filter(|t| !t.is_empty()),
+                                ) {
+                                    call_tasks.insert(call.to_owned(), task.to_owned());
+                                }
+                            }
+                            "task_notification" => {
+                                if let Some(task) = system.task_id.as_deref() {
+                                    call_tasks.retain(|_, t| t != task);
+                                }
                             }
                             // The first, or a background wake's: either way a
                             // turn is running.
@@ -1730,6 +1758,31 @@ async fn run_session(session: Session) {
                 let id = format!("zeron_stop_task_{task_stops_sent}");
                 if !stdin.line(wire::stop_task_request_line(&id, &task)) {
                     break 'main;
+                }
+            },
+
+            // The person stopped one call of the turn: the task it started
+            // is stopped as a background one is, and the call returns killed.
+            request = turn.tool_stop_requested(), if !interrupted => {
+                match call_tasks.get(&request.call_id) {
+                    Some(task) => {
+                        task_stops_sent += 1;
+                        let id = format!("zeron_stop_task_{task_stops_sent}");
+                        if !stdin.line(wire::stop_task_request_line(&id, task)) {
+                            request.answer(crate::ToolStop::NotRunning);
+                            break 'main;
+                        }
+                        request.answer(crate::ToolStop::Stopping);
+                    }
+                    // Running, but not as a task: an MCP call, a read, a
+                    // search. The CLI has no stop for one of those alone.
+                    None if open_tools.contains(&request.call_id) => {
+                        request.answer(crate::ToolStop::Unsupported(
+                            "Claude Code can stop a command or a subagent on its own, not this tool."
+                                .into(),
+                        ));
+                    }
+                    None => request.answer(crate::ToolStop::NotRunning),
                 }
             },
 
