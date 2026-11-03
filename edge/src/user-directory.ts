@@ -88,6 +88,9 @@ import { deleteUserBlobs } from "./user-images";
 
 export const USER_DIRECTORY_NAME = "users1";
 
+/** The badge a card shows first, ahead of the order badges were defined in. */
+const LEADING_BADGE = "maintainer";
+
 /** A new row's user number. Conflict updates never set `user_number`, so a
  * number is taken only on first insert. */
 const NEXT_USER_NUMBER = "(SELECT COALESCE(MAX(user_number), 0) + 1 FROM users)";
@@ -831,8 +834,9 @@ export class UserDirectory extends DurableObject<Env> {
     const badges = this.ctx.storage.sql
       .exec(
         `SELECT b.badge_id, b.name, b.icon FROM user_badges ub JOIN badges b ON b.badge_id = ub.badge_id
-         WHERE ub.user_id = ? ORDER BY b.created_at, b.rowid`,
-        row.user_id
+         WHERE ub.user_id = ? ORDER BY b.badge_id = ? DESC, b.created_at, b.rowid`,
+        row.user_id,
+        LEADING_BADGE
       )
       .toArray();
     // Field by field, never spread from a row: a new column must not go public.

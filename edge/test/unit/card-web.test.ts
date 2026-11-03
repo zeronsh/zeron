@@ -153,10 +153,24 @@ describe("the card's badges", async () => {
 
   it("draws a badge it has no style for as an outline pill, as the native app does", () => {
     const graham = mock.members.find((m) => m.username === "graham")!;
-    const { row, labels } = pills({ ...graham, badges: [{ id: "maintainer", name: "Maintainer", icon: null }] });
-    expect(labels).toEqual(["MAINTAINER"]);
+    const { row, labels } = pills({ ...graham, badges: [{ id: "early-tester", name: "Early Tester", icon: null }] });
+    expect(labels).toEqual(["EARLY TESTER"]);
     expect(row[0]).toMatchObject({ border: 1 });
     expect(row[0]!.fill).toBeUndefined();
+  });
+
+  it("draws Maintainer as a solid dark pill, first, as the edge serves it", () => {
+    expect(BADGE_STYLES).toMatchObject({ maintainer: "ink" });
+    const graham = mock.members.find((m) => m.username === "graham")!;
+    const { row, labels } = pills({
+      ...graham,
+      badges: [{ id: "maintainer", name: "Maintainer", icon: null }, ...graham.badges]
+    });
+    expect(labels).toEqual(["MAINTAINER", "CLOUD TESTER", "V3 BETA"]);
+    // Opaque ink, no border; the others stay outline pills.
+    expect(row[0]).toMatchObject({ fill: [0x16, 0x16, 0x16, 0xff] });
+    expect(row[0]!.border).toBeUndefined();
+    for (const pill of row.slice(1)) expect(pill).toMatchObject({ border: 1 });
   });
 
   it("gives every mock member's badges in one order, as the edge serves them", () => {
