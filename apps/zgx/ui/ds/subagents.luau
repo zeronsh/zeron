@@ -51,6 +51,9 @@ export type Sub = {
 	-- Whether it can be stopped alone, and opened in a lane.
 	stoppable: boolean?,
 	openable: boolean?,
+	-- A stop asked of it from elsewhere (the composer's stop of all that's
+	-- left running) is on its way: "Stopping", as its own Stop says.
+	stopping: boolean?,
 }
 
 export type Props = {
@@ -126,7 +129,7 @@ end
 local function row(now_of: () -> Sub, tick: () -> number, props: Props): Node
 	local id = now_of().id
 	local function stage(): string?
-		return STOPS:get()[id]
+		return STOPS:get()[id] or (if now_of().stopping then "stopping" else nil)
 	end
 	local function set_stage(to: string?)
 		local all = table.clone(STOPS:peek())

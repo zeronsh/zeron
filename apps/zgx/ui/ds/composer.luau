@@ -55,6 +55,7 @@ local locale = require("@self/locale")
 local context_usage = require("@self/context_usage")
 local motion = require("@self/motion")
 local EditorMenu = require("@self/editor_menu")
+local Tooltip = require("@self/tooltip")
 
 -- What the model's context holds, as its agent reports it: the tokens in
 -- it and the window's size (either may be missing).
@@ -109,6 +110,14 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
+	-- What is left running with no turn (background processes, subagents):
+	-- how many. While there are some, no turn runs and the draft is empty,
+	-- Send becomes a Stop of all of them (`on_stop_background`); typing
+	-- brings Send back, as a turn's Stop does. `background_stopping`: that
+	-- stop is on its way (the Stop spins, and takes no click).
+	background: (() -> number)?,
+	on_stop_background: (() -> ())?,
+	background_stopping: (() -> boolean)?,
 	-- What the agent may do unasked: "supervised", "edits" or "full"; and
 	-- plan mode (explore and propose before changing anything).
 	access: State<string?>?,
@@ -1040,6 +1049,21 @@ return ui.component(function(props: Props): Node
 	local function stopping(): boolean
 		return running ~= nil and running:get() and not has_text() and not has_cargo() and not asking()
 	end
+	-- No turn, the draft empty, and work left running: Send is its Stop.
+	local function background(): number
+		return if props.background then props.background() else 0
+	end
+	local function stopping_background(): boolean
+		return props.on_stop_background ~= nil
+			and not (running ~= nil and running:get())
+			and background() > 0
+			and not has_text()
+			and not has_cargo()
+			and not asking()
+	end
+	local function background_busy(): boolean
+		return props.background_stopping ~= nil and props.background_stopping()
+	end
 
 	-- Mentions at the caret.
 	local m = mentions.use {
@@ -1409,6 +1433,28 @@ return ui.component(function(props: Props): Node
 		icon = true,
 		label = locale.t("ds.composer.stop"),
 		on_click = props.on_stop,
+		ui.div { w = 10, h = 10, rounded = ui.raw(3, "the stop glyph's corner"), bg = "$zeron.primary.text" },
+	}
+	-- The turn's Stop's look, for what's left running without a turn: a
+	-- spinner while its stop is on its way.
+	local background_button = Button {
+		shape = "pill",
+		size = "sm",
+		icon = true,
+		label = function()
+			return locale.s(if background_busy() then "ds.composer.stopping_background" else "ds.composer.stop_background")
+		end,
+		tooltip = Tooltip {
+			function(): string
+				return locale.s("ds.composer.stop_background_count", { n = background() })
+			end,
+		},
+		busy = background_busy,
+		on_click = function()
+			if props.on_stop_background then
+				props.on_stop_background()
+			end
+		end,
 		ui.div { w = 10, h = 10, rounded = ui.raw(3, "the stop glyph's corner"), bg = "$zeron.primary.text" },
 	}
 	-- A question's way through: Back (from the second page), then Submit
@@ -1935,8 +1981,9 @@ return ui.component(function(props: Props): Node
 				gap = "$space.2",
 				mic,
 				ui.show(stopping, stop_button),
+				ui.show(stopping_background, background_button),
 				ui.show(function()
-					return not stopping()
+					return not stopping() and not stopping_background()
 				end, send_button),
 			}),
 		},

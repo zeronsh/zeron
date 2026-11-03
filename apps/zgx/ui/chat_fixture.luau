@@ -102,6 +102,17 @@ ui.command {
 		end
 	end,
 }
+-- Its background processes gone (stopped, or done).
+ui.command {
+	id = "tasks_gone",
+	title = "The background processes are gone",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { tasks = {} })
+		end
+	end,
+}
 -- The open session, as if it ran on the box (a remote device that's up),
 -- or on the old laptop (one gone quiet).
 for _, d in { "box", "old" } do

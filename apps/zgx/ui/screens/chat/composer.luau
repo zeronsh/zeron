@@ -36,6 +36,7 @@ local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
+local background = require("@app/screens/chat/background")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -396,9 +397,27 @@ local function Composer(): Node
 		local s = open()
 		return if s and s.todos then s.todos else {}
 	end)
+	-- (Each with whether a stop is on its way to it: its row says so.)
 	local tasks = ui.computed(function(): { any }
 		local s = open()
-		return if s and s.tasks then s.tasks else {}
+		local list = if s and s.tasks then s.tasks else {}
+		local marked = shared.stopping:get()
+		local out = {}
+		for i, t in list do
+			if marked[`task:{t.id}`] then
+				local c = table.clone(t)
+				c.stopping = true
+				out[i] = c
+			else
+				out[i] = t
+			end
+		end
+		return out
+	end)
+	-- What's left running with the turn over (background processes,
+	-- subagents at work): Send, with the draft empty, stops it all.
+	local left_running = ui.computed(function(): number
+		return if open() then #background.items(session_id:get()) else 0
 	end)
 	-- A line above it: one of its own (a send that failed), else the
 	-- session's.
@@ -1029,11 +1048,22 @@ local function Composer(): Node
 			end,
 			drop_overlay = false,
 			on_send = send,
+			-- (A turn's Stop stops the turn alone: what it left running in
+			-- the background goes on, as it outlives the turn.)
 			on_stop = function()
 				local id = session_id:peek()
 				if id then
 					store.interrupt(id)
 				end
+			end,
+			background = function(): number
+				return left_running:get()
+			end,
+			on_stop_background = function()
+				background.stop_all(session_id:peek())
+			end,
+			background_stopping = function(): boolean
+				return background.busy(session_id:get())
 			end,
 			-- The shipping app's settings: what sends, and whether Escape
 			-- stops the agent.
@@ -1096,7 +1126,7 @@ local function Composer(): Node
 				if not id then
 					return
 				end
-				store.stop_task(id, task):after(function() end, function()
+				background.stop_task(id, task, function()
 					own_notice:set { tone = "danger", key = "chat.composer.couldnt_stop_task", dismissable = true }
 				end)
 			end,

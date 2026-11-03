@@ -14,14 +14,18 @@ test("Stop on a background process asks its host, and says when it couldn't", fu
 	expect(app:has('role:button "Fold Running"')).to_be(false)
 	app:click('role:button "Open Running"')
 	app:frames(30)
-	app:click('role:button "Stop npm run dev"')
-	app:frames(10)
-	expect(app:state("calls")).to_contain("stop_task:s2:bg1")
-	expect(app:has('~"Couldn\'t stop that process"')).to_be(false)
+	-- A stop its host couldn't do says so, and the row keeps its Stop.
 	app:command("stop_fails")
 	app:click('role:button "Stop npm run dev"')
 	app:frames(10)
+	expect(app:state("calls")).to_contain("stop_task:s2:bg1")
 	expect(app:has('~"Couldn\'t stop that process"')).to_be(true)
+	expect(app:has('role:button "Stop npm run dev"')).to_be(true)
+	-- One it's doing: the row says so until the process is gone.
+	app:click('role:button "Stop npm run dev"')
+	app:frames(10)
+	expect(app:has('role:button "Stop npm run dev"')).to_be(false)
+	expect(app:tree()).to_contain('text "Stopping"')
 	expect(app:error()).to_be(nil)
 end)
 

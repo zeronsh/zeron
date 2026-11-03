@@ -41,6 +41,11 @@ M.anchor = ui.shared("chat.transcript.anchor", nil :: any)
 -- Each chat's place as it was left (its `anchor`; none, its end), by
 -- session id: switched back to, a chat opens where it was read.
 M.places = ui.shared("chat.transcript.places", {} :: { [string]: any })
+-- What a stop is on its way to (screens/chat/background), by key:
+-- `task:<id>` a background process, `call:<id>` a subagent's spawn,
+-- `chat:<id>` a chat made as a subagent. Their rows (the Running tray's,
+-- the subagent block's) say "Stopping" until they're no longer running.
+M.stopping = ui.shared("chat.stopping", {} :: { [string]: boolean })
 -- Every other chat's draft, by key (a session's id; "" a new chat's), and
 -- the key of the one shown.
 local kept = ui.shared("chat.composer.drafts", {} :: { [string]: any })
