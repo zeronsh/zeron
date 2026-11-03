@@ -98,6 +98,49 @@ pub fn framework(args: &[String]) -> (&'static str, u8) {
     }
 }
 
+/// A listener's command line as clients may show it (naming the process
+/// that opened a port): values that look like credentials (`--token x`,
+/// `--password=x`, `API_KEY=x`, a URL's `user:pass@`) read `…`.
+pub fn shown_command(args: &[String]) -> Vec<String> {
+    fn secret(name: &str) -> bool {
+        let name = name.trim_start_matches('-').to_ascii_lowercase();
+        [
+            "token",
+            "secret",
+            "passw",
+            "auth",
+            "credential",
+            "cookie",
+            "key",
+        ]
+        .iter()
+        .any(|word| name.contains(word))
+    }
+    fn userinfo(arg: &str) -> Option<String> {
+        let (scheme, rest) = arg.split_once("://")?;
+        let (user, host) = rest.split_once('@')?;
+        (!user.contains('/') && user.contains(':')).then(|| format!("{scheme}://…@{host}"))
+    }
+    let mut hide_next = false;
+    args.iter()
+        .map(|arg| {
+            if std::mem::take(&mut hide_next) && !arg.starts_with('-') {
+                return "…".to_string();
+            }
+            if let Some((name, _)) = arg.split_once('=')
+                && !name.contains('/')
+                && secret(name)
+            {
+                return format!("{name}=…");
+            }
+            if arg.starts_with('-') && !arg.contains('=') && secret(arg) {
+                hide_next = true;
+            }
+            userinfo(arg).unwrap_or_else(|| arg.clone())
+        })
+        .collect()
+}
+
 /// Port flags are operational settings, never part of a service identity.
 pub fn command_identity(args: &[String]) -> String {
     let mut skip = false;
@@ -671,6 +714,40 @@ pub fn same_process(_pid: u32, _started_at: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_shown_command_hides_what_looks_like_credentials() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shown_command(&args(&["python3", "-m", "http.server", "8000"])),
+            args(&["python3", "-m", "http.server", "8000"])
+        );
+        assert_eq!(
+            shown_command(&args(&[
+                "node",
+                "server.js",
+                "--token",
+                "abc",
+                "--api-key=xyz",
+                "DB_PASSWORD=hunter2",
+                "--auth",
+                "--port",
+                "3000",
+                "postgres://me:pw@db:5432/app",
+            ])),
+            args(&[
+                "node",
+                "server.js",
+                "--token",
+                "…",
+                "--api-key=…",
+                "DB_PASSWORD=…",
+                "--auth",
+                "--port",
+                "3000",
+                "postgres://…@db:5432/app",
+            ])
+        );
+    }
     #[test]
     fn authentication_commands_are_not_preview_candidates() {
         let listener = |args: &[&str]| Listener {

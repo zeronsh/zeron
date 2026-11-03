@@ -999,8 +999,9 @@ local function lanes(props: Props, sid: string): Node
 	-- (`extra`: a part of something else than sessions, ports: its rows'
 	-- glyph, always leading. `flat`: never grouped. `archive`: its rows'
 	-- corner action. `lanes_part`: side chats' or subagents', with their
-	-- own menu. `stop`: a stop in the corner while a row runs.)
-	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, lanes_part: boolean?, stop: { on_stop: (any) -> (), stoppable: (any) -> boolean }?): Node
+	-- own menu. `stop`: a stop in the corner while a row runs. `tooltip`:
+	-- its rows'.)
+	local function part(id: string, list: string, label: string, key: string, items: () -> { any }, name: (any) -> string, on_open: (any) -> (), menu: ((any) -> { any }?)?, extra: { icon: (any) -> string? }?, flat: boolean?, archive: ((any) -> ())?, lanes_part: boolean?, stop: { on_stop: (any) -> (), stoppable: (any) -> boolean }?, tooltip: ((any) -> string)?): Node
 		return ui.show(
 			function(): boolean
 				return #items() > 0
@@ -1021,6 +1022,7 @@ local function lanes(props: Props, sid: string): Node
 				on_archive = archive,
 				on_stop = if stop then stop.on_stop else nil,
 				stoppable = if stop then stop.stoppable else nil,
+				tooltip = tooltip,
 				icon = if extra then extra.icon :: any else nil,
 				menu = menu,
 				items = items,
@@ -1041,28 +1043,43 @@ local function lanes(props: Props, sid: string): Node
 	-- Its ports: the dev servers running for it (the engine's previews,
 	-- watched while the home shows, screens/panel/previews), as the shipping
 	-- app's session card lists them (shell/session_info.rs `render_session_ports`):
-	-- what serves each and its port, opening it in a browser tab of the
-	-- panel; its menu opens it there or in the default browser, or copies
-	-- its address.
+	-- the process serving each (its command line in its tooltip) and its
+	-- port, opening it in a browser tab of the panel; its menu opens it
+	-- there or in the default browser, or copies its address. Held as
+	-- `Previews.hold` holds them: a test's server, open a moment, never
+	-- shows; one closed stays a while, faded.
 	ui.effect(function()
 		if props.showing() then
 			ui.on_cleanup(Previews.use(sid))
 		end
 	end)
+	local held = Previews.hold(function(): string?
+		return sid
+	end)
 	local ports = ui.computed(function(): { any }
 		local out = {}
-		for _, sv in Previews.services(sid) do
+		for _, sv in held() do
 			local host = string.match(sv.url or "", "^%a+://([^/]+)") or ""
+			local name = if sv.name and sv.name ~= "" then sv.name else host
+			local process = if type(sv.process) == "string" and sv.process ~= "" then sv.process else nil
 			table.insert(out, {
-				id = `port:{sv.id}`,
-				title = if sv.name and sv.name ~= "" then sv.name else host,
+				id = `port:{sv.id}:{sv.port}`,
+				-- (What runs it; else what the engine makes of it, "HTTP server".)
+				title = process or name,
 				corner = `:{sv.port}`,
 				detail = if sv.remote and sv.device and sv.device ~= "" then `{sv.device} · {host}` else host,
 				url = sv.url,
+				faded = sv.closed == true,
+				command = if type(sv.command) == "string" and sv.command ~= "" then sv.command else nil,
+				closed = sv.closed == true,
 			})
 		end
 		return out
 	end)
+	local function port_tip(l: any): string
+		local says = l.command or l.url or l.title
+		return if l.closed then `{locale.s("panel.home.port_closed")}\n{says}` else says
+	end
 	local function port_menu(l: any): { any }?
 		local url = l.url
 		if type(url) ~= "string" or url == "" then
@@ -1075,9 +1092,15 @@ local function lanes(props: Props, sid: string): Node
 		end)
 	end
 	-- Local previews that can't open now (the engine's proxy): one plain
-	-- line, its why only in its tooltip.
+	-- line, its why only in its tooltip; only while a port's open (one kept
+	-- a while, closed, has nothing to open).
 	local trouble = ui.computed(function(): string?
-		return if #ports:get() > 0 then Previews.trouble(sid) else nil
+		for _, l in ports:get() do
+			if not l.closed then
+				return Previews.trouble(sid)
+			end
+		end
+		return nil
 	end)
 	return ui.column {
 		id = "panel-home-lanes",
@@ -1098,7 +1121,7 @@ local function lanes(props: Props, sid: string): Node
 				icon = function(_l: any): string?
 					return "global"
 				end,
-			}, true),
+			}, true, nil, nil, nil, port_tip),
 			ui.show(function(): boolean
 				return trouble:get() ~= nil
 			end, ui.row {

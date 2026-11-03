@@ -4,7 +4,13 @@
 //! `*.localhost` address), published as the shared state `previews`:
 //!
 //!   { chat, ready, error?, services = { { id, name, port, url, project,
-//!     device, cwd, remote } } }
+//!     device, cwd, pid, started, process, command } } }
+//!
+//! `process` names what listens, short (`cargo test zeron_engine`, `node
+//! server.js`, `python3 -m http.server`), `command` its whole command line:
+//! from the engine's `command` where it sends one, else read here when the
+//! process runs on this machine (the same pid in the same folder), else
+//! both empty.
 //!
 //! One chat is watched at a time (the panel shows one session):
 //!
@@ -122,21 +128,48 @@ fn snapshot(chat: &str, item: &Json) -> Value {
             } else {
                 format!("http://localhost:{port}")
             };
+            let pid = s["pid"].as_u64().unwrap_or(0);
+            let cwd = s["cwd"].as_str().unwrap_or_default();
+            let mut args: Vec<String> = s["command"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect();
+            if args.is_empty() {
+                args = shown_command(&local_args(pid as u32, cwd));
+            }
             Value::record([
                 ("id", Value::from(s["id"].as_str().unwrap_or_default())),
                 ("name", Value::from(s["name"].as_str().unwrap_or_default())),
                 ("port", Value::Num(port as f64)),
                 ("url", Value::from(url.as_str())),
-                ("project", Value::from(s["projectName"].as_str().unwrap_or_default())),
-                ("device", Value::from(s["deviceName"].as_str().unwrap_or_default())),
-                ("cwd", Value::from(s["cwd"].as_str().unwrap_or_default())),
+                (
+                    "project",
+                    Value::from(s["projectName"].as_str().unwrap_or_default()),
+                ),
+                (
+                    "device",
+                    Value::from(s["deviceName"].as_str().unwrap_or_default()),
+                ),
+                ("cwd", Value::from(cwd)),
+                ("pid", Value::Num(pid as f64)),
+                (
+                    "started",
+                    Value::Num(s["startedAt"].as_u64().unwrap_or(0) as f64),
+                ),
+                ("process", Value::from(process_label(&args).as_str())),
+                ("command", Value::from(command_line(&args).as_str())),
             ])
         })
         .collect();
     let mut fields = vec![
         ("chat", Value::from(chat)),
         ("ready", Value::Bool(true)),
-        ("remote", Value::Bool(item["remote"].as_bool().unwrap_or(false))),
+        (
+            "remote",
+            Value::Bool(item["remote"].as_bool().unwrap_or(false)),
+        ),
         ("services", Value::List(services.into())),
     ];
     if let Some(error) = item["error"].as_str() {
@@ -146,6 +179,180 @@ fn snapshot(chat: &str, item: &Json) -> Value {
         fields.push(("project", Value::from(project)));
     }
     Value::record(fields)
+}
+
+/// The arguments of `pid`, where it runs on this machine in `cwd` (a
+/// remote device's pid names some other process here, or none).
+#[cfg(target_os = "linux")]
+fn local_args(pid: u32, cwd: &str) -> Vec<String> {
+    if pid == 0 || cwd.is_empty() {
+        return Vec::new();
+    }
+    let here = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+    if here.as_deref() != Some(std::path::Path::new(cwd)) {
+        return Vec::new();
+    }
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .filter(|b| !b.is_empty())
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_args(_pid: u32, _cwd: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// Values that look like credentials as `…`, as the engine sends a command
+/// (zeron_preview::discovery::shown_command; its copy, for the arguments
+/// read here).
+fn shown_command(args: &[String]) -> Vec<String> {
+    fn secret(name: &str) -> bool {
+        let name = name.trim_start_matches('-').to_ascii_lowercase();
+        [
+            "token",
+            "secret",
+            "passw",
+            "auth",
+            "credential",
+            "cookie",
+            "key",
+        ]
+        .iter()
+        .any(|word| name.contains(word))
+    }
+    fn userinfo(arg: &str) -> Option<String> {
+        let (scheme, rest) = arg.split_once("://")?;
+        let (user, host) = rest.split_once('@')?;
+        (!user.contains('/') && user.contains(':')).then(|| format!("{scheme}://…@{host}"))
+    }
+    let mut hide_next = false;
+    args.iter()
+        .map(|arg| {
+            if std::mem::take(&mut hide_next) && !arg.starts_with('-') {
+                return "…".to_string();
+            }
+            if let Some((name, _)) = arg.split_once('=')
+                && !name.contains('/')
+                && secret(name)
+            {
+                return format!("{name}=…");
+            }
+            if arg.starts_with('-') && !arg.contains('=') && secret(arg) {
+                hide_next = true;
+            }
+            userinfo(arg).unwrap_or_else(|| arg.clone())
+        })
+        .collect()
+}
+
+fn base(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// What listens, in a few words: a runner with what it runs (`npm run
+/// dev`, `python3 -m http.server`, `node server.js`), a package's own
+/// command (`vite`), a test binary as what built it (`cargo test
+/// zeron_engine`), else the program (`zeron-engine`).
+fn process_label(args: &[String]) -> String {
+    let Some(first) = args.first() else {
+        return String::new();
+    };
+    let program = base(first);
+    // A Rust test binary: target/<profile>/deps/<crate>-<16 hex>.
+    if first.contains("/deps/")
+        && let Some((name, hash)) = program.rsplit_once('-')
+        && hash.len() == 16
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return format!("cargo test {name}");
+    }
+    let plain = |a: &&String| !a.starts_with('-');
+    let lower = program.to_ascii_lowercase();
+    let label = if lower.starts_with("python") {
+        match args.iter().position(|a| a == "-m") {
+            Some(i) if i + 1 < args.len() => format!("{program} -m {}", args[i + 1]),
+            _ => match args.iter().skip(1).find(plain) {
+                Some(script) => format!("{program} {}", base(script)),
+                None => program.to_string(),
+            },
+        }
+    } else if matches!(
+        lower.as_str(),
+        "node" | "bun" | "deno" | "ruby" | "perl" | "php"
+    ) {
+        match args.iter().skip(1).find(plain) {
+            // A package's own command, run through its bin script.
+            Some(script) if script.contains("node_modules/") => {
+                let after = script.rsplit("node_modules/").next().unwrap_or(script);
+                let after = after.strip_prefix(".bin/").unwrap_or(after);
+                if after.starts_with('@') {
+                    after.splitn(3, '/').take(2).collect::<Vec<_>>().join("/")
+                } else {
+                    after.split('/').next().unwrap_or(after).to_string()
+                }
+            }
+            Some(script) => format!("{program} {}", base(script)),
+            None => program.to_string(),
+        }
+    } else if matches!(
+        lower.as_str(),
+        "npm"
+            | "pnpm"
+            | "yarn"
+            | "npx"
+            | "bunx"
+            | "uv"
+            | "uvx"
+            | "cargo"
+            | "go"
+            | "dotnet"
+            | "make"
+            | "just"
+    ) {
+        let rest: Vec<&str> = args
+            .iter()
+            .skip(1)
+            .filter(plain)
+            .take(2)
+            .map(|a| base(a))
+            .collect();
+        if rest.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", rest.join(" "))
+        }
+    } else {
+        program.to_string()
+    };
+    clip(&label, 48)
+}
+
+/// The command line whole, an argument with a space quoted.
+fn command_line(args: &[String]) -> String {
+    let line = args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    clip(&line, 600)
+}
+
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -164,5 +371,94 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(crate::auth::text(&list[0].field("url").unwrap()), "http://web.zeron.localhost:27800");
         assert!(v.field("ready").unwrap().truthy());
+        // (An older engine sends no command, and pid 123 isn't in /w here.)
+        assert_eq!(crate::auth::text(&list[0].field("process").unwrap()), "");
+    }
+
+    #[test]
+    fn a_service_names_the_command_the_engine_sends() {
+        let item = json!({
+            "proxyPort": 27800,
+            "services": [{ "id": "a", "name": "HTTP server", "port": 8000, "hostname": "h.localhost", "pid": 9, "startedAt": 5,
+                "command": ["python3", "-m", "http.server", "8000"] }],
+        });
+        let v = snapshot("c1", &item);
+        let Value::List(list) = v.field("services").unwrap() else {
+            panic!("services")
+        };
+        assert_eq!(
+            crate::auth::text(&list[0].field("process").unwrap()),
+            "python3 -m http.server"
+        );
+        assert_eq!(
+            crate::auth::text(&list[0].field("command").unwrap()),
+            "python3 -m http.server 8000"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_service_on_this_machine_is_named_from_its_process() {
+        let pid = std::process::id();
+        let cwd = std::env::current_dir().unwrap();
+        let item = json!({
+            "services": [{ "id": "a", "name": "HTTP server", "port": 1, "hostname": "h.localhost", "pid": pid, "cwd": cwd.to_string_lossy() }],
+        });
+        let v = snapshot("c1", &item);
+        let Value::List(list) = v.field("services").unwrap() else {
+            panic!("services")
+        };
+        assert!(!crate::auth::text(&list[0].field("process").unwrap()).is_empty());
+        // Another folder: some other process with that pid, unnamed.
+        let item = json!({ "services": [{ "id": "a", "pid": pid, "cwd": "/nowhere" }] });
+        let v = snapshot("c1", &item);
+        let Value::List(list) = v.field("services").unwrap() else {
+            panic!("services")
+        };
+        assert_eq!(crate::auth::text(&list[0].field("process").unwrap()), "");
+    }
+
+    #[test]
+    fn a_process_is_named_in_a_few_words() {
+        let label =
+            |a: &[&str]| process_label(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            label(&[
+                "/w/target/debug/deps/zeron_engine-0123456789abcdef",
+                "--test-threads",
+                "4"
+            ]),
+            "cargo test zeron_engine"
+        );
+        assert_eq!(label(&["/usr/bin/zeron-engine", "serve"]), "zeron-engine");
+        assert_eq!(label(&["node", "/w/server.js"]), "node server.js");
+        assert_eq!(
+            label(&["node", "/w/node_modules/.bin/vite", "--port", "5173"]),
+            "vite"
+        );
+        assert_eq!(
+            label(&["node", "/w/node_modules/@scope/cli/bin/run.js"]),
+            "@scope/cli"
+        );
+        assert_eq!(
+            label(&["/usr/bin/python3", "-m", "http.server", "8000"]),
+            "python3 -m http.server"
+        );
+        assert_eq!(label(&["python", "app.py"]), "python app.py");
+        assert_eq!(label(&["npm", "run", "dev"]), "npm run dev");
+        assert_eq!(label(&["cargo", "test", "-p", "x"]), "cargo test x");
+        assert_eq!(label(&[]), "");
+    }
+
+    #[test]
+    fn a_command_hides_what_looks_like_credentials() {
+        let args: Vec<String> = ["serve", "--token", "abc", "API_KEY=x", "--port", "1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            command_line(&shown_command(&args)),
+            "serve --token … API_KEY=… --port 1"
+        );
     }
 }

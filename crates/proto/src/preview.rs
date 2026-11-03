@@ -40,6 +40,11 @@ pub struct PreviewService {
     /// The chat whose agent or terminal started it (see [`ORIGIN_ENV`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    /// The command line of the process listening (its arguments, values
+    /// that look like credentials replaced by `…`), so a client can name the
+    /// process. Empty from engines that predate it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
 }
 
 impl PreviewService {
