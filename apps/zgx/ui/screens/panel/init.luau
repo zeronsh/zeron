@@ -596,7 +596,6 @@ end
 export type Props = { project: any?, session: any?, page: any?, left: (() -> number)?, hold: (() -> number)?, on_last_closed: (() -> ())?, docked: (() -> boolean)?, [any]: any }
 
 -- Where the title bar's controls end, from the window's left (ds/title_bar).
-local CONTROLS_END = ds.TitleBar.controls_end()
 local STRIP_START_PT = (ui.theme.get("space.2") :: number?) or 8
 
 M.Panel = ui.component(function(props: Props): Node
@@ -1091,7 +1090,7 @@ M.Panel = ui.component(function(props: Props): Node
 		pl = if left_of
 			then function(): number
 				local left = left_of() + (if hold then hold() else 0)
-				return ui.raw(math.max(STRIP_START_PT, CONTROLS_END - left), "clear of the title bar's controls, as its edge moves")
+				return ui.raw(math.max(STRIP_START_PT, ds.TitleBar.controls_end() - left), "clear of the title bar's controls, as its edge moves")
 			end
 			else STRIP_START,
 		-- (And the window's own buttons, where they stand at the right.)

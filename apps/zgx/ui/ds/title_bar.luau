@@ -63,24 +63,71 @@ local LIGHT, LIGHT_FIRST, LIGHT_PITCH = 14, 21, 23
 -- `TITLEBAR_CLUSTER_PAD`).
 local TOGGLE_IN, ROW_PAD = 88, 10
 
--- How far in from the window's right edge the window's own buttons reach:
--- Windows' caption buttons, and on Linux the buttons zgx draws where the
--- desktop's `button-layout` asks (GNOME's `appmenu:close`, close at the
--- right). 0 where they stand at the left (macOS's traffic lights, which
--- TOGGLE_IN already clears), are not reported, or there are none. A plugin
--- reads no `ui.window.controls`: 0.
+-- The window's buttons the bar draws as its own controls (Linux: the
+-- window is undecorated and zgx draws none; the app's host says which the
+-- desktop asks for and where, GNOME's `button-layout`, as
+-- `{ left = {…}, right = {…} }` of "minimize", "maximize", "close"). Nil
+-- where the platform draws its own: macOS's traffic lights (TOGGLE_IN
+-- clears them), Windows' caption buttons.
+type WindowButtons = { left: { string }, right: { string } }
+local window_buttons_state = ui.shared("window.buttons", nil :: WindowButtons?)
+local function window_buttons(): WindowButtons?
+	return window_buttons_state:get()
+end
+
+-- A row of `n` bar controls, their gaps between: its width.
+local function controls_w(n: number): number
+	if n == 0 then
+		return 0
+	end
+	local m = island.metrics()
+	return n * m.control + (n - 1) * m.gap
+end
+
+-- Where the toggle stands from the window's left: past the traffic lights
+-- on macOS (Zeron's 88), past the window's buttons where the bar draws them
+-- at its left, else as far in as the bar's right end stands from its edge.
+local function toggle_in(): number
+	local buttons = window_buttons()
+	if buttons == nil then
+		return TOGGLE_IN
+	end
+	if #buttons.left > 0 then
+		return ROW_PAD + controls_w(#buttons.left) + island.metrics().group
+	end
+	return ROW_PAD
+end
+
+-- How far in from the window's right edge the window's own buttons reach,
+-- for what lies on the title line beside them (the panel's strip): the
+-- bar's own, a group's gap before them, where it draws them at its right;
+-- Windows' caption buttons; 0 where they stand at the left or there are
+-- none. A plugin reads neither: 0.
 local function window_buttons_right(): number
+	local buttons = window_buttons()
+	if buttons then
+		local n = #buttons.right
+		return if n > 0 then controls_w(n) + island.metrics().group else 0
+	end
 	local window = ui.window :: any
 	local area_state, controls_state = window.titlebar_area, window.controls
 	if area_state == nil or controls_state == nil then
 		return 0
 	end
-	local area, buttons = area_state:get(), controls_state:get()
-	if area and buttons and buttons.x >= area.x + area.width then
-		return buttons.width
+	local area, rect = area_state:get(), controls_state:get()
+	if area and rect and rect.x >= area.x + area.width then
+		return rect.width
 	end
 	return 0
 end
+
+-- The window's button `name` as a bar control: what the window manager's
+-- own would do.
+local WINDOW_BUTTON: { [string]: { icon: string, label: string, action: string } } = {
+	minimize = { icon = "minus", label = "ds.title_bar.minimize", action = "window.minimize" },
+	maximize = { icon = "square", label = "ds.title_bar.maximize", action = "window.maximize" },
+	close = { icon = "close", label = "ds.title_bar.close", action = "window.close" },
+}
 
 -- A bar control: the design system's icon button at the island's size,
 -- a quiet glyph, a wash under the pointer; when it can't (nothing to go
@@ -115,7 +162,34 @@ local TitleBar = ui.component(function(props: Props): Node
 	-- as an island (a control and its padding), a padding's worth less as it
 	-- comes (Zeron's 28 to 32).
 	local ISLAND_LEFT = m.inset
-	local ISLAND_RIGHT = TOGGLE_IN + CONTROL + GROUP_GAP + CONTROL + CONTROL_GAP + CONTROL + ROW_PAD
+	local function island_right(): number
+		return toggle_in() + CONTROL + GROUP_GAP + CONTROL + CONTROL_GAP + CONTROL + ROW_PAD
+	end
+	-- The window's buttons, as the bar's own controls: not in a preview
+	-- (`lights`), which draws a window's look, not this window's.
+	local function side_buttons(side: "left" | "right"): { string }
+		local buttons = if props.lights then nil else window_buttons()
+		return if buttons then buttons[side] else {}
+	end
+	local function window_button(name: string): Node
+		local b = WINDOW_BUTTON[name]
+		return control(locale.t(b.label), Icon { name = b.icon :: any, size = 16 }, nil, function()
+			pcall(ui.invoke, b.action)
+		end)
+	end
+	local function window_button_row(side: "left" | "right"): Node
+		return ui.each(ui.computed(function(): { string }
+			return side_buttons(side)
+		end), function(name: string): Node
+			return window_button(name)
+		end, {
+			key = function(name: string): string
+				return name
+			end,
+			direction = "row",
+			gap = ui.raw(CONTROL_GAP, "the island's gap between its controls"),
+		})
+	end
 	local ISLAND_TO = island.thickness()
 	local ISLAND_FROM = ISLAND_TO - m.pad
 	local collapsed = props.collapsed
@@ -159,7 +233,9 @@ local TitleBar = ui.component(function(props: Props): Node
 	local left_island: ContainerProps = {
 		absolute = true,
 		left = ISLAND_LEFT,
-		w = ISLAND_RIGHT - ISLAND_LEFT,
+		w = function(): number
+			return island_right() - ISLAND_LEFT
+		end,
 		top = motion.tween(ui.computed(function(): number
 			return MIDDLE - (if shown() then ISLAND_TO else ISLAND_FROM) / 2
 		end), motion.sidebar),
@@ -172,13 +248,27 @@ local TitleBar = ui.component(function(props: Props): Node
 	for _, light in lights do
 		table.insert(bar, light)
 	end
+	-- The window's buttons the desktop puts at the left, before the toggle.
+	table.insert(
+		bar,
+		ui.row {
+			absolute = true,
+			left = ROW_PAD,
+			top = MIDDLE - CONTROL / 2,
+			h = CONTROL,
+			items = "center",
+			pointer_events = "auto",
+			window_drag = true,
+			window_button_row("left"),
+		}
+	)
 	-- (Its own controls first, then the page's: Tab reads the bar left to
 	-- right.)
 	table.insert(
 		bar,
 		ui.row {
 			absolute = true,
-			left = TOGGLE_IN,
+			left = toggle_in,
 			top = MIDDLE - CONTROL / 2,
 			items = "center",
 			pointer_events = "auto",
@@ -208,7 +298,7 @@ local TitleBar = ui.component(function(props: Props): Node
 			control(locale.t("ds.title_bar.forward"), Icon { name = "arrow-right", size = 16 }, props.can_forward, props.on_forward),
 		}
 	)
-	if props.actions then
+	do
 		-- Over artwork, its island: the left island's glass and height,
 		-- round the row as far as the row stands in from the window's edge
 		-- (the island's inset from it, as at the left), there while the row
@@ -231,9 +321,7 @@ local TitleBar = ui.component(function(props: Props): Node
 		local actions_island: ContainerProps = {
 			id = "titlebar-actions-island",
 			absolute = true,
-			right = function(): number
-				return m.inset + window_buttons_right()
-			end,
+			right = m.inset,
 			w = function(): number
 				return row_w() + side * 2
 			end,
@@ -248,8 +336,16 @@ local TitleBar = ui.component(function(props: Props): Node
 		island.glass(actions_island)
 		table.insert(bar, ui.div(actions_island))
 		-- The page's controls, as far in from the right as the row runs past
-		-- its last control at the left, and clear of the window's own
-		-- buttons where they stand at the right.
+		-- its last control at the left; then the window's buttons the desktop
+		-- puts at the right, a group's gap after them, on the same island.
+		local row_children: { Node } = {}
+		if props.actions then
+			table.insert(row_children, props.actions)
+			table.insert(row_children, ui.show(function(): boolean
+				return #side_buttons("right") > 0
+			end, ui.div { w = ui.raw(GROUP_GAP - CONTROL_GAP, "a group's gap before the window's buttons, less the row's own"), shrink = 0 }))
+		end
+		table.insert(row_children, window_button_row("right"))
 		table.insert(
 			bar,
 			ui.row {
@@ -260,9 +356,7 @@ local TitleBar = ui.component(function(props: Props): Node
 					end
 				end,
 				absolute = true,
-				right = function(): number
-					return ROW_PAD + window_buttons_right()
-				end,
+				right = ROW_PAD,
 				top = MIDDLE - CONTROL / 2,
 				h = CONTROL,
 				items = "center",
@@ -270,7 +364,9 @@ local TitleBar = ui.component(function(props: Props): Node
 				pointer_events = "auto",
 				-- (Between its controls, the bar is still the window's to move.)
 				window_drag = true,
-				props.actions,
+				-- (Its children appended: `actions` may be nil, and a nil mid-table
+				-- would end the list there.)
+				table.unpack(row_children),
 			}
 		)
 	end
@@ -283,7 +379,7 @@ end)
 -- right edge): what lies on the title line beside them starts past it.
 local function controls_end(): number
 	local m = island.metrics()
-	return TOGGLE_IN + m.control + m.group + m.control + m.gap + m.control + ROW_PAD
+	return toggle_in() + m.control + m.group + m.control + m.gap + m.control + ROW_PAD
 end
 
 local M = setmetatable({ control = control, controls_end = controls_end, window_buttons_right = window_buttons_right }, {
