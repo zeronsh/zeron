@@ -499,6 +499,7 @@
       "empty": "No sessions yet",
       "resize": "Resize sidebar",
       "show_less": "Show less",
+      "empty_projects_word": "Empty",
       "empty_projects": "{n, plural, one {# empty project} other {# empty projects}}"
     },
     "git": {

@@ -499,6 +499,7 @@
       "empty": "暂无会话",
       "resize": "调整侧边栏大小",
       "show_less": "显示更少",
+      "empty_projects_word": "空项目",
       "empty_projects": "{n, plural, other {# 个空项目}}"
     },
     "git": {
