@@ -36,6 +36,8 @@ local Invocations = require("@app/screens/chat/invocations")
 local ZeronCommands = require("@app/screens/chat/zeron_commands")
 -- (Loaded with the chat page: captures land on its composer.)
 local Appshots = require("@app/screens/chat/appshots")
+local queued = require("@app/screens/chat/queued")
+local ReplyImages = require("@app/screens/chat/reply_images")
 
 -- The title bar's height (Zeron's): a new chat centres under it.
 local TITLE_H = 38
@@ -360,9 +362,27 @@ local function Composer(): Node
 			chosen:set({})
 		end
 	end)
-	local queue = ui.computed(function(): { any }
+	-- A queued row's pictures, each a path on the chat's device: read from
+	-- there, on another (as its sent messages' are, screens/chat/session).
+	local queue_pictures = ReplyImages.for_attachments(function(): any
+		local s = open()
+		if not s or s.state == "missing" then
+			return nil
+		end
+		return { id = s.id, device = s.device, cwd = s.cwd, here = sessions.now:get().here }
+	end)
+	-- The engine's queue, and the queue shown: with what was just asked of
+	-- it (screens/chat/queued), from the frame it's asked.
+	local engine_queue = ui.computed(function(): { any }
 		local s = open()
 		return if s and s.queue then s.queue else {}
+	end)
+	local queue = ui.computed(function(): { any }
+		return queued.rows(session_id:get(), engine_queue:get())
+	end)
+	ui.effect(function()
+		local rows = engine_queue:get()
+		queued.prune(session_id:peek(), rows)
 	end)
 	local todos = ui.computed(function(): { any }
 		local s = open()
@@ -647,6 +667,71 @@ local function Composer(): Node
 		shared.show(key)
 	end)
 
+	-- A queued row sent on: steered into the turn, sent now (one with
+	-- files interrupts), or, to an agent that reads only between turns,
+	-- sent next. It leaves the queue (or goes first) and joins the
+	-- transcript at once; the engine's word follows, and a refusal puts it
+	-- back and says so.
+	-- (A row still on its way to the queue goes once it's there:
+	-- `then_send`, by its own id.)
+	local then_send: { [string]: boolean } = {}
+	local function send_queued(item: string)
+		local id = session_id:peek()
+		if not id then
+			return
+		end
+		-- (Hidden already, a row that was on its way: the engine's.)
+		local row: any = nil
+		for _, r in queue:peek() do
+			if r.id == item then
+				row = r
+			end
+		end
+		for _, r in engine_queue:peek() do
+			if r.id == item and not row then
+				row = r
+			end
+		end
+		if not row then
+			return
+		end
+		if row.sending then
+			then_send[item] = true
+			queued.hide(id, { item })
+			return
+		end
+		local s = open()
+		local carries = row.cargo ~= nil and #row.cargo > 0
+		local next_turn = running:peek() and not carries and s ~= nil and s.steers == false
+		if next_turn then
+			queued.front(id, item)
+		else
+			queued.hide(id, { item })
+			local here = false
+			for _, m in store.messages:peek() do
+				here = here or m.id == item
+			end
+			if not here then
+				store.messages:push { id = item, role = "user", text = row.text, waiting = "sending" }
+			end
+		end
+		store.queue(id, { op = "send", item = item }):after(function() end, function()
+			if next_turn then
+				queued.unfront(id, item)
+			else
+				queued.unhide(id, { item })
+				local kept = {}
+				for _, m in store.messages:peek() do
+					if not (m.id == item and m.waiting == "sending") then
+						table.insert(kept, m)
+					end
+				end
+				store.messages:set(kept)
+			end
+			own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+		end)
+	end
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
@@ -721,9 +806,26 @@ local function Composer(): Node
 					end
 				end
 			end
+			-- Queued (a turn runs): its row in the queue at once, the
+			-- engine's copy taking its place as it comes.
+			local row: string? = nil
 			local function deliver(message_id: string?)
 				req.message_id = message_id
-				store.send(req :: any):after(function()
+				store.send(req :: any):after(function(got: any)
+					if row then
+						if type(got) == "string" then
+							queued.added(id, row, got)
+							local steer = then_send[row]
+							then_send[row] = nil
+							if steer then
+								send_queued(got)
+							end
+						else
+							-- (Run, not queued: the turn had ended.)
+							then_send[row] = nil
+							queued.forget(id, row)
+						end
+					end
 					-- Sent with it: the session has it now; no pick left.
 					if req.model or req.effort or req.fast ~= nil or req.options then
 						local all = table.clone(shared.picks:peek())
@@ -733,6 +835,10 @@ local function Composer(): Node
 						end
 					end
 				end, function(e: any)
+					if row then
+						then_send[row] = nil
+						queued.forget(id, row)
+					end
 					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
 					if shared.text:peek() == "" then
 						shared.text:set(text_out)
@@ -740,6 +846,13 @@ local function Composer(): Node
 				end)
 			end
 			if running:peek() then
+				local files_carried = {}
+				for _, item in carried do
+					if item.path then
+						table.insert(files_carried, item)
+					end
+				end
+				row = queued.add(id, engine_queue:peek(), text_out, if #files_carried > 0 then files_carried else nil)
 				deliver(nil)
 				return
 			end
@@ -1013,14 +1126,49 @@ local function Composer(): Node
 			end,
 			on_escape = store.escape,
 			queue = queue,
+			-- (An agent that reads only between turns takes a row next.)
 			can_steer = function(): boolean
-				return running:get()
+				local s = open()
+				return running:get() and not (s ~= nil and s.steers == false)
 			end,
 			on_queue_send = function(item: string)
+				send_queued(item)
+			end,
+			-- Every row there is (not one on its way or being edited) as one
+			-- message, steered: gone from the queue and in the transcript at
+			-- once; back, and said, if the engine refuses.
+			on_queue_steer_all = function()
 				local id = session_id:peek()
-				if id then
-					store.queue(id, { op = "send", item = item })
+				if not id then
+					return
 				end
+				local ids, texts, files = {}, {}, {}
+				for _, r in queue:peek() do
+					if not (r.sending or r.locked or r.editing) then
+						table.insert(ids, r.id)
+						table.insert(texts, r.text)
+						for _, c in r.cargo or {} do
+							table.insert(files, c)
+						end
+					end
+				end
+				if #ids < 2 then
+					return
+				end
+				local mid = store.new_id()
+				queued.hide(id, ids)
+				store.messages:push { id = mid, role = "user", text = queued.numbered(texts), attachments = files, waiting = "sending" }
+				store.steer_all(id, ids, mid):after(function() end, function()
+					queued.unhide(id, ids)
+					local kept = {}
+					for _, m in store.messages:peek() do
+						if m.id ~= mid then
+							table.insert(kept, m)
+						end
+					end
+					store.messages:set(kept)
+					own_notice:set { tone = "danger", key = "chat.composer.didnt_send", dismissable = true }
+				end)
 			end,
 			on_queue_edit = function(item: string)
 				local id = session_id:peek()
@@ -1039,23 +1187,30 @@ local function Composer(): Node
 					}
 				end)
 			end,
+			queue_pictures = queue_pictures,
 			on_queue_save = function()
 				end_edit("commit")
 			end,
 			on_queue_cancel = function()
 				end_edit("cancel")
 			end,
+			-- Gone at once; back, and said, if the engine refuses.
 			on_queue_remove = function(item: string)
 				local id = session_id:peek()
-				if id then
-					store.queue(id, { op = "remove", item = item })
+				if not id then
+					return
 				end
+				queued.hide(id, { item })
+				store.queue(id, { op = "remove", item = item }):after(function() end, function()
+					queued.unhide(id, { item })
+					own_notice:set { tone = "danger", key = "chat.composer.remove_failed", dismissable = true }
+				end)
 			end,
 			on_queue_reorder = function(from: number, to: number)
 				local id = session_id:peek()
 				local list = queue:peek()
-				if id and list[from] then
-					store.queue(id, { op = "move", item = list[from].id, to = to })
+				if id and list[from] and not list[from].sending then
+					store.queue(id, { op = "move", item = list[from].id, to = to }):after(function() end, function() end)
 				end
 			end,
 			todos = todos,

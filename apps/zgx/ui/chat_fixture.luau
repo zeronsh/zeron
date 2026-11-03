@@ -143,8 +143,77 @@ local function settled(value: any): any
 		end,
 	}
 end
+-- The engine's answers to the queue held back (`queue_held`), as a chat on
+-- another device keeps the page waiting: each answered as `engine_answers`
+-- or refused as `engine_refuses` says.
+local HELD = ui.state("fixture_queue_held", false)
+local held: { { ok: () -> any, err: (any) -> () } } = {}
+local function answer(ok: () -> any): any
+	if not HELD:peek() then
+		return settled(ok())
+	end
+	local p: any = {}
+	function p.after(_self: any, on_ok: (any) -> (), on_err: (any) -> ())
+		table.insert(held, {
+			ok = function()
+				on_ok(ok())
+			end,
+			err = on_err,
+		})
+	end
+	return p
+end
+ui.command {
+	id = "queue_held",
+	title = "The engine answers the queue later",
+	run = function()
+		HELD:set(true)
+	end,
+}
+ui.command {
+	id = "engine_answers",
+	title = "The engine answers what the queue asked",
+	run = function()
+		local all = held
+		held = {}
+		for _, h in all do
+			h.ok()
+		end
+	end,
+}
+ui.command {
+	id = "engine_refuses",
+	title = "The engine refuses what the queue asked",
+	run = function()
+		local all = held
+		held = {}
+		for _, h in all do
+			h.err({ message = "failed" })
+		end
+	end,
+}
+-- The open session's queue, as the engine has it.
+local function engine_queue(id: string): { any }
+	return table.clone((META[id] or {}).queue or {})
+end
+local queued_n = 0
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	-- A turn runs: it's queued (the engine's row, and its id).
+	if req.session and META[req.session] and META[req.session].running and not req.fresh then
+		return answer(function()
+			queued_n += 1
+			local id = `eq{queued_n}`
+			local q = engine_queue(req.session)
+			local cargo = {}
+			for _, a in req.attachments or {} do
+				table.insert(cargo, { kind = a.kind, name = a.name, path = a.path, src = if a.kind == "image" then a.path else nil })
+			end
+			table.insert(q, { id = id, text = req.text, cargo = if #cargo > 0 then cargo else nil })
+			publish(req.session, { queue = q })
+			return id
+		end)
+	end
 	for _, a in req.attachments or {} do
 		note(`att:{a.path}|{if a.on_host then "host" else "upload"}`)
 	end
@@ -274,7 +343,60 @@ stub.deny = function(id: string, request: string)
 	note(`deny:{id}:{request}`)
 end
 stub.answer = function() end
-stub.queue = function() end
+-- The queue's rows sent on (into the transcript), removed, moved: as the
+-- engine would, once it answers.
+stub.queue = function(id: string, op: any): any
+	note(`queue:{id}:{op.op}:{op.item}`)
+	return answer(function()
+		local q = engine_queue(id)
+		local row = nil
+		for i, r in q do
+			if r.id == op.item then
+				row = table.remove(q, i)
+				break
+			end
+		end
+		if op.op == "move" and row then
+			table.insert(q, math.clamp(op.to or 1, 1, #q + 1), row)
+		end
+		publish(id, { queue = q })
+		if op.op == "send" and row and opened == id then
+			local here = false
+			for i, m in store.messages:peek() do
+				if m.id == row.id then
+					here = true
+					store.messages:set_key({ i, "waiting" }, ui.null)
+				end
+			end
+			if not here then
+				store.messages:push { id = row.id, role = "user", text = row.text }
+			end
+		end
+		return nil
+	end)
+end
+-- Queued rows steered as one: gone from the queue, one message in the
+-- transcript, its words the page's (the host numbers them the same way).
+stub.steer_all = function(id: string, items: { string }, message_id: string): any
+	note(`steer_all:{id}:{table.concat(items, ",")}`)
+	return answer(function()
+		local q = {}
+		for _, r in engine_queue(id) do
+			if not table.find(items, r.id) then
+				table.insert(q, r)
+			end
+		end
+		publish(id, { queue = q })
+		if opened == id then
+			for i, m in store.messages:peek() do
+				if m.id == message_id then
+					store.messages:set_key({ i, "waiting" }, ui.null)
+				end
+			end
+		end
+		return nil
+	end)
+end
 -- One queued message, editable here.
 stub.queue_edit = function(id: string, item: string): any
 	note(`queue_edit:{id}:{item}`)
@@ -299,6 +421,36 @@ ui.command {
 	run = function()
 		if opened then
 			publish(opened, { queue = { { id = "q1", text = "Queued words" } } })
+		end
+	end,
+}
+ui.command {
+	id = "queue_with_files",
+	title = "A message with a picture and a file waits in the queue, after one without",
+	run = function()
+		if opened then
+			publish(opened, {
+				queue = {
+					{ id = "q1", text = "Plain words" },
+					{
+						id = "q2",
+						text = "Look at these",
+						cargo = {
+							{ kind = "image", name = "flint.png", src = "assets/favicons/flint.png" },
+							{ kind = "file", name = "notes.txt" },
+						},
+					},
+				},
+			})
+		end
+	end,
+}
+ui.command {
+	id = "queue_two",
+	title = "Two messages wait in the queue",
+	run = function()
+		if opened then
+			publish(opened, { queue = { { id = "q1", text = "First queued" }, { id = "q2", text = "Second queued" } } })
 		end
 	end,
 }
