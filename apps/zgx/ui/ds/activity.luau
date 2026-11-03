@@ -28,6 +28,7 @@ local Markdown = require("@self/markdown")
 local locale = require("@self/locale")
 local IconButton = require("@self/icon_button").IconButton
 local FoldButton = require("@self/fold_button")
+local ReplyPicture = require("@self/reply_picture")
 
 export type Kind = "exec" | "read" | "edit" | "write" | "search" | "glob" | "web" | "todo" | "agent" | "thought"
 -- One tool: what kind, what it did ("Read", "transcript.rs"), and for an
@@ -65,6 +66,10 @@ export type Tool = {
 	diff_ref: string?,
 	stats: { ToolDetail.Stat }?,
 	diff: ToolDetail.Diff?,
+	-- The pictures its result carried (a Read of a screenshot), as the
+	-- engine keeps them: copies on the chat's host, which the row opens to
+	-- (Zeron's chip previews, crates/ui tool_images.rs).
+	pictures: { { path: string, name: string? } }?,
 }
 
 export type Props = {
@@ -89,6 +94,9 @@ export type Props = {
 	-- the tool's result comes, and "Stopped" after. `settle(false)` says it
 	-- wasn't stopped after all (the caller says why), and the row is as it was.
 	stop_tool: ((tool: Tool, settle: (stopping: boolean) -> ()) -> ())?,
+	-- Where a tool's pictures are read from (ds/transcript's
+	-- `shown_pictures`: files on the chat's host). Without it, none show.
+	pictures: ReplyPicture.Pictures?,
 }
 
 local GLYPH: { [Kind]: Icon.Name } = {
@@ -450,7 +458,29 @@ local function stop_control(now: () -> Tool, live: () -> boolean, stop_tool: (To
 	}
 end
 
-local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?, live: (() -> boolean)?, stop_tool: ((Tool, (boolean) -> ()) -> ())?): Node
+-- A tool's pictures under its opened row: one alone, or several on a tray,
+-- in a lightbox group of their own.
+local function tool_pictures(now: () -> Tool, shown: ReplyPicture.Pictures): Node
+	local group = `tool:{now().id}`
+	local function entries(): { ReplyPicture.Entry }
+		local out = {}
+		for _, it in now().pictures or {} do
+			table.insert(out, { src = it.path, alt = it.name or "" })
+		end
+		return out
+	end
+	return ui.presence(function(): string
+		return if #(now().pictures or {}) > 1 then "run" else "one"
+	end, function(kind: string): Node
+		if kind == "run" then
+			return ReplyPicture.Run { pictures = shown, items = entries, group = group, set = entries }
+		end
+		local first = entries()[1] or { src = "", alt = "" }
+		return ReplyPicture.Single { pictures = shown, src = first.src, alt = first.alt, group = group, set = entries }
+	end, { w_full = true, min_w = 0 })
+end
+
+local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean, open_subagent: ((sub: any) -> ())?, live: (() -> boolean)?, stop_tool: ((Tool, (boolean) -> ()) -> ())?, pictures: ReplyPicture.Pictures?): Node
 	if now().kind == "thought" then
 		return thought_row(now, below)
 	end
@@ -466,9 +496,14 @@ local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean
 	local function has_detail(): boolean
 		return ToolDetail.has(now() :: any)
 	end
+	-- The pictures its result carried, where they can be read.
+	local function has_pictures(): boolean
+		local list = now().pictures
+		return pictures ~= nil and list ~= nil and #list > 0
+	end
 	-- Open as the reader left it (opened or closed), else closed.
 	local function showing(): boolean
-		if not (has_call() or has_detail()) then
+		if not (has_call() or has_detail() or has_pictures()) then
 			return false
 		end
 		return CALLS_OPEN:get()[id] == true
@@ -535,7 +570,7 @@ local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean
 						open_subagent(sub)
 						return
 					end
-					if has_call() or has_detail() then
+					if has_call() or has_detail() or has_pictures() then
 						local all = table.clone(CALLS_OPEN:peek())
 						all[id] = not showing()
 						CALLS_OPEN:set(all)
@@ -624,6 +659,17 @@ local function row(now: () -> Tool, below: () -> boolean, running: () -> boolean
 			ui.column {
 				w_full = true,
 				ui.show(has_call, call_block(now)),
+				if pictures
+					then ui.show(
+						has_pictures,
+						ui.div {
+							ml = ui.raw(GUTTER, "under the line's words, past the tree's gutter"),
+							mt = "$space.1",
+							mb = "$space.1",
+							tool_pictures(now, pictures),
+						}
+					)
+					else nil,
 				ui.show(
 					has_detail,
 					ui.div {
@@ -806,7 +852,7 @@ return ui.component(function(props: Props): Node
 						return now:get()
 					end, below_of(t), function(): boolean
 						return live() and last()
-					end, props.open_subagent, live, props.stop_tool)
+					end, props.open_subagent, live, props.stop_tool, props.pictures)
 				end, {
 					key = function(t: Tool): string
 						return t.id

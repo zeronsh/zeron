@@ -531,6 +531,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
 				stop_tool = if view then view.stop_tool else nil,
+				pictures = if view then view.shown_pictures else nil,
 				tools = function()
 					return brow:get().tools or {}
 				end,
@@ -764,6 +765,7 @@ local function reply(
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
 				stop_tool = if view then view.stop_tool else nil,
+				pictures = if view then view.shown_pictures else nil,
 				tools = function()
 					return now().tools or {}
 				end,

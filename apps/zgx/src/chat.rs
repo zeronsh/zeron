@@ -2689,6 +2689,34 @@ fn entry_text(entry: &Json) -> String {
     out
 }
 
+/// Whether a user entry is only Claude Code's note on a picture a tool read
+/// (`[Image: original WxH, displayed at WxH. …]`, `[Image: source: …]`), as
+/// zeron-harness's `is_synthetic_user_text` reads it: nothing else in it.
+fn image_note_only(entry: &Json) -> bool {
+    let mut notes = 0;
+    for p in entry["parts"].as_array().into_iter().flatten() {
+        match p["kind"].as_str() {
+            Some("text") => {
+                let text = p["text"].as_str().unwrap_or_default().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let note = text
+                    .strip_prefix("[Image: ")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .map(str::trim_start)
+                    .is_some_and(|rest| rest.starts_with("source: ") || rest.starts_with("original "));
+                if !note {
+                    return false;
+                }
+                notes += 1;
+            }
+            _ => return false,
+        }
+    }
+    notes > 0
+}
+
 /// An entry as ds/transcript's message; nil for one it doesn't show.
 pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
     let id = entry["id"].as_str()?;
@@ -2702,6 +2730,13 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            // Claude Code's note on a picture a tool read (its size as the
+            // model saw it), which a subagent's transcript kept as a message
+            // before the engine learned it isn't one: not something anyone
+            // said, so no bubble.
+            if image_note_only(entry) {
+                return None;
+            }
             let (words, mut paths) = split_attachments(&text);
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
@@ -4480,6 +4515,24 @@ mod tests {
         // Out of step: a length that doesn't add up.
         let wrong = json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t0", "text": "!", "len": 9 }], "count": 2 });
         assert!(apply(&mut entries, &wrong).is_err());
+    }
+
+    #[test]
+    fn claude_codes_image_note_is_no_message() {
+        let user = |text: &str| {
+            json!({ "id": "u", "role": "user", "createdAt": 1_788_900_000_000_i64,
+                "parts": [{ "id": "t", "kind": "text", "text": text }] })
+        };
+        for note in [
+            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
+            "[Image: source: /home/me/scratch/test.png]",
+            "  [Image: source: /a.png, original 10x10, displayed at 10x10.]\n",
+        ] {
+            assert!(message(&user(note), None).is_none(), "{note} showed");
+        }
+        // Words of its own around it, or a note-like line that isn't one, show.
+        assert!(message(&user("Look: [Image: original 10x10, displayed at 10x10.]"), None).is_some());
+        assert!(message(&user("[Image: the logo]"), None).is_some());
     }
 
     #[test]
