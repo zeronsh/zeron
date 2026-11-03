@@ -677,7 +677,9 @@
       "show_full": "{what, select, diff {Show full diff} other {Show full output}}",
       "show_full_size": "{what, select, diff {Show full diff ({size})} other {Show full output ({size})}}",
       "loading_full": "{what, select, diff {Loading full diff…} other {Loading full output…}}",
-      "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}"
+      "failed_full": "{what, select, diff {Couldn't load full diff — tap to retry} other {Couldn't load full output — tap to retry}}",
+      "earlier_trimmed": "… earlier output trimmed",
+      "exit_code": "Exit code {code}"
     },
     "activity": {
       "phrase": {
