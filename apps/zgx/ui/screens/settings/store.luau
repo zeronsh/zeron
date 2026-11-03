@@ -102,6 +102,9 @@ local SAYS: { [string]: string } = {
 	invalid = "settings.store.says.invalid",
 	too_large = "settings.store.says.too_large",
 	last_admin = "settings.store.says.last_admin",
+	busy = "settings.store.says.busy",
+	try_again = "settings.store.says.try_again",
+	timed_out = "settings.store.says.timed_out",
 	outdated = "settings.engine.outdated",
 }
 function M.says(word: string?): string
@@ -482,14 +485,35 @@ function M.set_photo(path: string?, crop: { x: number, y: number, side: number }
 	end)
 end
 
--- Deletes your account (`confirm`, your address typed back). `done(word)`:
--- nil once it's gone, else what stopped it ("last_admin", "invalid", …).
-function M.delete_account(confirm: string, done: (word: string?) -> ())
+-- Deletes your account (`confirm`, your address typed back). The engine
+-- deletes it only just after you've signed in again (no agent on this Mac
+-- can): asked for that, the browser opens on signing in again and
+-- `signing_in()` is told, then the deletion lands once you have.
+-- `done(word)`: nil once it's gone, else what stopped it ("last_admin",
+-- "invalid", "cancelled", "timed_out", …).
+function M.delete_account(confirm: string, done: (word: string?) -> (), signing_in: (() -> ())?)
 	host.call("account.delete", { confirm = confirm }):after(function()
 		done(nil)
 	end, function(err: any)
-		done(said(err))
+		local word = said(err)
+		if word ~= "step_up_required" then
+			done(word)
+			return
+		end
+		if signing_in then
+			signing_in()
+		end
+		host.call("account.delete_signed_in", { confirm = confirm }):after(function()
+			done(nil)
+		end, function(again: any)
+			done(said(again))
+		end)
 	end)
+end
+
+-- Stops waiting for that sign-in (its `done` says "cancelled").
+function M.cancel_delete()
+	host.invoke("account.cancel_step_up")
 end
 
 function M.forget()

@@ -12,6 +12,7 @@
 --   settings_stub.member_joins     someone accepts an invitation
 --   settings_stub.refuse_next      the next change is refused ("refused")
 --   settings_stub.not_admin        you're a member, not an admin, from now on
+--   settings_stub.signed_in_again  the browser sign-in a delete waits on lands
 
 local host = require("@app/screens/settings/host")
 local api = require("@account/api")
@@ -24,6 +25,40 @@ local refuse = ui.state("settings_stub_refuse", false)
 local role = ui.state("settings_stub_role", "admin")
 local about_next = ui.state("settings_stub_about_next", "ok")
 local delete_word = ui.state("settings_stub_delete_word", "ok")
+-- What a delete after signing in again answers: "ok", "wait" (until
+-- `settings_stub.signed_in_again`, or cancelled), or a refusal.
+local step_up_word = ui.state("settings_stub_step_up_word", "ok")
+-- The account's signing keys: "some" (this Mac's, one new on another
+-- device, one revoked; listed out of order) or "none".
+local keys_mode = ui.state("settings_stub_keys", "some")
+local signing_keys = {
+	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
+	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
+	{ key = "k_mac", fingerprint = "a1b2 c3d4 e5f6 0718 2930 4a5b 6c7d 8e9f", device_name = "Ada's MacBook Pro", device_id = "d_mac", this_device = true, created_at = 1790000000 },
+}
+-- That wait, while it's open.
+local signing_in: { ok: any, bad: any }? = nil
+local function waiting(): any
+	local p = {}
+	function p.after(_self: any, ok: ((any) -> ())?, bad: ((any) -> ())?)
+		signing_in = { ok = ok, bad = bad }
+	end
+	return p
+end
+local function signed_in_again(word: string?)
+	local w = signing_in
+	signing_in = nil
+	if not w then
+		return
+	end
+	if word then
+		if w.bad then
+			w.bad({ message = word })
+		end
+	elseif w.ok then
+		w.ok(true)
+	end
+end
 -- What the next photo upload answers ("ok", or a refusal like "too_large").
 local photo_word = ui.state("settings_stub_photo_word", "ok")
 -- The last square a photo was cut at, for a test to read.
@@ -156,6 +191,35 @@ local answers: { [string]: (arg: any) -> any } = {
 			return settled(nil, "invalid")
 		elseif word ~= "ok" then
 			return settled(nil, word)
+		end
+		return settled(true)
+	end,
+	["account.delete_signed_in"] = function(arg: any)
+		local word = step_up_word:peek()
+		if arg.confirm ~= me.email then
+			return settled(nil, "invalid")
+		elseif word == "wait" then
+			return waiting()
+		elseif word ~= "ok" then
+			return settled(nil, word)
+		end
+		return settled(true)
+	end,
+	["account.signing_keys"] = function()
+		if keys_mode:peek() == "none" then
+			return settled({ keys = {}, new_keys = {} })
+		end
+		local out = {}
+		for _, k in signing_keys do
+			table.insert(out, table.clone(k))
+		end
+		return settled({ keys = out, new_keys = { "k_dev" } })
+	end,
+	["account.revoke_key"] = function(key: string)
+		for _, k in signing_keys do
+			if k.key == key then
+				k.revoked_at = 1793700000
+			end
 		end
 		return settled(true)
 	end,
@@ -303,6 +367,9 @@ stub.call = function(name: string, arg: any?): any
 end
 stub.invoke = function(name: string, arg: any?)
 	log(if detail(arg) ~= "" then `{name}:{detail(arg)}` else name)
+	if name == "account.cancel_step_up" then
+		signed_in_again("cancelled")
+	end
 end
 -- A photo picked: the app's own PNG, so a headless host can draw it.
 stub.open_files = function(_opts: any): any
@@ -441,6 +508,13 @@ ui.command {
 		local store = require("@app/screens/settings/store")
 		store.load_members()
 		store.load_invitations()
+	end,
+}
+ui.command {
+	id = "settings_stub.signed_in_again",
+	title = "Signed in again in the browser",
+	run = function()
+		signed_in_again(nil)
 	end,
 }
 ui.command {

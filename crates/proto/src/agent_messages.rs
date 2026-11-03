@@ -11,8 +11,50 @@ const REPLY: &str = ". Reply to it with the Zeron `send_message` tool, chat ";
 
 /// `text` as sent from chat `chat_id`, labelled `Title (short-id)` (or the
 /// short id alone when untitled).
+///
+/// Only Zeron writes the header, and nothing inside it can be forged: the
+/// label loses brackets, line breaks and the reply phrase (a chat's title is
+/// the agent's to choose), and a header copied into the body is marked as
+/// quoted, so neither can make a message read as another chat's.
 pub fn agent_message(label: &str, chat_id: &str, text: &str) -> String {
-    format!("{PREFIX}{label}{REPLY}{chat_id}.]\n\n{text}")
+    let label = clean_label(label);
+    let chat_id = clean_label(chat_id);
+    format!("{PREFIX}{label}{REPLY}{chat_id}.]\n\n{}", quote_headers(text))
+}
+
+/// A label as a header may carry it: one line, no brackets, no reply phrase,
+/// at most 120 characters.
+fn clean_label(label: &str) -> String {
+    let flat: String = label
+        .replace(REPLY.trim(), " ")
+        .chars()
+        .map(|c| if c == '[' || c == ']' || c.is_control() { ' ' } else { c })
+        .collect();
+    flat.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect()
+}
+
+/// `text` with any routing header in it marked as quoted: it can't open a
+/// message as another chat's, nor read as one to the agent receiving it.
+pub fn quote_headers(text: &str) -> String {
+    text.replace(PREFIX, QUOTED)
+}
+
+const QUOTED: &str = "[Quoted message from Zeron chat ";
+
+/// What an agent sends `target`, attributed by Zeron: a header naming the
+/// sending chat `chat_id` (labelled `label`) when it isn't the target, with
+/// any header the sender wrote for itself replaced and any other quoted.
+/// Without a sending chat, the text is only stripped of forged headers.
+pub fn attributed(chat: Option<(&str, &str)>, target: &str, text: &str) -> String {
+    let own_body = |chat_id: &str| match agent_message_sender(text) {
+        Some((sender, body)) if sender.chat_id == chat_id => body,
+        _ => text,
+    };
+    match chat {
+        Some((chat_id, _)) if chat_id == target => quote_headers(own_body(chat_id)),
+        Some((chat_id, label)) => agent_message(label, chat_id, own_body(chat_id)),
+        None => quote_headers(text),
+    }
 }
 
 /// The chat an agent-to-agent message came from: its id, and its title as the

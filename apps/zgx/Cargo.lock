@@ -5927,7 +5927,7 @@ dependencies = [
 
 [[package]]
 name = "zatex"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "ttf-parser",
 ]
@@ -6093,7 +6093,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zeron-cli"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "anyhow",
  "clap",
@@ -6108,7 +6108,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-launch"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -6116,7 +6116,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-notify"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "objc",
  "sha2",
@@ -6124,12 +6124,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-plugin-guard"
+version = "0.2.136"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "zeron-preview-label"
-version = "0.2.134"
+version = "0.2.136"
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "anyhow",
  "clap",
@@ -6143,7 +6150,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "anyhow",
  "futures",
@@ -6159,7 +6166,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "base64 0.22.1",
  "gltf",
@@ -6171,7 +6178,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-visual-gpu"
-version = "0.2.134"
+version = "0.2.136"
 dependencies = [
  "pollster",
  "tracing",
@@ -6208,6 +6215,7 @@ dependencies = [
  "zeron-cli",
  "zeron-launch",
  "zeron-notify",
+ "zeron-plugin-guard",
  "zeron-preview-label",
  "zeron-theme",
  "zeron-update",

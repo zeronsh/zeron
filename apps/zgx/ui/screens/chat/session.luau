@@ -177,6 +177,7 @@ local function Session(id: Id?): Node
 		drop_when = zone.drop_when,
 		on_drag_over = zone.on_drag_over,
 		on_drag_leave = zone.on_drag_leave,
+		on_hover = zone.on_hover,
 		on_drop = zone.on_drop,
 		w_full = true,
 		h_full = true,

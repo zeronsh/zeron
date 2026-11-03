@@ -75,7 +75,9 @@ test("a command picked lands as its token and is sent as its reference; one type
 	expect(app:text("role:textbox")).to_be("/review ")
 	app:type("role:textbox", "the branch, then /compact by hand")
 	settle(app)
-	app:key("Escape")
+	-- (No menu over it: Enter sends. Escape here would give the keyboard
+	-- back to the window.)
+	expect(app:has("role:option")).to_be(false)
 	app:key("Enter")
 	settle(app)
 	-- (It goes to the host as it joins the transcript.)

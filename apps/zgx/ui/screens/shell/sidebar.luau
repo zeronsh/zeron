@@ -68,6 +68,10 @@ local shared = {
 		archived = ui.persist("shell_sidebar_show_archived", false),
 		-- (Zeron's project filter over the list: off until asked for.)
 		project_filter = ui.persist("shell_sidebar_show_project_filter", false),
+		-- The projects with none but archived sessions, folded into one row
+		-- at the projects' end: listed there (closed until it's opened), or
+		-- not at all.
+		empty_projects = ui.persist("shell_sidebar_show_empty_projects", true),
 		-- A collapsed group still lists its sessions working, asking or done
 		-- unseen: on, so folding a group away never hides what needs you.
 		keep_active = ui.persist("shell_sidebar_keep_active", true),
@@ -253,9 +257,45 @@ local function devices(): ({ [string]: string }, string?)
 	return names, here
 end
 
+-- A device's id by the name its group shows (ds.Sidebar groups by name):
+-- the project's own device where it's named so, else the first of yours
+-- named so, else one of Cloud's; nil for none (Unknown device).
+local function device_named(name: string, project: string?): string?
+	local now = sessions.now:peek()
+	local own: string? = nil
+	for _, p in now.projects do
+		if p.id == project then
+			own = p.device
+		end
+	end
+	local first, cloud = nil :: string?, nil :: string?
+	for _, d in now.devices do
+		if d.name == name then
+			if d.id == own then
+				return d.id
+			elseif d.cloud then
+				cloud = cloud or d.id
+			else
+				first = first or d.id
+			end
+		end
+	end
+	return first or cloud
+end
+
 -- The sessions as the sidebar groups them: under each project (in the
 -- engine's order, empty ones too: a new chat starts in one), those in none
 -- under Chats.
+--
+-- A project is empty when every session it has had is archived: none
+-- listed, one or more on the Archived shelf. The sidebar folds those into
+-- one row at the projects' end. One with no sessions at all (just added)
+-- isn't: it's where a new chat is about to start. Counted on all of them,
+-- not what a filter shows, so narrowing never moves a project in or out
+-- (the status filter hides every group with none anyway); the project the
+-- project filter is narrowed to is never folded away. Archived sessions
+-- stay on the Archived shelf, as everyone's do, so Show → Archived changes
+-- nothing here.
 local NO_PROJECT = "none"
 -- What an agent asks of you, by chat (the chat page's, `chat.asks`): it
 -- says which of "input" a session waiting on you is, an approval or a
@@ -386,6 +426,19 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		table.insert(out, group)
 	end
 	local loose: ds.SidebarProject = { id = NO_PROJECT, name = locale.s("shell.sidebar.chats"), icon = "chat-round-line", sessions = {} }
+	-- (Which have sessions listed, and which archived ones.)
+	local listed: { [string]: boolean } = {}
+	for _, c in now.chats do
+		if c.project then
+			listed[c.project] = true
+		end
+	end
+	for _, c in now.archived or {} do
+		local group = if c.project then by[c.project] else nil
+		if group and not listed[c.project :: string] and c.project ~= just then
+			group.empty = true
+		end
+	end
 	for _, c in now.chats do
 		if just and c.project ~= just then
 			continue
@@ -405,7 +458,9 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			agent = c.agent :: any,
 			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
 			branch = c.branch,
-			subagents = c.running_subagents,
+			-- (Its side chats working count as its subagents do, as its
+			-- lanes' badge counts them: screens/chat/lanes.)
+			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
@@ -816,7 +871,12 @@ M.order = ui.state("shell_sidebar_order", {} :: { string })
 -- key pressed meanwhile is a shortcut (⌘C), not a look at them: they go
 -- until the modifiers held change again (`M.key_pressed`, from the shell's
 -- root and its commands).
+-- ⌘ is the key `cmd+1` is pressed with: Command on macOS, Ctrl elsewhere
+-- (zgx's `cmd`), where Super (`meta`) is just another modifier.
 local held = ui.modifiers
+local mac = string.find(ui.shortcut_text("cmd"), "⌘", 1, true) ~= nil
+local primary = if mac then held.meta else held.control
+local other = if mac then held.control else held.meta
 local pressed = ui.state("shell_jump_hints_pressed", false)
 ui.effect(function()
 	-- (Every change of what's held starts afresh, as the shipping app's.)
@@ -829,13 +889,13 @@ end)
 -- key equivalent never reaching `on_key`): the hints go, unless it's the
 -- ⌘1–9 they offer (`digit`).
 function M.key_pressed(digit: boolean?)
-	if held.meta:peek() and not digit and not pressed:peek() then
+	if primary:peek() and not digit and not pressed:peek() then
 		pressed:set(true)
 	end
 end
 M.jump_hints = ui.state("shell_jump_hints", false)
 ui.effect(function()
-	local alone = held.meta:get() and not (held.shift:get() or held.control:get() or held.alt:get())
+	local alone = primary:get() and not (held.shift:get() or other:get() or held.alt:get())
 	local show = alone
 		and not pressed:get()
 		and ui.window.active:get() ~= false
@@ -1215,8 +1275,9 @@ M.Sidebar = ui.component(function(props: Props): Node
 		end :: any,
 		user = user,
 		top = props.top,
-		on_new = function(project: string?)
-			route.new_chat(project)
+		-- (A device's "+", inside a project's group: on that device too.)
+		on_new = function(project: string?, device: string?)
+			route.new_chat(project, if device then device_named(device, project) else nil)
 		end,
 		on_archive = M.archive,
 		archived = shelf,
