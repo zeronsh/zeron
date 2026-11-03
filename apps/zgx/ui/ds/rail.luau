@@ -24,6 +24,11 @@
 -- whole along its track. `track`: how long that is, where the rail stops
 -- short of the view's end (a transcript's, above the composer laid over
 -- its foot); the view's length by default.
+--
+-- `axis = "x"`: a sideways view's (a wide table's, a code block's), along
+-- its foot, the thumb as thin and as far in from the bottom edge. `show`:
+-- also there while this holds (the pointer over the view), so a reader
+-- sees there's more to the side before scrolling.
 
 export type Length = (() -> number) | State<number>
 
@@ -34,8 +39,14 @@ export type Props = {
 	extent: Length,
 	view: Length,
 	track: Length?,
-	-- An id for the strip, for tools that look for it.
+	-- An id for the strip, for tools that look for it (or a class, where
+	-- there are many).
 	id: string?,
+	class: string?,
+	-- Along the view's foot, for a view that scrolls sideways.
+	axis: ("x" | "y")?,
+	-- Also shown while this holds.
+	show: (() -> boolean)?,
 }
 
 -- The rail's geometry: the strip that takes the pointer, the thumb at rest
@@ -125,15 +136,17 @@ return ui.component(function(props: Props): Node
 	local function active(): boolean
 		return hovered:get() or dragging:get()
 	end
+	local show = props.show
 	local function shown(): boolean
-		return not span:get().fits and (recent:get() or active())
+		return not span:get().fits and (recent:get() or active() or (show ~= nil and show()))
 	end
 
-	-- Where the pointer is along the track, from its top.
-	local function along(e: { local_y: number }): number
-		return e.local_y - END
+	local across = props.axis == "x"
+	-- Where the pointer is along the track, from its start.
+	local function along(e: { local_x: number, local_y: number }): number
+		return (if across then e.local_x else e.local_y) - END
 	end
-	local function follow(e: { local_y: number })
+	local function follow(e: { local_x: number, local_y: number })
 		local top, _, travel, limit = geometry()
 		if top == nil or travel <= 0 then
 			return
@@ -142,18 +155,53 @@ return ui.component(function(props: Props): Node
 		offset:set(to / travel * limit)
 	end
 
+	-- The thumb's place and size, along the track and across it.
+	local function start(): number
+		local top = geometry()
+		return top or END
+	end
+	local function length(): number
+		return span:get().length
+	end
+	local function thickness(): number
+		return if active() then THUMB_ACTIVE else THUMB
+	end
+	local thumb = ui.div {
+		absolute = true,
+		right = if across then nil else SIDE,
+		bottom = if across then SIDE else nil,
+		top = if across then nil else start,
+		left = if across then start else nil,
+		w = if across then length else thickness,
+		h = if across then thickness else length,
+		rounded = "$radius.full",
+		bg = function(): string
+			return if active() then "$scrollbar.thumb.active" else "$scrollbar.thumb"
+		end,
+		pointer_events = "none",
+		aria_hidden = true,
+	}
+
 	return ui.div {
 		id = props.id,
+		class = props.class,
 		absolute = true,
-		top = 0,
-		h = if props.track
+		top = if across then nil else 0,
+		left = if across then 0 else nil,
+		w = if across
+			then (if props.track
+				then function(): number
+					return read(props.track :: Length)
+				end
+				else nil)
+			else HIT,
+		right = if across and props.track then nil else 0,
+		h = if across then HIT elseif props.track
 			then function(): number
 				return read(props.track :: Length)
 			end
 			else nil,
-		bottom = if props.track then nil else 0,
-		right = 0,
-		w = HIT,
+		bottom = if across or not props.track then 0 else nil,
 		aria_hidden = true,
 		opacity = ui.tween(
 			ui.computed(function(): number
@@ -188,25 +236,6 @@ return ui.component(function(props: Props): Node
 		on_release = function()
 			dragging:set(false)
 		end,
-		ui.div {
-			absolute = true,
-			right = SIDE,
-			top = function(): number
-				local top = geometry()
-				return top or END
-			end,
-			w = function(): number
-				return if active() then THUMB_ACTIVE else THUMB
-			end,
-			h = function(): number
-				return span:get().length
-			end,
-			rounded = "$radius.full",
-			bg = function(): string
-				return if active() then "$scrollbar.thumb.active" else "$scrollbar.thumb"
-			end,
-			pointer_events = "none",
-			aria_hidden = true,
-		},
+		thumb,
 	}
 end)
