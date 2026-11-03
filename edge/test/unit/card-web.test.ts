@@ -151,6 +151,14 @@ describe("the card's badges", async () => {
     expect(pills(ada).row[0]).toMatchObject({ border: 1 });
   });
 
+  it("draws a badge it has no style for as an outline pill, as the native app does", () => {
+    const graham = mock.members.find((m) => m.username === "graham")!;
+    const { row, labels } = pills({ ...graham, badges: [{ id: "maintainer", name: "Maintainer", icon: null }] });
+    expect(labels).toEqual(["MAINTAINER"]);
+    expect(row[0]).toMatchObject({ border: 1 });
+    expect(row[0]!.fill).toBeUndefined();
+  });
+
   it("gives every mock member's badges in one order, as the edge serves them", () => {
     const order = ["cloud-tester", "v3-beta"];
     for (const m of mock.members) {
